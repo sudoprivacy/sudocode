@@ -2399,6 +2399,40 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report(&skills))
         }
+        Some(args) if args.starts_with("list ") => {
+            let filter = args["list ".len()..].trim().to_lowercase();
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            let filtered: Vec<_> = skills
+                .into_iter()
+                .filter(|s| s.name.to_lowercase().contains(&filter))
+                .collect();
+            Ok(render_skills_report(&filtered))
+        }
+        Some("show" | "info" | "describe") => {
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            Ok(render_skills_report(&skills))
+        }
+        Some(args)
+            if args.starts_with("show ")
+                || args.starts_with("info ")
+                || args.starts_with("describe ") =>
+        {
+            let name = args
+                .splitn(2, ' ')
+                .nth(1)
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            let matched: Vec<_> = skills
+                .into_iter()
+                .filter(|s| s.name.to_lowercase() == name)
+                .collect();
+            Ok(render_skills_report(&matched))
+        }
         Some("install") => Ok(render_skills_usage(Some("install"))),
         Some(args) if args.starts_with("install ") => {
             let target = args["install ".len()..].trim();
@@ -2430,6 +2464,40 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report_json(&skills))
         }
+        Some(args) if args.starts_with("list ") => {
+            let filter = args["list ".len()..].trim().to_lowercase();
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            let filtered: Vec<_> = skills
+                .into_iter()
+                .filter(|s| s.name.to_lowercase().contains(&filter))
+                .collect();
+            Ok(render_skills_report_json(&filtered))
+        }
+        Some("show" | "info" | "describe") => {
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            Ok(render_skills_report_json(&skills))
+        }
+        Some(args)
+            if args.starts_with("show ")
+                || args.starts_with("info ")
+                || args.starts_with("describe ") =>
+        {
+            let name = args
+                .splitn(2, ' ')
+                .nth(1)
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            let roots = discover_skill_roots(cwd);
+            let skills = load_skills_from_roots(&roots)?;
+            let matched: Vec<_> = skills
+                .into_iter()
+                .filter(|s| s.name.to_lowercase() == name)
+                .collect();
+            Ok(render_skills_report_json(&matched))
+        }
         Some("install") => Ok(render_skills_usage_json(Some("install"))),
         Some(args) if args.starts_with("install ") => {
             let target = args["install ".len()..].trim();
@@ -2447,8 +2515,18 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
 #[must_use]
 pub fn classify_skills_slash_command(args: Option<&str>) -> SkillSlashDispatch {
     match normalize_optional_args(args) {
-        None | Some("list" | "help" | "-h" | "--help") => SkillSlashDispatch::Local,
+        None | Some("list" | "help" | "-h" | "--help" | "show" | "info" | "describe") => {
+            SkillSlashDispatch::Local
+        }
         Some(args) if args == "install" || args.starts_with("install ") => {
+            SkillSlashDispatch::Local
+        }
+        Some(args)
+            if args.starts_with("list ")
+                || args.starts_with("show ")
+                || args.starts_with("info ")
+                || args.starts_with("describe ") =>
+        {
             SkillSlashDispatch::Local
         }
         Some(args) => SkillSlashDispatch::Invoke(format!("${}", args.trim_start_matches('/'))),
@@ -4652,6 +4730,32 @@ mod tests {
             "Unexpected arguments for /agents: show planner. Use /agents, /agents list, or /agents help."
         ));
         assert!(agents_error.contains("  Usage            /agents [list|help]"));
+    }
+
+    #[test]
+    fn skills_show_and_list_filter_do_not_invoke_model() {
+        // `show`, `info`, `list <filter>` must route to Local, not Invoke.
+        // Regression for: `claw skills show plan` unexpectedly spawned a model session.
+        for token in &["show", "info", "describe"] {
+            assert_eq!(
+                classify_skills_slash_command(Some(token)),
+                SkillSlashDispatch::Local,
+                "`skills {token}` alone must be Local"
+            );
+        }
+        for prefix in &["show ", "info ", "list ", "describe "] {
+            let arg = format!("{prefix}plan");
+            assert_eq!(
+                classify_skills_slash_command(Some(&arg)),
+                SkillSlashDispatch::Local,
+                "`skills {arg}` must be Local, not Invoke"
+            );
+        }
+        // Bare invocable tokens still dispatch to Invoke.
+        assert_eq!(
+            classify_skills_slash_command(Some("plan")),
+            SkillSlashDispatch::Invoke("$plan".to_string()),
+        );
     }
 
     #[test]

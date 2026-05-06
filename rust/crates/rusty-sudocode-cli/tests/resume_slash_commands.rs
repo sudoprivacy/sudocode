@@ -235,6 +235,8 @@ fn resumed_status_command_emits_structured_json_when_requested() {
     // given
     let temp_dir = unique_temp_dir("resume-status-json");
     fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let config_home = temp_dir.join("config-home");
+    fs::create_dir_all(&config_home).expect("isolated config home should exist");
     let session_path = temp_dir.join("session.jsonl");
 
     let mut session = workspace_session(&temp_dir);
@@ -246,7 +248,9 @@ fn resumed_status_command_emits_structured_json_when_requested() {
         .expect("session should persist");
 
     // when
-    let output = run_scode(
+    // Use an isolated SUDO_CODE_CONFIG_HOME so ~/.nexus/sudocode/settings.json
+    // is not loaded, which would cause loaded_config_files to be non-zero.
+    let output = run_scode_with_env(
         &temp_dir,
         &[
             "--output-format",
@@ -255,6 +259,10 @@ fn resumed_status_command_emits_structured_json_when_requested() {
             session_path.to_str().expect("utf8 path"),
             "/status",
         ],
+        &[(
+            "SUDO_CODE_CONFIG_HOME",
+            config_home.to_str().expect("utf8 path"),
+        )],
     );
 
     // then

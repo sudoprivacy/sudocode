@@ -4,6 +4,7 @@ use std::path::Path;
 use runtime::{load_oauth_credentials, resolve_sandbox_status, ConfigLoader, ProjectContext};
 use serde_json::{json, Map, Value};
 
+use crate::cli::lifecycle::classify_session_lifecycle_for;
 use crate::{
     parse_git_status_metadata, parse_git_workspace_summary, CliOutputFormat, StatusContext,
     BUILD_TARGET, DEFAULT_DATE, DEPRECATED_INSTALL_COMMAND, GIT_SHA, OFFICIAL_REPO_SLUG,
@@ -196,6 +197,7 @@ pub(crate) fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error:
         project_root,
         git_branch,
         git_summary,
+        session_lifecycle: classify_session_lifecycle_for(&cwd),
         sandbox_status: resolve_sandbox_status(sandbox_config.sandbox(), &cwd),
         // Doctor path has its own config check; StatusContext here is only
         // fed into health renderers that don't read config_load_error.

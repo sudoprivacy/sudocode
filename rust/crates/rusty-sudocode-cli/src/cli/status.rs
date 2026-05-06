@@ -8,6 +8,7 @@ use crate::cli::format::format_sandbox_report;
 use crate::cli::git::{
     parse_git_status_metadata, parse_git_workspace_summary, GitWorkspaceSummary,
 };
+use crate::cli::lifecycle::{classify_session_lifecycle_for, SessionLifecycleSummary};
 use crate::{CliOutputFormat, ModelProvenance, ModelSource, DEFAULT_DATE, VERSION};
 
 use super::format::render_version_report;
@@ -22,6 +23,7 @@ pub(crate) struct StatusContext {
     pub(crate) project_root: Option<PathBuf>,
     pub(crate) git_branch: Option<String>,
     pub(crate) git_summary: GitWorkspaceSummary,
+    pub(crate) session_lifecycle: SessionLifecycleSummary,
     pub(crate) sandbox_status: runtime::SandboxStatus,
     /// #143: when `.scode.json` (or another loaded config file) fails to parse,
     /// we capture the parse error here and still populate every field that
@@ -143,6 +145,7 @@ pub(crate) fn status_json_value(
                 // .scode/sessions/. Extract the stem (drop the .jsonl extension).
                 path.file_stem().map(|n| n.to_string_lossy().into_owned())
             }),
+            "session_lifecycle": context.session_lifecycle.json_value(),
             "loaded_config_files": context.loaded_config_files,
             "discovered_config_files": context.discovered_config_files,
             "memory_file_count": context.memory_file_count,
@@ -198,7 +201,7 @@ pub(crate) fn status_context(
         parse_git_status_metadata(project_context.git_status.as_deref());
     let git_summary = parse_git_workspace_summary(project_context.git_status.as_deref());
     Ok(StatusContext {
-        cwd,
+        cwd: cwd.clone(),
         session_path: session_path.map(Path::to_path_buf),
         loaded_config_files,
         discovered_config_files,
@@ -206,6 +209,7 @@ pub(crate) fn status_context(
         project_root,
         git_branch,
         git_summary,
+        session_lifecycle: classify_session_lifecycle_for(&cwd),
         sandbox_status,
         config_load_error,
     })
@@ -279,6 +283,7 @@ pub(crate) fn format_status_report(
   Unstaged         {}
   Untracked        {}
   Session          {}
+  Lifecycle        {}
   Config files     loaded {}/{}
   Memory files     {}
   Suggested flow   /status → /diff → /commit",
@@ -297,6 +302,7 @@ pub(crate) fn format_status_report(
                 || "live-repl".to_string(),
                 |path| path.display().to_string()
             ),
+            context.session_lifecycle.signal(),
             context.loaded_config_files,
             context.discovered_config_files,
             context.memory_file_count,

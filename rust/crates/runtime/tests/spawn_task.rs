@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext};
-use runtime::spawn_task::spawn_task;
+use runtime::spawn_task::spawn_task_echo;
 
 const DT_STREAM: i32 = 4;
 const STREAM_CAPACITY: usize = 65_536;
@@ -128,7 +128,7 @@ fn echo_round_trip_through_proc_pid_chat_with_me() {
     mount_proc(&kernel);
     plant_chat_stream(&kernel, "v0-echo-1");
     let desc = make_desc("v0-echo-1", "agent-v0");
-    let handle = spawn_task(Arc::clone(&kernel), desc);
+    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
 
     let ctx = user_ctx();
     let cwm_path = "/proc/v0-echo-1/chat-with-me";
@@ -163,7 +163,7 @@ fn loop_exits_on_abort_signal() {
     plant_chat_stream(&kernel, "v0-abort-1");
     let desc = make_desc("v0-abort-1", "agent-abort");
 
-    let handle = spawn_task(Arc::clone(&kernel), desc);
+    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
     // No prompt sent — the loop is sitting in the poll sleep.
     // abort() must wake it within one POLL_INTERVAL + a sys_read
     // round trip.
@@ -192,7 +192,7 @@ fn skips_own_writes_to_avoid_echo_loop() {
     mount_proc(&kernel);
     plant_chat_stream(&kernel, "v0-loop-1");
     let desc = make_desc("v0-loop-1", "agent-loop");
-    let handle = spawn_task(Arc::clone(&kernel), desc);
+    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
 
     let ctx = user_ctx();
     let cwm_path = "/proc/v0-loop-1/chat-with-me";

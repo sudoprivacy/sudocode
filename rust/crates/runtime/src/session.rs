@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::json::{JsonError, JsonValue};
 use crate::usage::TokenUsage;
 
@@ -82,9 +82,18 @@ pub struct SessionPromptEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 struct SessionPersistence {
     path: PathBuf,
+    fs: Arc<dyn FsBackend>,
+}
+
+impl fmt::Debug for SessionPersistence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionPersistence")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Persisted conversational state for the runtime and CLI session manager.
@@ -185,7 +194,20 @@ impl Session {
 
     #[must_use]
     pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.persistence = Some(SessionPersistence { path: path.into() });
+        self.persistence = Some(SessionPersistence {
+            path: path.into(),
+            fs: Arc::new(StdFsBackend),
+        });
+        self
+    }
+
+    /// Attach a custom filesystem backend to the session's persistence
+    /// layer. When not called, persistence defaults to [`StdFsBackend`].
+    #[must_use]
+    pub fn with_fs_backend(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.fs = fs;
+        }
         self
     }
 
@@ -210,18 +232,38 @@ impl Session {
         self.persistence.as_ref().map(|value| value.path.as_path())
     }
 
+    /// Return the filesystem backend attached to the persistence layer,
+    /// falling back to a static `StdFsBackend` when no persistence is set.
+    fn backend(&self) -> &dyn FsBackend {
+        static DEFAULT: StdFsBackend = StdFsBackend;
+        self.persistence
+            .as_ref()
+            .map(|p| p.fs.as_ref() as &dyn FsBackend)
+            .unwrap_or(&DEFAULT)
+    }
+
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
         let snapshot = self.render_jsonl_snapshot()?;
-        rotate_session_file_if_needed(path)?;
-        write_atomic(path, &snapshot)?;
-        cleanup_rotated_logs(path)?;
+        let path_str = path.to_string_lossy();
+        let backend = self.backend();
+        rotate_session_file_if_needed_with(backend, path)?;
+        write_atomic_with(backend, &path_str, &snapshot)?;
+        cleanup_rotated_logs_with(backend, path)?;
         Ok(())
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        Self::load_from_path_with(&StdFsBackend, path)
+    }
+
+    /// Load a session from disk using a custom filesystem backend.
+    pub fn load_from_path_with(
+        fs: &dyn FsBackend,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, SessionError> {
         let path = path.as_ref();
-        let contents = fs::read_to_string(path)?;
+        let contents = fs.read_to_string(&path.to_string_lossy())?;
         let session = match JsonValue::parse(&contents) {
             Ok(value)
                 if value
@@ -561,15 +603,18 @@ impl Session {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
+        let path_str = path.to_string_lossy();
+        let backend = self.backend();
 
-        let needs_bootstrap = !path.exists() || fs::metadata(path)?.len() == 0;
+        let needs_bootstrap = !backend.exists(&path_str)?
+            || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
             self.save_to_path(path)?;
             return Ok(());
         }
 
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        writeln!(file, "{}", message_record(message).render())?;
+        let line = format!("{}\n", message_record(message).render());
+        backend.append(&path_str, line.as_bytes())?;
         Ok(())
     }
 
@@ -580,15 +625,18 @@ impl Session {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
+        let path_str = path.to_string_lossy();
+        let backend = self.backend();
 
-        let needs_bootstrap = !path.exists() || fs::metadata(path)?.len() == 0;
+        let needs_bootstrap = !backend.exists(&path_str)?
+            || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
             self.save_to_path(path)?;
             return Ok(());
         }
 
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        writeln!(file, "{}", entry.to_jsonl_record().render())?;
+        let line = format!("{}\n", entry.to_jsonl_record().render());
+        backend.append(&path_str, line.as_bytes())?;
         Ok(())
     }
 
@@ -1118,16 +1166,24 @@ fn generate_session_id() -> String {
     format!("session-{millis}-{counter}")
 }
 
+#[cfg(test)]
 fn write_atomic(path: &Path, contents: &str) -> Result<(), SessionError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    write_atomic_with(&StdFsBackend, &path.to_string_lossy(), contents)
+}
+
+fn write_atomic_with(
+    backend: &dyn FsBackend,
+    path: &str,
+    contents: &str,
+) -> Result<(), SessionError> {
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = backend.create_dir_all(&parent.to_string_lossy());
     }
-    let temp_path = temporary_path_for(path);
-    fs::write(&temp_path, contents)?;
-    fs::rename(temp_path, path)?;
+    backend.write_atomic(path, contents.as_bytes())?;
     Ok(())
 }
 
+#[allow(dead_code)]
 fn temporary_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -1140,15 +1196,24 @@ fn temporary_path_for(path: &Path) -> PathBuf {
     ))
 }
 
+#[cfg(test)]
 fn rotate_session_file_if_needed(path: &Path) -> Result<(), SessionError> {
-    let Ok(metadata) = fs::metadata(path) else {
+    rotate_session_file_if_needed_with(&StdFsBackend, path)
+}
+
+fn rotate_session_file_if_needed_with(
+    backend: &dyn FsBackend,
+    path: &Path,
+) -> Result<(), SessionError> {
+    let path_str = path.to_string_lossy();
+    let Ok(meta) = backend.stat(&path_str) else {
         return Ok(());
     };
-    if metadata.len() < ROTATE_AFTER_BYTES {
+    if meta.len < ROTATE_AFTER_BYTES {
         return Ok(());
     }
-    let rotated_path = rotated_log_path(path);
-    fs::rename(path, rotated_path)?;
+    let rotated = rotated_log_path(path);
+    backend.rename(&path_str, &rotated.to_string_lossy())?;
     Ok(())
 }
 
@@ -1160,7 +1225,15 @@ fn rotated_log_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}.rot-{}.jsonl", current_time_millis()))
 }
 
+#[cfg(test)]
 fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
+    cleanup_rotated_logs_with(&StdFsBackend, path)
+}
+
+fn cleanup_rotated_logs_with(
+    backend: &dyn FsBackend,
+    path: &Path,
+) -> Result<(), SessionError> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -1169,31 +1242,35 @@ fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
         .and_then(|value| value.to_str())
         .unwrap_or("session");
     let prefix = format!("{stem}.rot-");
-    let mut rotated_paths = fs::read_dir(parent)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|entry_path| {
-            entry_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| {
-                    name.starts_with(&prefix)
-                        && Path::new(name)
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-                })
+    let parent_str = parent.to_string_lossy();
+
+    let entries = match backend.readdir(&parent_str) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+
+    let mut rotated_paths: Vec<PathBuf> = entries
+        .into_iter()
+        .filter(|entry| {
+            entry.name.starts_with(&prefix)
+                && Path::new(&entry.name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
         })
-        .collect::<Vec<_>>();
+        .map(|entry| parent.join(&entry.name))
+        .collect();
 
     rotated_paths.sort_by_key(|entry_path| {
-        fs::metadata(entry_path)
-            .and_then(|metadata| metadata.modified())
+        backend
+            .stat(&entry_path.to_string_lossy())
+            .ok()
+            .and_then(|m| m.modified)
             .unwrap_or(UNIX_EPOCH)
     });
 
     let remove_count = rotated_paths.len().saturating_sub(MAX_ROTATED_FILES);
     for stale_path in rotated_paths.into_iter().take(remove_count) {
-        fs::remove_file(stale_path)?;
+        backend.delete(&stale_path.to_string_lossy())?;
     }
     Ok(())
 }

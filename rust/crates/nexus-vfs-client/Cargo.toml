@@ -9,6 +9,7 @@ publish.workspace = true
 tonic = { version = "0.13", features = ["transport"] }
 prost = "0.13"
 tokio = { version = "1", features = ["rt", "net", "time"] }
+serde_json = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.13"

@@ -15,6 +15,7 @@ mod compact;
 pub mod config;
 pub mod config_validate;
 mod conversation;
+pub mod fs_backend;
 mod file_ops;
 mod git_context;
 pub mod green_contract;
@@ -85,6 +86,9 @@ pub use file_ops::{
     edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
     GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
     WriteFileOutput,
+};
+pub use fs_backend::{
+    FsBackend, FsDirEntry, FsMetadata, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{

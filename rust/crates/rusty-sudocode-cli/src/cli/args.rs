@@ -169,6 +169,13 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Permissions (slash command only — start scode REPL)
+    #[command(hide = true)]
+    Permissions {
+        /// Trailing args
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Manage plugins
     #[command(alias = "plugin", alias = "marketplace")]
     Plugins {
@@ -509,6 +516,9 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                     }),
                 }
             }
+            Cmd::Permissions { .. } => Err(
+                "`scode permissions` is a slash command. Start `scode` and run `/permissions` inside the REPL.\n  Usage  /permissions [read-only|workspace-write|danger-full-access]".to_string(),
+            ),
             Cmd::Plugins { action, target } => Ok(CliAction::Plugins {
                 action,
                 target,

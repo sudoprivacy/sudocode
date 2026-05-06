@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::json::JsonValue;
@@ -407,8 +406,16 @@ impl ConfigLoader {
     /// can tolerate a missing file (display helpers, alias resolution) are
     /// responsible for their own fallback.
     pub fn load_sudocode_config(&self) -> Result<SudoCodeConfig, ConfigError> {
+        self.load_sudocode_config_with(&crate::fs_backend::StdFsBackend)
+    }
+
+    /// Load `sudocode.json` using a custom filesystem backend.
+    pub fn load_sudocode_config_with(
+        &self,
+        backend: &dyn crate::fs_backend::FsBackend,
+    ) -> Result<SudoCodeConfig, ConfigError> {
         let path = self.config_home.join("sudocode.json");
-        if !path.exists() {
+        if !backend.exists(&path.to_string_lossy()).unwrap_or(false) {
             return Err(ConfigError::Parse(format!(
                 "missing sudocode.json: expected at {path}\n\
                  Create this file to configure models and providers.\n\n\
@@ -417,7 +424,7 @@ impl ConfigLoader {
                 path = path.display()
             )));
         }
-        parse_sudocode_json(&path)
+        parse_sudocode_json_with(backend, &path)
     }
 }
 
@@ -770,7 +777,14 @@ struct ParsedConfigFile {
 }
 
 fn read_optional_json_object(path: &Path) -> Result<Option<ParsedConfigFile>, ConfigError> {
-    let contents = match fs::read_to_string(path) {
+    read_optional_json_object_with(&crate::fs_backend::StdFsBackend, path)
+}
+
+fn read_optional_json_object_with(
+    backend: &dyn crate::fs_backend::FsBackend,
+    path: &Path,
+) -> Result<Option<ParsedConfigFile>, ConfigError> {
+    let contents = match backend.read_to_string(&path.to_string_lossy()) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ConfigError::Io(error)),
@@ -1012,8 +1026,18 @@ fn parse_optional_trusted_roots(root: &JsonValue) -> Result<Vec<String>, ConfigE
 // ---------------------------------------------------------------------------
 
 /// Parse `sudocode.json` into `SudoCodeConfig`.
+#[allow(dead_code)]
 fn parse_sudocode_json(path: &Path) -> Result<SudoCodeConfig, ConfigError> {
-    let content = fs::read_to_string(path).map_err(ConfigError::Io)?;
+    parse_sudocode_json_with(&crate::fs_backend::StdFsBackend, path)
+}
+
+fn parse_sudocode_json_with(
+    backend: &dyn crate::fs_backend::FsBackend,
+    path: &Path,
+) -> Result<SudoCodeConfig, ConfigError> {
+    let content = backend
+        .read_to_string(&path.to_string_lossy())
+        .map_err(ConfigError::Io)?;
     parse_sudocode_json_str_with_label(&content, &path.display().to_string())
 }
 

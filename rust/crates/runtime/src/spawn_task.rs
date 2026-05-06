@@ -1,38 +1,39 @@
-//! Managed-agent loop spawn entry — v1 echo scaffolding (PR-C v1).
+//! Managed-agent loop spawn entry — v2 ConversationRuntime integration.
 //!
-//! Wires the per-pid agent loop into a sudocode-driven body that polls
-//! `/proc/{pid}/chat-with-me` for inbound JSON envelopes and writes
-//! responses back through the same mailbox path. The full LLM
-//! turn-driver wiring (constructing a [`crate::ConversationRuntime`]
-//! with a provider client + tool executor and calling `run_turn` per
-//! inbound prompt) lands in PR-C v2 — v1 ships the scaffolding
-//! (procfs poll loop, [`crate::HookAbortSignal`] plumbing, envelope
-//! round-trip pass-through) so the nexus-side `ManagedAgentService`
-//! wiring + e2e round-trip can land alongside.
+//! Wires the per-pid agent loop into a full LLM turn-driver that polls
+//! `/proc/{pid}/chat-with-me` for inbound JSON envelopes, drives each
+//! prompt through a [`crate::ConversationRuntime`], and writes structured
+//! responses back through the same mailbox path.
 //!
-//! Cancellation: callers reuse [`crate::HookAbortSignal`] (the same
-//! signal `with_hook_abort_signal` threads into a
-//! [`crate::ConversationRuntime`] when v2 lands). At the nexus
-//! boundary, `cancel(Turn)` and `cancel(Session)` both translate to
-//! `abort_signal.abort()`; the difference falls out of the loop body
-//! once the v2 `run_turn` driver lands. v1's body has no per-turn
-//! boundary, so today turn-cancel and session-cancel both terminate
-//! the loop on the next poll iteration.
+//! ## State machine
 //!
-//! ## v0 → v1 migration
+//! The loop drives the following agent-state transitions:
+//!   WARMING_UP (runtime construction)
+//!   → READY (idle, polling mailbox)
+//!   → BUSY (per turn, while `run_turn` executes)
+//!   → READY (turn complete, back to polling)
 //!
-//! v0 (commit `869e80a`, reverted as `17bc205`) was generic over a
-//! concrete `Arc<Kernel>` and used a path-dep on the nexus kernel rlib.
-//! That coupled sudocode's build to a specific side-by-side dev layout
-//! and pinned the kernel concrete type into the spawn API.
+//! State is surfaced to the caller via the `state_callback` closure
+//! passed to [`spawn_task`]; the caller (typically nexus's
+//! `ManagedAgentService`) is responsible for calling
+//! `agent_registry.update_state()` with the reported values.
 //!
-//! v1 takes `Arc<K: KernelAbi + Send + Sync + 'static>` so production
-//! (`K = Kernel`, monomorphised at the binary link site → identical
-//! perf to a direct inherent call) and tests (`K = MockKernel` once
-//! that lands) share one entry. The kernel rlib is reached through a
-//! `kernel = { git = ..., rev = ..., default-features = false }` git
-//! dep on the nexus repo's `feat/kernel-abi-trait` rev (the PR that
-//! introduced `KernelAbi`).
+//! ## Cancellation
+//!
+//! Callers reuse [`crate::HookAbortSignal`] — the same signal
+//! `with_hook_abort_signal` threads into the `ConversationRuntime`.
+//! `cancel(Turn)` and `cancel(Session)` both translate to
+//! `abort_signal.abort()`; the runtime's built-in abort check
+//! short-circuits the current turn and the loop exits on the next
+//! poll iteration.
+//!
+//! ## v1 → v2 migration
+//!
+//! v1 (echo scaffolding) is replaced in-place. The function signature
+//! is extended with `api_client`, `tool_executor`, `system_prompt`,
+//! and `permission_policy` so the caller constructs the provider-
+//! specific wiring and spawn_task owns only the loop + state
+//! management. The echo-reply helper is removed.
 
 use std::sync::Arc;
 use std::thread;
@@ -42,71 +43,88 @@ use kernel::abi::KernelAbi;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::OperationContext;
 
+use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
+use crate::fs_backend::KernelFsBackend;
 use crate::hooks::HookAbortSignal;
+use crate::permissions::PermissionPolicy;
+use crate::prompt::SystemPrompt;
+use crate::session::Session;
 
 /// Sleep between `sys_read` polls when the canonical mailbox is idle.
-/// Kept short so prompt-to-response latency stays bounded by a single
-/// sleep tick once the v2 LLM body lands; today's echo body returns
-/// even faster because each iteration writes the reply inline.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Per-call `sys_read` blocking timeout. `0` keeps the call
-/// non-blocking — `FileWatchRegistry::wait_for_event` is a stub today
-/// (returns `None` immediately), so any non-zero timeout would
-/// degrade to a busy wait inside the kernel. Once `sys_watch` lands
-/// the loop can drop the explicit `thread::sleep` below and let the
-/// kernel block for it.
+/// non-blocking — the loop uses explicit `thread::sleep` between polls.
 const READ_TIMEOUT_MS: u64 = 0;
 
-/// Handle returned by [`spawn_task`]. Caller (typically nexus's
-/// `ManagedAgentService::start_session`) holds this so cancel paths
-/// can call `abort_signal.abort()` without caring whether the per-pid
-/// task is mid-turn or idle in the poll loop, and so observability
-/// code can wait for the loop to actually leave by joining the
-/// thread.
+/// Agent-state values surfaced via `state_callback`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentLoopState {
+    WarmingUp,
+    Ready,
+    Busy,
+}
+
+/// Handle returned by [`spawn_task`].
 pub struct SpawnHandle {
-    /// Shared abort signal — the same [`HookAbortSignal`] the v2 LLM
-    /// runtime threads through to [`crate::ConversationRuntime`] via
-    /// `with_hook_abort_signal`. v1's loop checks `is_aborted()`
-    /// between poll iterations.
+    /// Shared abort signal — wired into the [`ConversationRuntime`] via
+    /// `with_hook_abort_signal` so both turn-level and session-level
+    /// cancellation share the same wire.
     pub abort_signal: HookAbortSignal,
-    /// Join handle for the spawned worker thread. v1 uses
-    /// [`std::thread`] because the body has no async work; v2 will
-    /// switch this to a `tokio::task::JoinHandle` so the LLM stream
-    /// can run inside `spawn_blocking` and bubble structured errors
-    /// up through the join surface.
+    /// Join handle for the spawned worker thread.
     pub join: thread::JoinHandle<()>,
 }
 
 /// Spawn the managed-agent loop for a freshly-allocated pid.
 ///
-/// `desc` is the descriptor nexus's
-/// `ManagedAgentService::start_session` already planted in
-/// `AgentRegistry`; we read `pid` (which procfs path to poll),
-/// `name` (the agent_id we stamp our writes with), `owner_id` and
-/// `zone_id` (carried into the per-call `OperationContext`).
+/// The caller supplies a fully-constructed `api_client` and
+/// `tool_executor` — spawn_task owns the mailbox poll loop, the
+/// `ConversationRuntime` lifecycle, and state-transition reporting.
 ///
-/// `kernel` is the same `Arc<K>` the service holds (concrete `Kernel`
-/// in production, mock in tests). Every `sys_read` / `sys_write`
-/// rides through the [`KernelAbi`] trait as a system-tier call
-/// (`is_system = true` so workspace-boundary checks pass).
-///
-/// v1 body: for each inbound envelope where `from != desc.name`,
-/// write back `{"to": <inbound from>, "from": <self>, "body":
-/// "echo: <inbound body>"}`. The explicit self-`from` lets the loop
-/// guard skip our own writes without depending on
-/// `MailboxStampingHook` being installed (kernel can run
-/// without the hook in unit tests). When the hook is installed the
-/// stamp is a no-op because the field already matches.
-///
-/// v2 body (future PR): construct [`crate::ConversationRuntime`] +
-/// call `run_turn` per inbound prompt. The [`HookAbortSignal`]
-/// returned in the handle is the wiring point —
-/// `with_hook_abort_signal(handle.abort_signal.clone())` on the
-/// runtime gives turn-level abort the same wire that session-level
-/// abort already uses.
+/// `state_callback` is invoked on every state transition so the caller
+/// can forward to `AgentRegistry::update_state`.
 #[must_use]
-pub fn spawn_task<K: KernelAbi + Send + Sync + 'static>(
+pub fn spawn_task<K, C, T, F>(
+    kernel: Arc<K>,
+    desc: AgentDescriptor,
+    api_client: C,
+    tool_executor: T,
+    system_prompt: SystemPrompt,
+    permission_policy: PermissionPolicy,
+    state_callback: F,
+) -> SpawnHandle
+where
+    K: KernelAbi + Send + Sync + 'static,
+    C: ApiClient + 'static,
+    T: ToolExecutor + 'static,
+    F: Fn(AgentLoopState) + Send + 'static,
+{
+    let abort_signal = HookAbortSignal::default();
+    let abort_for_thread = abort_signal.clone();
+
+    let join = thread::Builder::new()
+        .name(format!("managed-agent-{}", desc.pid))
+        .spawn(move || {
+            run_loop(
+                kernel,
+                desc,
+                api_client,
+                tool_executor,
+                system_prompt,
+                permission_policy,
+                abort_for_thread,
+                state_callback,
+            );
+        })
+        .expect("OS refused to spawn managed-agent thread");
+
+    SpawnHandle { abort_signal, join }
+}
+
+/// Spawn the v1 echo-only loop (retained for backward compatibility
+/// and integration tests that don't need a full LLM provider).
+#[must_use]
+pub fn spawn_task_echo<K: KernelAbi + Send + Sync + 'static>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
 ) -> SpawnHandle {
@@ -114,25 +132,65 @@ pub fn spawn_task<K: KernelAbi + Send + Sync + 'static>(
     let abort_for_thread = abort_signal.clone();
 
     let join = thread::Builder::new()
-        .name(format!("managed-agent-{}", desc.pid))
+        .name(format!("managed-agent-echo-{}", desc.pid))
         .spawn(move || {
-            run_loop(&kernel, &desc, &abort_for_thread);
+            run_echo_loop(&kernel, &desc, &abort_for_thread);
         })
         .expect("OS refused to spawn managed-agent thread");
 
     SpawnHandle { abort_signal, join }
 }
 
-fn run_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookAbortSignal) {
+// ---------------------------------------------------------------------------
+// v2 loop — ConversationRuntime integration
+// ---------------------------------------------------------------------------
+
+fn run_loop<K, C, T, F>(
+    kernel: Arc<K>,
+    desc: AgentDescriptor,
+    api_client: C,
+    tool_executor: T,
+    system_prompt: SystemPrompt,
+    permission_policy: PermissionPolicy,
+    abort: HookAbortSignal,
+    state_cb: F,
+) where
+    K: KernelAbi + Send + Sync + 'static,
+    C: ApiClient + 'static,
+    T: ToolExecutor + 'static,
+    F: Fn(AgentLoopState),
+{
+    // Build a tokio runtime for async run_turn calls.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("managed-agent tokio runtime");
+
+    // -- WARMING_UP --
+    state_cb(AgentLoopState::WarmingUp);
+
+    // Build the KernelFsBackend for VFS-backed file operations.
+    let _fs_backend = KernelFsBackend::new(
+        Arc::clone(&kernel),
+        OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&desc.name), true),
+    );
+
+    let session = Session::new();
+    let mut runtime = ConversationRuntime::new(
+        session,
+        api_client,
+        tool_executor,
+        permission_policy,
+        system_prompt,
+    )
+    .with_hook_abort_signal(abort.clone());
+
+    // -- READY --
+    state_cb(AgentLoopState::Ready);
+
     let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
     let agent_id = desc.name.as_str();
-    let ctx = OperationContext::new(
-        &desc.owner_id,
-        &desc.zone_id,
-        /* is_admin */ false,
-        Some(agent_id),
-        /* is_system */ true,
-    );
+    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
 
     let mut next_offset: u64 = 0;
     while !abort.is_aborted() {
@@ -140,15 +198,49 @@ fn run_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookA
             Ok(result) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
-                        if let Some(reply) = build_echo_reply(bytes, agent_id) {
-                            // Pass-through if write fails — v1 does
-                            // not retry; the abort path wins on the
-                            // next poll. Real failure modes (mailbox
-                            // capacity exceeded, federation lost
-                            // quorum) are surfaced when the v2 LLM
-                            // body wraps writes with structured
-                            // RuntimeError reporting.
-                            let _ = kernel.sys_write(&cwm_path, &ctx, &reply, 0);
+                        if let Some((sender, prompt)) = parse_inbound(bytes, agent_id) {
+                            // -- BUSY --
+                            state_cb(AgentLoopState::Busy);
+
+                            let turn_result = rt.block_on(runtime.run_turn(&prompt, None, None));
+
+                            let response = match turn_result {
+                                Ok(summary) => {
+                                    let text = summary
+                                        .assistant_messages
+                                        .iter()
+                                        .filter_map(|m| {
+                                            m.blocks.iter().find_map(|b| match b {
+                                                crate::session::ContentBlock::Text { text } => {
+                                                    Some(text.as_str())
+                                                }
+                                                _ => None,
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    serde_json::json!({
+                                        "to": sender,
+                                        "from": agent_id,
+                                        "body": text,
+                                    })
+                                }
+                                Err(e) => {
+                                    serde_json::json!({
+                                        "to": sender,
+                                        "from": agent_id,
+                                        "body": format!("error: {e}"),
+                                        "error": true,
+                                    })
+                                }
+                            };
+
+                            if let Ok(bytes) = serde_json::to_vec(&response) {
+                                let _ = kernel.sys_write(&cwm_path, &ctx, &bytes, 0);
+                            }
+
+                            // -- READY --
+                            state_cb(AgentLoopState::Ready);
                         }
                     }
                 }
@@ -157,11 +249,9 @@ fn run_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookA
                 }
             }
             Err(_) => {
-                // Path tear-down (cancel(Session) → procfs unregister)
-                // arrives as FileNotFound; other transient kernel
-                // errors share the same path. v1 treats every kernel
-                // error as terminal because the loop's lifetime is
-                // bounded by the pid's procfs subtree anyway.
+                // Path tear-down (procfs unregister) or transient kernel
+                // error — v2 treats every kernel error as terminal because
+                // the loop's lifetime is bounded by the pid's procfs subtree.
                 break;
             }
         }
@@ -169,9 +259,58 @@ fn run_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookA
     }
 }
 
-/// Build the echo response envelope, or `None` when the inbound
-/// envelope should be skipped (own write, no `from` field, non-JSON,
-/// non-object).
+/// Parse an inbound mailbox envelope.
+///
+/// Returns `Some((sender, body))` when the envelope is a JSON object
+/// with `from != self` and a non-empty `body` field.
+fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    let from = obj.get("from").and_then(|v| v.as_str())?;
+    if from == self_agent_id {
+        return None;
+    }
+    let body = obj
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if body.is_empty() {
+        return None;
+    }
+    Some((from.to_string(), body))
+}
+
+// ---------------------------------------------------------------------------
+// v1 echo loop — retained for tests and backward compatibility
+// ---------------------------------------------------------------------------
+
+fn run_echo_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookAbortSignal) {
+    let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
+    let agent_id = desc.name.as_str();
+    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
+
+    let mut next_offset: u64 = 0;
+    while !abort.is_aborted() {
+        match kernel.sys_read(&cwm_path, &ctx, READ_TIMEOUT_MS, next_offset) {
+            Ok(result) => {
+                if let Some(bytes) = result.data.as_ref() {
+                    if !bytes.is_empty() {
+                        if let Some(reply) = build_echo_reply(bytes, agent_id) {
+                            let _ = kernel.sys_write(&cwm_path, &ctx, &reply, 0);
+                        }
+                    }
+                }
+                if let Some(advanced) = result.stream_next_offset {
+                    next_offset = advanced as u64;
+                }
+            }
+            Err(_) => break,
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn build_echo_reply(inbound: &[u8], self_agent_id: &str) -> Option<Vec<u8>> {
     let value: serde_json::Value = serde_json::from_slice(inbound).ok()?;
     let obj = value.as_object()?;
@@ -190,5 +329,4 @@ fn build_echo_reply(inbound: &[u8], self_agent_id: &str) -> Option<Vec<u8>> {
 
 // Tests live under `runtime/tests/spawn_task.rs` as an integration
 // test binary so they can compile without bringing in the rest of
-// the lib's test target (which has pre-existing platform-specific
-// fixtures unrelated to spawn_task).
+// the lib's test target.

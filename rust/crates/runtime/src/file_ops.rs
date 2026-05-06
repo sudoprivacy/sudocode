@@ -2,48 +2,20 @@ use std::cmp::Reverse;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use glob::Pattern;
-use nexus_vfs_client::NexusVfsClient;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-// ---------------------------------------------------------------------------
-// Nexus VFS bridge — activated by NEXUS_VFS_SOCK env var.
-// When set, read_file / write_file / edit_file route raw bytes through the
-// nexus VFS gRPC server instead of the local filesystem.
-// ---------------------------------------------------------------------------
-
-static VFS: OnceLock<Option<(NexusVfsClient, String)>> = OnceLock::new();
-
-fn vfs() -> Option<(&'static NexusVfsClient, &'static str)> {
-    VFS.get_or_init(|| {
-        let sock = std::env::var("NEXUS_VFS_SOCK").ok()?;
-        let token = std::env::var("NEXUS_AUTH_TOKEN").unwrap_or_default();
-        NexusVfsClient::connect(&sock).ok().map(|c| (c, token))
-    })
-    .as_ref()
-    .map(|(c, t)| (c, t.as_str()))
-}
+use crate::fs_backend::FsBackend;
 
 /// Maximum file size that can be read (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Maximum file size that can be written (10 MB).
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
-
-/// Check whether a file appears to contain binary content by examining
-/// the first chunk for NUL bytes.
-fn is_binary_file(path: &Path) -> io::Result<bool> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut buffer = [0u8; 8192];
-    let bytes_read = file.read(&mut buffer)?;
-    Ok(buffer[..bytes_read].contains(&0))
-}
 
 /// Validate that a resolved path stays within the given workspace root.
 /// Returns the canonical path on success, or an error if the path escapes
@@ -192,57 +164,52 @@ pub struct GrepSearchOutput {
 }
 
 /// Reads a text file and returns a line-windowed payload.
+///
+/// The `fs` backend determines where the bytes come from — `StdFsBackend`
+/// for standalone CLI, `KernelFsBackend` for in-process nexusd, or
+/// `NexusVfsClient` for gRPC.
 pub fn read_file(
+    fs: &dyn FsBackend,
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
     let absolute_path = normalize_path(path)?;
+    let abs_str = absolute_path.to_string_lossy();
 
-    let content = if let Some((client, token)) = vfs() {
-        let bytes = client.read(&absolute_path.to_string_lossy(), token)?;
-        if bytes.len() as u64 > MAX_READ_SIZE {
+    // Size check via stat (works for both local and remote backends).
+    if let Ok(meta) = fs.stat(&abs_str) {
+        if meta.len > MAX_READ_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "file is too large ({} bytes, max {} bytes)",
-                    bytes.len(),
-                    MAX_READ_SIZE
+                    meta.len, MAX_READ_SIZE
                 ),
             ));
         }
-        if bytes.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "file appears to be binary",
-            ));
-        }
-        String::from_utf8(bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8"))?
-    } else {
-        // Check file size before reading
-        let metadata = fs::metadata(&absolute_path)?;
-        if metadata.len() > MAX_READ_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "file is too large ({} bytes, max {} bytes)",
-                    metadata.len(),
-                    MAX_READ_SIZE
-                ),
-            ));
-        }
+    }
 
-        // Detect binary files
-        if is_binary_file(&absolute_path)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "file appears to be binary",
-            ));
-        }
+    let bytes = fs.read(&abs_str)?;
+    if bytes.len() as u64 > MAX_READ_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "file is too large ({} bytes, max {} bytes)",
+                bytes.len(),
+                MAX_READ_SIZE
+            ),
+        ));
+    }
+    if bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file appears to be binary",
+        ));
+    }
 
-        fs::read_to_string(&absolute_path)?
-    };
+    let content = String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8"))?;
 
     let lines: Vec<&str> = content.lines().collect();
     let start_index = offset.unwrap_or(0).min(lines.len());
@@ -264,7 +231,7 @@ pub fn read_file(
 }
 
 /// Replaces a file's contents and returns patch metadata.
-pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
+pub fn write_file(fs: &dyn FsBackend, path: &str, content: &str) -> io::Result<WriteFileOutput> {
     if content.len() > MAX_WRITE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -277,64 +244,42 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     }
 
     let absolute_path = normalize_path_allow_missing(path)?;
-    let vfs_path = absolute_path.to_string_lossy().into_owned();
+    let abs_str = absolute_path.to_string_lossy().into_owned();
 
-    if let Some((client, token)) = vfs() {
-        let original_file = client
-            .read(&vfs_path, token)
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok());
-        client.write(&vfs_path, content.as_bytes().to_vec(), token)?;
-        Ok(WriteFileOutput {
-            kind: if original_file.is_some() {
-                String::from("update")
-            } else {
-                String::from("create")
-            },
-            file_path: vfs_path,
-            content: content.to_owned(),
-            structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
-            original_file,
-            git_diff: None,
-        })
-    } else {
-        let original_file = fs::read_to_string(&absolute_path).ok();
-        if let Some(parent) = absolute_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&absolute_path, content)?;
-        Ok(WriteFileOutput {
-            kind: if original_file.is_some() {
-                String::from("update")
-            } else {
-                String::from("create")
-            },
-            file_path: vfs_path,
-            content: content.to_owned(),
-            structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
-            original_file,
-            git_diff: None,
-        })
+    let original_file = fs.read_to_string(&abs_str).ok();
+
+    if let Some(parent) = absolute_path.parent() {
+        let parent_str = parent.to_string_lossy();
+        let _ = fs.create_dir_all(&parent_str);
     }
+    fs.write(&abs_str, content.as_bytes())?;
+
+    Ok(WriteFileOutput {
+        kind: if original_file.is_some() {
+            String::from("update")
+        } else {
+            String::from("create")
+        },
+        file_path: abs_str,
+        content: content.to_owned(),
+        structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
+        original_file,
+        git_diff: None,
+    })
 }
 
 /// Performs an in-file string replacement and returns patch metadata.
 pub fn edit_file(
+    fs: &dyn FsBackend,
     path: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
 ) -> io::Result<EditFileOutput> {
     let absolute_path = normalize_path(path)?;
-    let vfs_path = absolute_path.to_string_lossy().into_owned();
+    let abs_str = absolute_path.to_string_lossy().into_owned();
 
-    let original_file = if let Some((client, token)) = vfs() {
-        let bytes = client.read(&vfs_path, token)?;
-        String::from_utf8(bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "file is not valid UTF-8"))?
-    } else {
-        fs::read_to_string(&absolute_path)?
-    };
+    let original_file = fs.read_to_string(&abs_str)?;
 
     if old_string == new_string {
         return Err(io::Error::new(
@@ -355,14 +300,10 @@ pub fn edit_file(
         original_file.replacen(old_string, new_string, 1)
     };
 
-    if let Some((client, token)) = vfs() {
-        client.write(&vfs_path, updated.as_bytes().to_vec(), token)?;
-    } else {
-        fs::write(&absolute_path, &updated)?;
-    }
+    fs.write(&abs_str, updated.as_bytes())?;
 
     Ok(EditFileOutput {
-        file_path: vfs_path,
+        file_path: abs_str,
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
@@ -646,6 +587,7 @@ fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
 /// Read a file with workspace boundary enforcement.
 #[allow(dead_code)]
 pub fn read_file_in_workspace(
+    fs: &dyn FsBackend,
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -656,12 +598,13 @@ pub fn read_file_in_workspace(
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     validate_workspace_boundary(&absolute_path, &canonical_root)?;
-    read_file(path, offset, limit)
+    read_file(fs, path, offset, limit)
 }
 
 /// Write a file with workspace boundary enforcement.
 #[allow(dead_code)]
 pub fn write_file_in_workspace(
+    fs: &dyn FsBackend,
     path: &str,
     content: &str,
     workspace_root: &Path,
@@ -671,12 +614,13 @@ pub fn write_file_in_workspace(
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     validate_workspace_boundary(&absolute_path, &canonical_root)?;
-    write_file(path, content)
+    write_file(fs, path, content)
 }
 
 /// Edit a file with workspace boundary enforcement.
 #[allow(dead_code)]
 pub fn edit_file_in_workspace(
+    fs: &dyn FsBackend,
     path: &str,
     old_string: &str,
     new_string: &str,
@@ -688,7 +632,7 @@ pub fn edit_file_in_workspace(
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     validate_workspace_boundary(&absolute_path, &canonical_root)?;
-    edit_file(path, old_string, new_string, replace_all)
+    edit_file(fs, path, old_string, new_string, replace_all)
 }
 
 /// Check whether a path is a symlink that resolves outside the workspace.
@@ -735,6 +679,7 @@ mod tests {
         edit_file, expand_braces, glob_search, grep_search, is_symlink_escape, read_file,
         read_file_in_workspace, write_file, GrepSearchInput, MAX_WRITE_SIZE,
     };
+    use crate::fs_backend::StdFsBackend;
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -746,31 +691,34 @@ mod tests {
 
     #[test]
     fn reads_and_writes_files() {
+        let fs = &StdFsBackend;
         let path = temp_path("read-write.txt");
-        let write_output = write_file(path.to_string_lossy().as_ref(), "one\ntwo\nthree")
+        let write_output = write_file(fs, path.to_string_lossy().as_ref(), "one\ntwo\nthree")
             .expect("write should succeed");
         assert_eq!(write_output.kind, "create");
 
-        let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
+        let read_output = read_file(fs, path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
         assert_eq!(read_output.file.content, "two");
     }
 
     #[test]
     fn edits_file_contents() {
+        let fs = &StdFsBackend;
         let path = temp_path("edit.txt");
-        write_file(path.to_string_lossy().as_ref(), "alpha beta alpha")
+        write_file(fs, path.to_string_lossy().as_ref(), "alpha beta alpha")
             .expect("initial write should succeed");
-        let output = edit_file(path.to_string_lossy().as_ref(), "alpha", "omega", true)
+        let output = edit_file(fs, path.to_string_lossy().as_ref(), "alpha", "omega", true)
             .expect("edit should succeed");
         assert!(output.replace_all);
     }
 
     #[test]
     fn rejects_binary_files() {
+        let fs = &StdFsBackend;
         let path = temp_path("binary-test.bin");
         std::fs::write(&path, b"\x00\x01\x02\x03binary content").expect("write should succeed");
-        let result = read_file(path.to_string_lossy().as_ref(), None, None);
+        let result = read_file(fs, path.to_string_lossy().as_ref(), None, None);
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -779,9 +727,10 @@ mod tests {
 
     #[test]
     fn rejects_oversized_writes() {
+        let fs = &StdFsBackend;
         let path = temp_path("oversize-write.txt");
         let huge = "x".repeat(MAX_WRITE_SIZE + 1);
-        let result = write_file(path.to_string_lossy().as_ref(), &huge);
+        let result = write_file(fs, path.to_string_lossy().as_ref(), &huge);
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -790,23 +739,34 @@ mod tests {
 
     #[test]
     fn enforces_workspace_boundary() {
+        let fs = &StdFsBackend;
         let workspace = temp_path("workspace-boundary");
         std::fs::create_dir_all(&workspace).expect("workspace dir should be created");
         let inside = workspace.join("inside.txt");
-        write_file(inside.to_string_lossy().as_ref(), "safe content")
+        write_file(fs, inside.to_string_lossy().as_ref(), "safe content")
             .expect("write inside workspace should succeed");
 
         // Reading inside workspace should succeed
-        let result =
-            read_file_in_workspace(inside.to_string_lossy().as_ref(), None, None, &workspace);
+        let result = read_file_in_workspace(
+            fs,
+            inside.to_string_lossy().as_ref(),
+            None,
+            None,
+            &workspace,
+        );
         assert!(result.is_ok());
 
         // Reading outside workspace should fail
         let outside = temp_path("outside-boundary.txt");
-        write_file(outside.to_string_lossy().as_ref(), "unsafe content")
+        write_file(fs, outside.to_string_lossy().as_ref(), "unsafe content")
             .expect("write outside should succeed");
-        let result =
-            read_file_in_workspace(outside.to_string_lossy().as_ref(), None, None, &workspace);
+        let result = read_file_in_workspace(
+            fs,
+            outside.to_string_lossy().as_ref(),
+            None,
+            None,
+            &workspace,
+        );
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
@@ -835,10 +795,12 @@ mod tests {
 
     #[test]
     fn globs_and_greps_directory() {
+        let fs = &StdFsBackend;
         let dir = temp_path("search-dir");
         std::fs::create_dir_all(&dir).expect("directory should be created");
         let file = dir.join("demo.rs");
         write_file(
+            fs,
             file.to_string_lossy().as_ref(),
             "fn main() {\n println!(\"hello\");\n}\n",
         )

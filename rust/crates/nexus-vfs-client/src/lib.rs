@@ -3,7 +3,7 @@ pub mod proto {
 }
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
-use proto::{DeleteRequest, ReadRequest, WriteRequest};
+use proto::{CallRequest, DeleteRequest, ReadRequest, WriteRequest};
 use std::io;
 use std::sync::mpsc;
 
@@ -23,6 +23,13 @@ enum VfsOp {
         path: String,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<()>>,
+    },
+    /// Generic Call RPC — method name + JSON payload.
+    Call {
+        method: String,
+        payload: Vec<u8>,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
     },
 }
 
@@ -121,6 +128,27 @@ impl NexusVfsClient {
                                     }
                                 }));
                             }
+                            VfsOp::Call {
+                                method,
+                                payload,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .call(CallRequest {
+                                        method,
+                                        payload,
+                                        auth_token,
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.payload))
+                                    } else {
+                                        Ok(r.payload)
+                                    }
+                                }));
+                            }
                         }
                     }
                 });
@@ -166,6 +194,71 @@ impl NexusVfsClient {
             .map_err(|_| broken_pipe())?;
         resp_rx.recv().map_err(|_| broken_pipe())?
     }
+
+    /// Generic Call RPC — sends `method` + JSON `payload` through the
+    /// nexus VFS `Call` endpoint. Returns the response payload bytes.
+    pub fn call(&self, method: &str, payload: &[u8], auth_token: &str) -> io::Result<Vec<u8>> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .blocking_send(VfsOp::Call {
+                method: method.to_owned(),
+                payload: payload.to_vec(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// Stat a path via the generic Call RPC.
+    ///
+    /// Returns `(size, is_directory)` on success.
+    pub fn stat(&self, path: &str, auth_token: &str) -> io::Result<VfsStat> {
+        let payload = serde_json::json!({ "path": path });
+        let resp = self.call("stat", payload.to_string().as_bytes(), auth_token)?;
+        let value: serde_json::Value = serde_json::from_slice(&resp)
+            .map_err(|e| io::Error::other(format!("stat response parse: {e}")))?;
+        Ok(VfsStat {
+            size: value["size"].as_u64().unwrap_or(0),
+            is_directory: value["is_directory"].as_bool().unwrap_or(false),
+            modified_at_ms: value["modified_at_ms"].as_i64(),
+        })
+    }
+
+    /// List directory entries via the generic Call RPC.
+    pub fn readdir(&self, path: &str, auth_token: &str) -> io::Result<Vec<VfsDirEntry>> {
+        let payload = serde_json::json!({ "path": path });
+        let resp = self.call("readdir", payload.to_string().as_bytes(), auth_token)?;
+        let value: serde_json::Value = serde_json::from_slice(&resp)
+            .map_err(|e| io::Error::other(format!("readdir response parse: {e}")))?;
+        let entries = value
+            .as_array()
+            .ok_or_else(|| io::Error::other("readdir: expected array"))?;
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                Some(VfsDirEntry {
+                    name: entry["name"].as_str()?.to_string(),
+                    is_directory: entry["is_directory"].as_bool().unwrap_or(false),
+                })
+            })
+            .collect())
+    }
+}
+
+/// Stat result returned by [`NexusVfsClient::stat`].
+#[derive(Debug, Clone)]
+pub struct VfsStat {
+    pub size: u64,
+    pub is_directory: bool,
+    pub modified_at_ms: Option<i64>,
+}
+
+/// Directory entry returned by [`NexusVfsClient::readdir`].
+#[derive(Debug, Clone)]
+pub struct VfsDirEntry {
+    pub name: String,
+    pub is_directory: bool,
 }
 
 fn grpc_result<T, R, F>(result: Result<tonic::Response<T>, tonic::Status>, f: F) -> io::Result<R>

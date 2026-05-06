@@ -256,8 +256,8 @@ fn local_subcommand_help_does_not_fall_through_to_runtime_or_provider_calls() {
     assert_success(&status_help);
     let status_stdout = String::from_utf8(status_help.stdout).expect("stdout should be utf8");
     assert!(
-        status_stdout.contains("workspace status snapshot"),
-        "status --help should contain subcommand description: {status_stdout}"
+        status_stdout.contains("Status"),
+        "status --help should contain help topic header: {status_stdout}"
     );
     assert!(!status_stdout.contains("Thinking"));
 

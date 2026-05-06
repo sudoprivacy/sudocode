@@ -312,7 +312,10 @@ pub(crate) enum CliAction {
         allow_broad_cwd: bool,
         auth_mode: Option<AuthMode>,
     },
-    HelpTopic(LocalHelpTopic),
+    HelpTopic {
+        topic: LocalHelpTopic,
+        output_format: CliOutputFormat,
+    },
     Help {
         output_format: CliOutputFormat,
     },
@@ -330,7 +333,7 @@ impl CliAction {
             self,
             CliAction::Help { .. }
                 | CliAction::Version { .. }
-                | CliAction::HelpTopic(_)
+                | CliAction::HelpTopic { .. }
                 | CliAction::Config { .. }
                 | CliAction::Login
                 | CliAction::Logout
@@ -401,6 +404,12 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliAction, String> {
         if first.starts_with('/') {
             return parse_slash_command_invocation(args);
         }
+    }
+
+    // Intercept `<subcommand> --help [--output-format json]` before clap
+    // so we can emit structured JSON help instead of clap's default text.
+    if let Some(action) = parse_local_help_action(args) {
+        return action;
     }
 
     let cli = Cli::try_parse_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()));
@@ -850,6 +859,67 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Local help interception
+// ---------------------------------------------------------------------------
+
+fn is_help_flag(value: &str) -> bool {
+    value == "--help" || value == "-h"
+}
+
+/// Detect `<subcommand> --help [--output-format json]` before clap parses args.
+/// Returns `Some(Ok(..))` when matched, `None` otherwise.
+fn parse_local_help_action(args: &[String]) -> Option<Result<CliAction, String>> {
+    // We need at least 2 args: `<subcommand> --help`
+    if args.len() < 2 {
+        return None;
+    }
+
+    // Find the help flag position and extract output_format
+    let has_help = args.iter().any(|a| is_help_flag(a));
+    if !has_help {
+        return None;
+    }
+
+    // Determine output format from remaining args
+    let mut output_format = CliOutputFormat::Text;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--output-format" {
+            if let Some(fmt) = args.get(i + 1) {
+                match CliOutputFormat::parse(fmt) {
+                    Ok(f) => output_format = f,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    // The first non-flag arg should be the subcommand
+    let subcommand = args[0].as_str();
+    let topic = match subcommand {
+        "status" => LocalHelpTopic::Status,
+        "sandbox" => LocalHelpTopic::Sandbox,
+        "doctor" => LocalHelpTopic::Doctor,
+        "acp" => LocalHelpTopic::Acp,
+        "init" => LocalHelpTopic::Init,
+        "state" => LocalHelpTopic::State,
+        "export" => LocalHelpTopic::Export,
+        "version" => LocalHelpTopic::Version,
+        "system-prompt" => LocalHelpTopic::SystemPrompt,
+        "dump-manifests" => LocalHelpTopic::DumpManifests,
+        "bootstrap-plan" => LocalHelpTopic::BootstrapPlan,
+        _ => return None,
+    };
+    Some(Ok(CliAction::HelpTopic {
+        topic,
+        output_format,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1083,7 +1153,11 @@ mod tests {
             output_format: CliOutputFormat::Json
         }
         .is_informational());
-        assert!(CliAction::HelpTopic(LocalHelpTopic::Status).is_informational());
+        assert!(CliAction::HelpTopic {
+            topic: LocalHelpTopic::Status,
+            output_format: CliOutputFormat::Text,
+        }
+        .is_informational());
         assert!(CliAction::Config {
             section: None,
             output_format: CliOutputFormat::Text

@@ -29,7 +29,8 @@ pub use providers::codex::{CodexClient, DEFAULT_CODEX_BASE_URL};
 pub use providers::gemini::GeminiClient;
 pub use providers::openai_compat::{
     build_chat_completion_request, flatten_tool_result_content, is_reasoning_model,
-    model_rejects_is_error_field, translate_message, OpenAiCompatClient, OpenAiCompatConfig,
+    model_rejects_is_error_field, model_requires_reasoning_content_in_history, translate_message,
+    OpenAiCompatClient, OpenAiCompatConfig,
 };
 pub use providers::registry::{
     max_tokens_for_model, max_tokens_for_model_from_config, max_tokens_for_model_with_override,
@@ -38,7 +39,10 @@ pub use providers::registry::{
     ModelConfigEntry, ModelProviderMapping, ModelTokenLimit, ProviderConnectionConfig,
     ResolvedProvider, SudoCodeConfig,
 };
-pub use providers::{AuthMode, ProviderKind};
+pub use providers::{
+    detect_provider_kind, model_family_identity_for, model_family_identity_for_kind, AuthMode,
+    ProviderKind,
+};
 pub use sse::{parse_frame, SseParser};
 pub use types::{
     CacheHints, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,

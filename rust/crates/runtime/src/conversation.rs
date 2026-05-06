@@ -36,6 +36,10 @@ pub struct ApiRequest {
 /// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
     TextDelta(String),
     ToolUse {
         id: String,
@@ -368,6 +372,16 @@ where
         let mut blocks = Vec::new();
         for event in events {
             match event {
+                AssistantEvent::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    flush_text_block(&mut text, &mut blocks);
+                    blocks.push(ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    });
+                }
                 AssistantEvent::TextDelta(delta) => text.push_str(&delta),
                 AssistantEvent::ToolUse {
                     id,
@@ -946,6 +960,16 @@ fn build_assistant_message(
 
     for event in events {
         match event {
+            AssistantEvent::Thinking {
+                thinking,
+                signature,
+            } => {
+                flush_text_block(&mut text, &mut blocks);
+                blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                });
+            }
             AssistantEvent::TextDelta(delta) => {
                 text.push_str(&delta);
             }

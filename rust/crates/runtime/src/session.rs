@@ -36,6 +36,10 @@ pub enum ContentBlock {
         /// MIME type, e.g. `image/png`, `image/jpeg`.
         mime_type: String,
     },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -824,6 +828,22 @@ impl ContentBlock {
                     JsonValue::String(mime_type.clone()),
                 );
             }
+            Self::Thinking {
+                thinking,
+                signature,
+            } => {
+                object.insert(
+                    "type".to_string(),
+                    JsonValue::String("thinking".to_string()),
+                );
+                object.insert("thinking".to_string(), JsonValue::String(thinking.clone()));
+                if let Some(signature) = signature {
+                    object.insert(
+                        "signature".to_string(),
+                        JsonValue::String(signature.clone()),
+                    );
+                }
+            }
             Self::ToolUse {
                 id,
                 name,
@@ -884,6 +904,13 @@ impl ContentBlock {
             "image" => Ok(Self::Image {
                 data: required_string(object, "data")?,
                 mime_type: required_string(object, "mime_type")?,
+            }),
+            "thinking" => Ok(Self::Thinking {
+                thinking: required_string(object, "thinking")?,
+                signature: object
+                    .get("signature")
+                    .and_then(JsonValue::as_str)
+                    .map(String::from),
             }),
             "tool_use" => Ok(Self::ToolUse {
                 id: required_string(object, "id")?,

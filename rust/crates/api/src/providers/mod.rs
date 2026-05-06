@@ -83,6 +83,58 @@ pub enum ProviderKind {
     Gemini,
 }
 
+/// Best-effort heuristic to infer the provider kind from a model name
+/// (e.g. `openai/gpt-4.1-mini` → `OpenAi`, `grok-3` → `Xai`).
+///
+/// Used only for prompt identity resolution; the full config-based
+/// resolution in the registry takes precedence for actual API routing.
+#[must_use]
+pub fn detect_provider_kind(model: &str) -> ProviderKind {
+    let lowered = model.to_ascii_lowercase();
+    if let Some(prefix) = lowered.split('/').next() {
+        match prefix {
+            "openai" => return ProviderKind::OpenAi,
+            "gemini" => return ProviderKind::Gemini,
+            "codex" => return ProviderKind::Codex,
+            "xai" | "grok" => return ProviderKind::Xai,
+            _ => {}
+        }
+    }
+    let canonical = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
+    if canonical.starts_with("grok") {
+        return ProviderKind::Xai;
+    }
+    if canonical.starts_with("gpt-")
+        || canonical.starts_with("o1")
+        || canonical.starts_with("o3")
+        || canonical.starts_with("o4")
+        || canonical.starts_with("deepseek")
+        || canonical.starts_with("qwen")
+        || canonical.starts_with("kimi")
+    {
+        return ProviderKind::OpenAi;
+    }
+    if canonical.starts_with("gemini") {
+        return ProviderKind::Gemini;
+    }
+    ProviderKind::Anthropic
+}
+
+#[must_use]
+pub const fn model_family_identity_for_kind(kind: ProviderKind) -> runtime::ModelFamilyIdentity {
+    match kind {
+        ProviderKind::Anthropic => runtime::ModelFamilyIdentity::Claude,
+        ProviderKind::Xai | ProviderKind::OpenAi | ProviderKind::Codex | ProviderKind::Gemini => {
+            runtime::ModelFamilyIdentity::Generic
+        }
+    }
+}
+
+#[must_use]
+pub fn model_family_identity_for(model: &str) -> runtime::ModelFamilyIdentity {
+    model_family_identity_for_kind(detect_provider_kind(model))
+}
+
 /// Env var names used by other provider backends. When Anthropic auth
 /// resolution fails we sniff these so we can hint the user that their
 /// credentials probably belong to a different provider and suggest the
@@ -217,8 +269,9 @@ mod tests {
     use crate::error::ApiError;
 
     use super::{
-        anthropic_missing_credentials, anthropic_missing_credentials_hint, load_dotenv_file,
-        parse_dotenv,
+        anthropic_missing_credentials, anthropic_missing_credentials_hint, detect_provider_kind,
+        load_dotenv_file, model_family_identity_for, model_family_identity_for_kind, parse_dotenv,
+        ProviderKind,
     };
 
     /// Serializes every test in this module that mutates process-wide
@@ -493,5 +546,72 @@ NO_EQUALS_LINE
         let hint = anthropic_missing_credentials_hint();
 
         assert!(hint.is_none());
+    }
+
+    #[test]
+    fn maps_provider_kind_to_model_family_identity() {
+        let anthropic = ProviderKind::Anthropic;
+        let openai = ProviderKind::OpenAi;
+        let xai = ProviderKind::Xai;
+        let codex = ProviderKind::Codex;
+        let gemini = ProviderKind::Gemini;
+
+        assert_eq!(
+            model_family_identity_for_kind(anthropic),
+            runtime::ModelFamilyIdentity::Claude
+        );
+        assert_eq!(
+            model_family_identity_for_kind(openai),
+            runtime::ModelFamilyIdentity::Generic
+        );
+        assert_eq!(
+            model_family_identity_for_kind(xai),
+            runtime::ModelFamilyIdentity::Generic
+        );
+        assert_eq!(
+            model_family_identity_for_kind(codex),
+            runtime::ModelFamilyIdentity::Generic
+        );
+        assert_eq!(
+            model_family_identity_for_kind(gemini),
+            runtime::ModelFamilyIdentity::Generic
+        );
+    }
+
+    #[test]
+    fn maps_model_name_to_model_family_identity() {
+        assert_eq!(
+            model_family_identity_for("claude-opus-4-6"),
+            runtime::ModelFamilyIdentity::Claude
+        );
+        assert_eq!(
+            model_family_identity_for("openai/gpt-4.1-mini"),
+            runtime::ModelFamilyIdentity::Generic
+        );
+        assert_eq!(
+            model_family_identity_for("grok-3"),
+            runtime::ModelFamilyIdentity::Generic
+        );
+    }
+
+    #[test]
+    fn detect_provider_kind_heuristic_covers_prefixes() {
+        assert_eq!(
+            detect_provider_kind("claude-sonnet-4-6"),
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            detect_provider_kind("openai/gpt-4.1-mini"),
+            ProviderKind::OpenAi
+        );
+        assert_eq!(detect_provider_kind("grok-3"), ProviderKind::Xai);
+        assert_eq!(
+            detect_provider_kind("gemini/gemini-pro"),
+            ProviderKind::Gemini
+        );
+        assert_eq!(
+            detect_provider_kind("deepseek-v4-pro"),
+            ProviderKind::OpenAi
+        );
     }
 }

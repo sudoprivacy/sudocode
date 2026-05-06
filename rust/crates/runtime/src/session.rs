@@ -1230,10 +1230,7 @@ fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
     cleanup_rotated_logs_with(&StdFsBackend, path)
 }
 
-fn cleanup_rotated_logs_with(
-    backend: &dyn FsBackend,
-    path: &Path,
-) -> Result<(), SessionError> {
+fn cleanup_rotated_logs_with(backend: &dyn FsBackend, path: &Path) -> Result<(), SessionError> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };

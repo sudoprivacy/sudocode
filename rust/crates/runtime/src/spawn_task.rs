@@ -172,13 +172,7 @@ fn run_loop<K, C, T, F>(
     // Build the KernelFsBackend for VFS-backed file operations.
     let _fs_backend = KernelFsBackend::new(
         Arc::clone(&kernel),
-        OperationContext::new(
-            &desc.owner_id,
-            &desc.zone_id,
-            false,
-            Some(&desc.name),
-            true,
-        ),
+        OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&desc.name), true),
     );
 
     let session = Session::new();
@@ -196,13 +190,7 @@ fn run_loop<K, C, T, F>(
 
     let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
     let agent_id = desc.name.as_str();
-    let ctx = OperationContext::new(
-        &desc.owner_id,
-        &desc.zone_id,
-        false,
-        Some(agent_id),
-        true,
-    );
+    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
 
     let mut next_offset: u64 = 0;
     while !abort.is_aborted() {
@@ -214,8 +202,7 @@ fn run_loop<K, C, T, F>(
                             // -- BUSY --
                             state_cb(AgentLoopState::Busy);
 
-                            let turn_result =
-                                rt.block_on(runtime.run_turn(&prompt, None, None));
+                            let turn_result = rt.block_on(runtime.run_turn(&prompt, None, None));
 
                             let response = match turn_result {
                                 Ok(summary) => {
@@ -224,9 +211,9 @@ fn run_loop<K, C, T, F>(
                                         .iter()
                                         .filter_map(|m| {
                                             m.blocks.iter().find_map(|b| match b {
-                                                crate::session::ContentBlock::Text {
-                                                    text,
-                                                } => Some(text.as_str()),
+                                                crate::session::ContentBlock::Text { text } => {
+                                                    Some(text.as_str())
+                                                }
                                                 _ => None,
                                             })
                                         })
@@ -298,20 +285,10 @@ fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> 
 // v1 echo loop — retained for tests and backward compatibility
 // ---------------------------------------------------------------------------
 
-fn run_echo_loop<K: KernelAbi>(
-    kernel: &Arc<K>,
-    desc: &AgentDescriptor,
-    abort: &HookAbortSignal,
-) {
+fn run_echo_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookAbortSignal) {
     let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
     let agent_id = desc.name.as_str();
-    let ctx = OperationContext::new(
-        &desc.owner_id,
-        &desc.zone_id,
-        false,
-        Some(agent_id),
-        true,
-    );
+    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
 
     let mut next_offset: u64 = 0;
     while !abort.is_aborted() {

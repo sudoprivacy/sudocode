@@ -217,8 +217,9 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
             .sys_read(path, &self.ctx, 0, 0)
             .map_err(kernel_err)
             .and_then(|r| {
-                r.data
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: no data")))
+                r.data.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, format!("{path}: no data"))
+                })
             })
     }
 
@@ -255,9 +256,9 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
                 is_dir: s.is_directory,
                 is_file: !s.is_directory,
                 is_symlink: false,
-                modified: s.modified_at_ms.map(|ms| {
-                    std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)
-                }),
+                modified: s
+                    .modified_at_ms
+                    .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
             })
     }
 
@@ -278,10 +279,7 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     }
 
     fn exists(&self, path: &str) -> io::Result<bool> {
-        Ok(self
-            .kernel
-            .sys_stat(path, &self.ctx.zone_id)
-            .is_some())
+        Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
     }
 
     fn create_dir_all(&self, _path: &str) -> io::Result<()> {
@@ -348,9 +346,9 @@ impl FsBackend for NexusVfsFsBackend {
             is_dir: stat.is_directory,
             is_file: !stat.is_directory,
             is_symlink: false,
-            modified: stat.modified_at_ms.map(|ms| {
-                std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)
-            }),
+            modified: stat
+                .modified_at_ms
+                .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
         })
     }
 

@@ -170,6 +170,7 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Manage plugins
+    #[command(alias = "plugin", alias = "marketplace")]
     Plugins {
         /// Plugin action (list, enable, disable, …)
         action: Option<String>,

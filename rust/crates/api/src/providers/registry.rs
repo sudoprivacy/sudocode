@@ -135,17 +135,45 @@ const MODEL_SPECS: &[(&str, ModelTokenLimit)] = &[
     ),
     // OpenAI / Codex
     (
+        "gpt-4.1",
+        ModelTokenLimit {
+            max_output_tokens: 32_768,
+            context_window_tokens: 1_047_576,
+        },
+    ),
+    (
+        "gpt-4.1-mini",
+        ModelTokenLimit {
+            max_output_tokens: 32_768,
+            context_window_tokens: 1_047_576,
+        },
+    ),
+    (
+        "gpt-4.1-nano",
+        ModelTokenLimit {
+            max_output_tokens: 32_768,
+            context_window_tokens: 1_047_576,
+        },
+    ),
+    (
         "gpt-5.4",
         ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
+            max_output_tokens: 128_000,
+            context_window_tokens: 1_000_000,
         },
     ),
     (
         "gpt-5.4-mini",
         ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
+            max_output_tokens: 128_000,
+            context_window_tokens: 400_000,
+        },
+    ),
+    (
+        "gpt-5.4-nano",
+        ModelTokenLimit {
+            max_output_tokens: 128_000,
+            context_window_tokens: 400_000,
         },
     ),
     // Qwen (via DashScope)
@@ -193,11 +221,15 @@ const MODEL_SPECS: &[(&str, ModelTokenLimit)] = &[
 // ---------------------------------------------------------------------------
 
 /// Look up token limits for a wire model ID.
+///
+/// Handles provider-prefixed model IDs (e.g. `openai/gpt-4.1-mini`) by
+/// stripping the prefix before lookup.
 #[must_use]
 pub fn model_token_limit(model_id: &str) -> Option<ModelTokenLimit> {
+    let base_model = model_id.rsplit('/').next().unwrap_or(model_id);
     MODEL_SPECS
         .iter()
-        .find(|(id, _)| id.eq_ignore_ascii_case(model_id))
+        .find(|(id, _)| id.eq_ignore_ascii_case(base_model))
         .map(|(_, limit)| *limit)
 }
 
@@ -213,17 +245,30 @@ pub fn model_token_limit_from_config(
 }
 
 /// Return the effective max output tokens for a wire model ID.
-/// Falls back to 64k when the model is not in the specs table.
+///
+/// Uses a heuristic default (32k for opus, 64k otherwise) and caps it
+/// against the model's registered `max_output_tokens` when available.
+/// This prevents requesting more output tokens than the model supports
+/// while keeping sensible defaults for unknown models.
 #[must_use]
 pub fn max_tokens_for_model(model_id: &str) -> u32 {
-    model_token_limit(model_id).map_or(64_000, |l| l.max_output_tokens)
+    let heuristic = if model_id.contains("opus") {
+        32_000
+    } else {
+        64_000
+    };
+
+    model_token_limit(model_id)
+        .map(|limit| heuristic.min(limit.max_output_tokens))
+        .unwrap_or(heuristic)
 }
 
 /// Return the effective max output tokens by resolving an alias through
-/// config first.
+/// config first.  Applies the same heuristic cap as [`max_tokens_for_model`].
 #[must_use]
 pub fn max_tokens_for_model_from_config(config: &SudoCodeConfig, alias: &str) -> u32 {
-    model_token_limit_from_config(config, alias).map_or(64_000, |l| l.max_output_tokens)
+    let wire_id = resolve_model_alias_from_config(config, alias);
+    max_tokens_for_model(&wire_id)
 }
 
 /// Returns the effective max output tokens for a model, preferring a plugin
@@ -965,6 +1010,98 @@ mod tests {
             Credential::Token("sk-inline-oauth-token".to_string())
         );
         assert_eq!(resolved.model_id, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn caps_default_max_tokens_to_openai_model_limits() {
+        assert_eq!(max_tokens_for_model("gpt-4.1-mini"), 32_768);
+        assert_eq!(max_tokens_for_model("openai/gpt-4.1-mini"), 32_768);
+        assert_eq!(max_tokens_for_model("gpt-5.4"), 64_000);
+        assert_eq!(max_tokens_for_model("openai/gpt-5.4"), 64_000);
+    }
+
+    #[test]
+    fn keeps_existing_max_token_heuristic() {
+        assert_eq!(max_tokens_for_model("claude-opus-4-6"), 32_000);
+        assert_eq!(max_tokens_for_model("grok-3"), 64_000);
+        assert_eq!(max_tokens_for_model("gpt-5.4"), 64_000);
+    }
+
+    #[test]
+    fn model_token_limit_resolves_prefixed_models() {
+        assert_eq!(
+            model_token_limit("openai/gpt-4.1-mini")
+                .expect("openai/gpt-4.1-mini should be registered")
+                .context_window_tokens,
+            1_047_576
+        );
+        assert_eq!(
+            model_token_limit("gpt-5.4")
+                .expect("gpt-5.4 should be registered")
+                .context_window_tokens,
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn preflight_blocks_oversized_requests_for_gpt_5_4() {
+        use crate::types::{InputContentBlock, InputMessage};
+
+        let request = MessageRequest {
+            model: "gpt-5.4".to_string(),
+            max_tokens: 64_000,
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                content: vec![InputContentBlock::Text {
+                    text: "x".repeat(3_900_000),
+                }],
+            }],
+            system: Some("Keep the answer short.".to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            ..Default::default()
+        };
+
+        let error = preflight_message_request(&request)
+            .expect_err("oversized gpt-5.4 request should be rejected before the provider call");
+
+        match error {
+            ApiError::ContextWindowExceeded {
+                model,
+                requested_output_tokens,
+                context_window_tokens,
+                ..
+            } => {
+                assert_eq!(model, "gpt-5.4");
+                assert_eq!(requested_output_tokens, 64_000);
+                assert_eq!(context_window_tokens, 1_000_000);
+            }
+            other => panic!("expected context-window preflight failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_skips_unknown_models() {
+        use crate::types::{InputContentBlock, InputMessage};
+
+        let request = MessageRequest {
+            model: "unknown-model".to_string(),
+            max_tokens: 64_000,
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                content: vec![InputContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            ..Default::default()
+        };
+
+        assert!(preflight_message_request(&request).is_ok());
     }
 
     #[test]

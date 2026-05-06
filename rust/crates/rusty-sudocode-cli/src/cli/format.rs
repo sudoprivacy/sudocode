@@ -1026,3 +1026,43 @@ pub(crate) fn truncate_output_for_display(
     }
     preview
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_configured_limit_errors_are_rendered_as_context_window_guidance() {
+        let error = api::ApiError::Api {
+            status: "400".parse().expect("status"),
+            error_type: Some("invalid_request_error".to_string()),
+            message: Some(
+                "Input tokens exceed the configured limit of 922000 tokens. Your messages resulted in 1860900 tokens. Please reduce the length of the messages."
+                    .to_string(),
+            ),
+            request_id: Some("req_ctx_openai_456".to_string()),
+            body: String::new(),
+            retryable: false,
+            suggested_action: None,
+        };
+
+        let rendered = format_user_visible_api_error("session-issue-32", &error);
+        assert!(rendered.contains("Context window blocked"), "{rendered}");
+        assert!(rendered.contains("context_window_blocked"), "{rendered}");
+        assert!(
+            rendered.contains("Trace            req_ctx_openai_456"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "Detail           Input tokens exceed the configured limit of 922000 tokens."
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Compact          /compact"), "{rendered}");
+        assert!(
+            rendered.contains("Fresh session    /clear --confirm"),
+            "{rendered}"
+        );
+    }
+}

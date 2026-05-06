@@ -5005,13 +5005,21 @@ async fn stream_with_provider(
     let mut events = Vec::new();
     let mut pending_tools: BTreeMap<u32, (String, String, String, Option<String>)> =
         BTreeMap::new();
+    let mut pending_thinking: BTreeMap<u32, (String, Option<String>)> = BTreeMap::new();
     let mut saw_stop = false;
 
     while let Some(event) = stream.next_event().await? {
         match event {
             ApiStreamEvent::MessageStart(start) => {
                 for block in start.message.content {
-                    push_output_block(block, 0, &mut events, &mut pending_tools, true);
+                    push_output_block(
+                        block,
+                        0,
+                        &mut events,
+                        &mut pending_tools,
+                        &mut pending_thinking,
+                        true,
+                    );
                 }
             }
             ApiStreamEvent::ContentBlockStart(start) => {
@@ -5020,6 +5028,7 @@ async fn stream_with_provider(
                     start.index,
                     &mut events,
                     &mut pending_tools,
+                    &mut pending_thinking,
                     true,
                 );
             }
@@ -5034,10 +5043,23 @@ async fn stream_with_provider(
                         input.push_str(&partial_json);
                     }
                 }
-                ContentBlockDelta::ThinkingDelta { .. }
-                | ContentBlockDelta::SignatureDelta { .. } => {}
+                ContentBlockDelta::ThinkingDelta { thinking } => {
+                    if let Some((pending, _)) = pending_thinking.get_mut(&delta.index) {
+                        pending.push_str(&thinking);
+                    }
+                }
+                ContentBlockDelta::SignatureDelta { signature } => {
+                    if let Some((_, pending_signature)) = pending_thinking.get_mut(&delta.index) {
+                        pending_signature
+                            .get_or_insert_with(String::new)
+                            .push_str(&signature);
+                    }
+                }
             },
             ApiStreamEvent::ContentBlockStop(stop) => {
+                if let Some((thinking, signature)) = pending_thinking.remove(&stop.index) {
+                    events.push(AssistantEvent::Thinking { thinking, signature });
+                }
                 if let Some((id, name, input, thought_signature)) =
                     pending_tools.remove(&stop.index)
                 {
@@ -5141,6 +5163,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => InputContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    },
                     ContentBlock::ToolUse {
                         id,
                         name,
@@ -5187,6 +5216,7 @@ fn push_output_block(
     block_index: u32,
     events: &mut Vec<AssistantEvent>,
     pending_tools: &mut BTreeMap<u32, (String, String, String, Option<String>)>,
+    pending_thinking: &mut BTreeMap<u32, (String, Option<String>)>,
     streaming_tool_input: bool,
 ) {
     match block {
@@ -5211,23 +5241,47 @@ fn push_output_block(
             };
             pending_tools.insert(block_index, (id, name, initial_input, thought_signature));
         }
-        OutputContentBlock::Thinking { .. } | OutputContentBlock::RedactedThinking { .. } => {}
+        OutputContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            if streaming_tool_input {
+                pending_thinking.insert(block_index, (thinking, signature));
+            } else {
+                events.push(AssistantEvent::Thinking { thinking, signature });
+            }
+        }
+        OutputContentBlock::RedactedThinking { .. } => {}
     }
 }
 
 fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     let mut events = Vec::new();
     let mut pending_tools = BTreeMap::new();
+    let mut pending_thinking = BTreeMap::new();
 
     for (index, block) in response.content.into_iter().enumerate() {
         let index = u32::try_from(index).expect("response block index overflow");
-        push_output_block(block, index, &mut events, &mut pending_tools, false);
+        push_output_block(
+            block,
+            index,
+            &mut events,
+            &mut pending_tools,
+            &mut pending_thinking,
+            false,
+        );
         if let Some((id, name, input, thought_signature)) = pending_tools.remove(&index) {
             events.push(AssistantEvent::ToolUse {
                 id,
                 name,
                 input,
                 thought_signature,
+            });
+        }
+        if let Some((thinking, signature)) = pending_thinking.remove(&index) {
+            events.push(AssistantEvent::Thinking {
+                thinking,
+                signature,
             });
         }
     }
@@ -7560,6 +7614,7 @@ mod tests {
     fn pending_tools_preserve_multiple_streaming_tool_calls_by_index() {
         let mut events = Vec::new();
         let mut pending_tools = BTreeMap::new();
+        let mut pending_thinking = BTreeMap::new();
 
         push_output_block(
             OutputContentBlock::ToolUse {
@@ -7571,6 +7626,7 @@ mod tests {
             1,
             &mut events,
             &mut pending_tools,
+            &mut pending_thinking,
             true,
         );
         push_output_block(
@@ -7583,6 +7639,7 @@ mod tests {
             2,
             &mut events,
             &mut pending_tools,
+            &mut pending_thinking,
             true,
         );
 

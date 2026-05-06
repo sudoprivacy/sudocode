@@ -2518,6 +2518,13 @@ pub fn classify_skills_slash_command(args: Option<&str>) -> SkillSlashDispatch {
         None | Some("list" | "help" | "-h" | "--help" | "show" | "info" | "describe") => {
             SkillSlashDispatch::Local
         }
+        Some(args)
+            if args
+                .split_whitespace()
+                .any(|part| matches!(part, "-h" | "--help")) =>
+        {
+            SkillSlashDispatch::Local
+        }
         Some(args) if args == "install" || args.starts_with("install ") => {
             SkillSlashDispatch::Local
         }

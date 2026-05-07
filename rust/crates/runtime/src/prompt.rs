@@ -296,10 +296,7 @@ pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
     items.into_iter().map(|item| format!(" - {item}")).collect()
 }
 
-fn discover_instruction_files(
-    cwd: &Path,
-    fs: &dyn FsBackend,
-) -> std::io::Result<Vec<ContextFile>> {
+fn discover_instruction_files(cwd: &Path, fs: &dyn FsBackend) -> std::io::Result<Vec<ContextFile>> {
     let mut directories = Vec::new();
     let mut cursor = Some(cwd);
     while let Some(dir) = cursor {
@@ -537,7 +534,14 @@ pub fn load_system_prompt(
     os_version: impl Into<String>,
     model_family: ModelFamilyIdentity,
 ) -> Result<SystemPrompt, PromptBuildError> {
-    load_system_prompt_with(cwd, current_date, os_name, os_version, model_family, &StdFsBackend)
+    load_system_prompt_with(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        model_family,
+        &StdFsBackend,
+    )
 }
 
 /// Backend-parameterised variant of [`load_system_prompt`].

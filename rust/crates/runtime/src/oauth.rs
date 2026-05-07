@@ -540,7 +540,10 @@ fn write_credentials_root_with(
     let rendered = serde_json::to_string_pretty(&Value::Object(root.clone()))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let temp_path = path.with_extension("json.tmp");
-    fs.write(&temp_path.to_string_lossy(), format!("{rendered}\n").as_bytes())?;
+    fs.write(
+        &temp_path.to_string_lossy(),
+        format!("{rendered}\n").as_bytes(),
+    )?;
     fs.rename(&temp_path.to_string_lossy(), &path.to_string_lossy())
 }
 

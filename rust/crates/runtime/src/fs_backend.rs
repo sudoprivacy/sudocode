@@ -291,7 +291,9 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
         Ok(entries
             .into_iter()
             .map(|child_path| {
-                let is_dir = self.kernel.sys_stat(&child_path, zone)
+                let is_dir = self
+                    .kernel
+                    .sys_stat(&child_path, zone)
                     .map_or(false, |s| s.is_directory);
                 let name = child_path
                     .rsplit('/')

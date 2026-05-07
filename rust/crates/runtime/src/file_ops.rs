@@ -324,6 +324,23 @@ pub fn edit_file(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Intentional std::fs exclusions (NOT migrated to FsBackend)
+//
+// The following functions remain on std::fs because they depend on host
+// filesystem traversal (WalkDir) or host-only metadata that has no VFS
+// equivalent:
+//
+// - glob_search: WalkDir-based host traversal + fs::metadata for mtime sort
+// - grep_search: WalkDir-based host traversal + fs::read_to_string per file
+//
+// Other intentional exclusions in the runtime crate:
+// - sandbox.rs: /proc/1/cgroup — host OS container detection
+// - bash.rs: sandbox dirs — host filesystem isolation
+// - oauth.rs: /dev/urandom — crypto random source (File::open)
+// - trust_resolver.rs: #[cfg(test)] only module
+// ---------------------------------------------------------------------------
+
 /// Expands a glob pattern and returns matching filenames.
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
@@ -689,13 +706,25 @@ pub fn edit_file_in_workspace(
 /// Check whether a path is a symlink that resolves outside the workspace.
 #[allow(dead_code)]
 pub fn is_symlink_escape(path: &Path, workspace_root: &Path) -> io::Result<bool> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_symlink() {
+    is_symlink_escape_with(path, workspace_root, &crate::fs_backend::StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`is_symlink_escape`].
+#[allow(dead_code)]
+pub fn is_symlink_escape_with(
+    path: &Path,
+    workspace_root: &Path,
+    fs: &dyn FsBackend,
+) -> io::Result<bool> {
+    let path_str = path.to_string_lossy();
+    let metadata = fs.symlink_metadata(&path_str)?;
+    if !metadata.is_symlink {
         return Ok(false);
     }
-    let resolved = path.canonicalize()?;
-    let canonical_root = workspace_root
-        .canonicalize()
+    let resolved = fs.canonicalize(&path_str).map(PathBuf::from)?;
+    let canonical_root = fs
+        .canonicalize(&workspace_root.to_string_lossy())
+        .map(PathBuf::from)
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     Ok(!resolved.starts_with(&canonical_root))
 }

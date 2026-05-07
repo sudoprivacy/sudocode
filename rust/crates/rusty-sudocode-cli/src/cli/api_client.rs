@@ -785,39 +785,42 @@ pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMes
             let content = message
                 .blocks
                 .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
-                    ContentBlock::Image { data, mime_type } => InputContentBlock::Image {
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => {
+                        Some(InputContentBlock::Text { text: text.clone() })
+                    }
+                    ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
                         source: ImageSource {
                             source_type: "base64".to_string(),
                             media_type: mime_type.clone(),
                             data: data.clone(),
                         },
-                    },
+                    }),
+                    ContentBlock::Thinking { .. } => None,
                     ContentBlock::ToolUse {
                         id,
                         name,
                         input,
                         thought_signature,
-                    } => InputContentBlock::ToolUse {
+                    } => Some(InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
                         input: serde_json::from_str(input)
                             .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
                         thought_signature: thought_signature.clone(),
-                    },
+                    }),
                     ContentBlock::ToolResult {
                         tool_use_id,
                         output,
                         is_error,
                         ..
-                    } => InputContentBlock::ToolResult {
+                    } => Some(InputContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: vec![ToolResultContentBlock::Text {
                             text: output.clone(),
                         }],
                         is_error: *is_error,
-                    },
+                    }),
                 })
                 .collect::<Vec<_>>();
             (!content.is_empty()).then(|| InputMessage {

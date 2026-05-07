@@ -213,7 +213,9 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
         .filter_map(|block| match block {
             ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
             ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
-            ContentBlock::Text { .. } | ContentBlock::Image { .. } => None,
+            ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Thinking { .. } => None,
         })
         .collect::<Vec<_>>();
     tool_names.sort_unstable();
@@ -319,6 +321,9 @@ fn summarize_block(block: &ContentBlock) -> String {
     let raw = match block {
         ContentBlock::Text { text } => text.clone(),
         ContentBlock::Image { mime_type, .. } => format!("[image: {mime_type}]"),
+        ContentBlock::Thinking { thinking, .. } => {
+            format!("thinking ({} chars)", thinking.chars().count())
+        }
         ContentBlock::ToolUse { name, input, .. } => format!("tool_use {name}({input})"),
         ContentBlock::ToolResult {
             tool_name,
@@ -380,6 +385,7 @@ fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::ToolUse { input, .. } => Some(input.as_str()),
             ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
+            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
             ContentBlock::Image { .. } => None,
         })
         .flat_map(extract_file_candidates)
@@ -403,6 +409,7 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
         ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
         ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
+        | ContentBlock::Thinking { .. }
         | ContentBlock::Text { .. }
         | ContentBlock::Image { .. } => None,
     })
@@ -455,6 +462,10 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
             ContentBlock::ToolResult {
                 tool_name, output, ..
             } => (tool_name.len() + output.len()) / 4 + 1,
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
         })
         .sum()
 }

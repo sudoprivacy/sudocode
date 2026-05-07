@@ -109,6 +109,11 @@ pub enum InputContentBlock {
     Image {
         source: ImageSource,
     },
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,

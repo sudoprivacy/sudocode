@@ -242,6 +242,7 @@ pub(crate) enum CliAction {
     PrintSystemPrompt {
         cwd: PathBuf,
         date: String,
+        model: String,
         output_format: CliOutputFormat,
     },
     Version {
@@ -528,6 +529,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 Ok(CliAction::PrintSystemPrompt {
                     cwd: resolved_cwd,
                     date: resolved_date,
+                    model: model.clone(),
                     output_format,
                 })
             }

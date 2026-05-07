@@ -263,7 +263,9 @@ fn translate_input_message(message: &InputMessage, input: &mut Vec<Value>) {
                         "arguments": args.to_string(),
                     }));
                 }
-                InputContentBlock::ToolResult { .. } | InputContentBlock::Image { .. } => {}
+                InputContentBlock::ToolResult { .. }
+                | InputContentBlock::Image { .. }
+                | InputContentBlock::Thinking { .. } => {}
             }
         }
         flush_text(&mut text_buf, "assistant", input);
@@ -300,7 +302,7 @@ fn translate_input_message(message: &InputMessage, input: &mut Vec<Value>) {
                         "output": flatten_tool_result(content),
                     }));
                 }
-                InputContentBlock::ToolUse { .. } => {}
+                InputContentBlock::ToolUse { .. } | InputContentBlock::Thinking { .. } => {}
             }
         }
         // Flush remaining user parts.

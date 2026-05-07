@@ -1,9 +1,9 @@
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
+use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::git_context::GitContext;
 
 /// Errors raised while assembling the final system prompt.
@@ -125,8 +125,17 @@ impl ProjectContext {
         cwd: impl Into<PathBuf>,
         current_date: impl Into<String>,
     ) -> std::io::Result<Self> {
+        Self::discover_with_fs(cwd, current_date, &StdFsBackend)
+    }
+
+    /// Backend-parameterised variant of [`ProjectContext::discover`].
+    pub fn discover_with_fs(
+        cwd: impl Into<PathBuf>,
+        current_date: impl Into<String>,
+        fs: &dyn FsBackend,
+    ) -> std::io::Result<Self> {
         let cwd = cwd.into();
-        let instruction_files = discover_instruction_files(&cwd)?;
+        let instruction_files = discover_instruction_files(&cwd, fs)?;
         Ok(Self {
             cwd,
             current_date: current_date.into(),
@@ -141,7 +150,16 @@ impl ProjectContext {
         cwd: impl Into<PathBuf>,
         current_date: impl Into<String>,
     ) -> std::io::Result<Self> {
-        let mut context = Self::discover(cwd, current_date)?;
+        Self::discover_with_git_fs(cwd, current_date, &StdFsBackend)
+    }
+
+    /// Backend-parameterised variant of [`ProjectContext::discover_with_git`].
+    pub fn discover_with_git_fs(
+        cwd: impl Into<PathBuf>,
+        current_date: impl Into<String>,
+        fs: &dyn FsBackend,
+    ) -> std::io::Result<Self> {
+        let mut context = Self::discover_with_fs(cwd, current_date, fs)?;
         context.git_status = read_git_status(&context.cwd);
         context.git_diff = read_git_diff(&context.cwd);
         context.git_context = GitContext::detect(&context.cwd);
@@ -278,7 +296,7 @@ pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
     items.into_iter().map(|item| format!(" - {item}")).collect()
 }
 
-fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
+fn discover_instruction_files(cwd: &Path, fs: &dyn FsBackend) -> std::io::Result<Vec<ContextFile>> {
     let mut directories = Vec::new();
     let mut cursor = Some(cwd);
     while let Some(dir) = cursor {
@@ -293,14 +311,18 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
             dir.join("AGENTS.md"),
             dir.join(".nexus").join("sudocode").join("AGENTS.md"),
         ] {
-            push_context_file(&mut files, candidate)?;
+            push_context_file(&mut files, candidate, fs)?;
         }
     }
     Ok(dedupe_instruction_files(files))
 }
 
-fn push_context_file(files: &mut Vec<ContextFile>, path: PathBuf) -> std::io::Result<()> {
-    match fs::read_to_string(&path) {
+fn push_context_file(
+    files: &mut Vec<ContextFile>,
+    path: PathBuf,
+    fs: &dyn FsBackend,
+) -> std::io::Result<()> {
+    match fs.read_to_string(&path.to_string_lossy()) {
         Ok(content) if !content.trim().is_empty() => {
             files.push(ContextFile { path, content });
             Ok(())
@@ -512,8 +534,27 @@ pub fn load_system_prompt(
     os_version: impl Into<String>,
     model_family: ModelFamilyIdentity,
 ) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_with(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        model_family,
+        &StdFsBackend,
+    )
+}
+
+/// Backend-parameterised variant of [`load_system_prompt`].
+pub fn load_system_prompt_with(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    model_family: ModelFamilyIdentity,
+    fs: &dyn FsBackend,
+) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
-    let project_context = ProjectContext::discover_with_git(&cwd, current_date.into())?;
+    let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
     Ok(SystemPromptBuilder::new()
         .with_os(os_name, os_version)

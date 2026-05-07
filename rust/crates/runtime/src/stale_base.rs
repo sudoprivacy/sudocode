@@ -2,6 +2,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::fs_backend::{FsBackend, StdFsBackend};
+
 /// Outcome of comparing the worktree HEAD against the expected base commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaseCommitState {
@@ -25,8 +27,13 @@ pub enum BaseCommitSource {
 /// Read the `.sudocode-base` file from the given directory and return the trimmed
 /// commit hash, or `None` when the file is absent or empty.
 pub fn read_sudocode_base_file(cwd: &Path) -> Option<String> {
+    read_sudocode_base_file_with(cwd, &StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`read_sudocode_base_file`].
+pub fn read_sudocode_base_file_with(cwd: &Path, fs: &dyn FsBackend) -> Option<String> {
     let path = cwd.join(".sudocode-base");
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = fs.read_to_string(&path.to_string_lossy()).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         None

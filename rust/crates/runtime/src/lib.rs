@@ -125,12 +125,13 @@ pub use mcp_stdio::{
     UnsupportedMcpServer,
 };
 pub use oauth::{
-    clear_oauth_credentials, clear_oauth_credentials_from_keyring, code_challenge_s256,
-    credentials_path, generate_pkce_pair, generate_state, import_claude_code_credentials,
-    load_oauth_credentials, loopback_redirect_uri, parse_oauth_callback_query,
-    parse_oauth_callback_request_target, save_oauth_credentials, OAuthAuthorizationRequest,
-    OAuthCallbackParams, OAuthRefreshRequest, OAuthTokenExchangeRequest, OAuthTokenSet,
-    PkceChallengeMethod, PkceCodePair,
+    clear_oauth_credentials, clear_oauth_credentials_from_keyring, clear_oauth_credentials_with,
+    code_challenge_s256, credentials_path, generate_pkce_pair, generate_state,
+    import_claude_code_credentials, import_claude_code_credentials_with, load_oauth_credentials,
+    load_oauth_credentials_with, loopback_redirect_uri, parse_oauth_callback_query,
+    parse_oauth_callback_request_target, save_oauth_credentials, save_oauth_credentials_with,
+    OAuthAuthorizationRequest, OAuthCallbackParams, OAuthRefreshRequest, OAuthTokenExchangeRequest,
+    OAuthTokenSet, PkceChallengeMethod, PkceCodePair,
 };
 pub use permissions::{
     PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
@@ -145,8 +146,8 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, prepend_bullets, ContextFile, ModelFamilyIdentity, ProjectContext,
-    PromptBuildError, SystemPrompt, SystemPromptBuilder, FRONTIER_MODEL_NAME,
+    load_system_prompt, load_system_prompt_with, prepend_bullets, ContextFile, ModelFamilyIdentity,
+    ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder, FRONTIER_MODEL_NAME,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
@@ -154,9 +155,10 @@ pub use recovery_recipes::{
     RecoveryEvent, RecoveryRecipe, RecoveryResult, RecoveryStep,
 };
 pub use remote::{
-    inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,
-    RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState, DEFAULT_REMOTE_BASE_URL,
-    DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS, UPSTREAM_PROXY_ENV_KEYS,
+    inherited_upstream_proxy_env, no_proxy_list, read_token, read_token_with,
+    upstream_proxy_ws_url, RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState,
+    DEFAULT_REMOTE_BASE_URL, DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS,
+    UPSTREAM_PROXY_ENV_KEYS,
 };
 pub use sandbox::{
     build_linux_sandbox_command, detect_container_environment, detect_container_environment_from,
@@ -170,8 +172,8 @@ pub use session::{
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{
-    check_base_commit, format_stale_base_warning, read_sudocode_base_file, resolve_expected_base,
-    BaseCommitSource, BaseCommitState,
+    check_base_commit, format_stale_base_warning, read_sudocode_base_file,
+    read_sudocode_base_file_with, resolve_expected_base, BaseCommitSource, BaseCommitState,
 };
 pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,

@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 use std::env;
 use std::fmt::{Display, Formatter};
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::session::{Session, SessionError};
 
 /// Per-worktree session store that namespaces on-disk session files by
@@ -16,13 +17,14 @@ use crate::session::{Session, SessionError};
 /// explicit `--data-dir` flag).  Both constructors produce a directory layout
 /// of `<data_dir>/sessions/<workspace_hash>/` where `<workspace_hash>` is a
 /// stable hex digest of the canonical workspace root.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStore {
     /// Resolved root of the session namespace, e.g.
     /// `/home/user/project/.scode/sessions/a1b2c3d4e5f60718/`.
     sessions_root: PathBuf,
     /// The canonical workspace path that was fingerprinted.
     workspace_root: PathBuf,
+    /// Filesystem backend for all I/O.
+    fs: Arc<dyn FsBackend>,
 }
 
 impl SessionStore {
@@ -30,20 +32,32 @@ impl SessionStore {
     ///
     /// The on-disk layout becomes `<cwd>/.scode/sessions/<workspace_hash>/`.
     pub fn from_cwd(cwd: impl AsRef<Path>) -> Result<Self, SessionControlError> {
+        Self::from_cwd_with(cwd, Arc::new(StdFsBackend))
+    }
+
+    /// Backend-parameterised variant of [`SessionStore::from_cwd`].
+    pub fn from_cwd_with(
+        cwd: impl AsRef<Path>,
+        fs: Arc<dyn FsBackend>,
+    ) -> Result<Self, SessionControlError> {
         let cwd = cwd.as_ref();
         // #151: canonicalize so equivalent paths (symlinks, relative vs
         // absolute, /tmp vs /private/tmp on macOS) produce the same
         // workspace_fingerprint. Falls back to the raw path if canonicalize
         // fails (e.g. the directory doesn't exist yet).
-        let canonical_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let canonical_cwd = fs
+            .canonicalize(&cwd.to_string_lossy())
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| cwd.to_path_buf());
         let sessions_root = canonical_cwd
             .join(".scode")
             .join("sessions")
             .join(workspace_fingerprint(&canonical_cwd));
-        fs::create_dir_all(&sessions_root)?;
+        fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,
             workspace_root: canonical_cwd,
+            fs,
         })
     }
 
@@ -55,19 +69,31 @@ impl SessionStore {
         data_dir: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, SessionControlError> {
+        Self::from_data_dir_with(data_dir, workspace_root, Arc::new(StdFsBackend))
+    }
+
+    /// Backend-parameterised variant of [`SessionStore::from_data_dir`].
+    pub fn from_data_dir_with(
+        data_dir: impl AsRef<Path>,
+        workspace_root: impl AsRef<Path>,
+        fs: Arc<dyn FsBackend>,
+    ) -> Result<Self, SessionControlError> {
         let workspace_root = workspace_root.as_ref();
         // #151: canonicalize workspace_root for consistent fingerprinting
         // across equivalent path representations.
-        let canonical_workspace =
-            fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+        let canonical_workspace = fs
+            .canonicalize(&workspace_root.to_string_lossy())
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
         let sessions_root = data_dir
             .as_ref()
             .join("sessions")
             .join(workspace_fingerprint(&canonical_workspace));
-        fs::create_dir_all(&sessions_root)?;
+        fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,
             workspace_root: canonical_workspace,
+            fs,
         })
     }
 
@@ -195,14 +221,14 @@ impl SessionStore {
         session: &Session,
     ) -> Result<(), SessionControlError> {
         let Some(actual) = session.workspace_root() else {
-            if path_is_within_workspace(session_path, &self.workspace_root) {
+            if path_is_within_workspace(session_path, &self.workspace_root, &*self.fs) {
                 return Ok(());
             }
             return Err(SessionControlError::Format(
                 format_session_missing_workspace_root(session_path, &self.workspace_root),
             ));
         };
-        if workspace_roots_match(actual, &self.workspace_root) {
+        if workspace_roots_match(actual, &self.workspace_root, &*self.fs) {
             return Ok(());
         }
         Err(SessionControlError::WorkspaceMismatch {
@@ -216,21 +242,22 @@ impl SessionStore {
         directory: &Path,
         sessions: &mut Vec<ManagedSessionSummary>,
     ) -> Result<(), SessionControlError> {
-        let entries = match fs::read_dir(directory) {
+        let dir_str = directory.to_string_lossy();
+        let entries = match self.fs.readdir(&dir_str) {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err.into()),
         };
         for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
+            let path = directory.join(&entry.name);
             if !is_managed_session_file(&path) {
                 continue;
             }
-            let metadata = entry.metadata()?;
-            let modified_epoch_millis = metadata
-                .modified()
+            let modified_epoch_millis = self
+                .fs
+                .stat(&path.to_string_lossy())
                 .ok()
+                .and_then(|m| m.modified)
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default();
@@ -530,16 +557,18 @@ fn format_session_missing_workspace_root(session_path: &Path, workspace_root: &P
     )
 }
 
-fn workspace_roots_match(left: &Path, right: &Path) -> bool {
-    canonicalize_for_compare(left) == canonicalize_for_compare(right)
+fn workspace_roots_match(left: &Path, right: &Path, fs: &dyn FsBackend) -> bool {
+    canonicalize_for_compare(left, fs) == canonicalize_for_compare(right, fs)
 }
 
-fn canonicalize_for_compare(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+fn canonicalize_for_compare(path: &Path, fs: &dyn FsBackend) -> PathBuf {
+    fs.canonicalize(&path.to_string_lossy())
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn path_is_within_workspace(path: &Path, workspace_root: &Path) -> bool {
-    canonicalize_for_compare(path).starts_with(canonicalize_for_compare(workspace_root))
+fn path_is_within_workspace(path: &Path, workspace_root: &Path, fs: &dyn FsBackend) -> bool {
+    canonicalize_for_compare(path, fs).starts_with(canonicalize_for_compare(workspace_root, fs))
 }
 
 #[cfg(test)]

@@ -264,16 +264,19 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
         let zone = &self.ctx.zone_id;
-        let names = self.kernel.sys_readdir_backend(path, zone);
-        Ok(names
+        let entries = self.kernel.readdir(path, zone, false);
+        Ok(entries
             .into_iter()
-            .map(|name| {
-                let child = format!("{}/{name}", path.trim_end_matches('/'));
-                let is_dir = self
-                    .kernel
-                    .sys_stat(&child, zone)
-                    .is_some_and(|s| s.is_directory);
-                FsDirEntry { name, is_dir }
+            .map(|(child_path, entry_type)| {
+                let name = child_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&child_path)
+                    .to_string();
+                FsDirEntry {
+                    name,
+                    is_dir: entry_type == 1, // DT_DIR
+                }
             })
             .collect())
     }

@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::Instant;
 use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::fs_backend::FsBackend;
 
@@ -16,6 +17,15 @@ const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Maximum file size that can be written (10 MB).
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
+
+const GLOB_SEARCH_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    ".build",
+    "target",
+    "dist",
+    "coverage",
+];
 
 /// Validate that a resolved path stays within the given workspace root.
 /// Returns the canonical path on success, or an error if the path escapes
@@ -332,14 +342,22 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     // `Assets/**/*.{cs,uxml,uss}` work correctly.
     let expanded = expand_braces(&search_pattern);
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut matches = Vec::new();
     for pat in &expanded {
-        let entries = glob::glob(pat)
+        let compiled = Pattern::new(pat)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        let walk_root = derive_glob_walk_root(pat);
+        let entries = WalkDir::new(&walk_root)
+            .into_iter()
+            .filter_entry(|entry| !should_skip_glob_dir(entry));
         for entry in entries.flatten() {
-            if entry.is_file() && seen.insert(entry.clone()) {
-                matches.push(entry);
+            let candidate = entry.path();
+            if entry.file_type().is_file()
+                && compiled.matches_path(candidate)
+                && seen.insert(candidate.to_path_buf())
+            {
+                matches.push(candidate.to_path_buf());
             }
         }
     }
@@ -474,6 +492,39 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         applied_limit,
         applied_offset,
     })
+}
+
+fn should_skip_glob_dir(entry: &DirEntry) -> bool {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| GLOB_SEARCH_IGNORED_DIRS.contains(&name))
+}
+
+fn derive_glob_walk_root(pattern: &str) -> PathBuf {
+    let path = Path::new(pattern);
+    let mut prefix = PathBuf::new();
+    let mut saw_component = false;
+
+    for component in path.components() {
+        let text = component.as_os_str().to_string_lossy();
+        if component_contains_glob(&text) {
+            break;
+        }
+        prefix.push(component.as_os_str());
+        saw_component = true;
+    }
+
+    if saw_component {
+        prefix
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+}
+
+fn component_contains_glob(component: &str) -> bool {
+    component.contains('*') || component.contains('?') || component.contains('[')
 }
 
 fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -673,11 +724,13 @@ fn expand_braces(pattern: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        edit_file, expand_braces, glob_search, grep_search, is_symlink_escape, read_file,
-        read_file_in_workspace, write_file, GrepSearchInput, MAX_WRITE_SIZE,
+        component_contains_glob, derive_glob_walk_root, edit_file, expand_braces, glob_search,
+        grep_search, is_symlink_escape, read_file, read_file_in_workspace, write_file,
+        GrepSearchInput, MAX_WRITE_SIZE,
     };
     use crate::fs_backend::StdFsBackend;
 
@@ -875,5 +928,51 @@ mod tests {
             "should match .rs and .toml but not .txt"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glob_search_skips_common_heavy_directories() {
+        let dir = temp_path("glob-ignored-dirs");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(dir.join(".build/checkouts/pkg")).unwrap();
+        std::fs::create_dir_all(dir.join("target/debug/deps")).unwrap();
+
+        std::fs::write(dir.join("src/AGENTS.md"), "src").unwrap();
+        std::fs::write(dir.join("docs/AGENTS.md"), "docs").unwrap();
+        std::fs::write(dir.join("node_modules/pkg/AGENTS.md"), "node_modules").unwrap();
+        std::fs::write(dir.join(".build/checkouts/pkg/AGENTS.md"), ".build").unwrap();
+        std::fs::write(dir.join("target/debug/deps/AGENTS.md"), "target").unwrap();
+
+        let result =
+            glob_search("**/AGENTS.md", Some(dir.to_str().unwrap())).expect("glob should succeed");
+
+        assert_eq!(result.num_files, 2, "ignored dirs should be pruned");
+        assert!(result
+            .filenames
+            .iter()
+            .any(|path| path.ends_with("src/AGENTS.md")));
+        assert!(result
+            .filenames
+            .iter()
+            .any(|path| path.ends_with("docs/AGENTS.md")));
+        assert!(!result
+            .filenames
+            .iter()
+            .any(|path| path.contains("node_modules")
+                || path.contains(".build")
+                || path.contains("/target/")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derive_glob_walk_root_stops_at_first_glob_component() {
+        let root = derive_glob_walk_root("/tmp/demo/**/AGENTS.md");
+        assert_eq!(root, PathBuf::from("/tmp/demo"));
+        assert!(component_contains_glob("**"));
+        assert!(component_contains_glob("*.rs"));
+        assert!(!component_contains_glob("src"));
     }
 }

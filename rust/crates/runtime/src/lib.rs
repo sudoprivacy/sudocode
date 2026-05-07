@@ -154,9 +154,10 @@ pub use recovery_recipes::{
     RecoveryEvent, RecoveryRecipe, RecoveryResult, RecoveryStep,
 };
 pub use remote::{
-    inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,
-    RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState, DEFAULT_REMOTE_BASE_URL,
-    DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS, UPSTREAM_PROXY_ENV_KEYS,
+    inherited_upstream_proxy_env, no_proxy_list, read_token, read_token_with,
+    upstream_proxy_ws_url, RemoteSessionContext, UpstreamProxyBootstrap, UpstreamProxyState,
+    DEFAULT_REMOTE_BASE_URL, DEFAULT_SESSION_TOKEN_PATH, DEFAULT_SYSTEM_CA_BUNDLE, NO_PROXY_HOSTS,
+    UPSTREAM_PROXY_ENV_KEYS,
 };
 pub use sandbox::{
     build_linux_sandbox_command, detect_container_environment, detect_container_environment_from,
@@ -170,8 +171,8 @@ pub use session::{
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{
-    check_base_commit, format_stale_base_warning, read_sudocode_base_file, resolve_expected_base,
-    BaseCommitSource, BaseCommitState,
+    check_base_commit, format_stale_base_warning, read_sudocode_base_file,
+    read_sudocode_base_file_with, resolve_expected_base, BaseCommitSource, BaseCommitState,
 };
 pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,

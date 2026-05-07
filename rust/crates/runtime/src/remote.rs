@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::fs_backend::{FsBackend, StdFsBackend};
 
 pub const DEFAULT_REMOTE_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_SESSION_TOKEN_PATH: &str = "/run/ccr/session_token";
@@ -183,7 +184,12 @@ impl UpstreamProxyState {
 }
 
 pub fn read_token(path: &Path) -> io::Result<Option<String>> {
-    match fs::read_to_string(path) {
+    read_token_with(path, &StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`read_token`].
+pub fn read_token_with(path: &Path, fs: &dyn FsBackend) -> io::Result<Option<String>> {
+    match fs.read_to_string(&path.to_string_lossy()) {
         Ok(contents) => {
             let token = contents.trim();
             if token.is_empty() {

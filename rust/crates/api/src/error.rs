@@ -14,6 +14,11 @@ const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "too many tokens",
     "prompt is too long",
     "input is too long",
+    "input tokens exceed",
+    "configured limit",
+    "messages resulted in",
+    "completion tokens",
+    "prompt tokens",
     "request is too large",
 ];
 
@@ -549,6 +554,26 @@ mod tests {
         assert!(error.is_context_window_failure());
         assert_eq!(error.safe_failure_class(), "context_window");
         assert_eq!(error.request_id(), Some("req_ctx_123"));
+    }
+
+    #[test]
+    fn classifies_openai_configured_limit_errors_as_context_window_failures() {
+        let error = ApiError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error_type: Some("invalid_request_error".to_string()),
+            message: Some(
+                "Input tokens exceed the configured limit of 922000 tokens. Your messages resulted in 1860900 tokens. Please reduce the length of the messages."
+                    .to_string(),
+            ),
+            request_id: Some("req_ctx_openai_123".to_string()),
+            body: String::new(),
+            retryable: false,
+            suggested_action: None,
+        };
+
+        assert!(error.is_context_window_failure());
+        assert_eq!(error.safe_failure_class(), "context_window");
+        assert_eq!(error.request_id(), Some("req_ctx_openai_123"));
     }
 
     #[test]

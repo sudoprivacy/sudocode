@@ -567,11 +567,7 @@ pub(crate) fn collect_prompt_cache_events(
 }
 
 pub(crate) fn max_tokens_for_model(model: &str) -> u32 {
-    if model.contains("opus") {
-        32_000
-    } else {
-        64_000
-    }
+    api::max_tokens_for_model(model)
 }
 
 pub(crate) fn render_thinking_block_summary(

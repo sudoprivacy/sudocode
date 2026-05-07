@@ -1189,6 +1189,18 @@ fn run_resume_command(
         } if act == "list" => {
             let sessions = list_managed_sessions().unwrap_or_default();
             let session_ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+            let session_details: Vec<serde_json::Value> = sessions
+                .iter()
+                .map(|session| {
+                    serde_json::json!({
+                        "id": session.id,
+                        "path": session.path.display().to_string(),
+                        "message_count": session.message_count,
+                        "updated_at_ms": session.updated_at_ms,
+                        "lifecycle": session.lifecycle.json_value(),
+                    })
+                })
+                .collect();
             let active_id = session.session_id.clone();
             let text = render_session_list(&active_id).unwrap_or_else(|e| format!("error: {e}"));
             Ok(ResumeCommandOutcome {
@@ -1197,6 +1209,7 @@ fn run_resume_command(
                 json: Some(serde_json::json!({
                     "kind": "session_list",
                     "sessions": session_ids,
+                    "session_details": session_details,
                     "active": active_id,
                 })),
             })

@@ -637,6 +637,7 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out)?;
     let resume_commands = resume_supported_slash_commands()
         .into_iter()
+        .filter(|spec| !STUB_COMMANDS.contains(&spec.name))
         .map(|spec| match spec.argument_hint {
             Some(argument_hint) => format!("/{} {}", spec.name, argument_hint),
             None => format!("/{}", spec.name),
@@ -704,4 +705,35 @@ pub(crate) fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn s
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stub_commands_absent_from_resume_safe_help() {
+        let mut help = Vec::new();
+        print_help_to(&mut help).expect("help should render");
+        let help = String::from_utf8(help).expect("help should be utf8");
+        let resume_line = help
+            .lines()
+            .find(|line| line.starts_with("Resume-safe commands:"))
+            .expect("resume-safe command line should exist");
+        let resume_roots = resume_line
+            .trim_start_matches("Resume-safe commands:")
+            .split(',')
+            .filter_map(|entry| entry.trim().strip_prefix('/'))
+            .filter_map(|entry| entry.split_whitespace().next())
+            .collect::<Vec<_>>();
+
+        for stub in STUB_COMMANDS {
+            assert!(
+                !resume_roots.contains(stub),
+                "stub command /{stub} should not appear in resume-safe command list"
+            );
+        }
+
+        assert!(resume_roots.contains(&"status"));
+    }
 }

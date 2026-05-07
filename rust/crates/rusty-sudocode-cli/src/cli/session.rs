@@ -6,6 +6,8 @@ use std::time::UNIX_EPOCH;
 
 use runtime::{Session, SessionStore};
 
+use crate::cli::lifecycle::{classify_session_lifecycle_for, SessionLifecycleSummary};
+
 pub(crate) const LATEST_SESSION_REFERENCE: &str = "latest";
 pub(crate) const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 
@@ -24,6 +26,7 @@ pub(crate) struct ManagedSessionSummary {
     pub(crate) message_count: usize,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) branch_name: Option<String>,
+    pub(crate) lifecycle: SessionLifecycleSummary,
 }
 
 pub(crate) fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -85,7 +88,9 @@ pub(crate) fn resolve_managed_session_path(
 
 pub(crate) fn list_managed_sessions(
 ) -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
-    Ok(current_session_store()?
+    let store = current_session_store()?;
+    let lifecycle = classify_session_lifecycle_for(store.workspace_root());
+    Ok(store
         .list_sessions()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
         .into_iter()
@@ -97,13 +102,16 @@ pub(crate) fn list_managed_sessions(
             message_count: session.message_count,
             parent_session_id: session.parent_session_id,
             branch_name: session.branch_name,
+            lifecycle: lifecycle.clone(),
         })
         .collect())
 }
 
 pub(crate) fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error::Error>>
 {
-    let session = current_session_store()?
+    let store = current_session_store()?;
+    let lifecycle = classify_session_lifecycle_for(store.workspace_root());
+    let session = store
         .latest_session()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     Ok(ManagedSessionSummary {
@@ -114,6 +122,7 @@ pub(crate) fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn 
         message_count: session.message_count,
         parent_session_id: session.parent_session_id,
         branch_name: session.branch_name,
+        lifecycle,
     })
 }
 
@@ -180,8 +189,9 @@ pub(crate) fn render_session_list(
             (None, None) => String::new(),
         };
         lines.push(format!(
-            "  {id:<20} {marker:<10} msgs={msgs:<4} modified={modified}{lineage} path={path}",
+            "  {id:<20} {marker:<10} lifecycle={lifecycle} msgs={msgs:<4} modified={modified}{lineage} path={path}",
             id = session.id,
+            lifecycle = session.lifecycle.signal(),
             msgs = session.message_count,
             modified = format_session_modified_age(session.modified_epoch_millis),
             lineage = lineage,

@@ -1,9 +1,10 @@
 //! Managed-agent loop spawn entry — v2 ConversationRuntime integration.
 //!
-//! Wires the per-pid agent loop into a full LLM turn-driver that polls
-//! `/proc/{pid}/chat-with-me` for inbound JSON envelopes, drives each
-//! prompt through a [`crate::ConversationRuntime`], and writes structured
-//! responses back through the same mailbox path.
+//! Wires the per-pid agent loop into a full LLM turn-driver that waits
+//! on `/proc/{pid}/chat-with-me` for inbound JSON envelopes (via
+//! `sys_watch` condvar blocking), drives each prompt through a
+//! [`crate::ConversationRuntime`], and writes structured responses back
+//! through the same mailbox path.
 //!
 //! ## State machine
 //!
@@ -37,7 +38,6 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use kernel::abi::KernelAbi;
 use kernel::core::agents::registry::AgentDescriptor;
@@ -50,11 +50,15 @@ use crate::permissions::PermissionPolicy;
 use crate::prompt::SystemPrompt;
 use crate::session::Session;
 
-/// Sleep between `sys_read` polls when the canonical mailbox is idle.
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// `sys_watch` timeout per iteration. The kernel's `FileWatchRegistry`
+/// condvar blocks the thread until a `FileWrite` event fires on the
+/// mailbox path or the timeout expires — no busy-polling, near-zero
+/// idle CPU. On timeout the loop re-checks `abort.is_aborted()` and
+/// re-arms the watch.
+const WATCH_TIMEOUT_MS: u64 = 500;
 
 /// Per-call `sys_read` blocking timeout. `0` keeps the call
-/// non-blocking — the loop uses explicit `thread::sleep` between polls.
+/// non-blocking — data is already present because `sys_watch` woke us.
 const READ_TIMEOUT_MS: u64 = 0;
 
 /// Agent-state values surfaced via `state_callback`.
@@ -255,7 +259,11 @@ fn run_loop<K, C, T, F>(
                 break;
             }
         }
-        thread::sleep(POLL_INTERVAL);
+        // Block until a FileWrite event fires on the mailbox path, or
+        // timeout. Replaces the old `thread::sleep(50ms)` busy-poll
+        // with a condvar wait — near-zero idle CPU, sub-millisecond
+        // wake latency on new data.
+        kernel.sys_watch(&cwm_path, WATCH_TIMEOUT_MS);
     }
 }
 
@@ -307,7 +315,7 @@ fn run_echo_loop<K: KernelAbi>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &
             }
             Err(_) => break,
         }
-        thread::sleep(POLL_INTERVAL);
+        kernel.sys_watch(&cwm_path, WATCH_TIMEOUT_MS);
     }
 }
 

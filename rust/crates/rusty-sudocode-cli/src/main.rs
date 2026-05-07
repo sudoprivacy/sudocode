@@ -517,7 +517,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_broad_cwd,
             auth_mode,
         )?,
-        CliAction::HelpTopic(topic) => print_help_topic(topic),
+        CliAction::HelpTopic {
+            topic,
+            output_format,
+        } => print_help_topic(topic, output_format)?,
         CliAction::Help { output_format } => print_help(output_format)?,
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
@@ -1120,10 +1123,10 @@ fn run_resume_command(
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
                 message: Some(handle_agents_slash_command(args.as_deref(), &cwd)?),
-                json: Some(serde_json::json!({
-                    "kind": "agents",
-                    "text": handle_agents_slash_command(args.as_deref(), &cwd)?,
-                })),
+                json: Some(
+                    serde_json::to_value(handle_agents_slash_command_json(args.as_deref(), &cwd)?)
+                        .unwrap_or_else(|_| serde_json::json!(null)),
+                ),
             })
         }
         SlashCommand::Skills { args } => {

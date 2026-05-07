@@ -30,6 +30,15 @@ fn version_emits_json_when_requested() {
     let parsed = assert_json_command(&root, &["--output-format", "json", "version"]);
     assert_eq!(parsed["kind"], "version");
     assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+    // Provenance fields must be present for binary identification.
+    assert!(
+        parsed["build_date"].is_string(),
+        "build_date must be a string in version JSON"
+    );
+    assert!(
+        parsed["executable_path"].is_string(),
+        "executable_path must be a string in version JSON so callers can identify which binary is running"
+    );
 }
 
 #[test]
@@ -342,6 +351,34 @@ fn resumed_inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(skills["action"], "list");
     assert!(skills["summary"]["total"].is_number());
     assert!(skills["skills"].is_array());
+
+    let agents = assert_json_command_with_env(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "--resume",
+            session_path.to_str().expect("utf8 session path"),
+            "/agents",
+        ],
+        &[
+            (
+                "SUDO_CODE_CONFIG_HOME",
+                config_home.to_str().expect("utf8 config home"),
+            ),
+            ("HOME", home.to_str().expect("utf8 home")),
+        ],
+    );
+    assert_eq!(agents["kind"], "agents");
+    assert_eq!(agents["action"], "list");
+    assert!(
+        agents["agents"].is_array(),
+        "agents field must be a JSON array"
+    );
+    assert!(
+        agents["count"].is_number(),
+        "count must be a number, not a text render"
+    );
 }
 
 #[test]
@@ -376,6 +413,80 @@ fn resumed_version_and_init_emit_structured_json_when_requested() {
     );
     assert_eq!(init["kind"], "init");
     assert!(root.join("CLAUDE.md").exists());
+}
+
+#[test]
+fn config_section_json_emits_section_and_value() {
+    let root = unique_temp_dir("config-section-json");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    // Without a section: should return base envelope (no section field).
+    let base = assert_json_command(&root, &["--output-format", "json", "config"]);
+    assert_eq!(base["kind"], "config");
+    assert!(base["loaded_files"].is_number());
+    assert!(base["merged_keys"].is_number());
+    assert!(
+        base.get("section").is_none(),
+        "no section field without section arg"
+    );
+
+    // With a known section: should add section + section_value fields.
+    for section in &["model", "env", "hooks", "plugins"] {
+        let result = assert_json_command(&root, &["--output-format", "json", "config", section]);
+        assert_eq!(result["kind"], "config", "section={section}");
+        assert_eq!(
+            result["section"].as_str(),
+            Some(*section),
+            "section field must match requested section, got {result:?}"
+        );
+        assert!(
+            result.get("section_value").is_some(),
+            "section_value field must be present for section={section}"
+        );
+    }
+
+    // With an unsupported section: should return ok:false + error field.
+    let bad = assert_json_command(&root, &["--output-format", "json", "config", "unknown"]);
+    assert_eq!(bad["kind"], "config");
+    assert_eq!(bad["ok"], false);
+    assert!(bad["error"].as_str().is_some());
+    assert!(bad["section"].as_str().is_some());
+}
+
+#[test]
+fn export_help_emits_bounded_json_when_requested() {
+    let root = unique_temp_dir("export-help-json");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(&root, &["export", "--help", "--output-format", "json"]);
+    assert_eq!(parsed["kind"], "help");
+    assert_eq!(parsed["topic"], "export");
+    assert_eq!(parsed["command"], "export");
+    assert_eq!(
+        parsed["usage"],
+        "scode export [--session <id|latest>] [--output <path>] [--output-format <format>]"
+    );
+    assert_eq!(parsed["defaults"]["session"], "latest");
+    assert!(parsed["options"].as_array().expect("options").len() >= 4);
+    assert!(parsed.get("message").is_none());
+}
+
+#[test]
+fn export_help_preserves_plaintext_in_text_mode() {
+    let root = unique_temp_dir("export-help-text");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let output = run_scode(&root, &["export", "--help"], &[]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(stdout.starts_with("Export\n"));
+    assert!(stdout.contains("Usage            scode export"));
+    serde_json::from_str::<Value>(&stdout).expect_err("text help should remain plaintext");
 }
 
 fn assert_json_command(current_dir: &Path, args: &[&str]) -> Value {

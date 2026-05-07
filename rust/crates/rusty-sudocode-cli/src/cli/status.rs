@@ -360,12 +360,17 @@ pub(crate) fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn version_json_value() -> serde_json::Value {
+    let executable_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string());
     json!({
         "kind": "version",
         "message": render_version_report(),
         "version": VERSION,
         "git_sha": crate::GIT_SHA,
         "target": crate::BUILD_TARGET,
+        "build_date": crate::DEFAULT_DATE,
+        "executable_path": executable_path,
     })
 }
 

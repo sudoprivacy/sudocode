@@ -123,8 +123,90 @@ pub(crate) fn render_help_topic(topic: LocalHelpTopic) -> String {
     }
 }
 
-pub(crate) fn print_help_topic(topic: LocalHelpTopic) {
-    println!("{}", render_help_topic(topic));
+fn local_help_topic_command(topic: LocalHelpTopic) -> &'static str {
+    match topic {
+        LocalHelpTopic::Status => "status",
+        LocalHelpTopic::Sandbox => "sandbox",
+        LocalHelpTopic::Doctor => "doctor",
+        LocalHelpTopic::Acp => "acp",
+        LocalHelpTopic::Init => "init",
+        LocalHelpTopic::State => "state",
+        LocalHelpTopic::Export => "export",
+        LocalHelpTopic::Version => "version",
+        LocalHelpTopic::SystemPrompt => "system-prompt",
+        LocalHelpTopic::DumpManifests => "dump-manifests",
+        LocalHelpTopic::BootstrapPlan => "bootstrap-plan",
+    }
+}
+
+fn render_export_help_json() -> serde_json::Value {
+    json!({
+        "kind": "help",
+        "topic": "export",
+        "command": "export",
+        "usage": "scode export [--session <id|latest>] [--output <path>] [--output-format <format>]",
+        "purpose": "serialize a managed session to JSON for review, transfer, or archival",
+        "defaults": {
+            "session": LATEST_SESSION_REFERENCE,
+            "session_source": ".scode/sessions/",
+            "output": "derived from the selected session when omitted"
+        },
+        "formats": ["text", "json"],
+        "options": [
+            {
+                "name": "--session",
+                "value": "<id|latest>",
+                "default": LATEST_SESSION_REFERENCE,
+                "description": "managed session to export"
+            },
+            {
+                "name": "--output",
+                "aliases": ["-o"],
+                "value": "<path>",
+                "description": "write the exported transcript to this path"
+            },
+            {
+                "name": "--output-format",
+                "value": "<format>",
+                "values": ["text", "json"],
+                "default": "text",
+                "description": "format for the command result envelope"
+            },
+            {
+                "name": "--help",
+                "aliases": ["-h"],
+                "description": "show help for the export command"
+            }
+        ],
+        "related": ["/session list", "scode --resume latest"]
+    })
+}
+
+pub(crate) fn render_help_topic_json(topic: LocalHelpTopic) -> serde_json::Value {
+    if topic == LocalHelpTopic::Export {
+        return render_export_help_json();
+    }
+
+    json!({
+        "kind": "help",
+        "topic": local_help_topic_command(topic),
+        "command": local_help_topic_command(topic),
+        "message": render_help_topic(topic),
+    })
+}
+
+pub(crate) fn print_help_topic(
+    topic: LocalHelpTopic,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match output_format {
+        CliOutputFormat::Text => println!("{}", render_help_topic(topic)),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&render_help_topic_json(topic))?
+        ),
+    }
+    Ok(())
 }
 
 pub(crate) fn render_config_report(
@@ -209,7 +291,7 @@ pub(crate) fn render_config_report(
 }
 
 pub(crate) fn render_config_json(
-    _section: Option<&str>,
+    section: Option<&str>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
@@ -242,13 +324,52 @@ pub(crate) fn render_config_json(
         })
         .collect();
 
-    Ok(serde_json::json!({
+    let base = serde_json::json!({
         "kind": "config",
         "cwd": cwd.display().to_string(),
         "loaded_files": loaded_paths.len(),
         "merged_keys": runtime_config.merged().len(),
         "files": files,
-    }))
+    });
+
+    if let Some(section) = section {
+        let section_rendered: Option<String> = match section {
+            "env" => runtime_config.get("env").map(|v| v.render()),
+            "hooks" => runtime_config.get("hooks").map(|v| v.render()),
+            "model" => runtime_config.get("model").map(|v| v.render()),
+            "plugins" => runtime_config
+                .get("plugins")
+                .or_else(|| runtime_config.get("enabledPlugins"))
+                .map(|v| v.render()),
+            other => {
+                return Ok(serde_json::json!({
+                    "kind": "config",
+                    "section": other,
+                    "ok": false,
+                    "error": format!("Unsupported config section '{other}'. Use env, hooks, model, or plugins."),
+                    "cwd": cwd.display().to_string(),
+                    "loaded_files": loaded_paths.len(),
+                    "files": files,
+                }));
+            }
+        };
+        // Parse the rendered JSON string back into serde_json::Value so that
+        // section_value is a real JSON object/array in the envelope, not a quoted string.
+        let section_value: serde_json::Value = section_rendered
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let mut obj = base;
+        let map = obj.as_object_mut().expect("base is object");
+        map.insert(
+            "section".to_string(),
+            serde_json::Value::String(section.to_string()),
+        );
+        map.insert("section_value".to_string(), section_value);
+        return Ok(obj);
+    }
+
+    Ok(base)
 }
 
 pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {

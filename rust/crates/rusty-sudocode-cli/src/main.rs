@@ -31,10 +31,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, resolve_startup_auth_source, AnthropicClient, AuthMode, AuthSource,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
+    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
+    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
+    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -395,8 +396,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::PrintSystemPrompt {
             cwd,
             date,
+            model,
             output_format,
-        } => print_system_prompt(cwd, date, output_format)?,
+        } => print_system_prompt(cwd, date, &model, output_format)?,
         CliAction::Version { output_format } => print_version(output_format)?,
         CliAction::ResumeSession {
             session_path,
@@ -729,9 +731,16 @@ fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn st
 fn print_system_prompt(
     cwd: PathBuf,
     date: String,
+    model: &str,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let prompt = load_system_prompt(cwd, date, env::consts::OS, "unknown")?;
+    let prompt = load_system_prompt(
+        cwd,
+        date,
+        env::consts::OS,
+        "unknown",
+        model_family_identity_for(model),
+    )?;
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -1559,7 +1568,7 @@ impl AcpCliAgent {
         let cwd = canonical_session_cwd(cwd)?;
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_system_prompt_for(&cwd).map_err(|error| {
+        let system_prompt = build_system_prompt_for(&cwd, &model).map_err(|error| {
             AcpError::internal(format!("failed to build system prompt: {error}"))
         })?;
         let session_state = new_cli_session_for(&cwd)
@@ -1668,7 +1677,7 @@ impl AcpCliAgent {
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
         let auth_mode = resolve_auth_mode(&resolved, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-        let system_prompt = build_system_prompt_for(&cwd)
+        let system_prompt = build_system_prompt_for(&cwd, &resolved)
             .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
         let runtime = build_runtime_for_cwd(
             &cwd,
@@ -2021,7 +2030,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_system_prompt_for(&cwd).map_err(|e| {
+        let system_prompt = build_system_prompt_for(&cwd, &model).map_err(|e| {
             runtime::AcpError::internal(format!("failed to build system prompt: {e}"))
         })?;
         let sudocode_config =
@@ -2198,7 +2207,7 @@ impl LiveCli {
         permission_mode: PermissionMode,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let system_prompt = build_system_prompt()?;
+        let system_prompt = build_system_prompt(&model)?;
         let session_state = new_cli_session()?;
         let session = create_managed_session_handle(&session_state.session_id)?;
         let cwd = env::current_dir()?;
@@ -2400,6 +2409,10 @@ impl LiveCli {
                     )?;
                 } else {
                     spinner.clear(&mut stdout)?;
+                    let final_text = final_assistant_text(&summary);
+                    if !final_text.is_empty() {
+                        println!("{final_text}");
+                    }
                     if let Some(event) = summary.auto_compaction {
                         println!(
                             "{}",
@@ -3376,16 +3389,20 @@ fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_jso
     })
 }
 
-fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
-    build_system_prompt_for(&env::current_dir()?)
+fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+    build_system_prompt_for(&env::current_dir()?, model)
 }
 
-fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+fn build_system_prompt_for(
+    cwd: &Path,
+    model: &str,
+) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     Ok(load_system_prompt(
         cwd.to_path_buf(),
         DEFAULT_DATE,
         env::consts::OS,
         "unknown",
+        model_family_identity_for(model),
     )?)
 }
 

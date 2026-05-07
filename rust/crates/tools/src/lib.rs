@@ -4,10 +4,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use api::{
-    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
-    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    max_tokens_for_model, model_family_identity_for, resolve_provider_from_config, ApiError,
+    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
+    OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 use plugins::PluginTool;
 use reqwest::blocking::Client;
@@ -3721,7 +3721,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| slugify_agent_name(&input.description));
     let created_at = iso8601_now();
-    let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
+    let system_prompt = build_agent_system_prompt(&normalized_subagent_type, &model)?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
 
     let output_contents = format!(
@@ -3925,13 +3925,14 @@ fn build_agent_runtime(
     ))
 }
 
-fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String> {
+fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let mut prompt = load_system_prompt(
         cwd,
         DEFAULT_AGENT_SYSTEM_DATE.to_string(),
         std::env::consts::OS,
         "unknown",
+        model_family_identity_for(model),
     )
     .map_err(|error| error.to_string())?;
     prompt.dynamic_sections.push(format!(
@@ -5161,46 +5162,40 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             let content = message
                 .blocks
                 .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => InputContentBlock::Text { text: text.clone() },
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    } => InputContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: signature.clone(),
-                    },
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
+                    ContentBlock::Thinking { .. } => None,
                     ContentBlock::ToolUse {
                         id,
                         name,
                         input,
                         thought_signature,
-                    } => InputContentBlock::ToolUse {
+                    } => Some(InputContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
                         input: serde_json::from_str(input)
                             .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
                         thought_signature: thought_signature.clone(),
-                    },
+                    }),
                     ContentBlock::ToolResult {
                         tool_use_id,
                         output,
                         is_error,
                         ..
-                    } => InputContentBlock::ToolResult {
+                    } => Some(InputContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: vec![ToolResultContentBlock::Text {
                             text: output.clone(),
                         }],
                         is_error: *is_error,
-                    },
-                    ContentBlock::Image { data, mime_type } => InputContentBlock::Image {
+                    }),
+                    ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
                         source: api::ImageSource {
                             source_type: "base64".to_string(),
                             media_type: mime_type.clone(),
                             data: data.clone(),
                         },
-                    },
+                    }),
                 })
                 .collect::<Vec<_>>();
             (!content.is_empty()).then(|| InputMessage {

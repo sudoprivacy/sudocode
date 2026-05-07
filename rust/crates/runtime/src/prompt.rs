@@ -38,8 +38,30 @@ impl From<ConfigError> for PromptBuildError {
 
 /// Marker separating static prompt scaffolding from dynamic runtime context.
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+/// Human-readable label used for the "Model family" environment bullet
+/// when the provider is Anthropic.
+pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
+
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
+
+/// Neutral identity for the model family line in generated prompts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelFamilyIdentity {
+    #[default]
+    Claude,
+    Generic,
+}
+
+impl ModelFamilyIdentity {
+    #[must_use]
+    pub const fn family_label(self) -> &'static str {
+        match self {
+            Self::Claude => FRONTIER_MODEL_NAME,
+            Self::Generic => "an AI assistant",
+        }
+    }
+}
 
 /// Structured system prompt with an explicit static/dynamic split.
 ///
@@ -134,6 +156,7 @@ pub struct SystemPromptBuilder {
     output_style_prompt: Option<String>,
     os_name: Option<String>,
     os_version: Option<String>,
+    model_family: Option<ModelFamilyIdentity>,
     append_sections: Vec<String>,
     project_context: Option<ProjectContext>,
     config: Option<RuntimeConfig>,
@@ -156,6 +179,12 @@ impl SystemPromptBuilder {
     pub fn with_os(mut self, os_name: impl Into<String>, os_version: impl Into<String>) -> Self {
         self.os_name = Some(os_name.into());
         self.os_version = Some(os_version.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_family(mut self, model_family: ModelFamilyIdentity) -> Self {
+        self.model_family = Some(model_family);
         self
     }
 
@@ -227,8 +256,10 @@ impl SystemPromptBuilder {
             || "unknown".to_string(),
             |context| context.current_date.clone(),
         );
+        let identity = self.model_family.unwrap_or_default();
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
+            format!("Model family: {}", identity.family_label()),
             format!("Working directory: {cwd}"),
             format!("Date: {date}"),
             format!(
@@ -479,12 +510,14 @@ pub fn load_system_prompt(
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
+    model_family: ModelFamilyIdentity,
 ) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git(&cwd, current_date.into())?;
     let config = ConfigLoader::default_for(&cwd).load()?;
     Ok(SystemPromptBuilder::new()
         .with_os(os_name, os_version)
+        .with_model_family(model_family)
         .with_project_context(project_context)
         .with_runtime_config(config)
         .build())
@@ -630,7 +663,7 @@ mod tests {
     use super::{
         collapse_blank_lines, display_context_path, normalize_instruction_content,
         render_instruction_content, render_instruction_files, truncate_instruction_content,
-        ContextFile, ProjectContext, SystemPromptBuilder,
+        ContextFile, ModelFamilyIdentity, ProjectContext, SystemPromptBuilder,
     };
     use crate::config::ConfigLoader;
     use std::fs;
@@ -907,9 +940,15 @@ mod tests {
         std::env::set_var("HOME", &root);
         std::env::set_var("SUDO_CODE_CONFIG_HOME", root.join("missing-home"));
         std::env::set_current_dir(&root).expect("change cwd");
-        let prompt = super::load_system_prompt(&root, "2026-03-31", "linux", "6.8")
-            .expect("system prompt should load")
-            .render();
+        let prompt = super::load_system_prompt(
+            &root,
+            "2026-03-31",
+            "linux",
+            "6.8",
+            ModelFamilyIdentity::Claude,
+        )
+        .expect("system prompt should load")
+        .render();
         std::env::set_current_dir(previous).expect("restore cwd");
         if let Some(value) = original_home {
             std::env::set_var("HOME", value);

@@ -496,6 +496,7 @@ fn translate_input_message(message: &InputMessage, contents: &mut Vec<Value>) {
                     }
                 }));
             }
+            InputContentBlock::Thinking { .. } => {}
         }
     }
 

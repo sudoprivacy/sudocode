@@ -104,6 +104,7 @@ pub(crate) fn render_session_markdown(
                     lines.push(format!("_[image: {mime_type}]_"));
                     lines.push(String::new());
                 }
+                ContentBlock::Thinking { .. } => {}
             }
         }
         if let Some(usage) = message.usage {
@@ -278,6 +279,7 @@ pub(crate) fn render_export_text(session: &Session) -> String {
                 ContentBlock::Image { mime_type, .. } => {
                     lines.push(format!("[image: {mime_type}]"));
                 }
+                ContentBlock::Thinking { .. } => {}
             }
         }
         lines.push(String::new());

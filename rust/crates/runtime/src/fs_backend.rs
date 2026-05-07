@@ -53,6 +53,8 @@ pub trait FsBackend: Send + Sync + 'static {
     fn exists(&self, path: &str) -> io::Result<bool>;
     fn create_dir_all(&self, path: &str) -> io::Result<()>;
     fn rename(&self, from: &str, to: &str) -> io::Result<()>;
+    fn canonicalize(&self, path: &str) -> io::Result<String>;
+    fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata>;
 
     /// Convenience: read a file and decode as UTF-8.
     fn read_to_string(&self, path: &str) -> io::Result<String> {
@@ -97,6 +99,12 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         (**self).rename(from, to)
+    }
+    fn canonicalize(&self, path: &str) -> io::Result<String> {
+        (**self).canonicalize(path)
+    }
+    fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
+        (**self).symlink_metadata(path)
     }
     fn read_to_string(&self, path: &str) -> io::Result<String> {
         (**self).read_to_string(path)
@@ -172,6 +180,21 @@ impl FsBackend for StdFsBackend {
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn canonicalize(&self, path: &str) -> io::Result<String> {
+        Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned())
+    }
+
+    fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
+        let meta = std::fs::symlink_metadata(path)?;
+        Ok(FsMetadata {
+            len: meta.len(),
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            is_symlink: meta.is_symlink(),
+            modified: meta.modified().ok(),
+        })
     }
 
     fn read_to_string(&self, path: &str) -> io::Result<String> {
@@ -264,19 +287,18 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
         let zone = &self.ctx.zone_id;
-        let entries = self.kernel.readdir(path, zone, false);
+        let entries = self.kernel.sys_readdir_backend(path, zone);
         Ok(entries
             .into_iter()
-            .map(|(child_path, entry_type)| {
+            .map(|child_path| {
+                let is_dir = self.kernel.sys_stat(&child_path, zone)
+                    .map_or(false, |s| s.is_directory);
                 let name = child_path
                     .rsplit('/')
                     .next()
                     .unwrap_or(&child_path)
                     .to_string();
-                FsDirEntry {
-                    name,
-                    is_dir: entry_type == 1, // DT_DIR
-                }
+                FsDirEntry { name, is_dir }
             })
             .collect())
     }
@@ -297,6 +319,16 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
         self.write(to, &data)?;
         self.delete(from)?;
         Ok(())
+    }
+
+    fn canonicalize(&self, path: &str) -> io::Result<String> {
+        // VFS paths are already canonical — no host symlinks to resolve.
+        Ok(path.to_string())
+    }
+
+    fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
+        // VFS has no symlinks — delegate to regular stat.
+        self.stat(path)
     }
 
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -380,6 +412,16 @@ impl FsBackend for NexusVfsFsBackend {
         self.write(to, &data)?;
         self.delete(from)?;
         Ok(())
+    }
+
+    fn canonicalize(&self, path: &str) -> io::Result<String> {
+        // VFS paths are already canonical over gRPC — no host symlinks.
+        Ok(path.to_string())
+    }
+
+    fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
+        // VFS has no symlinks — delegate to regular stat.
+        self.stat(path)
     }
 }
 

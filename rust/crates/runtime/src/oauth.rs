@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::config::OAuthConfig;
+use crate::fs_backend::{FsBackend, StdFsBackend};
 
 /// Persisted OAuth access token bundle used by the CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,12 +269,17 @@ pub fn credentials_path() -> io::Result<PathBuf> {
 }
 
 pub fn load_oauth_credentials() -> io::Result<Option<OAuthTokenSet>> {
+    load_oauth_credentials_with(&StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`load_oauth_credentials`].
+pub fn load_oauth_credentials_with(fs: &dyn FsBackend) -> io::Result<Option<OAuthTokenSet>> {
     // Try keyring first, fall back to file.
     if let Some(token_set) = load_oauth_credentials_from_keyring() {
         return Ok(Some(token_set));
     }
     let path = credentials_path()?;
-    let root = read_credentials_root(&path)?;
+    let root = read_credentials_root_with(&path, fs)?;
     let Some(oauth) = root.get("oauth") else {
         return Ok(None);
     };
@@ -286,24 +292,37 @@ pub fn load_oauth_credentials() -> io::Result<Option<OAuthTokenSet>> {
 }
 
 pub fn save_oauth_credentials(token_set: &OAuthTokenSet) -> io::Result<()> {
+    save_oauth_credentials_with(token_set, &StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`save_oauth_credentials`].
+pub fn save_oauth_credentials_with(
+    token_set: &OAuthTokenSet,
+    fs: &dyn FsBackend,
+) -> io::Result<()> {
     // Write to both keyring and file for redundancy.
     save_oauth_credentials_to_keyring(token_set);
     let path = credentials_path()?;
-    let mut root = read_credentials_root(&path)?;
+    let mut root = read_credentials_root_with(&path, fs)?;
     root.insert(
         "oauth".to_string(),
         serde_json::to_value(StoredOAuthCredentials::from(token_set.clone()))
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
     );
-    write_credentials_root(&path, &root)
+    write_credentials_root_with(&path, &root, fs)
 }
 
 pub fn clear_oauth_credentials() -> io::Result<()> {
+    clear_oauth_credentials_with(&StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`clear_oauth_credentials`].
+pub fn clear_oauth_credentials_with(fs: &dyn FsBackend) -> io::Result<()> {
     clear_oauth_credentials_from_keyring();
     let path = credentials_path()?;
-    let mut root = read_credentials_root(&path)?;
+    let mut root = read_credentials_root_with(&path, fs)?;
     root.remove("oauth");
-    write_credentials_root(&path, &root)
+    write_credentials_root_with(&path, &root, fs)
 }
 
 pub fn parse_oauth_callback_request_target(target: &str) -> Result<OAuthCallbackParams, String> {
@@ -393,6 +412,11 @@ struct CcOAuthEntry {
 ///
 /// Returns the imported token set, or a human-readable error string.
 pub fn import_claude_code_credentials() -> Result<OAuthTokenSet, String> {
+    import_claude_code_credentials_with(&StdFsBackend)
+}
+
+/// Backend-parameterised variant of [`import_claude_code_credentials`].
+pub fn import_claude_code_credentials_with(fs: &dyn FsBackend) -> Result<OAuthTokenSet, String> {
     let json = read_cc_keychain_password()?;
     let payload: CcKeychainPayload = serde_json::from_str(&json)
         .map_err(|e| format!("failed to parse Claude Code keychain data: {e}"))?;
@@ -408,7 +432,7 @@ pub fn import_claude_code_credentials() -> Result<OAuthTokenSet, String> {
         scopes: cc.scopes,
     };
 
-    save_oauth_credentials(&token_set)
+    save_oauth_credentials_with(&token_set, fs)
         .map_err(|e| format!("failed to save imported credentials: {e}"))?;
 
     Ok(token_set)
@@ -473,7 +497,14 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
 }
 
 fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {
-    match fs::read_to_string(path) {
+    read_credentials_root_with(path, &StdFsBackend)
+}
+
+fn read_credentials_root_with(
+    path: &PathBuf,
+    fs: &dyn FsBackend,
+) -> io::Result<Map<String, Value>> {
+    match fs.read_to_string(&path.to_string_lossy()) {
         Ok(contents) => {
             if contents.trim().is_empty() {
                 return Ok(Map::new());
@@ -495,14 +526,22 @@ fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {
 }
 
 fn write_credentials_root(path: &PathBuf, root: &Map<String, Value>) -> io::Result<()> {
+    write_credentials_root_with(path, root, &StdFsBackend)
+}
+
+fn write_credentials_root_with(
+    path: &PathBuf,
+    root: &Map<String, Value>,
+    fs: &dyn FsBackend,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        fs.create_dir_all(&parent.to_string_lossy())?;
     }
     let rendered = serde_json::to_string_pretty(&Value::Object(root.clone()))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let temp_path = path.with_extension("json.tmp");
-    fs::write(&temp_path, format!("{rendered}\n"))?;
-    fs::rename(temp_path, path)
+    fs.write(&temp_path.to_string_lossy(), format!("{rendered}\n").as_bytes())?;
+    fs.rename(&temp_path.to_string_lossy(), &path.to_string_lossy())
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {

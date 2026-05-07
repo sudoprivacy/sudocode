@@ -1,9 +1,11 @@
-use std::fs;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
+
+use crate::fs_backend::{FsBackend, StdFsBackend};
 
 /// Maximum raw image size before downsampling (5 MB).
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -17,6 +19,7 @@ const MAX_IMAGE_DIMENSION: u32 = 8000;
 /// `<image:HASH>` tag inside the prompt text.
 pub struct ImageRegistry {
     cache_dir: PathBuf,
+    fs: Arc<dyn FsBackend>,
 }
 
 /// Information about a successfully registered image.
@@ -34,9 +37,16 @@ impl ImageRegistry {
     /// Create a new registry backed by the default cache directory
     /// (`<config_home>/image_cache`, typically `~/.nexus/sudocode/image_cache`).
     pub fn default_cache() -> io::Result<Self> {
+        let fs: Arc<dyn FsBackend> = Arc::new(StdFsBackend);
         let cache_dir = crate::config::default_config_home().join("image_cache");
-        fs::create_dir_all(&cache_dir)?;
-        Ok(Self { cache_dir })
+        fs.create_dir_all(&cache_dir.to_string_lossy())?;
+        Ok(Self { cache_dir, fs })
+    }
+
+    /// Create a registry with a custom cache directory and filesystem backend.
+    pub fn new(cache_dir: PathBuf, fs: Arc<dyn FsBackend>) -> io::Result<Self> {
+        fs.create_dir_all(&cache_dir.to_string_lossy())?;
+        Ok(Self { cache_dir, fs })
     }
 
     /// Register raw RGBA image data (as provided by `arboard`).
@@ -64,7 +74,7 @@ impl ImageRegistry {
     /// Load a previously stored image by its hex hash. Returns `(base64_data, mime_type)`.
     pub fn load(&self, hash: &str) -> io::Result<(String, String)> {
         let entry = self.find_by_hash(hash)?;
-        let bytes = fs::read(&entry.0)?;
+        let bytes = self.fs.read(&entry.0.to_string_lossy())?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok((b64, entry.1))
     }
@@ -83,8 +93,8 @@ impl ImageRegistry {
         let filename = format!("{hash}.{ext}");
         let path = self.cache_dir.join(&filename);
 
-        if !path.exists() {
-            fs::write(&path, bytes)?;
+        if !self.fs.exists(&path.to_string_lossy()).unwrap_or(false) {
+            self.fs.write(&path.to_string_lossy(), bytes)?;
         }
 
         Ok(RegisteredImage {
@@ -97,7 +107,7 @@ impl ImageRegistry {
     fn find_by_hash(&self, hash: &str) -> io::Result<(PathBuf, String)> {
         for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
             let path = self.cache_dir.join(format!("{hash}.{ext}"));
-            if path.exists() {
+            if self.fs.exists(&path.to_string_lossy()).unwrap_or(false) {
                 let mime = ext_to_mime(ext);
                 return Ok((path, mime.to_string()));
             }
@@ -212,8 +222,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(&dir).unwrap();
-        ImageRegistry { cache_dir: dir }
+        let fs: Arc<dyn FsBackend> = Arc::new(StdFsBackend);
+        fs.create_dir_all(&dir.to_string_lossy()).unwrap();
+        ImageRegistry { cache_dir: dir, fs }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+pub mod managed_agent;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -4835,14 +4837,14 @@ struct ProviderEntry {
     client: ProviderClient,
 }
 
-struct ProviderRuntimeClient {
+pub(crate) struct ProviderRuntimeClient {
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
 }
 
 impl ProviderRuntimeClient {
-    #[allow(dead_code, clippy::needless_pass_by_value)]
-    fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
         let fallback_config = load_provider_fallback_config();
         Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
     }

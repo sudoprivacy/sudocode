@@ -39,8 +39,10 @@
 use std::sync::Arc;
 use std::thread;
 
-use kernel::abi::KernelAbi;
-use kernel::core::agents::registry::AgentDescriptor;
+// Re-export kernel types so downstream crates (e.g. `tools`) can
+// reference them without adding a direct `kernel` dependency.
+pub use kernel::abi::KernelAbi;
+pub use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::OperationContext;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};

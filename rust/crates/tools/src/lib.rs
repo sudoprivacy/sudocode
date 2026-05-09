@@ -5534,9 +5534,6 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         return Ok(cwd.join(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".sudocode-agents"));
-    }
     Ok(cwd.join(".sudocode-agents"))
 }
 

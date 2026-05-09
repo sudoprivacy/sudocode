@@ -150,5 +150,10 @@
         "api-key":      { "provider": "openai", "model": "gpt-5.4-mini" }
       }
     }
+  },
+  "web_search": {
+    "provider": "tavily",
+    "apiUrl": "https://hk.sudorouter.ai/search/tavily/search",
+    "apiKey": ""
   }
 }

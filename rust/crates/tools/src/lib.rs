@@ -2275,12 +2275,20 @@ fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_fetch(&input)?)
+    // Run on a dedicated OS thread to avoid deadlocking reqwest::blocking inside
+    // a tokio async runtime (e.g. ACP mode).
+    std::thread::spawn(move || to_pretty_json(execute_web_fetch(&input)?))
+        .join()
+        .unwrap_or_else(|_| Err("web fetch thread panicked".into()))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_search(input: WebSearchInput) -> Result<String, String> {
-    to_pretty_json(execute_web_search(&input)?)
+    // Run on a dedicated OS thread to avoid deadlocking reqwest::blocking inside
+    // a tokio async runtime (e.g. ACP mode).
+    std::thread::spawn(move || to_pretty_json(execute_web_search(&input)?))
+        .join()
+        .unwrap_or_else(|_| Err("web search thread panicked".into()))
 }
 
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
@@ -2955,6 +2963,22 @@ enum WebSearchResultItem {
 struct SearchHit {
     title: String,
     url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TavilySearchResponse {
+    results: Vec<TavilyResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TavilyResult {
+    title: String,
+    url: String,
+    content: String,
+    #[allow(dead_code)]
+    score: f64,
 }
 
 fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
@@ -2993,20 +3017,40 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
 
 fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
     let started = Instant::now();
-    let client = build_http_client()?;
-    let search_url = build_search_url(&input.query)?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| error.to_string())?;
+    let config = load_sudocode_config();
+    let ws = &config.web_search;
 
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
-    let mut hits = extract_search_hits(&html);
+    let provider =
+        std::env::var("SUDOCODE_WEB_SEARCH_PROVIDER").unwrap_or_else(|_| ws.provider.clone());
 
-    if hits.is_empty() && final_url.host_str().is_some() {
-        hits = extract_search_hits_from_generic_links(&html);
-    }
+    let mut hits = match provider.as_str() {
+        "tavily" => {
+            let api_key = std::env::var("SUDOCODE_TAVILY_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| {
+                    if ws.api_key.is_empty() {
+                        config
+                            .auth_modes
+                            .get("proxy")
+                            .and_then(|m| m.get("sudorouter"))
+                            .and_then(|c| c.api_key.clone())
+                            .unwrap_or_default()
+                    } else {
+                        ws.api_key.clone()
+                    }
+                });
+            if api_key.is_empty() || api_key.starts_with('<') {
+                return Err(
+                    "Tavily search requires apiKey in web_search or proxy.sudorouter".into(),
+                );
+            }
+            let api_url =
+                std::env::var("SUDOCODE_TAVILY_API_URL").unwrap_or_else(|_| ws.api_url.clone());
+            execute_tavily_search(input, &api_url, &api_key)?
+        }
+        _ => execute_duckduckgo_search(input)?,
+    };
 
     if let Some(allowed) = input.allowed_domains.as_ref() {
         hits.retain(|hit| host_matches_list(&hit.url, allowed));
@@ -3023,7 +3067,10 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     } else {
         let rendered_hits = hits
             .iter()
-            .map(|hit| format!("- [{}]({})", hit.title, hit.url))
+            .map(|hit| match &hit.snippet {
+                Some(s) => format!("- [{}]({}): {}", hit.title, hit.url, s),
+                None => format!("- [{}]({})", hit.title, hit.url),
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!(
@@ -3080,6 +3127,72 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
         .map_err(|error| error.to_string())?;
     url.query_pairs_mut().append_pair("q", query);
     Ok(url)
+}
+
+fn execute_duckduckgo_search(input: &WebSearchInput) -> Result<Vec<SearchHit>, String> {
+    let client = build_http_client()?;
+    let search_url = build_search_url(&input.query)?;
+    let response = client
+        .get(search_url)
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    let final_url = response.url().clone();
+    let html = response.text().map_err(|error| error.to_string())?;
+    let mut hits = extract_search_hits(&html);
+
+    if hits.is_empty() && final_url.host_str().is_some() {
+        hits = extract_search_hits_from_generic_links(&html);
+    }
+
+    Ok(hits)
+}
+
+fn execute_tavily_search(
+    input: &WebSearchInput,
+    api_url: &str,
+    api_key: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let client = build_http_client()?;
+
+    let mut body = serde_json::json!({
+        "query": input.query,
+        "search_depth": "basic",
+        "max_results": 8,
+    });
+    if let Some(ref allowed) = input.allowed_domains {
+        body["include_domains"] = serde_json::json!(allowed);
+    }
+    if let Some(ref blocked) = input.blocked_domains {
+        body["exclude_domains"] = serde_json::json!(blocked);
+    }
+
+    let response = client
+        .post(api_url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .map_err(|e| format!("Tavily request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().unwrap_or_default();
+        return Err(format!("Tavily API returned {status}: {text}"));
+    }
+
+    let tavily_resp: TavilySearchResponse = response
+        .json()
+        .map_err(|e| format!("Failed to parse Tavily response: {e}"))?;
+
+    Ok(tavily_resp
+        .results
+        .into_iter()
+        .map(|r| SearchHit {
+            title: r.title,
+            url: r.url,
+            snippet: Some(r.content),
+        })
+        .collect())
 }
 
 fn normalize_fetched_content(body: &str, content_type: &str) -> String {
@@ -3220,6 +3333,7 @@ fn extract_search_hits(html: &str) -> Vec<SearchHit> {
             hits.push(SearchHit {
                 title: title.trim().to_string(),
                 url: decoded_url,
+                snippet: None,
             });
         }
         remaining = &after_tag[end_anchor_idx + 4..];
@@ -3262,6 +3376,7 @@ fn extract_search_hits_from_generic_links(html: &str) -> Vec<SearchHit> {
             hits.push(SearchHit {
                 title: title.trim().to_string(),
                 url: decoded_url,
+                snippet: None,
             });
         }
         remaining = &after_tag[end_anchor_idx + 4..];
@@ -7487,6 +7602,7 @@ mod tests {
             "SUDOCODE_WEB_SEARCH_BASE_URL",
             format!("http://{}/search", server.addr()),
         );
+        std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "duckduckgo");
         let result = execute_tool(
             "WebSearch",
             &json!({
@@ -7497,6 +7613,7 @@ mod tests {
         )
         .expect("WebSearch should succeed");
         std::env::remove_var("SUDOCODE_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_PROVIDER");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["query"], "rust web search");
@@ -7535,6 +7652,7 @@ mod tests {
             "SUDOCODE_WEB_SEARCH_BASE_URL",
             format!("http://{}/fallback", server.addr()),
         );
+        std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "duckduckgo");
         let result = execute_tool(
             "WebSearch",
             &json!({
@@ -7543,6 +7661,7 @@ mod tests {
         )
         .expect("WebSearch fallback parsing should succeed");
         std::env::remove_var("SUDOCODE_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_PROVIDER");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         let results = output["results"].as_array().expect("results array");
@@ -7556,10 +7675,101 @@ mod tests {
         assert_eq!(content[1]["url"], "https://docs.rs/tokio");
 
         std::env::set_var("SUDOCODE_WEB_SEARCH_BASE_URL", "://bad-base-url");
+        std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "duckduckgo");
         let error = execute_tool("WebSearch", &json!({ "query": "generic links" }))
             .expect_err("invalid base URL should fail");
         std::env::remove_var("SUDOCODE_WEB_SEARCH_BASE_URL");
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_PROVIDER");
         assert!(error.contains("relative URL without a base") || error.contains("empty host"));
+    }
+
+    #[test]
+    fn web_search_tavily_returns_results_with_snippets() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+            HttpResponse::json(
+                200,
+                "OK",
+                r#"{
+                    "query": "rust async runtime",
+                    "results": [
+                        {
+                            "title": "Tokio - An async runtime for Rust",
+                            "url": "https://tokio.rs",
+                            "content": "Tokio is an asynchronous runtime for Rust.",
+                            "score": 0.95
+                        },
+                        {
+                            "title": "async-std documentation",
+                            "url": "https://async.rs",
+                            "content": "async-std is an async version of the Rust standard library.",
+                            "score": 0.87
+                        }
+                    ]
+                }"#,
+            )
+        }));
+
+        std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "tavily");
+        std::env::set_var("SUDOCODE_TAVILY_API_KEY", "test-key-123");
+        std::env::set_var(
+            "SUDOCODE_TAVILY_API_URL",
+            format!("http://{}/search", server.addr()),
+        );
+        // Ensure DDG base URL is not set so it doesn't interfere
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_BASE_URL");
+
+        let result = execute_tool("WebSearch", &json!({ "query": "rust async runtime" }))
+            .expect("WebSearch with Tavily should succeed");
+
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_PROVIDER");
+        std::env::remove_var("SUDOCODE_TAVILY_API_KEY");
+        std::env::remove_var("SUDOCODE_TAVILY_API_URL");
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(output["query"], "rust async runtime");
+        let results = output["results"].as_array().expect("results array");
+        let search_result = results
+            .iter()
+            .find(|item| item.get("content").is_some())
+            .expect("search result block present");
+        let content = search_result["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["title"], "Tokio - An async runtime for Rust");
+        assert_eq!(content[0]["url"], "https://tokio.rs");
+        assert_eq!(
+            content[0]["snippet"],
+            "Tokio is an asynchronous runtime for Rust."
+        );
+        assert_eq!(content[1]["title"], "async-std documentation");
+        assert_eq!(
+            content[1]["snippet"],
+            "async-std is an async version of the Rust standard library."
+        );
+    }
+
+    #[test]
+    fn web_search_tavily_missing_api_key_returns_error() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        std::env::set_var("SUDOCODE_WEB_SEARCH_PROVIDER", "tavily");
+        std::env::set_var("SUDOCODE_TAVILY_API_KEY", "<PLACEHOLDER>");
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_BASE_URL");
+
+        let error = execute_tool("WebSearch", &json!({ "query": "test" }))
+            .expect_err("should fail with placeholder API key");
+
+        std::env::remove_var("SUDOCODE_WEB_SEARCH_PROVIDER");
+        std::env::remove_var("SUDOCODE_TAVILY_API_KEY");
+
+        assert!(
+            error.contains("apiKey") || error.contains("API key"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -10298,6 +10508,15 @@ printf 'pwsh:%s' "$1"
                 status,
                 reason,
                 content_type: "text/plain; charset=utf-8",
+                body: body.to_string(),
+            }
+        }
+
+        fn json(status: u16, reason: &'static str, body: &str) -> Self {
+            Self {
+                status,
+                reason,
+                content_type: "application/json; charset=utf-8",
                 body: body.to_string(),
             }
         }

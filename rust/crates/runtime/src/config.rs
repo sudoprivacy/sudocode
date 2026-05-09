@@ -101,6 +101,27 @@ pub struct ModelConfigEntry {
     pub providers: BTreeMap<String, ModelProviderMapping>,
 }
 
+/// Web search configuration from `sudocode.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSearchConfig {
+    /// Search provider: `"tavily"` or `"duckduckgo"`.
+    pub provider: String,
+    /// API endpoint URL.
+    pub api_url: String,
+    /// API key (empty string = fallback to `proxy.sudorouter.apiKey`).
+    pub api_key: String,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: "tavily".to_string(),
+            api_url: "https://hk.sudorouter.ai/search/tavily/search".to_string(),
+            api_key: String::new(),
+        }
+    }
+}
+
 /// Top-level config from `sudocode.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SudoCodeConfig {
@@ -108,6 +129,8 @@ pub struct SudoCodeConfig {
     pub auth_modes: BTreeMap<String, BTreeMap<String, ProviderConnectionConfig>>,
     /// `models.<alias>` → model config.
     pub models: BTreeMap<String, ModelConfigEntry>,
+    /// `web_search` → search provider configuration.
+    pub web_search: WebSearchConfig,
 }
 
 impl SudoCodeConfig {
@@ -1060,8 +1083,13 @@ fn parse_sudocode_json_str_with_label(
 
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
     let models = parse_sudocode_models_section(root_obj, sentinel)?;
+    let web_search = parse_web_search_section(root_obj);
 
-    Ok(SudoCodeConfig { auth_modes, models })
+    Ok(SudoCodeConfig {
+        auth_modes,
+        models,
+        web_search,
+    })
 }
 
 fn parse_auth_modes_section(
@@ -1103,6 +1131,37 @@ fn parse_auth_modes_section(
         result.insert(mode_name.clone(), providers);
     }
     Ok(result)
+}
+
+fn parse_web_search_section(root: &BTreeMap<String, JsonValue>) -> WebSearchConfig {
+    let defaults = WebSearchConfig::default();
+    let Some(value) = root.get("web_search") else {
+        return defaults;
+    };
+    let Some(obj) = value.as_object() else {
+        return defaults;
+    };
+
+    let provider = obj
+        .get("provider")
+        .and_then(JsonValue::as_str)
+        .filter(|s| !s.is_empty())
+        .map_or(defaults.provider, str::to_string);
+    let api_url = obj
+        .get("apiUrl")
+        .and_then(JsonValue::as_str)
+        .filter(|s| !s.is_empty())
+        .map_or(defaults.api_url, str::to_string);
+    let api_key = obj
+        .get("apiKey")
+        .and_then(JsonValue::as_str)
+        .map_or(defaults.api_key, str::to_string);
+
+    WebSearchConfig {
+        provider,
+        api_url,
+        api_key,
+    }
 }
 
 fn parse_sudocode_models_section(

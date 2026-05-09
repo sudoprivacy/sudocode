@@ -510,13 +510,19 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     for (i, n) in notifs.iter().enumerate() {
         let update = &n["params"]["update"];
         let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
-        eprintln!("  notif[{i}]: sessionUpdate={session_update} status={}", update["status"]);
+        eprintln!(
+            "  notif[{i}]: sessionUpdate={session_update} status={}",
+            update["status"]
+        );
     }
     for (i, u) in completed_updates.iter().enumerate() {
         eprintln!("  completed[{i}]: {}", serde_json::to_string(u).unwrap());
     }
     for (i, u) in failed_updates.iter().enumerate() {
-        eprintln!("  failed[{i}]: rawOutput={}", u["params"]["update"]["rawOutput"]);
+        eprintln!(
+            "  failed[{i}]: rawOutput={}",
+            u["params"]["update"]["rawOutput"]
+        );
     }
 
     assert!(

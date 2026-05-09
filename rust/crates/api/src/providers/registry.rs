@@ -801,7 +801,7 @@ mod tests {
             },
         );
 
-        SudoCodeConfig { auth_modes, models }
+        SudoCodeConfig { auth_modes, models, web_search: Default::default() }
     }
 
     #[test]

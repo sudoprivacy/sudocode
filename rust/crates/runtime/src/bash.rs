@@ -183,6 +183,7 @@ async fn execute_bash_async(
     detect_and_emit_ship_prepared(&input.command);
 
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
+    command.stdin(Stdio::null());
 
     let output_result = if let Some(timeout_ms) = input.timeout {
         match timeout(Duration::from_millis(timeout_ms), command.output()).await {

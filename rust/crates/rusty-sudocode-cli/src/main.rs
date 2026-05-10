@@ -1639,14 +1639,13 @@ impl AcpCliAgent {
 
         // Record session started event
         let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
-        let mode = if is_child_process { "child" } else { "standalone" };
+        let mode = if is_child_process {
+            "child"
+        } else {
+            "standalone"
+        };
         if let Some(tracer) = runtime.session_tracer() {
-            tracer.record_session_started(
-                VERSION,
-                cwd.to_string_lossy(),
-                mode,
-                &model,
-            );
+            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &model);
         }
 
         Ok(AcpCliSession {
@@ -2299,14 +2298,13 @@ impl LiveCli {
 
         // Record session started event
         let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
-        let mode = if is_child_process { "child" } else { "standalone" };
+        let mode = if is_child_process {
+            "child"
+        } else {
+            "standalone"
+        };
         if let Some(tracer) = cli.runtime.session_tracer() {
-            tracer.record_session_started(
-                VERSION,
-                cwd.to_string_lossy(),
-                mode,
-                &cli.config.model,
-            );
+            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &cli.config.model);
         }
 
         Ok(cli)

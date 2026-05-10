@@ -1,8 +1,12 @@
-use telemetry::{SudoclawLogSink, TelemetryEvent, TelemetrySink};
 use std::path::PathBuf;
+use telemetry::{SudoclawLogSink, TelemetryEvent, TelemetrySink};
 
 fn temp_log_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("sudoclaw-integration-{}-{}.log", name, std::process::id()))
+    std::env::temp_dir().join(format!(
+        "sudoclaw-integration-{}-{}.log",
+        name,
+        std::process::id()
+    ))
 }
 
 #[test]
@@ -110,24 +114,31 @@ fn multiple_events_in_sequence() {
 
     // Verify each line is valid JSON with correct session_id
     for line in &lines {
-        let parsed: serde_json::Value = serde_json::from_str(line).expect("each line should be JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("each line should be JSON");
         assert_eq!(parsed["session_id"], "trace-test");
         assert_eq!(parsed["component"], "scode");
     }
 
     // Verify event order
-    let events: Vec<String> = lines.iter().map(|l| {
-        let parsed: serde_json::Value = serde_json::from_str(l).unwrap();
-        parsed["event"].as_str().unwrap().to_string()
-    }).collect();
+    let events: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            let parsed: serde_json::Value = serde_json::from_str(l).unwrap();
+            parsed["event"].as_str().unwrap().to_string()
+        })
+        .collect();
 
-    assert_eq!(events, vec![
-        "session_started",
-        "request_started",
-        "request_succeeded",
-        "response_usage",
-        "session_ended"
-    ]);
+    assert_eq!(
+        events,
+        vec![
+            "session_started",
+            "request_started",
+            "request_succeeded",
+            "response_usage",
+            "session_ended"
+        ]
+    );
 
     let _ = std::fs::remove_file(path);
 }

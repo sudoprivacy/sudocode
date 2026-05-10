@@ -126,6 +126,11 @@ impl GeminiClient {
         self
     }
 
+    #[must_use]
+    pub fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.http.session_tracer()
+    }
+
     // -----------------------------------------------------------------------
     // Auth helpers
     // -----------------------------------------------------------------------

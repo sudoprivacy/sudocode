@@ -6,8 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;
 
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const DEFAULT_APP_NAME: &str = "claude-code";
@@ -224,6 +228,24 @@ pub enum TelemetryEvent {
     },
     Analytics(AnalyticsEvent),
     SessionTrace(SessionTraceRecord),
+    /// Emitted when a scode session starts.
+    SessionStarted {
+        session_id: String,
+        timestamp_ms: u64,
+        version: String,
+        cwd: String,
+        mode: String,
+        model: String,
+    },
+    /// Emitted when a scode session ends.
+    SessionEnded {
+        session_id: String,
+        timestamp_ms: u64,
+        total_turns: u32,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        duration_ms: u64,
+    },
 }
 
 pub trait TelemetrySink: Send + Sync {
@@ -298,6 +320,335 @@ impl TelemetrySink for JsonlTelemetrySink {
         let _ = writeln!(file, "{line}");
         let _ = file.flush();
     }
+}
+
+/// A telemetry sink that writes logs to sudoclaw.log or scode.log.
+///
+/// This sink detects the runtime mode:
+/// - If `SCODE_LOG_PATH` environment variable is set, uses that path
+/// - If `SUDOWORK_CHILD_PROCESS` is set, writes to ~/.nexus/logs/sudoclaw.log (child process mode)
+/// - Otherwise, writes to ~/.nexus/logs/scode.log (standalone mode)
+///
+/// Supports log rotation when file exceeds 10MB, keeping up to 3 rotated files.
+pub struct SudoclawLogSink {
+    path: PathBuf,
+    file: Mutex<File>,
+}
+
+impl Debug for SudoclawLogSink {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SudoclawLogSink")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SudoclawLogSink {
+    /// Creates a new SudoclawLogSink with automatic path detection.
+    pub fn new() -> Result<Self, std::io::Error> {
+        let path = Self::resolve_log_path()?;
+        Self::with_path(&path)
+    }
+
+    /// Creates a new SudoclawLogSink with a specific path.
+    pub fn with_path(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        Ok(Self {
+            path,
+            file: Mutex::new(file),
+        })
+    }
+
+    /// Resolves the log file path based on environment variables and runtime mode.
+    ///
+    /// Priority:
+    /// 1. `SCODE_LOG_PATH` environment variable (if set)
+    /// 2. `SUDOWORK_CHILD_PROCESS` environment variable (if set) -> ~/.nexus/logs/sudoclaw.log
+    /// 3. Default -> ~/.nexus/logs/scode.log
+    fn resolve_log_path() -> Result<PathBuf, std::io::Error> {
+        // Check for explicit log path override
+        if let Ok(log_path) = std::env::var("SCODE_LOG_PATH") {
+            return Ok(PathBuf::from(log_path));
+        }
+
+        // Determine log directory
+        let log_dir = dirs::home_dir()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not determine home directory",
+                )
+            })?
+            .join(".nexus")
+            .join("logs");
+
+        // Check if running as child process
+        let log_filename = if std::env::var("SUDOWORK_CHILD_PROCESS").is_ok() {
+            "sudoclaw.log"
+        } else {
+            "scode.log"
+        };
+
+        Ok(log_dir.join(log_filename))
+    }
+
+    /// Returns the path to the log file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Rotates the log file, keeping up to SUDOCLAW_LOG_MAX_ROTATED_FILES rotated files.
+    fn rotate_log_file(&self) -> Result<(), std::io::Error> {
+        // Remove the oldest rotated file if it exists
+        let oldest_rotated = format!("{}.{}", self.path.display(), SUDOCLAW_LOG_MAX_ROTATED_FILES);
+        if Path::new(&oldest_rotated).exists() {
+            std::fs::remove_file(&oldest_rotated)?;
+        }
+
+        // Shift existing rotated files
+        for i in (1..=SUDOCLAW_LOG_MAX_ROTATED_FILES - 1).rev() {
+            let current = format!("{}.{}", self.path.display(), i);
+            let next = format!("{}.{}", self.path.display(), i + 1);
+            if Path::new(&current).exists() {
+                std::fs::rename(&current, &next)?;
+            }
+        }
+
+        // Rename current log to .1
+        let first_rotated = format!("{}.1", self.path.display());
+        std::fs::rename(&self.path, &first_rotated)?;
+
+        // Reopen the log file (it will be created on next write)
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let mut file_guard = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *file_guard = file;
+
+        Ok(())
+    }
+}
+
+impl TelemetrySink for SudoclawLogSink {
+    fn record(&self, event: TelemetryEvent) {
+        let log_entry = format_log_entry(&event);
+        let Ok(json) = serde_json::to_string(&log_entry) else {
+            return;
+        };
+
+        // Acquire lock first to prevent race condition during rotation check
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Check for rotation while holding the lock
+        if let Ok(metadata) = std::fs::metadata(&self.path) {
+            if metadata.len() >= SUDOCLAW_LOG_ROTATE_AFTER_BYTES {
+                // Flush before rotation
+                let _ = file.flush();
+                // Release lock before rotation (rotate_log_file needs to acquire it)
+                drop(file);
+
+                // Perform rotation
+                if let Err(e) = self.rotate_log_file() {
+                    eprintln!("[scode telemetry] Failed to rotate log: {}", e);
+                }
+
+                // Re-acquire lock after rotation
+                file = self
+                    .file
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+
+        if let Err(e) = writeln!(file, "{json}") {
+            eprintln!("[scode telemetry] Failed to write log: {}", e);
+        }
+        if let Err(e) = file.flush() {
+            eprintln!("[scode telemetry] Failed to flush log: {}", e);
+        }
+    }
+}
+
+/// Formats a TelemetryEvent into a structured log entry.
+fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
+    let mut entry = Map::new();
+
+    entry.insert("timestamp".to_string(), Value::String(format_timestamp()));
+    entry.insert("level".to_string(), Value::String("info".to_string()));
+
+    let (session_id, event_name, attributes) = extract_event_info(event);
+
+    entry.insert("session_id".to_string(), Value::String(session_id));
+    entry.insert("component".to_string(), Value::String("scode".to_string()));
+    entry.insert("event".to_string(), Value::String(event_name));
+
+    if !attributes.is_empty() {
+        entry.insert("attributes".to_string(), Value::Object(attributes));
+    }
+
+    entry
+}
+
+/// Extracts event information from a TelemetryEvent.
+fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Value>) {
+    match event {
+        TelemetryEvent::HttpRequestStarted {
+            session_id,
+            attempt,
+            method,
+            path,
+            attributes,
+        } => {
+            let mut attrs = attributes.clone();
+            attrs.insert("attempt".to_string(), Value::from(*attempt));
+            attrs.insert("method".to_string(), Value::String(method.clone()));
+            attrs.insert("path".to_string(), Value::String(path.clone()));
+            (session_id.clone(), "request_started".to_string(), attrs)
+        }
+        TelemetryEvent::HttpRequestSucceeded {
+            session_id,
+            attempt,
+            method,
+            path,
+            status,
+            request_id,
+            attributes,
+        } => {
+            let mut attrs = attributes.clone();
+            attrs.insert("attempt".to_string(), Value::from(*attempt));
+            attrs.insert("method".to_string(), Value::String(method.clone()));
+            attrs.insert("path".to_string(), Value::String(path.clone()));
+            attrs.insert("status".to_string(), Value::from(*status));
+            if let Some(rid) = request_id {
+                attrs.insert("request_id".to_string(), Value::String(rid.clone()));
+            }
+            (session_id.clone(), "request_succeeded".to_string(), attrs)
+        }
+        TelemetryEvent::HttpRequestFailed {
+            session_id,
+            attempt,
+            method,
+            path,
+            error,
+            retryable,
+            attributes,
+        } => {
+            let mut attrs = attributes.clone();
+            attrs.insert("attempt".to_string(), Value::from(*attempt));
+            attrs.insert("method".to_string(), Value::String(method.clone()));
+            attrs.insert("path".to_string(), Value::String(path.clone()));
+            attrs.insert("error".to_string(), Value::String(error.clone()));
+            attrs.insert("retryable".to_string(), Value::Bool(*retryable));
+            (session_id.clone(), "request_failed".to_string(), attrs)
+        }
+        TelemetryEvent::HttpRequestDebug {
+            session_id,
+            timestamp_ms,
+            url,
+            method,
+            headers,
+            body,
+        } => {
+            let mut attrs = Map::new();
+            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
+            attrs.insert("url".to_string(), Value::String(url.clone()));
+            attrs.insert("method".to_string(), Value::String(method.clone()));
+            attrs.insert("headers".to_string(), Value::Object(headers.clone()));
+            attrs.insert("body".to_string(), body.clone());
+            (session_id.clone(), "request_debug".to_string(), attrs)
+        }
+        TelemetryEvent::HttpResponseUsage {
+            session_id,
+            timestamp_ms,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        } => {
+            let mut attrs = Map::new();
+            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
+            attrs.insert("input_tokens".to_string(), Value::from(*input_tokens));
+            attrs.insert("output_tokens".to_string(), Value::from(*output_tokens));
+            attrs.insert(
+                "cache_creation_input_tokens".to_string(),
+                Value::from(*cache_creation_input_tokens),
+            );
+            attrs.insert(
+                "cache_read_input_tokens".to_string(),
+                Value::from(*cache_read_input_tokens),
+            );
+            (session_id.clone(), "response_usage".to_string(), attrs)
+        }
+        TelemetryEvent::Analytics(event) => {
+            let mut attrs = event.properties.clone();
+            attrs.insert(
+                "namespace".to_string(),
+                Value::String(event.namespace.clone()),
+            );
+            attrs.insert("action".to_string(), Value::String(event.action.clone()));
+            (String::new(), "event".to_string(), attrs)
+        }
+        TelemetryEvent::SessionTrace(record) => (
+            record.session_id.clone(),
+            record.name.clone(),
+            record.attributes.clone(),
+        ),
+        TelemetryEvent::SessionStarted {
+            session_id,
+            timestamp_ms: _,
+            version,
+            cwd,
+            mode,
+            model,
+        } => {
+            let attrs = Map::from_iter([
+                ("version".to_string(), Value::String(version.clone())),
+                ("cwd".to_string(), Value::String(cwd.clone())),
+                ("mode".to_string(), Value::String(mode.clone())),
+                ("model".to_string(), Value::String(model.clone())),
+            ]);
+            (session_id.clone(), "session_started".to_string(), attrs)
+        }
+        TelemetryEvent::SessionEnded {
+            session_id,
+            timestamp_ms: _,
+            total_turns,
+            total_input_tokens,
+            total_output_tokens,
+            duration_ms,
+        } => {
+            let attrs = Map::from_iter([
+                ("total_turns".to_string(), Value::from(*total_turns)),
+                (
+                    "total_input_tokens".to_string(),
+                    Value::from(*total_input_tokens),
+                ),
+                (
+                    "total_output_tokens".to_string(),
+                    Value::from(*total_output_tokens),
+                ),
+                ("duration_ms".to_string(), Value::from(*duration_ms)),
+            ]);
+            (session_id.clone(), "session_ended".to_string(), attrs)
+        }
+    }
+}
+
+/// Formats the current timestamp in ISO 8601 format.
+fn format_timestamp() -> String {
+    Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
 }
 
 #[derive(Clone)]
@@ -462,6 +813,62 @@ impl SessionTracer {
         self.sink.record(TelemetryEvent::Analytics(event));
         self.record("analytics", attributes);
     }
+
+    pub fn record_session_started(
+        &self,
+        version: impl Into<String>,
+        cwd: impl Into<String>,
+        mode: impl Into<String>,
+        model: impl Into<String>,
+    ) {
+        let version = version.into();
+        let cwd = cwd.into();
+        let mode = mode.into();
+        let model = model.into();
+        self.sink.record(TelemetryEvent::SessionStarted {
+            session_id: self.session_id.clone(),
+            timestamp_ms: current_timestamp_ms(),
+            version: version.clone(),
+            cwd: cwd.clone(),
+            mode: mode.clone(),
+            model: model.clone(),
+        });
+        let mut attributes = Map::new();
+        attributes.insert("version".to_string(), Value::String(version));
+        attributes.insert("cwd".to_string(), Value::String(cwd));
+        attributes.insert("mode".to_string(), Value::String(mode));
+        attributes.insert("model".to_string(), Value::String(model));
+        self.record("session_started", attributes);
+    }
+
+    pub fn record_session_ended(
+        &self,
+        total_turns: u32,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        duration_ms: u64,
+    ) {
+        self.sink.record(TelemetryEvent::SessionEnded {
+            session_id: self.session_id.clone(),
+            timestamp_ms: current_timestamp_ms(),
+            total_turns,
+            total_input_tokens,
+            total_output_tokens,
+            duration_ms,
+        });
+        let mut attributes = Map::new();
+        attributes.insert("total_turns".to_string(), Value::from(total_turns));
+        attributes.insert(
+            "total_input_tokens".to_string(),
+            Value::from(total_input_tokens),
+        );
+        attributes.insert(
+            "total_output_tokens".to_string(),
+            Value::from(total_output_tokens),
+        );
+        attributes.insert("duration_ms".to_string(), Value::from(duration_ms));
+        self.record("session_ended", attributes);
+    }
 }
 
 /// Mask sensitive header values for debug capture logs.
@@ -515,6 +922,7 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn request_profile_emits_headers_and_merges_body() {
@@ -607,5 +1015,75 @@ mod tests {
         assert!(contents.contains("\"action\":\"turn_completed\""));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[serial]
+    fn sudoclaw_log_sink_resolves_child_process_path() {
+        std::env::set_var("SUDOWORK_CHILD_PROCESS", "1");
+        let path = SudoclawLogSink::resolve_log_path().expect("should resolve path");
+        assert!(path.to_string_lossy().contains("sudoclaw.log"));
+        std::env::remove_var("SUDOWORK_CHILD_PROCESS");
+    }
+
+    #[test]
+    #[serial]
+    fn sudoclaw_log_sink_resolves_standalone_path() {
+        std::env::remove_var("SUDOWORK_CHILD_PROCESS");
+        std::env::remove_var("SCODE_LOG_PATH");
+        let path = SudoclawLogSink::resolve_log_path().expect("should resolve path");
+        assert!(path.to_string_lossy().contains("scode.log"));
+    }
+
+    #[test]
+    #[serial]
+    fn sudoclaw_log_sink_respects_env_override() {
+        std::env::set_var("SCODE_LOG_PATH", "/custom/path.log");
+        let path = SudoclawLogSink::resolve_log_path().expect("should resolve path");
+        assert_eq!(path.to_string_lossy(), "/custom/path.log");
+        std::env::remove_var("SCODE_LOG_PATH");
+    }
+
+    #[test]
+    fn sudoclaw_log_sink_writes_json_events() {
+        let temp_dir = std::env::temp_dir();
+        let log_path = temp_dir.join(format!("test-sudoclaw-{}.log", current_timestamp_ms()));
+
+        let sink = SudoclawLogSink::with_path(&log_path).expect("sink should create file");
+        sink.record(TelemetryEvent::SessionStarted {
+            session_id: "test-session".to_string(),
+            timestamp_ms: 1234567890,
+            version: "0.1.0".to_string(),
+            cwd: "/test".to_string(),
+            mode: "standalone".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+        });
+
+        let contents = std::fs::read_to_string(&log_path).expect("log should be readable");
+        assert!(contents.contains("\"event\":\"session_started\""));
+        assert!(contents.contains("\"session_id\":\"test-session\""));
+        assert!(contents.contains("\"model\":\"claude-sonnet-4-6\""));
+
+        let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn format_log_entry_produces_valid_json() {
+        let event = TelemetryEvent::HttpRequestStarted {
+            session_id: "session-123".to_string(),
+            attempt: 1,
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            attributes: Map::new(),
+        };
+
+        let entry = format_log_entry(&event);
+        let json = serde_json::to_string(&entry).expect("should serialize to JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should be valid JSON");
+
+        assert_eq!(parsed["level"], "info");
+        assert_eq!(parsed["session_id"], "session-123");
+        assert_eq!(parsed["event"], "request_started");
+        assert_eq!(parsed["component"], "scode");
     }
 }

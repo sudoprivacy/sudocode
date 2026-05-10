@@ -442,9 +442,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
+            let session_start = Instant::now();
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode, auth_mode)?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
+
+            // Record token usage and session ended event for non-interactive prompt mode
+            let duration_ms = session_start.elapsed().as_millis() as u64;
+            let usage = cli.runtime.usage().cumulative_usage();
+            let total_turns = cli.runtime.usage().turns();
+            if let Some(tracer) = cli.session_tracer() {
+                tracer.record_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
+                tracer.record_session_ended(
+                    total_turns,
+                    usage.input_tokens as u64,
+                    usage.output_tokens as u64,
+                    duration_ms,
+                );
+            }
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Acp {
@@ -1316,6 +1336,9 @@ fn run_repl(
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
 
+    // Track session metrics for session_ended event
+    let session_start = Instant::now();
+
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
         let term_width = crossterm::terminal::size()
@@ -1394,6 +1417,25 @@ fn run_repl(
                 break;
             }
         }
+    }
+
+    // Record token usage and session ended event
+    let duration_ms = session_start.elapsed().as_millis() as u64;
+    let usage = cli.runtime.usage().cumulative_usage();
+    let total_turns = cli.runtime.usage().turns();
+    if let Some(tracer) = cli.session_tracer() {
+        tracer.record_usage(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+        tracer.record_session_ended(
+            total_turns,
+            usage.input_tokens as u64,
+            usage.output_tokens as u64,
+            duration_ms,
+        );
     }
 
     Ok(())
@@ -1483,6 +1525,15 @@ impl BuiltRuntime {
         }
         Ok(())
     }
+
+    /// Returns a reference to the session tracer, if available.
+    fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.runtime
+            .as_ref()
+            .expect("runtime should exist while built runtime is alive")
+            .api_client()
+            .session_tracer()
+    }
 }
 
 impl Deref for BuiltRuntime {
@@ -1515,6 +1566,8 @@ struct AcpCliSession {
     handle: SessionHandle,
     runtime: BuiltRuntime,
     abort_signal: runtime::HookAbortSignal,
+    /// Session start time for duration tracking.
+    started_at: Instant,
 }
 
 struct AcpCliAgent {
@@ -1572,7 +1625,7 @@ impl AcpCliAgent {
                 let auth_mode = resolve_auth_mode(&model, self.auth_mode, &sudocode_config)
                     .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
                 RuntimeConfig {
-                    model,
+                    model: model.clone(),
                     system_prompt,
                     enable_tools: true,
                     emit_output: false,
@@ -1596,11 +1649,23 @@ impl AcpCliAgent {
             .save_to_path(&handle.path)
             .map_err(|error| AcpError::internal(format!("failed to persist session: {error}")))?;
 
+        // Record session started event
+        let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
+        let mode = if is_child_process {
+            "child"
+        } else {
+            "standalone"
+        };
+        if let Some(tracer) = runtime.session_tracer() {
+            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &model);
+        }
+
         Ok(AcpCliSession {
             cwd,
             handle,
             runtime,
             abort_signal,
+            started_at: Instant::now(),
         })
     }
 
@@ -1943,7 +2008,29 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     }
 
     fn close_session(&mut self, session_id: &str) -> bool {
-        self.inner.sessions.remove(session_id).is_some()
+        if let Some(session) = self.inner.sessions.remove(session_id) {
+            // Record token usage and session ended event
+            let duration_ms = session.started_at.elapsed().as_millis() as u64;
+            let usage = session.runtime.usage().cumulative_usage();
+            let total_turns = session.runtime.usage().turns();
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
+                tracer.record_session_ended(
+                    total_turns,
+                    usage.input_tokens as u64,
+                    usage.output_tokens as u64,
+                    duration_ms,
+                );
+            }
+            true
+        } else {
+            false
+        }
     }
 
     fn set_model(&mut self, session_id: &str, model_id: &str) -> Result<String, runtime::AcpError> {
@@ -2060,6 +2147,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 handle,
                 runtime,
                 abort_signal,
+                started_at: Instant::now(),
             },
         );
         Ok((loaded_session_id, cwd, signal))
@@ -2100,6 +2188,15 @@ impl AcpSdkDelegate {
             cache_read_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_write_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         };
+        // Record token usage to telemetry log
+        if let Some(tracer) = session.runtime.session_tracer() {
+            tracer.record_usage(
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
+        }
         session
             .runtime
             .session()
@@ -2225,7 +2322,24 @@ impl LiveCli {
             tokio_runtime: tokio::runtime::Runtime::new()?,
         };
         cli.persist_session()?;
+
+        // Record session started event
+        let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
+        let mode = if is_child_process {
+            "child"
+        } else {
+            "standalone"
+        };
+        if let Some(tracer) = cli.runtime.session_tracer() {
+            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &cli.config.model);
+        }
+
         Ok(cli)
+    }
+
+    /// Returns a reference to the session tracer, if available.
+    fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.runtime.session_tracer()
     }
 
     fn set_reasoning_effort(&mut self, effort: Option<String>) {

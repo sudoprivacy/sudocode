@@ -111,6 +111,11 @@ impl CodexClient {
         self
     }
 
+    #[must_use]
+    pub fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.http.session_tracer()
+    }
+
     /// Build from `~/.codex/auth.json`.
     pub fn from_auth_file() -> Result<Self, ApiError> {
         let (access_token, account_id) = read_auth_file()?;

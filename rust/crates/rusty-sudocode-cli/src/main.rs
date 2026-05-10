@@ -447,11 +447,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 
-            // Record session ended event for non-interactive prompt mode
+            // Record token usage and session ended event for non-interactive prompt mode
             let duration_ms = session_start.elapsed().as_millis() as u64;
             let usage = cli.runtime.usage().cumulative_usage();
             let total_turns = cli.runtime.usage().turns();
             if let Some(tracer) = cli.session_tracer() {
+                tracer.record_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
                 tracer.record_session_ended(
                     total_turns,
                     usage.input_tokens as u64,
@@ -1413,11 +1419,17 @@ fn run_repl(
         }
     }
 
-    // Record session ended event
+    // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
     let usage = cli.runtime.usage().cumulative_usage();
     let total_turns = cli.runtime.usage().turns();
     if let Some(tracer) = cli.session_tracer() {
+        tracer.record_usage(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
         tracer.record_session_ended(
             total_turns,
             usage.input_tokens as u64,
@@ -1997,11 +2009,17 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
     fn close_session(&mut self, session_id: &str) -> bool {
         if let Some(session) = self.inner.sessions.remove(session_id) {
-            // Record session ended event
+            // Record token usage and session ended event
             let duration_ms = session.started_at.elapsed().as_millis() as u64;
             let usage = session.runtime.usage().cumulative_usage();
             let total_turns = session.runtime.usage().turns();
             if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record_usage(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
                 tracer.record_session_ended(
                     total_turns,
                     usage.input_tokens as u64,
@@ -2170,6 +2188,15 @@ impl AcpSdkDelegate {
             cache_read_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_write_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
         };
+        // Record token usage to telemetry log
+        if let Some(tracer) = session.runtime.session_tracer() {
+            tracer.record_usage(
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            );
+        }
         session
             .runtime
             .session()

@@ -165,6 +165,17 @@ impl ProviderClient {
     }
 
     #[must_use]
+    pub fn session_tracer(&self) -> Option<&SessionTracer> {
+        match self {
+            Self::Anthropic(client) => client.session_tracer(),
+            Self::Xai(client) => client.session_tracer(),
+            Self::OpenAi(client) => client.session_tracer(),
+            Self::Codex(client) => client.session_tracer(),
+            Self::Gemini(client) => client.session_tracer(),
+        }
+    }
+
+    #[must_use]
     pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
         match self {
             Self::Anthropic(client) => Self::Anthropic(client.with_prompt_cache(prompt_cache)),

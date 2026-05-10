@@ -143,6 +143,11 @@ impl OpenAiCompatClient {
     }
 
     #[must_use]
+    pub fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.http.session_tracer()
+    }
+
+    #[must_use]
     pub fn with_retry_policy(
         mut self,
         max_retries: u32,

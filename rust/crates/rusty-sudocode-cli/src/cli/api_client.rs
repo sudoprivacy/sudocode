@@ -13,7 +13,7 @@ use runtime::{
     ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ContentBlock, ConversationMessage,
     MessageRole, PromptCacheEvent, RuntimeError, TokenUsage,
 };
-use telemetry::{JsonlTelemetrySink, SessionTracer};
+use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
@@ -64,11 +64,10 @@ impl AnthropicRuntimeClient {
         let mut client = ApiProviderClient::from_resolved(&resolved, Some(effective_mode))?
             .with_prompt_cache(PromptCache::new(session_id));
 
-        if let Ok(capture_path) = std::env::var("SCODE_HTTP_DEBUG") {
-            let sink = Arc::new(JsonlTelemetrySink::new(&capture_path)?);
-            let tracer = SessionTracer::new(session_id, sink);
-            client = client.with_session_tracer(tracer);
-        }
+        // 默认启用日志追踪
+        let sink = Arc::new(SudoclawLogSink::new()?);
+        let tracer = SessionTracer::new(session_id, sink);
+        client = client.with_session_tracer(tracer);
 
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
@@ -110,6 +109,11 @@ impl AnthropicRuntimeClient {
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    /// Returns a reference to the session tracer, if available.
+    pub(crate) fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
+        self.client.session_tracer()
     }
 }
 

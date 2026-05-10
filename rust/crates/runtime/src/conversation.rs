@@ -759,6 +759,11 @@ where
         &self.session
     }
 
+    #[must_use]
+    pub fn api_client(&self) -> &C {
+        &self.api_client
+    }
+
     pub fn api_client_mut(&mut self) -> &mut C {
         &mut self.api_client
     }

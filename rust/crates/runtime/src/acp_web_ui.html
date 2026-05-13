@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scode ACP</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460;
+  --fg: #e0e0e0; --fg2: #a0a0b0; --accent: #00d4aa;
+  --err: #ff6b6b; --border: #2a2a4a; --msg-user: #1e3a5f;
+  --msg-agent: #1a2e1a; --msg-tool: #2e2a1a;
+}
+html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+body { display: flex; flex-direction: column; }
+
+/* Header */
+.header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); flex-shrink: 0; }
+.status-dot.connected { background: var(--accent); }
+.status-label { font-size: 12px; color: var(--fg2); }
+.session-select { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+.btn { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.btn:hover { border-color: var(--accent); }
+.spacer { flex: 1; }
+
+/* Main */
+.main { display: flex; flex: 1; min-height: 0; }
+
+/* Chat panel */
+.chat-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.msg { margin-bottom: 12px; }
+.msg-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.msg-label.user { color: #5dade2; }
+.msg-label.agent { color: var(--accent); }
+.msg-label.tool { color: #f0b27a; }
+.msg-body { padding: 8px 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.5; }
+.msg.user .msg-body { background: var(--msg-user); }
+.msg.agent .msg-body { background: var(--msg-agent); }
+.msg.tool .msg-body { background: var(--msg-tool); cursor: pointer; }
+.msg.tool .msg-body.collapsed { max-height: 60px; overflow: hidden; position: relative; }
+.msg.tool .msg-body.collapsed::after { content: '... (click to expand)'; position: absolute; bottom: 0; right: 8px; background: var(--msg-tool); color: var(--fg2); font-size: 11px; padding: 0 4px; }
+
+/* Inspector panel */
+.inspector-panel { width: 420px; border-left: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+.inspector-header { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); }
+.inspector-header span { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg2); }
+.inspector-messages { flex: 1; overflow-y: auto; padding: 8px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; }
+.inspector-msg { margin-bottom: 6px; padding: 4px 8px; border-radius: 4px; background: var(--bg2); cursor: pointer; }
+.inspector-msg .dir { color: var(--accent); font-weight: 600; margin-right: 4px; }
+.inspector-msg .dir.out { color: #5dade2; }
+.inspector-msg .method { color: #dda0dd; }
+.inspector-msg .ts { color: var(--fg2); font-size: 10px; float: right; }
+.inspector-msg .detail { display: none; margin-top: 6px; white-space: pre-wrap; color: var(--fg2); max-height: 300px; overflow-y: auto; }
+.inspector-msg.expanded .detail { display: block; }
+
+/* Input bar */
+.input-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--border); background: var(--bg2); flex-shrink: 0; }
+.slash-btns { display: flex; gap: 4px; }
+.slash-btn { background: var(--bg); color: var(--fg2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; font-family: monospace; }
+.slash-btn:hover { border-color: var(--accent); color: var(--fg); }
+.input-bar input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 14px; outline: none; }
+.input-bar input:focus { border-color: var(--accent); }
+.input-bar input:disabled { opacity: 0.5; }
+.send-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; font-weight: 600; font-size: 14px; min-width: 80px; }
+.send-btn:disabled { opacity: 0.4; cursor: default; }
+.send-btn.cancel { background: var(--err); cursor: pointer; opacity: 1; }
+.send-btn.cancelling { background: var(--err); opacity: 0.5; cursor: default; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="status-dot" id="statusDot"></div>
+  <span class="status-label" id="statusLabel">Disconnected</span>
+  <select class="session-select" id="sessionSelect"><option value="">No sessions</option></select>
+  <button class="btn" id="newSessionBtn">+ New</button>
+  <div class="spacer"></div>
+  <button class="btn" id="clearInspectorBtn">Clear Log</button>
+</div>
+
+<div class="main">
+  <div class="chat-panel">
+    <div class="chat-messages" id="chatMessages"></div>
+  </div>
+  <div class="inspector-panel">
+    <div class="inspector-header"><span>JSON-RPC Inspector</span></div>
+    <div class="inspector-messages" id="inspectorMessages"></div>
+  </div>
+</div>
+
+<div class="input-bar">
+  <div class="slash-btns">
+    <button class="slash-btn" data-cmd="/help">/help</button>
+    <button class="slash-btn" data-cmd="/status">/status</button>
+    <button class="slash-btn" data-cmd="/cost">/cost</button>
+  </div>
+  <input type="text" id="msgInput" placeholder="Type a message..." disabled>
+  <button class="send-btn" id="sendBtn" disabled>Send</button>
+</div>
+
+<script>
+(function() {
+  const chatEl = document.getElementById('chatMessages');
+  const inspectorEl = document.getElementById('inspectorMessages');
+  const inputEl = document.getElementById('msgInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusLabel = document.getElementById('statusLabel');
+  const sessionSelect = document.getElementById('sessionSelect');
+  const newSessionBtn = document.getElementById('newSessionBtn');
+  const clearBtn = document.getElementById('clearInspectorBtn');
+
+  let ws = null;
+  let rpcId = 0;
+  let currentSession = '';
+  let pendingCallbacks = {};
+  let agentMsgEl = null; // accumulator for streaming agent text
+  let prompting = false; // true while a prompt is in-flight
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.onopen = () => {
+      statusDot.classList.add('connected');
+      statusLabel.textContent = 'Connected';
+      doInitialize();
+    };
+    ws.onclose = () => {
+      statusDot.classList.remove('connected');
+      statusLabel.textContent = 'Disconnected';
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      setTimeout(connect, 2000);
+    };
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      logInspector('in', msg);
+      if (msg.id != null && pendingCallbacks[msg.id]) {
+        pendingCallbacks[msg.id](msg);
+        delete pendingCallbacks[msg.id];
+      } else if (msg.method === 'session/update') {
+        handleSessionUpdate(msg.params);
+      }
+    };
+  }
+
+  function sendRpc(method, params) {
+    const id = ++rpcId;
+    const msg = { jsonrpc: '2.0', id, method, params: params || {} };
+    logInspector('out', msg);
+    ws.send(JSON.stringify(msg));
+    return new Promise(resolve => { pendingCallbacks[id] = resolve; });
+  }
+
+  function sendNotification(method, params) {
+    const msg = { jsonrpc: '2.0', method, params: params || {} };
+    logInspector('out', msg);
+    ws.send(JSON.stringify(msg));
+  }
+
+  async function doInitialize() {
+    await sendRpc('initialize', { protocolVersion: 1 });
+    const listResp = await sendRpc('session/list');
+    const sessions = (listResp.result && listResp.result.sessions) || [];
+    updateSessionDropdown(sessions);
+    if (sessions.length === 0) {
+      await createNewSession();
+    } else {
+      currentSession = sessions[0].sessionId;
+      sessionSelect.value = currentSession;
+    }
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
+  async function createNewSession() {
+    const resp = await sendRpc('session/new', {cwd: '.', mcpServers: []});
+    if (resp.result && resp.result.sessionId) {
+      currentSession = resp.result.sessionId;
+      addChatMsg('system', 'Session created: ' + currentSession.substring(0, 8) + '...');
+      const listResp = await sendRpc('session/list');
+      updateSessionDropdown((listResp.result && listResp.result.sessions) || []);
+      sessionSelect.value = currentSession;
+    } else {
+      addChatMsg('system', 'Failed to create session: ' + JSON.stringify(resp.error));
+    }
+  }
+
+  function updateSessionDropdown(sessions) {
+    sessionSelect.innerHTML = '';
+    for (const s of sessions) {
+      const opt = document.createElement('option');
+      opt.value = s.sessionId;
+      opt.textContent = s.sessionId.substring(0, 8) + '...';
+      sessionSelect.appendChild(opt);
+    }
+  }
+
+  function setPrompting(active) {
+    prompting = active;
+    inputEl.disabled = active;
+    if (active) {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Cancel';
+      sendBtn.classList.remove('cancelling');
+      sendBtn.classList.add('cancel');
+    } else {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('cancel');
+      sendBtn.classList.remove('cancelling');
+    }
+  }
+
+  function cancelPrompt() {
+    if (!prompting || !currentSession) return;
+    sendNotification('session/cancel', { sessionId: currentSession });
+    // Immediately show "Cancelling..." so the user knows it was received.
+    sendBtn.textContent = 'Cancelling\u2026';
+    sendBtn.classList.remove('cancel');
+    sendBtn.classList.add('cancelling');
+    sendBtn.disabled = true;
+  }
+
+  async function sendPrompt(text) {
+    if (!currentSession || !text.trim()) return;
+    addChatMsg('user', text);
+    inputEl.value = '';
+    agentMsgEl = null;
+    setPrompting(true);
+
+    const resp = await sendRpc('session/prompt', {
+      sessionId: currentSession,
+      prompt: [{ type: 'text', text: text }]
+    });
+
+    // Finalize any streaming agent message
+    agentMsgEl = null;
+    setPrompting(false);
+    inputEl.focus();
+  }
+
+  function handleSessionUpdate(params) {
+    if (!params || !params.update) return;
+    const update = params.update;
+    const kind = update.sessionUpdate;
+
+    if (kind === 'agent_message_chunk') {
+      const text = (update.content && update.content.text) || '';
+      if (text) {
+        if (!agentMsgEl) {
+          agentMsgEl = addChatMsg('agent', '');
+        }
+        agentMsgEl.querySelector('.msg-body').textContent += text;
+        scrollChat();
+      }
+    } else if (kind === 'tool_call') {
+      const inputStr = update.rawInput ? JSON.stringify(update.rawInput, null, 2) : '';
+      const label = (update.name || 'tool') + '(' + (inputStr.length > 200 ? inputStr.substring(0, 200) + '...' : inputStr) + ')';
+      const el = addChatMsg('tool', label);
+      el.querySelector('.msg-body').classList.add('collapsed');
+      el.querySelector('.msg-body').dataset.full = (update.name || 'tool') + '\n' + inputStr;
+      el.querySelector('.msg-body').addEventListener('click', function() {
+        if (this.classList.contains('collapsed')) {
+          this.classList.remove('collapsed');
+          this.textContent = this.dataset.full;
+        } else {
+          this.classList.add('collapsed');
+          this.textContent = label;
+        }
+      });
+    } else if (kind === 'tool_call_update') {
+      const fields = update.fields || {};
+      if (fields.rawOutput) {
+        const outputStr = JSON.stringify(fields.rawOutput, null, 2);
+        const summary = 'Tool result: ' + (outputStr.length > 300 ? outputStr.substring(0, 300) + '...' : outputStr);
+        const el = addChatMsg('tool', summary);
+        el.querySelector('.msg-body').classList.add('collapsed');
+        el.querySelector('.msg-body').dataset.full = outputStr;
+        el.querySelector('.msg-body').addEventListener('click', function() {
+          if (this.classList.contains('collapsed')) {
+            this.classList.remove('collapsed');
+            this.textContent = this.dataset.full;
+          } else {
+            this.classList.add('collapsed');
+            this.textContent = summary;
+          }
+        });
+      }
+    }
+  }
+
+  function addChatMsg(role, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.innerHTML = '<div class="msg-label ' + role + '">' + role + '</div><div class="msg-body"></div>';
+    div.querySelector('.msg-body').textContent = text;
+    chatEl.appendChild(div);
+    scrollChat();
+    return div;
+  }
+
+  function scrollChat() {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function logInspector(dir, msg) {
+    const div = document.createElement('div');
+    div.className = 'inspector-msg';
+    const ts = new Date().toLocaleTimeString();
+    const method = msg.method || (msg.result ? 'response' : 'error');
+    const arrow = dir === 'out' ? '&rarr;' : '&larr;';
+    const dirClass = dir === 'out' ? 'out' : '';
+    div.innerHTML = '<span class="dir ' + dirClass + '">' + arrow + '</span>' +
+      '<span class="method">' + escHtml(method) + '</span>' +
+      '<span class="ts">' + ts + '</span>' +
+      '<div class="detail">' + escHtml(JSON.stringify(msg, null, 2)) + '</div>';
+    div.addEventListener('click', () => div.classList.toggle('expanded'));
+    inspectorEl.appendChild(div);
+    inspectorEl.scrollTop = inspectorEl.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Event listeners
+  sendBtn.addEventListener('click', () => {
+    if (prompting) { cancelPrompt(); } else { sendPrompt(inputEl.value); }
+  });
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !inputEl.disabled) {
+      e.preventDefault();
+      sendPrompt(inputEl.value);
+    }
+    if (e.key === 'Escape' && prompting) {
+      cancelPrompt();
+    }
+  });
+  newSessionBtn.addEventListener('click', createNewSession);
+  sessionSelect.addEventListener('change', () => { currentSession = sessionSelect.value; });
+  clearBtn.addEventListener('click', () => { inspectorEl.innerHTML = ''; });
+  document.querySelectorAll('.slash-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!inputEl.disabled) sendPrompt(btn.dataset.cmd);
+    });
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

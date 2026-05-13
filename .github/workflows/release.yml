@@ -1,0 +1,130 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            bin: scode
+            package_dir: scode-linux-x64
+            archive_name: scode-linux-x64.tar.gz
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            bin: scode
+            package_dir: scode-linux-arm64
+            archive_name: scode-linux-arm64.tar.gz
+          - name: macos-arm64
+            os: macos-14
+            bin: scode
+            package_dir: scode-macos-arm64
+            archive_name: scode-macos-arm64.tar.gz
+          - name: macos-x64
+            os: macos-15-intel
+            bin: scode
+            package_dir: scode-macos-x64
+            archive_name: scode-macos-x64.tar.gz
+          - name: windows-x64
+            os: windows-2022
+            bin: scode.exe
+            package_dir: scode-windows-x64
+            archive_name: scode-windows-x64.zip
+          - name: windows-arm64
+            os: windows-11-arm
+            bin: scode.exe
+            package_dir: scode-windows-arm64
+            archive_name: scode-windows-arm64.zip
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Build release binary
+        run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.package_dir }}"
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          cp "../README.md" "dist/${{ matrix.package_dir }}/README.md"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          fi
+
+      - name: Archive release payload (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"
+
+      - name: Archive release payload (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "dist/${{ matrix.package_dir }}" `
+            -DestinationPath "dist/${{ matrix.archive_name }}" `
+            -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}
+          path: rust/dist/${{ matrix.archive_name }}
+
+  publish-release:
+    name: publish-release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum scode-* > SHA256SUMS.txt
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/scode-*
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true

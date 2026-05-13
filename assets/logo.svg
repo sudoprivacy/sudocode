@@ -1,0 +1,33 @@
+<svg width="960" height="360" viewBox="0 0 960 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Sudo Code logo</title>
+  <desc id="desc">A minimal terminal prompt and engine mark for the Sudo Code agent runtime.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="960" y2="360" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#121826"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="186" y1="79" x2="312" y2="262" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#facc15"/>
+      <stop offset="0.42" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="softGlow" x="110" y="30" width="260" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <rect width="960" height="360" rx="28" fill="url(#panel)"/>
+  <path d="M60 76H900M60 132H900M60 188H900M60 244H900M60 300H900" stroke="#1f2937" stroke-width="1"/>
+  <path d="M104 44V316M160 44V316M216 44V316M272 44V316M328 44V316M384 44V316M440 44V316M496 44V316M552 44V316M608 44V316M664 44V316M720 44V316M776 44V316M832 44V316" stroke="#1f2937" stroke-width="1"/>
+
+  <g filter="url(#softGlow)">
+    <path d="M288 83C234 88 187 124 167 172C147 220 160 267 205 284C180 259 178 220 197 183C216 146 252 119 299 112L288 83Z" fill="url(#mark)"/>
+    <path d="M211 122L155 178L211 234" stroke="#e5e7eb" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M255 240H322" stroke="#38bdf8" stroke-width="18" stroke-linecap="round"/>
+  </g>
+
+  <text x="398" y="159" fill="#f8fafc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="62" font-weight="800" letter-spacing="0">Sudo Code</text>
+  <text x="402" y="211" fill="#94a3b8" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace" font-size="24" font-weight="500" letter-spacing="0">model-agnostic agent engine</text>
+  <text x="402" y="255" fill="#38bdf8" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace" font-size="20" font-weight="600" letter-spacing="0">&gt; scode acp serve --port 8080</text>
+</svg>

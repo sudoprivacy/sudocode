@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.6"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
+agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
+agent-client-protocol-tokio = "0.11"
+axum = { version = "0.8", features = ["ws"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"

@@ -1,0 +1,86 @@
+// VFS gRPC transport for REMOTE profile and federation peers.
+//
+// Phase 1 (PR #2667): Generic Call RPC — method name + JSON payload.
+// Phase 2: Typed RPCs for content ops (native bytes, no base64 overhead)
+//          + Ping health check.
+//
+// Generic Call stays for 25+ service proxy methods and metadata ops.
+// Typed RPCs only for content-heavy operations (Read/Write/Delete).
+
+syntax = "proto3";
+
+package nexus.grpc.vfs;
+
+service NexusVFSService {
+  // Generic dispatch RPC — method name + JSON-encoded params.
+  rpc Call(CallRequest) returns (CallResponse);
+
+  // Typed RPCs for content operations — native bytes, no JSON/base64.
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Health check with server metadata.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message CallRequest {
+  string method = 1;
+  bytes payload = 2;
+  string auth_token = 3;
+}
+
+message CallResponse {
+  bytes payload = 1;
+  bool is_error = 2;
+}
+
+message ReadRequest {
+  string path = 1;
+  string auth_token = 2;
+  string content_id = 3;
+}
+
+message ReadResponse {
+  bytes content = 1;
+  string etag = 2;
+  int64 size = 3;
+  bool is_error = 4;
+  bytes error_payload = 5;
+}
+
+message WriteRequest {
+  string path = 1;
+  bytes content = 2;
+  string auth_token = 3;
+  string etag = 4;
+}
+
+message WriteResponse {
+  string etag = 1;
+  int64 size = 2;
+  bool is_error = 3;
+  bytes error_payload = 4;
+}
+
+message DeleteRequest {
+  string path = 1;
+  string auth_token = 2;
+  bool recursive = 3;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+message PingRequest {
+  string auth_token = 1;
+}
+
+message PingResponse {
+  string version = 1;
+  string zone_id = 2;
+  int64 uptime_seconds = 3;
+}

@@ -1,0 +1,20 @@
+__pycache__/
+archive/
+.omx/
+.sudocode-agents/
+# Claude Code local artifacts
+.claude/settings.local.json
+.claude/sessions/
+# Sudo Code local artifacts
+.nexus/sudocode/settings.local.json
+.nexus/sudocode/sessions/
+.scode/sessions/
+.sudocodehip/
+status-help.txt
+# Legacy tool artifacts
+.claw.json
+.claw/
+.clawd-todos.json
+.omc/
+.sandbox-home/
+.hydra

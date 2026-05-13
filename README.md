@@ -280,12 +280,6 @@ cargo test --workspace
 
 Star the repo if `scode` is useful to you — it helps others find the project.
 
-## Star History
-
-<p align="center">
-  <img src="assets/star-history.png" alt="Star history" width="600" />
-</p>
-
 ## Lineage & credits
 
 Sudo Code was originally forked from [`ultraworkers/claw-code`](https://github.com/ultraworkers/claw-code) (last synced: 2026-04-23) and has since evolved into a standalone, ACP-native, model-agnostic engine. Thanks to the upstream authors for the starting point.

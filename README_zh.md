@@ -280,12 +280,6 @@ cargo test --workspace
 
 如果 `scode` 对你有帮助，欢迎点 Star —— 这能帮助更多开发者发现这个项目。
 
-## Star 趋势
-
-<p align="center">
-  <img src="assets/star-history.png" alt="Star history" width="600" />
-</p>
-
 ## 项目溯源
 
 Sudo Code 最初 fork 自 [`ultraworkers/claw-code`](https://github.com/ultraworkers/claw-code)（最后同步：2026-04-23），此后已演进为独立的、ACP 原生、模型无关的代理引擎。感谢上游作者提供的起点。

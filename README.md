@@ -3,7 +3,7 @@
 # Sudo Code
 
 <p align="center">
-  <img src="assets/claw-hero.jpeg" alt="Sudo Code" width="300" />
+  <img src="assets/logo.svg" alt="Sudo Code" width="600" />
 </p>
 
 <p align="center">
@@ -12,42 +12,60 @@
   <img alt="Version" src="https://img.shields.io/badge/version-0.1.6-brightgreen">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
   <img alt="Protocol" src="https://img.shields.io/badge/protocol-ACP-purple">
+  <img alt="Model-agnostic" src="https://img.shields.io/badge/models-Anthropic%20%C2%B7%20OpenAI%20%C2%B7%20xAI%20%C2%B7%20Gemini-blueviolet">
   <a href="#contributing"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-success.svg"></a>
 </p>
 
 <p align="center">
-  <b>A fast, headless, provider-agnostic AI coding agent — written in Rust.</b><br/>
-  Multi-provider auth · Agent Communication Protocol (ACP) · Native tool execution · ~20K lines of Rust.
+  <b>An engine for the AI agent era.</b><br/>
+  Rust-native · model-agnostic · headless-first · safe by design.
 </p>
 
 ---
 
-## Why Sudo Code
+## What is Sudo Code?
 
-`scode` is the open-source coding-agent engine that powers the **Sudowork** platform. It is designed for developers who want a transparent, scriptable, provider-agnostic agent that runs anywhere — from a terminal REPL to a headless server speaking ACP.
+**Sudo Code** (`scode`) is a high-performance, Rust-native implementation of a coding agent — in the same family as Claude Code or Aider — but built for two audiences from day one: **humans at a terminal** and **machines on a wire**.
 
-- ⚡ **Fast boot, lean runtime.** Built in Rust for low-latency startup and predictable resource use.
-- 🛰 **Headless-first.** First-class ACP server mode for IDE integrations and orchestration backends.
-- 🔌 **Multi-provider.** Anthropic, OpenAI, xAI, DashScope, OAuth subscriptions, and custom proxies — switch with a single flag.
-- 🧰 **Batteries included.** Rich slash-command surface covering sessions, plugins, permissions, git, MCP, and review workflows.
-- 🧪 **Deterministic mock harness.** A bundled Anthropic-compatible mock service lets you exercise the full agent loop with **zero API keys**.
-- 🩺 **Built-in diagnostics.** `scode doctor` reports auth, providers, MCP, and config health in one command.
+- **Model-agnostic.** First-class support for Anthropic, OpenAI, xAI, and Gemini, plus OAuth subscriptions and arbitrary proxy backends. Swap providers with a single `--auth` / `--model` flag.
+- **Performance-first runtime.** Single native binary, no Node/Python startup tax. Built on Rust + `tokio` for a lean memory footprint, deterministic shutdown, and predictable resource use under load.
+- **Headless infrastructure.** `scode acp serve` exposes the **Agent Communication Protocol** over both **stdio** (for editors and CLI orchestrators) and **WebSocket** (for browsers, IDE plugins, and service backends) — turning `scode` into "agent as a service."
+- **Embedded Web UI.** The WebSocket mode ships with a built-in interactive web client. Run `scode acp serve --port 8080`, open `http://localhost:8080/`, and you have a working agent UI without installing anything else.
+- **Safe by design.** A hardened permission system with explicit modes (`read-only`, `workspace-write`, `danger-full-access`) plus a Linux sandbox using user namespaces for filesystem and network isolation.
+
+This isn't just a fork. It's flexible infrastructure for building, running, and embedding coding agents — anywhere from a developer's laptop to a production service mesh.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Dev([Developer]) -->|prompts / slash cmds| CLI[scode CLI / REPL]
-    CLI --> RT[Runtime<br/>session · permissions · config]
-    RT --> API[API Client<br/>SSE streaming]
+    subgraph Clients
+      Term([Terminal user])
+      Editor([Editor / IDE])
+      Browser([Browser / Web UI])
+      Service([Backend service])
+    end
+
+    Term -->|REPL · one-shot| CLI
+    Editor -->|ACP stdio| STDIO[scode acp]
+    Browser -->|WebSocket + HTML| WS[scode acp serve --port N]
+    Service -->|WebSocket / JSON-RPC| WS
+
+    CLI[scode CLI / REPL] --> RT
+    STDIO --> RT
+    WS --> RT
+
+    RT[Runtime<br/>session · permissions · sandbox · config] --> API[API Client<br/>SSE streaming]
     RT --> TOOLS[Tools]
     RT --> MCP[MCP servers]
     RT --> PLUG[Plugins / Skills]
+
     TOOLS --> T1[Bash · Read · Write · Edit]
     TOOLS --> T2[Grep · Glob · WebSearch · WebFetch]
+
     API --> P1[Anthropic]
-    API --> P2[OpenAI]
-    API --> P3[xAI · DashScope]
+    API --> P2[OpenAI / Codex]
+    API --> P3[xAI · Gemini]
     API --> P4[Proxy / Mock]
 ```
 
@@ -85,29 +103,64 @@ scode "explain this codebase"
 scode doctor
 ```
 
-## Try without an API key
+## Run as infrastructure — `scode acp serve`
 
-`scode` ships with a deterministic, Anthropic-compatible mock service. You can drive the full agent loop end-to-end without signing up for anything:
+`scode` speaks the **Agent Communication Protocol (ACP)** natively, in two transports:
 
 ```bash
-# Terminal 1 — start the local mock service on a fixed port
+# 1) stdio — for editors, IDE plugins, and CLI orchestrators
+scode acp
+
+# 2) WebSocket + embedded Web UI — for browsers and service backends
+scode acp serve --port 8080
+#   → JSON-RPC over WebSocket at  ws://localhost:8080/ws
+#   → Interactive Web UI at       http://localhost:8080/
+```
+
+Both transports share the **same handler chain**, so WebSocket clients get full feature parity with stdio — including streaming, tool use, elicitation, and permission prompting. This makes `scode` a drop-in agent core for:
+
+- **Editor plugins** (Zed, VS Code, JetBrains) — speak ACP over stdio.
+- **Web apps and dashboards** — connect to the WebSocket endpoint, or just point a browser at `/` to use the embedded UI.
+- **Automation pipelines and microservices** — run `scode acp serve` as a long-lived process behind a load balancer.
+- **Sub-agents and orchestrators** — fan out work to multiple `scode` instances over the wire.
+
+> [!TIP]
+> The embedded Web UI is a zero-install way to demo, debug, or share an agent session. Bind to `127.0.0.1` for local-only use, or expose the port behind your own auth proxy for team access.
+
+## Developer Mode: Zero-config Protocol Debugging
+
+`scode` ships with a deterministic, Anthropic-compatible mock service designed for engineering work against the agent harness — not for live reasoning. Use it to exercise the **ACP integration**, **tool-dispatch logic**, and **UI / streaming behavior** end-to-end **without consuming API credits**.
+
+Typical use cases:
+
+- Validating editor or IDE plugins that speak ACP over stdio.
+- Smoke-testing WebSocket clients (including the embedded Web UI) against the same handler chain that production traffic hits.
+- Writing CI integration tests for tool dispatch, permission prompts, and SSE streaming without flakiness or quota.
+- Debugging a new provider adapter or proxy without burning real tokens.
+
+**Workflow — point `scode` at the local mock:**
+
+```bash
+# Terminal 1 — start the deterministic mock on a fixed port
 cd rust
 cargo run -p mock-anthropic-service -- --bind 127.0.0.1:8787
 
-# Terminal 2 — point scode at it via the proxy auth mode
+# Terminal 2 — route scode through the proxy auth mode to the mock
 export PROXY_BASE_URL="http://127.0.0.1:8787"
 export PROXY_AUTH_TOKEN="mock"
 cargo run --bin scode -- --auth proxy "say hi"
 ```
 
-This is the same service that powers the workspace's parity harness, so the responses you see are deterministic and reproducible. For the scripted version, run:
+**Workflow — run the scripted parity harness:**
+
+This is the same harness the workspace uses for CI parity checks. Responses are deterministic and reproducible across runs, machines, and CI shards.
 
 ```bash
 cd rust && ./scripts/run_mock_parity_harness.sh
 ```
 
 > [!NOTE]
-> The mock service returns canned, scripted responses suitable for evaluating the runtime, tool dispatch, and streaming UI — not for live reasoning.
+> The mock service returns scripted, fixture-backed responses. It is the right tool for protocol, transport, and UI verification — and the wrong tool for evaluating model quality. Point at a real provider for the latter.
 
 ## Authentication
 
@@ -121,13 +174,13 @@ scode --auth proxy            # uses PROXY_AUTH_TOKEN + PROXY_BASE_URL
 
 | Mode | Environment variables | Endpoint |
 |------|----------------------|----------|
-| `api-key` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `DASHSCOPE_API_KEY` | Provider default |
+| `api-key` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `DASHSCOPE_API_KEY` | Provider default |
 | `subscription` | `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` to get one) | `api.anthropic.com` |
 | `proxy` | `PROXY_AUTH_TOKEN` + `PROXY_BASE_URL` | `PROXY_BASE_URL` |
 
 ## Model Aliases
 
-Short names resolve to the current pinned model versions:
+Short names resolve to the current pinned versions:
 
 | Alias | Resolves to | Provider |
 |-------|-------------|----------|
@@ -143,7 +196,7 @@ scode --model sonnet --auth subscription
 
 ## Slash Commands
 
-The REPL surface is much broader than a minimal shell. Tab-complete from `/` to discover. A representative subset:
+The REPL surface is broad. Tab-complete from `/` to discover. A representative subset:
 
 | Category | Commands |
 |----------|----------|
@@ -158,6 +211,37 @@ For the canonical, live command list:
 ```bash
 cargo run --bin scode -- --help
 ```
+
+## Safety: Permissions & Sandbox
+
+Coding agents touch your filesystem and your shell — `scode` treats that seriously.
+
+**Permission modes** gate every tool call:
+
+| Mode | Behavior |
+|------|----------|
+| `read-only` | All filesystem and shell mutations blocked. Read tools and web tools still work. |
+| `workspace-write` | Writes restricted to the current workspace; ambient shell mutations blocked. |
+| `prompt` | Each privileged tool call requires interactive approval. |
+| `allow` | Pre-approved by the runner — used for non-interactive automation. |
+| `danger-full-access` | No restrictions. The current default — explicit by design. |
+
+Set via `--permission-mode <MODE>` or `permissionMode` in `.scode.json`.
+
+**Linux sandbox** (when running on Linux):
+
+- User-namespace isolation via `unshare` — no root required.
+- Filesystem modes: `off`, `workspace-only`, `allow-list` (with an explicit mount list).
+- Optional network isolation.
+- Container-aware: detects Docker / Podman and reports back through `scode doctor` and `/sandbox`.
+
+```bash
+scode --permission-mode workspace-write
+scode sandbox --status               # inspect current sandbox state
+```
+
+> [!WARNING]
+> The default permission mode is `danger-full-access` because `scode` is designed to *do work*, not just answer questions. Tighten it before running against untrusted prompts or in shared environments.
 
 ## Diagnostics: `scode doctor`
 
@@ -175,9 +259,6 @@ Run it before filing an issue — most setup problems surface here first.
 ```bash
 scode doctor
 ```
-
-> [!WARNING]
-> The default permission mode is `danger-full-access`. Set `--permission-mode` (or `permissionMode` in `.scode.json`) to tighten this before running against untrusted prompts or in shared environments.
 
 ## Documentation
 
@@ -199,10 +280,15 @@ cargo test --workspace
 
 Star the repo if `scode` is useful to you — it helps others find the project.
 
+## Star History
+
+<p align="center">
+  <img src="assets/star-history.png" alt="Star history" width="600" />
+</p>
 
 ## Lineage & credits
 
-Sudo Code was originally forked from [`ultraworkers/claw-code`](https://github.com/ultraworkers/claw-code) (last synced: 2026-04-23) and has since evolved into a standalone, ACP-native engine. Thanks to the upstream authors for the starting point.
+Sudo Code was originally forked from [`ultraworkers/claw-code`](https://github.com/ultraworkers/claw-code) (last synced: 2026-04-23) and has since evolved into a standalone, ACP-native, model-agnostic engine. Thanks to the upstream authors for the starting point.
 
 ## License
 

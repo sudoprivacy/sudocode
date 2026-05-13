@@ -199,11 +199,6 @@ cargo test --workspace
 
 Star the repo if `scode` is useful to you — it helps others find the project.
 
-## Star History
-
-<p align="center">
-  <img src="assets/star-history.png" alt="Star history" width="600" />
-</p>
 
 ## Lineage & credits
 

@@ -36,6 +36,41 @@ pub fn estimate_session_tokens(session: &Session) -> usize {
     session.messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// Estimate tokens for a single message block.
+/// This is useful for preflight checks before sending a request.
+#[must_use]
+pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
+    estimate_single_block_tokens(block)
+}
+
+fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
+    match block {
+        ContentBlock::Text { text } => text.len() / 4 + 1,
+        ContentBlock::Image { data, .. } => {
+            let base64_len = data.len();
+            if base64_len < 50_000 {
+                85
+            } else if base64_len < 200_000 {
+                256
+            } else if base64_len < 500_000 {
+                512
+            } else if base64_len < 1_000_000 {
+                1000
+            } else {
+                base64_len / 1000
+            }
+        }
+        ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
+        ContentBlock::ToolResult {
+            tool_name, output, ..
+        } => (tool_name.len() + output.len()) / 4 + 1,
+        ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
+    }
+}
+
 /// Returns `true` when the session exceeds the configured compaction budget.
 #[must_use]
 pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
@@ -455,18 +490,7 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
     message
         .blocks
         .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.len() / 4 + 1,
-            ContentBlock::Image { data, .. } => data.len() / 4 + 1,
-            ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
-            ContentBlock::ToolResult {
-                tool_name, output, ..
-            } => (tool_name.len() + output.len()) / 4 + 1,
-            ContentBlock::Thinking {
-                thinking,
-                signature,
-            } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
-        })
+        .map(estimate_single_block_tokens)
         .sum()
 }
 

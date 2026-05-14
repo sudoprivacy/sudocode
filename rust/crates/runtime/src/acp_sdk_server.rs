@@ -50,6 +50,46 @@ impl AcpError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
+
+    /// Generate a user-friendly error message with actionable suggestions.
+    #[must_use]
+    pub fn user_friendly_message(&self) -> String {
+        let raw_message = match self {
+            Self::InvalidParams(msg) | Self::Internal(msg) => msg,
+        };
+
+        // Check for specific error types and provide friendly messages
+        if raw_message.contains("context_window_blocked") || raw_message.contains("Context window blocked") {
+            return "图片或文本内容过大，超出了模型的处理限制。\n\n建议解决方案：\n1. 使用较小的图片（建议压缩或缩小图片尺寸）\n2. 简化输入内容\n3. 使用支持更大上下文的模型\n4. 清除对话历史后重新开始".to_string();
+        }
+
+        if raw_message.contains("authentication") || raw_message.contains("认证失败") || raw_message.contains("AUTH") {
+            return "认证失败，请检查您的账户配置。\n\n建议解决方案：\n1. 检查 API 密钥或订阅是否有效\n2. 重新登录账户\n3. 检查网络连接".to_string();
+        }
+
+        if raw_message.contains("timeout") || raw_message.contains("Timeout") || raw_message.contains("timed out") {
+            return "请求超时，模型响应时间过长。\n\n建议解决方案：\n1. 简化输入内容\n2. 检查网络连接\n3. 稍后重试".to_string();
+        }
+
+        if raw_message.contains("rate limit") || raw_message.contains("RateLimit") || raw_message.contains("429") {
+            return "请求频率过高，请稍后重试。\n\n建议解决方案：\n1. 等待几分钟后重试\n2. 减少请求频率".to_string();
+        }
+
+        if raw_message.contains("network") || raw_message.contains("connection") || raw_message.contains("Connection") {
+            return "网络连接出现问题。\n\n建议解决方案：\n1. 检查网络连接\n2. 检查代理设置\n3. 稍后重试".to_string();
+        }
+
+        if raw_message.contains("permission") || raw_message.contains("Permission") {
+            return "权限不足，无法执行此操作。\n\n建议解决方案：\n1. 检查文件或目录权限\n2. 检查账户权限配置".to_string();
+        }
+
+        // Default: return a simplified message
+        if raw_message.len() > 200 {
+            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message.chars().take(100).collect::<String>())
+        } else {
+            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message)
+        }
+    }
 }
 
 impl std::fmt::Display for AcpError {
@@ -530,6 +570,8 @@ pub(crate) async fn run_acp_on_transport(
 
                         let sid_for_blocking = sid.clone();
                         let sid_for_perm = sid.clone();
+                        let images_for_blocking = images.clone();
+                        let prompt_text_for_blocking = prompt_text.clone();
                         let blocking_handle = tokio::task::spawn_blocking(move || {
                             let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
                             let mut bridge = AcpPermissionBridge { tx: bridge_tx };
@@ -538,27 +580,28 @@ pub(crate) async fn run_acp_on_transport(
 
                             // Push image content blocks into the session before
                             // running the prompt so the API client includes them.
-                            if !images.is_empty() {
-                                let _ = delegate.push_images(&sid_for_blocking, &images);
+                            if !images_for_blocking.is_empty() {
+                                let _ = delegate.push_images(&sid_for_blocking, &images_for_blocking);
                             }
 
-                            let stop = if prompt_text.starts_with('/') {
+                            let stop = if prompt_text_for_blocking.starts_with('/') {
                                 delegate
                                     .handle_slash_command(
                                         &sid_for_blocking,
-                                        &prompt_text,
+                                        &prompt_text_for_blocking,
                                         &mut observer,
                                     )
                                     .map(|()| (StopReason::EndTurn, None))
                             } else {
                                 delegate.run_prompt_with_prompter(
                                     &sid_for_blocking,
-                                    prompt_text,
+                                    prompt_text_for_blocking,
                                     &mut observer,
                                     &mut bridge,
                                 )
                             };
-                            stop.unwrap_or((StopReason::EndTurn, None))
+                            // Return the Result instead of unwrapping, so we can handle errors
+                            stop
                         });
 
                         // Concurrently serve permission requests and stream
@@ -566,7 +609,7 @@ pub(crate) async fn run_acp_on_transport(
                         // for it to finish.
                         let mut blocking_handle = blocking_handle;
                         let mut notif_rx_open = true;
-                        let result = loop {
+                        let result: Result<(StopReason, Option<PromptUsage>), AcpError> = loop {
                             tokio::select! {
                                 biased;
                                 notif = notif_rx.recv(), if notif_rx_open => {
@@ -600,11 +643,11 @@ pub(crate) async fn run_acp_on_transport(
                                         // Await the result directly to avoid a busy loop
                                         // (biased select would keep picking this branch).
                                         break blocking_handle.await
-                                            .unwrap_or((StopReason::EndTurn, None));
+                                            .unwrap_or(Err(AcpError::internal("blocking task failed")));
                                     }
                                 }
                                 done = &mut blocking_handle => {
-                                    break done.unwrap_or((StopReason::EndTurn, None));
+                                    break done.unwrap_or(Err(AcpError::internal("blocking task join failed")));
                                 }
                             }
                         };
@@ -615,17 +658,34 @@ pub(crate) async fn run_acp_on_transport(
                             let _ = cx_inner.send_notification(n);
                         }
 
-                        let (stop_reason, prompt_usage) = result;
+                        // Handle errors by sending an error message notification to the client
+                        match result {
+                            Ok((stop_reason, prompt_usage)) => {
+                                let mut response = PromptResponse::new(stop_reason);
+                                if let Some(u) = prompt_usage {
+                                    response = response.usage(
+                                        Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
+                                            .cached_read_tokens(u.cache_read_tokens)
+                                            .cached_write_tokens(u.cache_write_tokens),
+                                    );
+                                }
+                                responder.respond(response)?;
+                            }
+                            Err(error) => {
+                                // Send user-friendly error message as a notification to the client
+                                let user_message = error.user_friendly_message();
+                                let error_notification = SessionNotification::new(
+                                    sid.clone(),
+                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                        ContentBlock::Text(TextContent::new(&user_message)),
+                                    )),
+                                );
+                                let _ = cx_inner.send_notification(error_notification);
 
-                        let mut response = PromptResponse::new(stop_reason);
-                        if let Some(u) = prompt_usage {
-                            response = response.usage(
-                                Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
-                                    .cached_read_tokens(u.cache_read_tokens)
-                                    .cached_write_tokens(u.cache_write_tokens),
-                            );
+                                // Respond with an error
+                                responder.respond_with_error(acp_error_to_sdk(&error))?;
+                            }
                         }
-                        responder.respond(response)?;
                         Ok(())
                     })?;
                     Ok(())

@@ -31,11 +31,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
-    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
-    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    base_url_for_mode, model_family_identity_for, model_token_limit, resolve_startup_auth_source,
+    AnthropicClient, AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -98,8 +98,9 @@ use init::initialize_repo;
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
-    check_base_commit, format_stale_base_warning, format_usd, load_oauth_credentials,
-    load_system_prompt, pricing_for_model, resolve_expected_base, resolve_sandbox_status, AcpError,
+    check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
+    format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
+    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, AcpError,
     ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
     ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
     McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode, PermissionPolicy,
@@ -2176,10 +2177,97 @@ impl AcpSdkDelegate {
         let _guard = ScopedCurrentDir::change_to(&session.cwd).map_err(|e| {
             runtime::AcpError::internal(format!("failed to enter session cwd: {e}"))
         })?;
+
+        // Pre-send token estimation and auto-compact logic
+        let model = session.runtime.session().model.as_ref().unwrap_or(&self.inner.model);
+        let context_limit = model_token_limit(model)
+            .map(|limit| limit.context_window_tokens as usize)
+            .unwrap_or(200_000);
+
+        // Estimate current session tokens
+        let estimated_tokens = estimate_session_tokens(session.runtime.session());
+        let threshold = (context_limit as f64 * 0.85) as usize; // 85% threshold
+
+        // If approaching limit, try auto-compact
+        if estimated_tokens > threshold {
+            // Check if we have enough messages to compact
+            let message_count = session.runtime.session().messages.len();
+            let can_compact = message_count > 4; // Need more than preserve_recent_messages
+
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record("auto_compact_check", {
+                    let mut attrs = Map::new();
+                    attrs.insert("estimated_tokens".to_string(), Value::Number(estimated_tokens.into()));
+                    attrs.insert("threshold".to_string(), Value::Number(threshold.into()));
+                    attrs.insert("context_limit".to_string(), Value::Number(context_limit.into()));
+                    attrs.insert("message_count".to_string(), Value::Number(message_count.into()));
+                    attrs.insert("can_compact".to_string(), Value::Bool(can_compact));
+                    attrs
+                });
+            }
+
+            if can_compact {
+                // Perform compaction with aggressive settings for overflow scenario
+                let compaction_config = CompactionConfig {
+                    preserve_recent_messages: 2,
+                    max_estimated_tokens: 0, // Force compaction
+                };
+                let result = compact_session(session.runtime.session(), compaction_config);
+                if result.removed_message_count > 0 {
+                    // Update session with compacted version
+                    *session.runtime.session_mut() = result.compacted_session.clone();
+                    if let Some(tracer) = session.runtime.session_tracer() {
+                        tracer.record("auto_compact_result", {
+                            let mut attrs = Map::new();
+                            attrs.insert("removed_messages".to_string(), Value::Number(result.removed_message_count.into()));
+                            attrs
+                        });
+                    }
+                }
+
+                // Re-estimate after compaction
+                let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
+
+                // If still over limit after compaction, return friendly error
+                if new_estimated_tokens > context_limit {
+                    let user_message = format!(
+                        "对话内容过长，即使压缩后仍超出模型限制。\n\n\
+                        当前估算: {} tokens\n\
+                        模型限制: {} tokens\n\n\
+                        建议解决方案：\n\
+                        1. 开始新对话\n\
+                        2. 使用支持更大上下文的模型\n\
+                        3. 减少图片或大文本内容的发送",
+                        new_estimated_tokens, context_limit
+                    );
+                    return Err(runtime::AcpError::internal(user_message));
+                }
+            } else {
+                // No messages to compact, but request is too large
+                let user_message = format!(
+                    "当前请求内容过大，超出模型处理限制。\n\n\
+                    当前估算: {} tokens\n\
+                    模型限制: {} tokens\n\n\
+                    建议解决方案：\n\
+                    1. 使用较小的图片（压缩或缩小图片尺寸）\n\
+                    2. 简化输入内容\n\
+                    3. 使用支持更大上下文的模型",
+                    estimated_tokens, context_limit
+                );
+                return Err(runtime::AcpError::internal(user_message));
+            }
+        }
+
         self.inner
             .tokio_runtime
             .block_on(session.runtime.run_turn(prompt, prompter, Some(observer)))
-            .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+            .map_err(|e| {
+                // Record error to telemetry log if available
+                if let Some(tracer) = session.runtime.session_tracer() {
+                    tracer.record_prompt_error("runtime_error", e.to_string());
+                }
+                runtime::AcpError::internal(e.to_string())
+            })?;
         let usage = UsageTracker::from_session(session.runtime.session()).cumulative_usage();
         let prompt_usage = runtime::acp_sdk_server::PromptUsage {
             input_tokens: u64::from(usage.input_tokens),

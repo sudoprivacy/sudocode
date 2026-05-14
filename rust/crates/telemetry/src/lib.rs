@@ -869,6 +869,20 @@ impl SessionTracer {
         attributes.insert("duration_ms".to_string(), Value::from(duration_ms));
         self.record("session_ended", attributes);
     }
+
+    /// Record a prompt error that occurred during a turn.
+    pub fn record_prompt_error(
+        &self,
+        error_type: impl Into<String>,
+        error_message: impl Into<String>,
+    ) {
+        let error_type = error_type.into();
+        let error_message = error_message.into();
+        let mut attributes = Map::new();
+        attributes.insert("error_type".to_string(), Value::String(error_type));
+        attributes.insert("error_message".to_string(), Value::String(error_message));
+        self.record("prompt_error", attributes);
+    }
 }
 
 /// Mask sensitive header values for debug capture logs.

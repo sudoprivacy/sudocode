@@ -59,23 +59,37 @@ impl AcpError {
         };
 
         // Check for specific error types and provide friendly messages
-        if raw_message.contains("context_window_blocked") || raw_message.contains("Context window blocked") {
+        if raw_message.contains("context_window_blocked")
+            || raw_message.contains("Context window blocked")
+        {
             return "图片或文本内容过大，超出了模型的处理限制。\n\n建议解决方案：\n1. 使用较小的图片（建议压缩或缩小图片尺寸）\n2. 简化输入内容\n3. 使用支持更大上下文的模型\n4. 清除对话历史后重新开始".to_string();
         }
 
-        if raw_message.contains("authentication") || raw_message.contains("认证失败") || raw_message.contains("AUTH") {
+        if raw_message.contains("authentication")
+            || raw_message.contains("认证失败")
+            || raw_message.contains("AUTH")
+        {
             return "认证失败，请检查您的账户配置。\n\n建议解决方案：\n1. 检查 API 密钥或订阅是否有效\n2. 重新登录账户\n3. 检查网络连接".to_string();
         }
 
-        if raw_message.contains("timeout") || raw_message.contains("Timeout") || raw_message.contains("timed out") {
+        if raw_message.contains("timeout")
+            || raw_message.contains("Timeout")
+            || raw_message.contains("timed out")
+        {
             return "请求超时，模型响应时间过长。\n\n建议解决方案：\n1. 简化输入内容\n2. 检查网络连接\n3. 稍后重试".to_string();
         }
 
-        if raw_message.contains("rate limit") || raw_message.contains("RateLimit") || raw_message.contains("429") {
+        if raw_message.contains("rate limit")
+            || raw_message.contains("RateLimit")
+            || raw_message.contains("429")
+        {
             return "请求频率过高，请稍后重试。\n\n建议解决方案：\n1. 等待几分钟后重试\n2. 减少请求频率".to_string();
         }
 
-        if raw_message.contains("network") || raw_message.contains("connection") || raw_message.contains("Connection") {
+        if raw_message.contains("network")
+            || raw_message.contains("connection")
+            || raw_message.contains("Connection")
+        {
             return "网络连接出现问题。\n\n建议解决方案：\n1. 检查网络连接\n2. 检查代理设置\n3. 稍后重试".to_string();
         }
 
@@ -85,7 +99,10 @@ impl AcpError {
 
         // Default: return a simplified message
         if raw_message.len() > 200 {
-            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message.chars().take(100).collect::<String>())
+            format!(
+                "发生错误：{}\n\n请尝试简化输入或稍后重试。",
+                raw_message.chars().take(100).collect::<String>()
+            )
         } else {
             format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message)
         }

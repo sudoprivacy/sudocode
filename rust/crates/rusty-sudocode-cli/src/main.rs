@@ -2179,7 +2179,12 @@ impl AcpSdkDelegate {
         })?;
 
         // Pre-send token estimation and auto-compact logic
-        let model = session.runtime.session().model.as_ref().unwrap_or(&self.inner.model);
+        let model = session
+            .runtime
+            .session()
+            .model
+            .as_ref()
+            .unwrap_or(&self.inner.model);
         let context_limit = model_token_limit(model)
             .map(|limit| limit.context_window_tokens as usize)
             .unwrap_or(200_000);
@@ -2197,10 +2202,19 @@ impl AcpSdkDelegate {
             if let Some(tracer) = session.runtime.session_tracer() {
                 tracer.record("auto_compact_check", {
                     let mut attrs = Map::new();
-                    attrs.insert("estimated_tokens".to_string(), Value::Number(estimated_tokens.into()));
+                    attrs.insert(
+                        "estimated_tokens".to_string(),
+                        Value::Number(estimated_tokens.into()),
+                    );
                     attrs.insert("threshold".to_string(), Value::Number(threshold.into()));
-                    attrs.insert("context_limit".to_string(), Value::Number(context_limit.into()));
-                    attrs.insert("message_count".to_string(), Value::Number(message_count.into()));
+                    attrs.insert(
+                        "context_limit".to_string(),
+                        Value::Number(context_limit.into()),
+                    );
+                    attrs.insert(
+                        "message_count".to_string(),
+                        Value::Number(message_count.into()),
+                    );
                     attrs.insert("can_compact".to_string(), Value::Bool(can_compact));
                     attrs
                 });
@@ -2219,7 +2233,10 @@ impl AcpSdkDelegate {
                     if let Some(tracer) = session.runtime.session_tracer() {
                         tracer.record("auto_compact_result", {
                             let mut attrs = Map::new();
-                            attrs.insert("removed_messages".to_string(), Value::Number(result.removed_message_count.into()));
+                            attrs.insert(
+                                "removed_messages".to_string(),
+                                Value::Number(result.removed_message_count.into()),
+                            );
                             attrs
                         });
                     }

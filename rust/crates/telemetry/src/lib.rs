@@ -871,7 +871,11 @@ impl SessionTracer {
     }
 
     /// Record a prompt error that occurred during a turn.
-    pub fn record_prompt_error(&self, error_type: impl Into<String>, error_message: impl Into<String>) {
+    pub fn record_prompt_error(
+        &self,
+        error_type: impl Into<String>,
+        error_message: impl Into<String>,
+    ) {
         let error_type = error_type.into();
         let error_message = error_message.into();
         let mut attributes = Map::new();

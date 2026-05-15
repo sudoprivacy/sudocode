@@ -16,7 +16,7 @@ use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 use tools::GlobalToolRegistry;
 
 use super::session::LATEST_SESSION_REFERENCE;
-use crate::{normalize_permission_mode, DEFAULT_DATE, DEFAULT_MODEL};
+use crate::{normalize_permission_mode, DEFAULT_MODEL};
 
 pub(crate) type AllowedToolSet = BTreeSet<String>;
 
@@ -525,7 +525,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             }),
             Cmd::SystemPrompt { cwd, date } => {
                 let resolved_cwd = cwd.unwrap_or(env::current_dir().map_err(|e| e.to_string())?);
-                let resolved_date = date.unwrap_or_else(|| DEFAULT_DATE.to_string());
+                let resolved_date = date.unwrap_or_else(runtime::today_local);
                 Ok(CliAction::PrintSystemPrompt {
                     cwd: resolved_cwd,
                     date: resolved_date,

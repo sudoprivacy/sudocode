@@ -21,6 +21,10 @@
   Rust-native · model-agnostic · headless-first · safe by design.
 </p>
 
+<p align="center">
+  <img src="assets/scode-demo.gif" alt="Sudo Code terminal demo highlighting Rust-native speed, model-agnostic providers, headless ACP infrastructure, and safe-by-design permissions" width="900" />
+</p>
+
 ---
 
 ## What is Sudo Code?

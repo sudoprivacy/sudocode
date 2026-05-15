@@ -176,6 +176,16 @@ pub struct ConversationRuntime<C, T> {
     tool_executor: T,
     permission_policy: PermissionPolicy,
     system_prompt: SystemPrompt,
+    /// Date (`YYYY-MM-DD`) baked into the cacheable system prompt at session
+    /// start. When `Some`, [`ConversationRuntime::run_turn_with_blocks`]
+    /// compares it against today's local date at turn time and prepends a
+    /// `<system-reminder>` content block when the date has rolled over,
+    /// instead of mutating the system prompt itself (which would invalidate
+    /// the prompt-cache prefix).
+    prompt_known_date: Option<String>,
+    /// Override for "today" used in tests. Always `None` outside tests.
+    #[cfg(test)]
+    today_override: Option<String>,
     max_iterations: usize,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
@@ -225,6 +235,9 @@ where
             tool_executor,
             permission_policy,
             system_prompt,
+            prompt_known_date: None,
+            #[cfg(test)]
+            today_override: None,
             max_iterations: usize::MAX,
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
@@ -233,6 +246,17 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
         }
+    }
+
+    /// Records the date (`YYYY-MM-DD`) that was frozen into the cacheable
+    /// system prompt at session start. Each turn compares this against the
+    /// local date and emits a `<system-reminder>` content block when the
+    /// date has rolled over, leaving the system prompt itself untouched so
+    /// the prompt cache prefix stays warm.
+    #[must_use]
+    pub fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
+        self.prompt_known_date = Some(date.into());
+        self
     }
 
     #[must_use]
@@ -337,6 +361,45 @@ where
                 None,
             )
         }
+    }
+
+    /// Returns the date the runtime should treat as "today" for the
+    /// purpose of inter-turn date-change detection.
+    fn current_local_date(&self) -> String {
+        #[cfg(test)]
+        {
+            if let Some(ref overridden) = self.today_override {
+                return overridden.clone();
+            }
+        }
+        crate::time::today_local()
+    }
+
+    /// If the session-start date frozen into the cacheable system prompt no
+    /// longer matches today's local date, prepend a `<system-reminder>`
+    /// content block so the assistant learns about the rollover without
+    /// invalidating the prompt-cache prefix. The known date is then advanced
+    /// so the reminder fires only once per rollover.
+    fn inject_date_change_reminder(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+        let Some(known) = self.prompt_known_date.clone() else {
+            return blocks;
+        };
+        let today = self.current_local_date();
+        if today == known {
+            return blocks;
+        }
+        let reminder = ContentBlock::Text {
+            text: format!(
+                "<system-reminder>The local calendar date has changed since this session started. \
+                 The system prompt was cached on {known}; today is now {today}. \
+                 Treat {today} as the current date for any reasoning that depends on it.</system-reminder>"
+            ),
+        };
+        self.prompt_known_date = Some(today);
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
+        combined.push(reminder);
+        combined.extend(blocks);
+        combined
     }
 
     /// Run a session health probe to verify the runtime is functional after compaction.
@@ -465,6 +528,7 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
         mut observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<TurnSummary, RuntimeError> {
+        let blocks = self.inject_date_change_reminder(blocks);
         let label = blocks
             .iter()
             .find_map(|b| match b {
@@ -2375,5 +2439,177 @@ mod tests {
 
         // then
         assert_eq!(error.to_string(), "upstream failed");
+    }
+
+    /// Captures the [`ApiRequest`] sent on each turn so tests can assert on
+    /// the messages and system prompt that the model would actually see.
+    #[derive(Default)]
+    struct CapturingApi {
+        requests: Arc<std::sync::Mutex<Vec<ApiRequest>>>,
+    }
+
+    #[async_trait]
+    impl ApiClient for CapturingApi {
+        async fn stream(
+            &mut self,
+            request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.requests
+                .lock()
+                .expect("requests mutex should not be poisoned")
+                .push(request);
+            Ok(events_to_stream(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn skips_date_change_reminder_when_known_date_unchanged() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        runtime.today_override = Some("2026-05-15".to_string());
+
+        runtime
+            .run_turn("hello", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        let user_blocks = &requests[0].messages[0].blocks;
+        assert_eq!(user_blocks.len(), 1, "no reminder should be prepended");
+        assert!(matches!(
+            &user_blocks[0],
+            ContentBlock::Text { text } if text == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn injects_date_change_reminder_when_local_date_rolls_over() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        runtime.today_override = Some("2026-05-16".to_string());
+
+        runtime
+            .run_turn("hello", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        let user_blocks = &requests[0].messages[0].blocks;
+        assert_eq!(
+            user_blocks.len(),
+            2,
+            "rollover should prepend exactly one reminder block"
+        );
+        let ContentBlock::Text { text: reminder } = &user_blocks[0] else {
+            panic!("first block should be the reminder text block");
+        };
+        assert!(
+            reminder.contains("<system-reminder>"),
+            "reminder should be wrapped in a system-reminder tag, got {reminder}"
+        );
+        assert!(
+            reminder.contains("2026-05-15") && reminder.contains("2026-05-16"),
+            "reminder should mention old and new date, got {reminder}"
+        );
+        assert!(matches!(
+            &user_blocks[1],
+            ContentBlock::Text { text } if text == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn date_change_reminder_fires_only_once_per_rollover() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        runtime.today_override = Some("2026-05-16".to_string());
+
+        runtime
+            .run_turn("first", None, None)
+            .await
+            .expect("first turn");
+        runtime
+            .run_turn("second", None, None)
+            .await
+            .expect("second turn");
+
+        let requests = captured.lock().expect("captured mutex");
+        // first turn carries the reminder + user text
+        assert_eq!(requests[0].messages[0].blocks.len(), 2);
+        // second turn (still on 2026-05-16) carries only the user text;
+        // the runtime's known date was advanced after firing the reminder.
+        let second_turn_user_blocks = requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .last()
+            .expect("user message")
+            .blocks
+            .clone();
+        assert_eq!(
+            second_turn_user_blocks.len(),
+            1,
+            "reminder must not repeat after rollover acknowledged"
+        );
+        assert!(matches!(
+            &second_turn_user_blocks[0],
+            ContentBlock::Text { text } if text == "second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_reminder_when_session_known_date_unset() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        runtime.today_override = Some("2099-12-31".to_string());
+
+        runtime
+            .run_turn("hello", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        assert_eq!(
+            requests[0].messages[0].blocks.len(),
+            1,
+            "no reminder should fire without a known date"
+        );
     }
 }

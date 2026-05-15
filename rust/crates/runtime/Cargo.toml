@@ -12,6 +12,7 @@ agent-client-protocol-tokio = { workspace = true }
 async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
+chrono = "0.4"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Nexus kernel rlib — provides `kernel::abi::KernelAbi` trait that

@@ -189,6 +189,7 @@ fn run_loop<K, C, T, F>(
         permission_policy,
         system_prompt,
     )
+    .with_session_known_date(crate::time::today_local())
     .with_hook_abort_signal(abort.clone());
 
     // -- READY --

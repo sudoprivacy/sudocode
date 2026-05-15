@@ -35,7 +35,7 @@ jobs:
             package_dir: scode-linux-arm64
             archive_name: scode-linux-arm64.tar.gz
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
             bin: scode
             package_dir: scode-macos-arm64
             archive_name: scode-macos-arm64.tar.gz

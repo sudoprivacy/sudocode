@@ -402,8 +402,23 @@ async fn check_gemini_response(response: reqwest::Response) -> Result<reqwest::R
 fn build_gemini_request_body(request: &MessageRequest) -> Value {
     let mut contents: Vec<Value> = Vec::new();
 
+    // Gemini requires `functionResponse.name` to match the original
+    // `functionCall.name`. Build a tool_use_id -> name lookup from all prior
+    // assistant turns so each tool result can recover the original function
+    // name. Without this, Gemini rejects (or silently drops) the response
+    // turn, manifesting as an empty assistant stream.
+    let mut tool_name_by_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for msg in &request.messages {
-        translate_input_message(msg, &mut contents);
+        for block in &msg.content {
+            if let InputContentBlock::ToolUse { id, name, .. } = block {
+                tool_name_by_id.insert(id.clone(), name.clone());
+            }
+        }
+    }
+
+    for msg in &request.messages {
+        translate_input_message(msg, &mut contents, &tool_name_by_id);
     }
 
     let mut body = json!({
@@ -435,7 +450,11 @@ fn build_gemini_request_body(request: &MessageRequest) -> Value {
     body
 }
 
-fn translate_input_message(message: &InputMessage, contents: &mut Vec<Value>) {
+fn translate_input_message(
+    message: &InputMessage,
+    contents: &mut Vec<Value>,
+    tool_name_by_id: &std::collections::HashMap<String, String>,
+) {
     let role = match message.role.as_str() {
         "assistant" => "model",
         _ => "user",
@@ -466,7 +485,7 @@ fn translate_input_message(message: &InputMessage, contents: &mut Vec<Value>) {
                 parts.push(part);
             }
             InputContentBlock::ToolResult {
-                tool_use_id: _,
+                tool_use_id,
                 content,
                 ..
             } => {
@@ -481,11 +500,19 @@ fn translate_input_message(message: &InputMessage, contents: &mut Vec<Value>) {
                     parts = Vec::new();
                 }
                 let response_text = flatten_tool_result(content);
+                // Gemini requires the functionResponse name to match the
+                // original functionCall name. Look it up from the map built
+                // by scanning prior assistant turns. Fall back to the id only
+                // if we somehow never saw the corresponding tool_use.
+                let fn_name = tool_name_by_id
+                    .get(tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| tool_use_id.clone());
                 contents.push(json!({
                     "role": "user",
                     "parts": [{
                         "functionResponse": {
-                            "name": "_tool_result",
+                            "name": fn_name,
                             "response": {
                                 "result": response_text,
                             }
@@ -547,8 +574,13 @@ fn sanitize_schema_for_gemini(schema: &Value) -> Value {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
                 match key.as_str() {
-                    // Remove unsupported fields.
-                    "additionalProperties" | "$schema" | "default" => {}
+                    // Remove unsupported fields. Gemini's function-calling schema is
+                    // an OpenAPI subset that does not accept JSON Schema combinators
+                    // (anyOf/oneOf/allOf), `additionalProperties`, `$schema`, or `default`.
+                    // We drop them here so upstream ToolSpec authors can keep the full
+                    // JSON Schema form for OpenAI/Anthropic without breaking Gemini.
+                    "additionalProperties" | "$schema" | "default" | "anyOf" | "oneOf"
+                    | "allOf" => {}
 
                     // Flatten type arrays: ["string","null"] → "string"
                     "type" => {
@@ -1079,8 +1111,15 @@ mod tests {
             contents[1]["parts"][0]["functionCall"]["name"],
             "get_weather"
         );
-        // Tool result is a functionResponse.
+        // Tool result is a functionResponse. Gemini requires that the
+        // functionResponse name matches the original functionCall name —
+        // anything else (e.g. a generic "_tool_result") causes Gemini to
+        // reject the turn or emit an empty assistant stream.
         assert!(contents[2]["parts"][0].get("functionResponse").is_some());
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            "get_weather"
+        );
 
         let tools = payload["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);

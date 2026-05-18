@@ -2,7 +2,10 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use runtime::{PermissionMode, PermissionPolicy, ToolError, ToolExecutor};
+use runtime::{
+    PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
+    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor,
+};
 use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
@@ -42,6 +45,7 @@ pub(crate) struct CliToolExecutor {
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     spinner_pause: Option<Arc<AtomicBool>>,
+    question_prompter: Option<Box<dyn QuestionPrompter>>,
 }
 
 impl CliToolExecutor {
@@ -58,11 +62,16 @@ impl CliToolExecutor {
             tool_registry,
             mcp_state,
             spinner_pause: None,
+            question_prompter: None,
         }
     }
 
     pub(crate) fn set_spinner_pause(&mut self, flag: Arc<AtomicBool>) {
         self.spinner_pause = Some(flag);
+    }
+
+    pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
+        self.question_prompter = Some(prompter);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -145,6 +154,21 @@ impl CliToolExecutor {
 
 impl ToolExecutor for CliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/scode-acp-diag.log")
+            {
+                let _ = writeln!(
+                    f,
+                    "[ACP-DIAG] execute tool_name={} prompter_set={}",
+                    tool_name,
+                    self.question_prompter.is_some()
+                );
+            }
+        }
         if self
             .allowed_tools
             .as_ref()
@@ -156,6 +180,9 @@ impl ToolExecutor for CliToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
+            return self.execute_ask_user_question(value);
+        }
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
         } else if self.tool_registry.has_runtime_tool(tool_name) {
@@ -189,6 +216,167 @@ impl ToolExecutor for CliToolExecutor {
                 Err(error)
             }
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionCliInput {
+    question: Option<String>,
+    options: Option<Vec<String>>,
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    questions: Vec<AskUserQuestionCliField>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionCliField {
+    id: String,
+    prompt: String,
+    kind: Option<String>,
+    required: Option<bool>,
+    allow_custom_input: Option<bool>,
+    custom_input_hint: Option<String>,
+    #[serde(default)]
+    options: Vec<AskUserQuestionCliOption>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionCliOption {
+    label: String,
+    value: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    recommended: Option<bool>,
+}
+
+impl CliToolExecutor {
+    fn execute_ask_user_question(&mut self, value: serde_json::Value) -> Result<String, ToolError> {
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/scode-acp-diag.log")
+            {
+                let _ = writeln!(f, "[ACP-DIAG] execute_ask_user_question invoked");
+            }
+        }
+        let input: AskUserQuestionCliInput = serde_json::from_value(value)
+            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+
+        let Some(prompter) = self.question_prompter.as_mut() else {
+            return Err(ToolError::new(
+                "AskUserQuestion requires an interactive question prompter",
+            ));
+        };
+
+        let fields = if !input.questions.is_empty() {
+            input.questions
+                .into_iter()
+                .map(|field| {
+                    let options = field
+                        .options
+                        .into_iter()
+                        .map(|option| QuestionOption {
+                            label: option.label,
+                            value: option.value,
+                            description: option.description,
+                            recommended: option.recommended.unwrap_or(false),
+                        })
+                        .collect::<Vec<_>>();
+                    let kind = field
+                        .kind
+                        .as_deref()
+                        .and_then(QuestionKind::from_str)
+                        .unwrap_or_else(|| {
+                            if options.is_empty() {
+                                QuestionKind::Text
+                            } else {
+                                QuestionKind::SingleSelect
+                            }
+                        });
+                    QuestionField {
+                        id: field.id,
+                        prompt: field.prompt,
+                        kind,
+                        required: field.required.unwrap_or(true),
+                        allow_custom_input: field.allow_custom_input.unwrap_or(false),
+                        custom_input_hint: field.custom_input_hint,
+                        options,
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let prompt = input
+                .question
+                .map(|question| question.trim().to_string())
+                .filter(|question| !question.is_empty())
+                .ok_or_else(|| ToolError::new("question or questions is required"))?;
+            let options = input
+                .options
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|option| !option.trim().is_empty())
+                .map(|option| QuestionOption {
+                    label: option.clone(),
+                    value: option,
+                    description: None,
+                    recommended: false,
+                })
+                .collect::<Vec<_>>();
+            let kind = if options.is_empty() {
+                QuestionKind::Text
+            } else {
+                QuestionKind::SingleSelect
+            };
+            vec![QuestionField {
+                id: "q1".to_string(),
+                prompt,
+                kind,
+                required: true,
+                allow_custom_input: options.is_empty(),
+                custom_input_hint: None,
+                options,
+            }]
+        };
+
+        let request = QuestionPromptRequest {
+            title: input.title,
+            description: input.description,
+            fields,
+        };
+
+        let answers = prompter.ask(&request).map_err(ToolError::new)?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "answered",
+            "title": request.title,
+            "description": request.description,
+            "questions": request.fields.iter().map(|field| serde_json::json!({
+              "id": field.id,
+              "prompt": field.prompt,
+              "kind": field.kind.as_str(),
+              "required": field.required,
+              "allowCustomInput": field.allow_custom_input,
+              "customInputHint": field.custom_input_hint,
+              "options": field.options.iter().map(|option| serde_json::json!({
+                "label": option.label,
+                "value": option.value,
+                "description": option.description,
+                "recommended": option.recommended,
+              })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "answers": answers.iter().map(|answer| serde_json::json!({
+              "id": answer.id,
+              "value": answer.value,
+              "label": answer.label,
+            })).collect::<Vec<_>>(),
+        }))
+        .map_err(|error| ToolError::new(error.to_string()))
     }
 }
 

@@ -87,6 +87,72 @@ pub trait PermissionPrompter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub label: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionField {
+    pub id: String,
+    pub prompt: String,
+    pub kind: QuestionKind,
+    pub required: bool,
+    pub allow_custom_input: bool,
+    pub custom_input_hint: Option<String>,
+    pub options: Vec<QuestionOption>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionKind {
+    SingleSelect,
+    MultiSelect,
+    Text,
+    Boolean,
+}
+
+impl QuestionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QuestionKind::SingleSelect => "single_select",
+            QuestionKind::MultiSelect => "multi_select",
+            QuestionKind::Text => "text",
+            QuestionKind::Boolean => "boolean",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "single_select" => Some(QuestionKind::SingleSelect),
+            "multi_select" => Some(QuestionKind::MultiSelect),
+            "text" => Some(QuestionKind::Text),
+            "boolean" => Some(QuestionKind::Boolean),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionPromptRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub fields: Vec<QuestionField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionPromptAnswer {
+    pub id: String,
+    pub value: String,
+    pub label: Option<String>,
+}
+
+pub trait QuestionPrompter: Send {
+    fn ask(&mut self, request: &QuestionPromptRequest) -> Result<Vec<QuestionPromptAnswer>, String>;
+}
+
 /// Final authorization result after evaluating static rules and prompts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionOutcome {

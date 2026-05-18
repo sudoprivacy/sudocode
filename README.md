@@ -87,6 +87,22 @@ cargo build --release
 
 Requires a recent stable Rust toolchain (2021 edition). macOS and Linux are supported.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
+```
+
+Downloads the latest prebuilt `scode` binary, verifies its SHA-256 checksum, and installs to `$HOME/.local/bin`. macOS (arm64/x64) and Linux (x64/arm64) are supported; Windows users should grab the zip from the [Releases page](https://github.com/sudoprivacy/sudocode/releases/latest).
+
+Overrides:
+
+- `SCODE_VERSION=v0.1.5 sh install.sh` — pin a specific release.
+- `SCODE_INSTALL_DIR=/usr/local/bin sh install.sh` — install elsewhere (must be writable; no `sudo`).
+- `sh install.sh --prefix /usr/local` — equivalent flag form.
+
+Already built from source? Skip to [Quick Start](#quick-start).
+
 ## Quick Start
 
 ```bash

@@ -579,7 +579,11 @@ fn sanitize_schema_for_gemini(schema: &Value) -> Value {
                     // (anyOf/oneOf/allOf), `additionalProperties`, `$schema`, or `default`.
                     // We drop them here so upstream ToolSpec authors can keep the full
                     // JSON Schema form for OpenAI/Anthropic without breaking Gemini.
-                    "additionalProperties" | "$schema" | "default" | "anyOf" | "oneOf"
+                    "additionalProperties"
+                    | "$schema"
+                    | "default"
+                    | "anyOf"
+                    | "oneOf"
                     | "allOf" => {}
 
                     // Flatten type arrays: ["string","null"] → "string"

@@ -789,9 +789,7 @@ pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMes
             .blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => {
-                    Some(InputContentBlock::Text { text: text.clone() })
-                }
+                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
                 ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
                     source: ImageSource {
                         source_type: "base64".to_string(),
@@ -841,9 +839,10 @@ pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMes
         if matches!(message.role, MessageRole::Tool) {
             if let Some(last) = result.last_mut() {
                 if last.role == "user"
-                    && last.content.iter().all(|block| {
-                        matches!(block, InputContentBlock::ToolResult { .. })
-                    })
+                    && last
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
                 {
                     last.content.extend(content);
                     continue;

@@ -276,7 +276,8 @@ impl CliToolExecutor {
         };
 
         let fields = if !input.questions.is_empty() {
-            input.questions
+            input
+                .questions
                 .into_iter()
                 .map(|field| {
                     let options = field

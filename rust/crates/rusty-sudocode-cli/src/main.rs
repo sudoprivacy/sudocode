@@ -1905,7 +1905,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
             runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
         })?;
-        session.runtime.tool_executor_mut().set_question_prompter(prompter);
+        session
+            .runtime
+            .tool_executor_mut()
+            .set_question_prompter(prompter);
         Ok(())
     }
 

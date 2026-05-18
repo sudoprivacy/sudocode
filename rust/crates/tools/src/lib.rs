@@ -5440,9 +5440,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             .blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => {
-                    Some(InputContentBlock::Text { text: text.clone() })
-                }
+                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
                 ContentBlock::Thinking { .. } => None,
                 ContentBlock::ToolUse {
                     id,
@@ -5488,9 +5486,10 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
         if matches!(message.role, MessageRole::Tool) {
             if let Some(last) = result.last_mut() {
                 if last.role == "user"
-                    && last.content.iter().all(|block| {
-                        matches!(block, InputContentBlock::ToolResult { .. })
-                    })
+                    && last
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
                 {
                     last.content.extend(content);
                     continue;
@@ -6877,10 +6876,9 @@ mod tests {
         classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
         extract_recovery_outcome, final_assistant_text, global_cron_registry,
         maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
-        persist_agent_terminal_state, push_output_block, run_task_packet, sweep_orphaned_tmp_files,
-        run_ask_user_question_v2, AgentInput, AgentJob, AskUserQuestionInput,
-        AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry, LaneEventName,
-        LaneFailureClass,
+        persist_agent_terminal_state, push_output_block, run_ask_user_question_v2, run_task_packet,
+        sweep_orphaned_tmp_files, AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem,
+        AskUserQuestionOption, GlobalToolRegistry, LaneEventName, LaneFailureClass,
         SubagentToolExecutor,
     };
     use api::OutputContentBlock;

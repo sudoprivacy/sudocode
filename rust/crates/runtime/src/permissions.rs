@@ -150,7 +150,8 @@ pub struct QuestionPromptAnswer {
 }
 
 pub trait QuestionPrompter: Send {
-    fn ask(&mut self, request: &QuestionPromptRequest) -> Result<Vec<QuestionPromptAnswer>, String>;
+    fn ask(&mut self, request: &QuestionPromptRequest)
+        -> Result<Vec<QuestionPromptAnswer>, String>;
 }
 
 /// Final authorization result after evaluating static rules and prompts.

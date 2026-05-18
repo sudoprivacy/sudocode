@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::Arc as StdArc;
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::role::acp::{Agent, Client};
 // NOTE: `ConnectTo` and `ConnectionTo` are different SDK concepts:
@@ -24,13 +24,13 @@ use agent_client_protocol::{
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, ExtRequest, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
+    AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest,
+    CloseSessionResponse, ContentBlock, ContentChunk, ExtRequest, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
     SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent, ToolCall,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
@@ -408,7 +408,10 @@ impl PermissionPrompter for AcpPermissionBridge {
 }
 
 impl QuestionPrompter for AcpQuestionBridge {
-    fn ask(&mut self, request: &QuestionPromptRequest) -> Result<Vec<QuestionPromptAnswer>, String> {
+    fn ask(
+        &mut self,
+        request: &QuestionPromptRequest,
+    ) -> Result<Vec<QuestionPromptAnswer>, String> {
         let tool_call_id = format!("ask-{}", uuid_v4());
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         if self

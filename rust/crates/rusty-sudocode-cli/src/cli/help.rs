@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::cli::session::LATEST_SESSION_REFERENCE;
 use crate::PRIMARY_SESSION_EXTENSION;
 use crate::{
-    truncate_for_prompt, CliOutputFormat, LocalHelpTopic, DEFAULT_DATE, DEPRECATED_INSTALL_COMMAND,
+    truncate_for_prompt, CliOutputFormat, LocalHelpTopic, DEPRECATED_INSTALL_COMMAND,
     OFFICIAL_REPO_SLUG, OFFICIAL_REPO_URL, STUB_COMMANDS, VERSION,
 };
 
@@ -374,7 +374,7 @@ pub(crate) fn render_config_json(
 
 pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let project_context = ProjectContext::discover(&cwd, DEFAULT_DATE)?;
+    let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
     let mut lines = vec![format!(
         "Memory
   Working directory {}
@@ -413,7 +413,7 @@ pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error
 
 pub(crate) fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let project_context = ProjectContext::discover(&cwd, DEFAULT_DATE)?;
+    let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
     let files: Vec<_> = project_context
         .instruction_files
         .iter()

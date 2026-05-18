@@ -3982,7 +3982,6 @@ fn parse_skill_frontmatter_value(contents: &str, key: &str) -> Option<String> {
 }
 
 const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
-const DEFAULT_AGENT_SYSTEM_DATE: &str = "2026-03-31";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
 fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
@@ -4222,14 +4221,15 @@ fn build_agent_runtime(
         tool_executor,
         permission_policy,
         job.system_prompt.clone(),
-    ))
+    )
+    .with_session_known_date(runtime::today_local()))
 }
 
 fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let mut prompt = load_system_prompt(
         cwd,
-        DEFAULT_AGENT_SYSTEM_DATE.to_string(),
+        runtime::today_local(),
         std::env::consts::OS,
         "unknown",
         model_family_identity_for(model),

@@ -3622,9 +3622,14 @@ fn build_system_prompt_for(
     cwd: &Path,
     model: &str,
 ) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+    // Use the local date at session-start time (not the build date baked
+    // into DEFAULT_DATE) so the cacheable system prompt reflects when the
+    // user actually started talking. ConversationRuntime separately tracks
+    // this date and emits a system-reminder if the date rolls over
+    // mid-session, keeping the prompt cache prefix warm.
     Ok(load_system_prompt(
         cwd.to_path_buf(),
-        DEFAULT_DATE,
+        runtime::today_local(),
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
@@ -3983,7 +3988,8 @@ fn build_runtime_with_plugin_state(
         policy,
         system_prompt,
         &feature_config,
-    );
+    )
+    .with_session_known_date(runtime::today_local());
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }

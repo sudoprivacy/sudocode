@@ -93,13 +93,14 @@ Requires a recent stable Rust toolchain (2021 edition). macOS and Linux are supp
 curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
 ```
 
-Downloads the latest prebuilt `scode` binary, verifies its SHA-256 checksum, and installs to `$HOME/.local/bin`. macOS (arm64/x64) and Linux (x64/arm64) are supported; Windows users should grab the zip from the [Releases page](https://github.com/sudoprivacy/sudocode/releases/latest).
+Downloads the latest prebuilt `scode` binary and verifies its SHA-256 checksum. On macOS Apple Silicon we install to `/opt/homebrew/bin`; on macOS x64 and Linux we install to `/usr/local/bin`, prompting for `sudo` if needed (only when stdin is a TTY — `curl … | sh` won't hang). If the preferred system dir isn't writable and sudo isn't available, we fall back to `$HOME/.local/bin`. macOS (arm64/x64) and Linux (x64/arm64) are supported; Windows users should grab the zip from the [Releases page](https://github.com/sudoprivacy/sudocode/releases/latest).
 
 Overrides:
 
 - `SCODE_VERSION=v0.1.5 sh install.sh` — pin a specific release.
-- `SCODE_INSTALL_DIR=/usr/local/bin sh install.sh` — install elsewhere (must be writable; no `sudo`).
-- `sh install.sh --prefix /usr/local` — equivalent flag form.
+- `sh install.sh --no-sudo` — never prompt for sudo; install to `$HOME/.local/bin` instead.
+- `SCODE_INSTALL_DIR=$HOME/.local/bin sh install.sh` — explicit per-user install (no `sudo`).
+- `sh install.sh --prefix /usr/local` — explicit prefix (no `sudo`).
 
 Already built from source? Skip to [Quick Start](#quick-start).
 

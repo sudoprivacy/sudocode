@@ -5,13 +5,21 @@
 #
 # Environment overrides:
 #   SCODE_VERSION       Release tag to install (e.g. v0.1.5). Default: latest.
-#   SCODE_INSTALL_DIR   Directory to install into. Default: $HOME/.local/bin.
+#   SCODE_INSTALL_DIR   Directory to install into. Overrides default resolution.
 #   NO_COLOR            Disable ANSI color output when set.
 #
 # Flags:
 #   --version vX.Y.Z    Pin a specific release.
 #   --prefix DIR        Install dir. If DIR/bin exists, install to DIR/bin.
+#   --no-sudo           Never attempt sudo; fall back to $HOME/.local/bin.
 #   --help              Show help.
+#
+# Default install dir is OS-specific:
+#   macOS arm64: /opt/homebrew/bin (if present), else /usr/local/bin
+#   macOS x64 / Linux: /usr/local/bin
+# If the preferred dir is not writable, we try sudo (cached creds first, then
+# interactive if stdin is a TTY). If sudo isn't available, we fall back to
+# $HOME/.local/bin.
 
 set -eu
 
@@ -50,17 +58,29 @@ ${C_BOLD}scode installer${C_RESET}
 Install the scode CLI (sudoprivacy/sudocode) from GitHub Releases.
 
 ${C_BOLD}USAGE${C_RESET}
-    install.sh [--version vX.Y.Z] [--prefix DIR] [--help]
+    install.sh [--version vX.Y.Z] [--prefix DIR] [--no-sudo] [--help]
+
+${C_BOLD}DEFAULT INSTALL DIR${C_RESET}
+    macOS arm64:        /opt/homebrew/bin (if present), else /usr/local/bin
+    macOS x64 / Linux:  /usr/local/bin
+    If that dir isn't writable, we try sudo (cached, then interactive on a
+    TTY). If sudo isn't available, we fall back to \$HOME/.local/bin.
+
+${C_BOLD}FLAGS${C_RESET}
+    --version vX.Y.Z    Pin a release tag (default: latest).
+    --prefix DIR        Install to DIR (or DIR/bin if it exists). No sudo.
+    --no-sudo           Never invoke sudo; fall back to \$HOME/.local/bin.
 
 ${C_BOLD}ENVIRONMENT${C_RESET}
     SCODE_VERSION       Pin a release tag (default: latest).
-    SCODE_INSTALL_DIR   Install directory (default: \$HOME/.local/bin).
+    SCODE_INSTALL_DIR   Override install dir (same as --prefix). No sudo.
     NO_COLOR            Disable colored output.
 
 ${C_BOLD}EXAMPLES${C_RESET}
     curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
     SCODE_VERSION=v0.1.5 sh install.sh
     sh install.sh --prefix /usr/local
+    sh install.sh --no-sudo
 EOF
 }
 
@@ -68,6 +88,10 @@ EOF
 VERSION="${SCODE_VERSION:-}"
 PREFIX=""
 INSTALL_DIR=""
+NO_SUDO=0
+# 1 if the user explicitly chose a dir (--prefix or SCODE_INSTALL_DIR):
+# no sudo escalation and no fallback to ~/.local/bin.
+INSTALL_DIR_FORCED=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -81,6 +105,8 @@ while [ $# -gt 0 ]; do
             PREFIX="$2"; shift 2 ;;
         --prefix=*)
             PREFIX="${1#--prefix=}"; shift ;;
+        --no-sudo)
+            NO_SUDO=1; shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -88,7 +114,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Resolve install dir. --prefix wins, then SCODE_INSTALL_DIR, then default.
+# Pick the preferred default install dir based on OS/arch.
+default_install_dir() {
+    _os=$(uname -s)
+    _arch=$(uname -m)
+    if [ "$_os" = "Darwin" ] && { [ "$_arch" = "arm64" ] || [ "$_arch" = "aarch64" ]; }; then
+        if [ -d /opt/homebrew/bin ]; then
+            printf '%s' "/opt/homebrew/bin"
+            return
+        fi
+    fi
+    printf '%s' "/usr/local/bin"
+}
+
+# Resolve install dir. --prefix wins, then SCODE_INSTALL_DIR, then OS default.
 if [ -n "$PREFIX" ]; then
     # If PREFIX/bin exists as a dir, treat PREFIX as a Unix-style prefix
     # (so --prefix=/usr/local installs to /usr/local/bin).
@@ -98,8 +137,12 @@ if [ -n "$PREFIX" ]; then
     else
         INSTALL_DIR="$prefix_trim"
     fi
+    INSTALL_DIR_FORCED=1
+elif [ -n "${SCODE_INSTALL_DIR:-}" ]; then
+    INSTALL_DIR="$SCODE_INSTALL_DIR"
+    INSTALL_DIR_FORCED=1
 else
-    INSTALL_DIR="${SCODE_INSTALL_DIR:-$HOME/.local/bin}"
+    INSTALL_DIR=$(default_install_dir)
 fi
 
 # ----- tool detection --------------------------------------------------------
@@ -220,7 +263,11 @@ ARCHIVE_URL="${DOWNLOAD_BASE}/${VERSION}/${ARCHIVE}"
 CHECKSUM_URL="${DOWNLOAD_BASE}/${VERSION}/${CHECKSUM_FILE}"
 
 info "target: ${C_BOLD}${TARGET}${C_RESET}"
-info "install dir: ${INSTALL_DIR}"
+if [ "$INSTALL_DIR_FORCED" -eq 1 ]; then
+    info "install dir: ${INSTALL_DIR}"
+else
+    info "preferred install dir: ${INSTALL_DIR} (will fall back to \$HOME/.local/bin if not writable and sudo unavailable)"
+fi
 
 # ----- temp dir with cleanup -------------------------------------------------
 TMP_BASE="${TMPDIR:-/tmp}"
@@ -257,30 +304,88 @@ EXTRACTED_BIN="$TMP/scode-${TARGET}/${BIN_NAME}"
 [ -f "$EXTRACTED_BIN" ] || die "expected binary not found in archive: scode-${TARGET}/${BIN_NAME}"
 
 # ----- install ---------------------------------------------------------------
-DEST="${INSTALL_DIR%/}/${BIN_NAME}"
+DEST=""
+FELL_BACK=0
+USED_SUDO=0
 
-if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
-    die "could not create install dir: $INSTALL_DIR"
-fi
-if [ ! -w "$INSTALL_DIR" ]; then
-    err "install dir is not writable: $INSTALL_DIR"
-    err "pick a writable location (e.g. --prefix \$HOME/.local) or chown the directory."
-    err "this installer will not run sudo for you."
-    exit 1
-fi
+# Install $EXTRACTED_BIN into $1, no sudo. Sets DEST on success, returns
+# non-zero if the directory isn't usable (cannot mkdir, or not writable).
+install_no_sudo() {
+    _dir="${1%/}"
+    _dest="${_dir}/${BIN_NAME}"
+    if ! mkdir -p "$_dir" 2>/dev/null; then
+        return 1
+    fi
+    if [ ! -w "$_dir" ]; then
+        return 1
+    fi
+    if [ -e "$_dest" ]; then
+        info "backing up existing binary: $_dest -> ${_dest}.bak"
+        mv -f "$_dest" "${_dest}.bak"
+    fi
+    mv -f "$EXTRACTED_BIN" "$_dest"
+    chmod +x "$_dest"
+    DEST="$_dest"
+    return 0
+}
 
-if [ -e "$DEST" ]; then
-    backup="${DEST}.bak"
-    info "backing up existing binary: $DEST -> $backup"
-    mv -f "$DEST" "$backup"
-fi
+# Try `sudo install ...` into $1. Uses `sudo -n` first (cached / NOPASSWD);
+# only prompts interactively when stdin is a TTY. Sets DEST + USED_SUDO=1 on
+# success.
+try_sudo_install() {
+    _dir="${1%/}"
+    _dest="${_dir}/${BIN_NAME}"
+    if ! have sudo; then
+        return 1
+    fi
+    if sudo -n install -m 755 "$EXTRACTED_BIN" "$_dest" 2>/dev/null; then
+        DEST="$_dest"
+        USED_SUDO=1
+        return 0
+    fi
+    if [ -t 0 ]; then
+        info "${_dir} requires sudo to install — you may be prompted for your password"
+        if sudo install -m 755 "$EXTRACTED_BIN" "$_dest"; then
+            DEST="$_dest"
+            USED_SUDO=1
+            return 0
+        fi
+    fi
+    return 1
+}
 
-mv -f "$EXTRACTED_BIN" "$DEST"
-chmod +x "$DEST"
+if [ "$INSTALL_DIR_FORCED" -eq 1 ]; then
+    # User-specified dir: no sudo escalation, no per-user fallback.
+    if ! install_no_sudo "$INSTALL_DIR"; then
+        err "install dir is not writable: $INSTALL_DIR"
+        err "pick a writable location (e.g. --prefix \$HOME/.local) or chown the directory."
+        err "this installer will not run sudo for an explicit --prefix / SCODE_INSTALL_DIR."
+        exit 1
+    fi
+else
+    PREFERRED="$INSTALL_DIR"
+    if install_no_sudo "$PREFERRED"; then
+        :
+    elif [ "$NO_SUDO" -eq 0 ] && try_sudo_install "$PREFERRED"; then
+        :
+    else
+        FALLBACK="$HOME/.local/bin"
+        info "falling back to per-user install dir: ${FALLBACK}"
+        if ! install_no_sudo "$FALLBACK"; then
+            die "could not install to ${PREFERRED} or ${FALLBACK}"
+        fi
+        INSTALL_DIR="$FALLBACK"
+        FELL_BACK=1
+    fi
+fi
 
 # ----- macOS quarantine ------------------------------------------------------
 if [ "$(uname -s)" = "Darwin" ] && have xattr; then
-    xattr -d com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
+    if [ "$USED_SUDO" -eq 1 ]; then
+        sudo xattr -d com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
+    else
+        xattr -d com.apple.quarantine "$DEST" >/dev/null 2>&1 || true
+    fi
 fi
 
 ok "installed: ${C_BOLD}${DEST}${C_RESET}"
@@ -313,6 +418,10 @@ if [ "$in_path" -ne 1 ]; then
             printf '  Add this to %s:\n\n    export PATH="%s:$PATH"\n\n' "$rc" "$INSTALL_DIR" ;;
     esac
     printf '  Then reload your shell (or run: %s. "%s"%s).\n\n' "$C_DIM" "$rc" "$C_RESET"
+fi
+
+if [ "$FELL_BACK" -eq 1 ]; then
+    printf '  %stip:%s re-run as root (or with cached sudo) to install system-wide to /usr/local/bin.\n\n' "$C_DIM" "$C_RESET"
 fi
 
 # ----- final version check ---------------------------------------------------

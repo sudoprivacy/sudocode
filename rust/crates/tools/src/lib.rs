@@ -1,6 +1,7 @@
 pub mod managed_agent;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -843,18 +844,51 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user a question and wait for their response.",
+            description: "Ask the user structured questions and wait for their response. Use this tool whenever you need user preferences, configuration values, first-run setup answers, or any other structured input. Prefer title/description/questions[] for multi-step forms; simple legacy question/options is still accepted. Do not ask numbered setup questions directly in plain assistant text when this tool is available.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "title": { "type": "string" },
+                    "description": { "type": "string" },
                     "question": { "type": "string" },
                     "options": {
                         "type": "array",
                         "items": { "type": "string" }
+                    },
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "prompt": { "type": "string" },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["single_select", "multi_select", "text", "boolean"]
+                                },
+                                "required": { "type": "boolean" },
+                                "allowCustomInput": { "type": "boolean" },
+                                "customInputHint": { "type": "string" },
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "value": { "type": "string" },
+                                            "description": { "type": "string" },
+                                            "recommended": { "type": "boolean" }
+                                        },
+                                        "required": ["label", "value"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["id", "prompt"],
+                            "additionalProperties": false
+                        }
                     }
-                },
-                "required": ["question"],
-                "additionalProperties": false
+                }
             }),
             required_permission: PermissionMode::ReadOnly,
         },
@@ -1442,16 +1476,25 @@ fn maybe_enforce_permission_check_with_mode(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> {
-    use std::io::{self, BufRead, Write};
+    use std::io;
 
-    // Display the question to the user via stdout
     let stdout = io::stdout();
     let stdin = io::stdin();
     let mut out = stdout.lock();
+    let mut reader = stdin.lock();
 
-    writeln!(out, "\n[Question] {}", input.question).map_err(|e| e.to_string())?;
+    run_ask_user_question_v2(input, &mut out, &mut reader)
+}
 
-    if let Some(ref options) = input.options {
+fn prompt_user_for_answer(
+    out: &mut impl Write,
+    reader: &mut impl BufRead,
+    question: &str,
+    options: Option<&Vec<String>>,
+) -> Result<String, String> {
+    writeln!(out, "\n[Question] {question}").map_err(|e| e.to_string())?;
+
+    if let Some(options) = options {
         for (i, option) in options.iter().enumerate() {
             writeln!(out, "  {}. {}", i + 1, option).map_err(|e| e.to_string())?;
         }
@@ -1461,34 +1504,73 @@ fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> 
     }
     out.flush().map_err(|e| e.to_string())?;
 
-    // Read user response from stdin
     let mut response = String::new();
-    stdin
-        .lock()
-        .read_line(&mut response)
-        .map_err(|e| e.to_string())?;
+    reader.read_line(&mut response).map_err(|e| e.to_string())?;
     let response = response.trim().to_string();
 
-    // If options were provided, resolve the numeric choice
-    let answer = if let Some(ref options) = input.options {
+    if let Some(options) = options {
         if let Ok(idx) = response.parse::<usize>() {
             if idx >= 1 && idx <= options.len() {
-                options[idx - 1].clone()
-            } else {
-                response.clone()
+                return Ok(options[idx - 1].clone());
             }
-        } else {
-            response.clone()
         }
-    } else {
-        response.clone()
-    };
+    }
 
-    to_pretty_json(json!({
-        "question": input.question,
-        "answer": answer,
-        "status": "answered"
-    }))
+    Ok(response)
+}
+
+fn run_ask_user_question_v2(
+    input: AskUserQuestionInput,
+    out: &mut impl Write,
+    reader: &mut impl BufRead,
+) -> Result<String, String> {
+    let (title, description, questions) = normalize_ask_user_question_input(input)?;
+
+    if let Some(title) = &title {
+        writeln!(out, "\n[Question Set] {title}").map_err(|e| e.to_string())?;
+    }
+    if let Some(description) = &description {
+        writeln!(out, "{description}").map_err(|e| e.to_string())?;
+    }
+
+    let mut answers = Vec::with_capacity(questions.len());
+    for (index, item) in questions.iter().enumerate() {
+        let prompt = format!("{}. {}", index + 1, item.prompt);
+        let option_labels = if item.options.is_empty() {
+            None
+        } else {
+            Some(
+                item.options
+                    .iter()
+                    .map(|option| option.label.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let answer = prompt_user_for_answer(out, reader, &prompt, option_labels.as_ref())?;
+        let matched_option = item
+            .options
+            .iter()
+            .find(|option| option.label == answer || option.value == answer);
+
+        answers.push(AskUserQuestionAnswer {
+            id: item.id.clone(),
+            value: matched_option
+                .map(|option| option.value.clone())
+                .unwrap_or_else(|| answer.clone()),
+            label: matched_option
+                .map(|option| option.label.clone())
+                .or_else(|| (!answer.is_empty()).then_some(answer)),
+        });
+    }
+
+    to_pretty_json(AskUserQuestionResult {
+        status: "answered".to_string(),
+        title,
+        description,
+        questions,
+        answers,
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2596,10 +2678,111 @@ struct PowerShellInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AskUserQuestionInput {
-    question: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
     #[serde(default)]
     options: Option<Vec<String>>,
+    #[serde(default)]
+    questions: Vec<AskUserQuestionItem>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionItem {
+    id: String,
+    prompt: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    allow_custom_input: Option<bool>,
+    #[serde(default)]
+    custom_input_hint: Option<String>,
+    #[serde(default)]
+    options: Vec<AskUserQuestionOption>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct AskUserQuestionOption {
+    label: String,
+    value: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    recommended: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionAnswer {
+    id: String,
+    value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserQuestionResult {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    questions: Vec<AskUserQuestionItem>,
+    answers: Vec<AskUserQuestionAnswer>,
+}
+
+fn normalize_ask_user_question_input(
+    input: AskUserQuestionInput,
+) -> Result<(Option<String>, Option<String>, Vec<AskUserQuestionItem>), String> {
+    if !input.questions.is_empty() {
+        return Ok((input.title, input.description, input.questions));
+    }
+
+    let question = input
+        .question
+        .map(|question| question.trim().to_string())
+        .filter(|question| !question.is_empty())
+        .ok_or_else(|| "question or questions is required".to_string())?;
+
+    let options = input
+        .options
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|option| !option.trim().is_empty())
+        .map(|option| AskUserQuestionOption {
+            label: option.clone(),
+            value: option,
+            description: None,
+            recommended: None,
+        })
+        .collect::<Vec<_>>();
+
+    Ok((
+        input.title,
+        input.description,
+        vec![AskUserQuestionItem {
+            id: "q1".to_string(),
+            prompt: question,
+            kind: Some(if options.is_empty() {
+                "text".to_string()
+            } else {
+                "single_select".to_string()
+            }),
+            required: Some(true),
+            allow_custom_input: Some(options.is_empty()),
+            custom_input_hint: None,
+            options,
+        }],
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -5247,60 +5430,78 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 }
 
 fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-                MessageRole::Assistant => "assistant",
-            };
-            let content = message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => {
-                        Some(InputContentBlock::Text { text: text.clone() })
-                    }
-                    ContentBlock::Thinking { .. } => None,
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        thought_signature,
-                    } => Some(InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                        thought_signature: thought_signature.clone(),
-                    }),
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                        ..
-                    } => Some(InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }],
-                        is_error: *is_error,
-                    }),
-                    ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
-                        source: api::ImageSource {
-                            source_type: "base64".to_string(),
-                            media_type: mime_type.clone(),
-                            data: data.clone(),
-                        },
-                    }),
-                })
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then(|| InputMessage {
-                role: role.to_string(),
-                content,
+    let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = match message.role {
+            MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
+            MessageRole::Assistant => "assistant",
+        };
+        let content = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
+                ContentBlock::Thinking { .. } => None,
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    thought_signature,
+                } => Some(InputContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: serde_json::from_str(input)
+                        .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
+                    thought_signature: thought_signature.clone(),
+                }),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some(InputContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: vec![ToolResultContentBlock::Text {
+                        text: output.clone(),
+                    }],
+                    is_error: *is_error,
+                }),
+                ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
+                    source: api::ImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: mime_type.clone(),
+                        data: data.clone(),
+                    },
+                }),
             })
-        })
-        .collect()
+            .collect::<Vec<_>>();
+        if content.is_empty() {
+            continue;
+        }
+
+        // Merge consecutive Tool-role messages into the previous user-role
+        // InputMessage. Anthropic requires every `tool_use` in an assistant
+        // turn to have its matching `tool_result` in the SAME next user
+        // message; emitting one user message per tool_result breaks this.
+        if matches!(message.role, MessageRole::Tool) {
+            if let Some(last) = result.last_mut() {
+                if last.role == "user"
+                    && last
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+                {
+                    last.content.extend(content);
+                    continue;
+                }
+            }
+        }
+        result.push(InputMessage {
+            role: role.to_string(),
+            content,
+        });
+    }
+    result
 }
 
 fn push_output_block(
@@ -6675,8 +6876,9 @@ mod tests {
         classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
         extract_recovery_outcome, final_assistant_text, global_cron_registry,
         maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
-        persist_agent_terminal_state, push_output_block, run_task_packet, sweep_orphaned_tmp_files,
-        AgentInput, AgentJob, GlobalToolRegistry, LaneEventName, LaneFailureClass,
+        persist_agent_terminal_state, push_output_block, run_ask_user_question_v2, run_task_packet,
+        sweep_orphaned_tmp_files, AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem,
+        AskUserQuestionOption, GlobalToolRegistry, LaneEventName, LaneFailureClass,
         SubagentToolExecutor,
     };
     use api::OutputContentBlock;
@@ -9915,6 +10117,100 @@ mod tests {
         assert!(output["sentAt"].as_str().is_some());
         assert_eq!(output["attachments"][0]["isImage"], true);
         let _ = std::fs::remove_file(attachment);
+    }
+
+    #[test]
+    fn ask_user_question_v2_returns_structured_answers() {
+        use std::io::Cursor;
+
+        let input = AskUserQuestionInput {
+            question: None,
+            options: None,
+            title: Some("Initial setup".to_string()),
+            description: Some("Please answer the following.".to_string()),
+            questions: vec![
+                AskUserQuestionItem {
+                    id: "save_scope".to_string(),
+                    prompt: "Where to save preferences?".to_string(),
+                    kind: Some("single_select".to_string()),
+                    required: Some(true),
+                    allow_custom_input: Some(false),
+                    custom_input_hint: None,
+                    options: vec![
+                        AskUserQuestionOption {
+                            label: "Project".to_string(),
+                            value: "project".to_string(),
+                            description: None,
+                            recommended: Some(true),
+                        },
+                        AskUserQuestionOption {
+                            label: "User".to_string(),
+                            value: "user".to_string(),
+                            description: None,
+                            recommended: None,
+                        },
+                    ],
+                },
+                AskUserQuestionItem {
+                    id: "default_language".to_string(),
+                    prompt: "Default language?".to_string(),
+                    kind: Some("single_select".to_string()),
+                    required: Some(true),
+                    allow_custom_input: Some(false),
+                    custom_input_hint: None,
+                    options: vec![
+                        AskUserQuestionOption {
+                            label: "zh-CN".to_string(),
+                            value: "zh-CN".to_string(),
+                            description: None,
+                            recommended: None,
+                        },
+                        AskUserQuestionOption {
+                            label: "en-US".to_string(),
+                            value: "en-US".to_string(),
+                            description: None,
+                            recommended: None,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let mut output = Vec::new();
+        let mut input_reader = Cursor::new(b"1\n2\n".to_vec());
+        let result = run_ask_user_question_v2(input, &mut output, &mut input_reader)
+            .expect("AskUserQuestion v2 should succeed");
+        let json: serde_json::Value = serde_json::from_str(&result).expect("json");
+
+        assert_eq!(json["status"], "answered");
+        assert_eq!(json["title"], "Initial setup");
+        assert_eq!(json["questions"][0]["id"], "save_scope");
+        assert_eq!(json["answers"][0]["id"], "save_scope");
+        assert_eq!(json["answers"][0]["value"], "project");
+        assert_eq!(json["answers"][0]["label"], "Project");
+        assert_eq!(json["answers"][1]["value"], "en-US");
+        assert!(String::from_utf8(output)
+            .expect("utf8")
+            .contains("[Question Set] Initial setup"));
+    }
+
+    #[test]
+    fn ask_user_question_v2_requires_non_empty_questions() {
+        use std::io::Cursor;
+
+        let input = AskUserQuestionInput {
+            question: None,
+            options: None,
+            title: None,
+            description: None,
+            questions: vec![],
+        };
+
+        let mut output = Vec::new();
+        let mut input_reader = Cursor::new(Vec::<u8>::new());
+        let error = run_ask_user_question_v2(input, &mut output, &mut input_reader)
+            .expect_err("empty questions should fail");
+        assert!(error.contains("question or questions is required"));
     }
 
     #[test]

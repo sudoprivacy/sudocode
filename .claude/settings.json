@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/zhangdongdong/**)",
+      "Read(//Users/zhangdongdong/.config/sudocode/**)"
+    ]
+  }
+}

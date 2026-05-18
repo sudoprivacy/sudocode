@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::role::acp::{Agent, Client};
@@ -16,22 +17,24 @@ use crate::conversation::RuntimeObserver;
 use crate::hooks::HookAbortSignal;
 use crate::permissions::{
     PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 use agent_client_protocol::{
     on_receive_dispatch, on_receive_notification, on_receive_request, ConnectTo, ConnectionTo,
-    Dispatch, Error, JsonRpcRequest, JsonRpcResponse, Responder,
+    Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
-    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
+    AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest,
+    CloseSessionResponse, ContentBlock, ContentChunk, ExtRequest, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
     SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent, ToolCall,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
+use serde::{Deserialize, Serialize};
 
 /// Error type returned by ACP agent implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +175,13 @@ pub trait SdkAcpDelegate: Send + 'static {
         observer: &mut SdkSessionObserver,
         prompter: &mut dyn PermissionPrompter,
     ) -> Result<(StopReason, Option<PromptUsage>), AcpError>;
+
+    /// Install a question prompter for AskUserQuestion tool execution within a session.
+    fn set_question_prompter(
+        &mut self,
+        session_id: &str,
+        prompter: Box<dyn QuestionPrompter>,
+    ) -> Result<(), AcpError>;
 
     /// Handle a slash command, returning text output.
     fn handle_slash_command(
@@ -397,6 +407,93 @@ impl PermissionPrompter for AcpPermissionBridge {
     }
 }
 
+impl QuestionPrompter for AcpQuestionBridge {
+    fn ask(
+        &mut self,
+        request: &QuestionPromptRequest,
+    ) -> Result<Vec<QuestionPromptAnswer>, String> {
+        let tool_call_id = format!("ask-{}", uuid_v4());
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        if self
+            .tx
+            .send((tool_call_id, request.clone(), response_tx))
+            .is_err()
+        {
+            return Err("question bridge closed".to_string());
+        }
+        // The LLM tool loop runs synchronously inside the conversation runtime's
+        // `tokio_runtime.block_on(run_turn)` (multi-thread runtime), so this
+        // `ask()` is reached from a tokio worker thread. Plain `blocking_recv()`
+        // there triggers tokio's "Cannot block the current thread from within a
+        // runtime" panic, which aborts the entire prompt task and surfaces to
+        // the client as a generic "blocking task failed" / Internal error.
+        // `block_in_place` informs the multi-thread scheduler that this worker
+        // is about to block, allowing the recv to complete safely.
+        tokio::task::block_in_place(|| {
+            response_rx
+                .blocking_recv()
+                .unwrap_or_else(|_| Err("question response channel closed".to_string()))
+        })
+    }
+}
+
+struct AcpQuestionBridge {
+    tx: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        QuestionPromptRequest,
+        tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
+    )>,
+}
+
+const ACP_ASK_USER_QUESTION_METHOD: &str = "_scode/ask_user_question";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpQuestionOptionPayload {
+    label: String,
+    value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    recommended: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpQuestionFieldPayload {
+    id: String,
+    prompt: String,
+    kind: String,
+    required: bool,
+    allow_custom_input: bool,
+    custom_input_hint: Option<String>,
+    options: Vec<AcpQuestionOptionPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpAskUserQuestionRequestPayload {
+    session_id: String,
+    tool_call_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    questions: Vec<AcpQuestionFieldPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpAskUserQuestionAnswerPayload {
+    id: String,
+    value: String,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpAskUserQuestionResponsePayload {
+    answers: Vec<AcpAskUserQuestionAnswerPayload>,
+}
+
 /// Build an ACP `RequestPermissionRequest` from a runtime `PermissionRequest`.
 fn build_acp_permission_request(
     session_id: String,
@@ -580,6 +677,11 @@ pub(crate) async fn run_acp_on_transport(
                             PermissionRequest,
                             tokio::sync::oneshot::Sender<PermissionPromptDecision>,
                         )>();
+                        let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel::<(
+                            String,
+                            QuestionPromptRequest,
+                            tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
+                        )>();
 
                         // Set up notification streaming channel.
                         let (notif_tx, mut notif_rx) =
@@ -592,8 +694,28 @@ pub(crate) async fn run_acp_on_transport(
                         let blocking_handle = tokio::task::spawn_blocking(move || {
                             let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
                             let mut bridge = AcpPermissionBridge { tx: bridge_tx };
+                            let question_bridge = AcpQuestionBridge { tx: question_tx };
                             let mut delegate =
                                 d.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let set_result = delegate.set_question_prompter(
+                                &sid_for_blocking,
+                                Box::new(question_bridge),
+                            );
+                            {
+                                use std::io::Write as _;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("/tmp/scode-acp-diag.log")
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "[ACP-DIAG] set_question_prompter sid={} ok={}",
+                                        sid_for_blocking,
+                                        set_result.is_ok()
+                                    );
+                                }
+                            }
 
                             // Push image content blocks into the session before
                             // running the prompt so the API client includes them.
@@ -659,6 +781,136 @@ pub(crate) async fn run_acp_on_transport(
                                         // Channel closed — blocking task dropped the sender.
                                         // Await the result directly to avoid a busy loop
                                         // (biased select would keep picking this branch).
+                                        break blocking_handle.await
+                                            .unwrap_or(Err(AcpError::internal("blocking task failed")));
+                                    }
+                                }
+                                question = question_rx.recv() => {
+                                    if let Some((tool_call_id, question_req, response_tx)) = question {
+                                        let payload = AcpAskUserQuestionRequestPayload {
+                                            session_id: sid_for_perm.clone(),
+                                            tool_call_id,
+                                            title: question_req.title.clone(),
+                                            description: question_req.description.clone(),
+                                            questions: question_req
+                                                .fields
+                                                .iter()
+                                                .map(|field| AcpQuestionFieldPayload {
+                                                    id: field.id.clone(),
+                                                    prompt: field.prompt.clone(),
+                                                    kind: field.kind.as_str().to_string(),
+                                                    required: field.required,
+                                                    allow_custom_input: field.allow_custom_input,
+                                                    custom_input_hint: field.custom_input_hint.clone(),
+                                                    options: field
+                                                        .options
+                                                        .iter()
+                                                        .map(|option| AcpQuestionOptionPayload {
+                                                            label: option.label.clone(),
+                                                            value: option.value.clone(),
+                                                            description: option.description.clone(),
+                                                            recommended: option.recommended,
+                                                        })
+                                                        .collect(),
+                                                })
+                                                .collect(),
+                                        };
+
+                                        {
+                                            use std::io::Write as _;
+                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                .create(true)
+                                                .append(true)
+                                                .open("/tmp/scode-acp-diag.log")
+                                            {
+                                                let _ = writeln!(
+                                                    f,
+                                                    "[ACP-DIAG] sending {} request",
+                                                    ACP_ASK_USER_QUESTION_METHOD
+                                                );
+                                            }
+                                        }
+                                        let outcome = match serde_json::value::to_raw_value(&payload) {
+                                            Ok(raw) => {
+                                                let raw_for_diag = raw.clone();
+                                                match cx_perm
+                                                    .send_request(ClientRequest::ExtMethodRequest(
+                                                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
+                                                    ))
+                                                    .block_task()
+                                                    .await
+                                                {
+                                                    Ok(resp) => {
+                                                        {
+                                                            use std::io::Write;
+                                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                                .create(true)
+                                                                .append(true)
+                                                                .open("/tmp/scode-acp-diag.log")
+                                                            {
+                                                                let _ = writeln!(
+                                                                    f,
+                                                                    "[ACP-DIAG] question raw_resp: {}",
+                                                                    resp,
+                                                                );
+                                                            }
+                                                        }
+                                                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                                                            .map_err(|error| format!("deserialize: {}", error))
+                                                            .map(|payload| {
+                                                                payload
+                                                                    .answers
+                                                                    .into_iter()
+                                                                    .map(|answer| QuestionPromptAnswer {
+                                                                        id: answer.id,
+                                                                        value: answer.value,
+                                                                        label: answer.label,
+                                                                    })
+                                                                    .collect::<Vec<_>>()
+                                                            })
+                                                    }
+                                                    Err(error) => {
+                                                        {
+                                                            use std::io::Write;
+                                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                                .create(true)
+                                                                .append(true)
+                                                                .open("/tmp/scode-acp-diag.log")
+                                                            {
+                                                                let _ = writeln!(
+                                                                    f,
+                                                                    "[ACP-DIAG] question send_request Err debug: {:?} payload_size={}",
+                                                                    error,
+                                                                    raw_for_diag.get().len(),
+                                                                );
+                                                            }
+                                                        }
+                                                        Err(error.to_string())
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => Err(error.to_string()),
+                                        };
+                                        {
+                                            use std::io::Write;
+                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                .create(true)
+                                                .append(true)
+                                                .open("/tmp/scode-acp-diag.log")
+                                            {
+                                                let summary = match &outcome {
+                                                    Ok(answers) => format!("Ok n_answers={}", answers.len()),
+                                                    Err(e) => format!("Err {}", e),
+                                                };
+                                                let _ = writeln!(
+                                                    f,
+                                                    "[ACP-DIAG] question outcome: {}",
+                                                    summary
+                                                );
+                                            }
+                                        }
+                                        let _ = response_tx.send(outcome);
+                                    } else {
                                         break blocking_handle.await
                                             .unwrap_or(Err(AcpError::internal("blocking task failed")));
                                     }
@@ -909,10 +1161,24 @@ pub(crate) async fn run_acp_on_transport(
             on_receive_request!(),
         )
         // --- catch-all for unhandled methods ---
+        // Only respond with method_not_found for Request/Notification.
+        // Response MUST be passed through (Handled::No) so the SDK's ResponseRouter
+        // can deliver the result to the waiting oneshot channel.
         .on_receive_dispatch(
             async move |dispatch: Dispatch, cx: ConnectionTo<Client>| {
-                dispatch.respond_with_error(Error::method_not_found(), cx)?;
-                Ok(())
+                match &dispatch {
+                    Dispatch::Request(_, _) | Dispatch::Notification(_) => {
+                        dispatch.respond_with_error(Error::method_not_found(), cx)?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Response(_, _) => {
+                        // Pass through to SDK's default ResponseRouter
+                        Ok(Handled::No {
+                            message: dispatch,
+                            retry: false,
+                        })
+                    }
+                }
             },
             on_receive_dispatch!(),
         )

@@ -779,60 +779,83 @@ pub(crate) fn prompt_cache_record_to_runtime_event(
 }
 
 pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-                MessageRole::Assistant => "assistant",
-            };
-            let content = message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => {
-                        Some(InputContentBlock::Text { text: text.clone() })
-                    }
-                    ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
-                        source: ImageSource {
-                            source_type: "base64".to_string(),
-                            media_type: mime_type.clone(),
-                            data: data.clone(),
-                        },
-                    }),
-                    ContentBlock::Thinking { .. } => None,
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        thought_signature,
-                    } => Some(InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                        thought_signature: thought_signature.clone(),
-                    }),
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                        ..
-                    } => Some(InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }],
-                        is_error: *is_error,
-                    }),
-                })
-                .collect::<Vec<_>>();
-            (!content.is_empty()).then(|| InputMessage {
-                role: role.to_string(),
-                content,
+    let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = match message.role {
+            MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
+            MessageRole::Assistant => "assistant",
+        };
+        let content = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
+                ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
+                    source: ImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: mime_type.clone(),
+                        data: data.clone(),
+                    },
+                }),
+                ContentBlock::Thinking { .. } => None,
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    thought_signature,
+                } => Some(InputContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: serde_json::from_str(input)
+                        .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
+                    thought_signature: thought_signature.clone(),
+                }),
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some(InputContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: vec![ToolResultContentBlock::Text {
+                        text: output.clone(),
+                    }],
+                    is_error: *is_error,
+                }),
             })
-        })
-        .collect()
+            .collect::<Vec<_>>();
+        if content.is_empty() {
+            continue;
+        }
+
+        // Merge consecutive Tool-role messages into the previous user-role
+        // InputMessage. The runtime pushes each tool_result as its own
+        // Tool-role ConversationMessage, but Anthropic requires every
+        // `tool_use` in an assistant turn to have its matching `tool_result`
+        // in the SAME next user message — splitting them across consecutive
+        // user messages triggers `messages.N: tool_use ids` 400 errors.
+        // OpenAI and Gemini conversions iterate per content block and emit
+        // their own per-result messages, so merging here is a no-op for them.
+        if matches!(message.role, MessageRole::Tool) {
+            if let Some(last) = result.last_mut() {
+                if last.role == "user"
+                    && last
+                        .content
+                        .iter()
+                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+                {
+                    last.content.extend(content);
+                    continue;
+                }
+            }
+        }
+
+        result.push(InputMessage {
+            role: role.to_string(),
+            content,
+        });
+    }
+    result
 }
 
 pub(crate) fn filter_tool_specs(
@@ -840,4 +863,110 @@ pub(crate) fn filter_tool_specs(
     allowed_tools: Option<&AllowedToolSet>,
 ) -> Vec<ToolDefinition> {
     tool_registry.definitions(allowed_tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_use(id: &str, name: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: MessageRole::Assistant,
+            blocks: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: "{}".to_string(),
+                thought_signature: None,
+            }],
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn tool_use_multi(ids_and_names: &[(&str, &str)]) -> ConversationMessage {
+        ConversationMessage {
+            role: MessageRole::Assistant,
+            blocks: ids_and_names
+                .iter()
+                .map(|(id, name)| ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input: "{}".to_string(),
+                    thought_signature: None,
+                })
+                .collect(),
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn tool_result(id: &str, name: &str, output: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: name.to_string(),
+                output: output.to_string(),
+                is_error: false,
+            }],
+            usage: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn convert_messages_merges_consecutive_tool_results_into_single_user_message() {
+        // Assistant emits two parallel tool_use blocks; runtime appends each
+        // tool_result as its own Tool-role ConversationMessage. Anthropic
+        // requires both tool_results in the same next user message — without
+        // the merge, the second tool_use's id has no matching tool_result in
+        // the immediately-following user turn, triggering a 400 error.
+        let messages = vec![
+            tool_use_multi(&[("call_a", "fn_a"), ("call_b", "fn_b")]),
+            tool_result("call_a", "fn_a", "result_a"),
+            tool_result("call_b", "fn_b", "result_b"),
+        ];
+
+        let converted = convert_messages(&messages);
+
+        assert_eq!(converted.len(), 2, "tool_results must be merged");
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[1].content.len(), 2);
+        for block in &converted[1].content {
+            assert!(matches!(block, InputContentBlock::ToolResult { .. }));
+        }
+    }
+
+    #[test]
+    fn convert_messages_does_not_merge_tool_result_into_plain_user_text() {
+        // If the previous user message is plain text (not a tool_result
+        // bundle), we must not merge a fresh tool_result into it.
+        let messages = vec![
+            ConversationMessage {
+                role: MessageRole::User,
+                blocks: vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                }],
+                usage: None,
+                model: None,
+            },
+            tool_use("call_a", "fn_a"),
+            tool_result("call_a", "fn_a", "ok"),
+        ];
+
+        let converted = convert_messages(&messages);
+
+        assert_eq!(converted.len(), 3);
+        assert_eq!(converted[0].role, "user");
+        assert!(matches!(
+            converted[0].content[0],
+            InputContentBlock::Text { .. }
+        ));
+        assert_eq!(converted[2].role, "user");
+        assert!(matches!(
+            converted[2].content[0],
+            InputContentBlock::ToolResult { .. }
+        ));
+    }
 }

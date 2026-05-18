@@ -1897,6 +1897,21 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         self.run_prompt_impl(session_id, prompt, observer, Some(prompter))
     }
 
+    fn set_question_prompter(
+        &mut self,
+        session_id: &str,
+        prompter: Box<dyn runtime::QuestionPrompter>,
+    ) -> Result<(), runtime::AcpError> {
+        let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
+            runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
+        })?;
+        session
+            .runtime
+            .tool_executor_mut()
+            .set_question_prompter(prompter);
+        Ok(())
+    }
+
     fn handle_slash_command(
         &mut self,
         session_id: &str,
@@ -2274,7 +2289,6 @@ impl AcpSdkDelegate {
                 return Err(runtime::AcpError::internal(user_message));
             }
         }
-
         self.inner
             .tokio_runtime
             .block_on(session.runtime.run_turn(prompt, prompter, Some(observer)))

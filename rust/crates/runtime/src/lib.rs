@@ -136,7 +136,8 @@ pub use oauth::{
 };
 pub use permissions::{
     PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
-    PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    PermissionPromptDecision, PermissionPrompter, PermissionRequest, QuestionField, QuestionKind,
+    QuestionOption, QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 pub use plugin_lifecycle::{
     DegradedMode, DiscoveryResult, PluginHealthcheck, PluginLifecycle, PluginLifecycleEvent,

@@ -3976,6 +3976,12 @@ fn build_runtime_with_plugin_state(
         .map_err(std::io::Error::other)?;
     let system_prompt = config.system_prompt.clone();
     let emit_output = config.emit_output;
+    // Use the session-creation date (not "today") so a resumed session whose
+    // calendar date has rolled over since creation triggers the
+    // `<system-reminder>` injected by ConversationRuntime. Passing
+    // `today_local()` here would always equal the runtime's `current_local_date()`
+    // on resume, suppressing the reminder.
+    let session_start_date = runtime::local_date_from_millis(session.created_at_ms);
     let mut runtime = ConversationRuntime::new_with_features(
         session,
         AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone())?,
@@ -3989,7 +3995,7 @@ fn build_runtime_with_plugin_state(
         system_prompt,
         &feature_config,
     )
-    .with_session_known_date(runtime::today_local());
+    .with_session_known_date(session_start_date);
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }

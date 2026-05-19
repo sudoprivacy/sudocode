@@ -1342,10 +1342,9 @@ fn run_repl(
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        let term_width = crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or(80);
-        let separator = format!("\x1b[2m{}\x1b[0m", "─".repeat(term_width));
+        // Re-derive width each iteration so the chrome adapts on terminal resize.
+        let term_width = input::terminal_width();
+        let separator = input::input_bar_separator(term_width);
         let footer = "  \x1b[2m/help · /status · Tab for /commands\x1b[0m";
         // Print the entire input chrome block: top sep, prompt placeholder,
         // bottom sep, footer.  Then move the cursor back to the prompt line

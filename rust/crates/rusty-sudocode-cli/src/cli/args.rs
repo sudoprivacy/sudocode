@@ -873,6 +873,55 @@ fn is_help_flag(value: &str) -> bool {
     value == "--help" || value == "-h"
 }
 
+fn local_help_topic_for_subcommand(subcommand: &str) -> Option<LocalHelpTopic> {
+    match subcommand {
+        "status" => Some(LocalHelpTopic::Status),
+        "sandbox" => Some(LocalHelpTopic::Sandbox),
+        "doctor" => Some(LocalHelpTopic::Doctor),
+        "acp" => Some(LocalHelpTopic::Acp),
+        "init" => Some(LocalHelpTopic::Init),
+        "state" => Some(LocalHelpTopic::State),
+        "export" => Some(LocalHelpTopic::Export),
+        "version" => Some(LocalHelpTopic::Version),
+        "system-prompt" => Some(LocalHelpTopic::SystemPrompt),
+        "dump-manifests" => Some(LocalHelpTopic::DumpManifests),
+        "bootstrap-plan" => Some(LocalHelpTopic::BootstrapPlan),
+        _ => None,
+    }
+}
+
+fn global_option_takes_value(value: &str) -> bool {
+    let flag = value.split_once('=').map_or(value, |(flag, _)| flag);
+    matches!(
+        flag,
+        "--model"
+            | "--auth"
+            | "--output-format"
+            | "--permission-mode"
+            | "--allowedTools"
+            | "--allowed-tools"
+            | "--base-commit"
+            | "--reasoning-effort"
+    )
+}
+
+fn local_help_topic_from_args(args: &[String]) -> Option<LocalHelpTopic> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if !arg.starts_with('-') {
+            return local_help_topic_for_subcommand(arg);
+        }
+
+        i += if global_option_takes_value(arg) && !arg.contains('=') {
+            2
+        } else {
+            1
+        };
+    }
+    None
+}
+
 /// Detect `<subcommand> --help [--output-format json]` before clap parses args.
 /// Returns `Some(Ok(..))` when matched, `None` otherwise.
 fn parse_local_help_action(args: &[String]) -> Option<Result<CliAction, String>> {
@@ -904,22 +953,7 @@ fn parse_local_help_action(args: &[String]) -> Option<Result<CliAction, String>>
         }
     }
 
-    // The first non-flag arg should be the subcommand
-    let subcommand = args[0].as_str();
-    let topic = match subcommand {
-        "status" => LocalHelpTopic::Status,
-        "sandbox" => LocalHelpTopic::Sandbox,
-        "doctor" => LocalHelpTopic::Doctor,
-        "acp" => LocalHelpTopic::Acp,
-        "init" => LocalHelpTopic::Init,
-        "state" => LocalHelpTopic::State,
-        "export" => LocalHelpTopic::Export,
-        "version" => LocalHelpTopic::Version,
-        "system-prompt" => LocalHelpTopic::SystemPrompt,
-        "dump-manifests" => LocalHelpTopic::DumpManifests,
-        "bootstrap-plan" => LocalHelpTopic::BootstrapPlan,
-        _ => return None,
-    };
+    let topic = local_help_topic_from_args(args)?;
     Some(Ok(CliAction::HelpTopic {
         topic,
         output_format,

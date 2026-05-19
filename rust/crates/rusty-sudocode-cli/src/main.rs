@@ -1342,9 +1342,7 @@ fn run_repl(
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        let term_width = crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or(80);
+        let term_width = terminal_width();
         let separator = format!("\x1b[2m{}\x1b[0m", "─".repeat(term_width));
         let footer = "  \x1b[2m/help · /status · Tab for /commands\x1b[0m";
         // Print the entire input chrome block: top sep, prompt placeholder,
@@ -2381,6 +2379,16 @@ impl HookAbortMonitor {
             let _ = join_handle.join();
         }
     }
+}
+
+/// Query the current terminal width in columns, clamped to a minimum of 20.
+///
+/// Falls back to 80 columns when the terminal size cannot be determined (e.g.
+/// piped output or non-tty environments).
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| (cols as usize).max(20))
+        .unwrap_or(80)
 }
 
 /// Measure visible string width by stripping ANSI escape sequences.

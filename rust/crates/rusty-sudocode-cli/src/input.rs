@@ -375,3 +375,64 @@ fn normalize_completions(completions: Vec<(String, String)>) -> Vec<(String, Str
         .filter(|(cmd, _)| seen.insert(cmd.clone()))
         .collect()
 }
+
+/// Minimum width for the input bar's horizontal rules, in columns.
+/// Guards against degenerate output on extremely narrow or unknown terminals.
+const MIN_BAR_WIDTH: usize = 10;
+
+/// Width fallback when `crossterm::terminal::size()` can't determine the pane size
+/// (e.g. piped stdout, detached PTY).
+const FALLBACK_BAR_WIDTH: usize = 80;
+
+/// Current terminal column count, clamped to at least [`MIN_BAR_WIDTH`].
+/// Re-read each call so the input chrome adapts to terminal resizes between paints.
+#[must_use]
+pub fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(FALLBACK_BAR_WIDTH)
+        .max(MIN_BAR_WIDTH)
+}
+
+/// Build the dimmed horizontal rule that brackets the REPL input prompt.
+/// `width` is the visible column count of the rule.
+#[must_use]
+pub fn input_bar_separator(width: usize) -> String {
+    let width = width.max(MIN_BAR_WIDTH);
+    format!("\x1b[2m{}\x1b[0m", "─".repeat(width))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{input_bar_separator, MIN_BAR_WIDTH};
+
+    fn count_rule_chars(s: &str) -> usize {
+        s.chars().filter(|c| *c == '─').count()
+    }
+
+    #[test]
+    fn separator_matches_requested_width() {
+        for width in [20, 80, 120, 200] {
+            let sep = input_bar_separator(width);
+            assert_eq!(count_rule_chars(&sep), width, "width={width}");
+        }
+    }
+
+    #[test]
+    fn separator_floors_at_minimum_width() {
+        // 0 / very-narrow terminals must still produce a visible, non-empty rule.
+        assert_eq!(count_rule_chars(&input_bar_separator(0)), MIN_BAR_WIDTH);
+        assert_eq!(count_rule_chars(&input_bar_separator(1)), MIN_BAR_WIDTH);
+        assert_eq!(
+            count_rule_chars(&input_bar_separator(MIN_BAR_WIDTH - 1)),
+            MIN_BAR_WIDTH
+        );
+    }
+
+    #[test]
+    fn separator_is_styled_dim() {
+        let sep = input_bar_separator(40);
+        assert!(sep.starts_with("\x1b[2m"), "expected dim SGR prefix");
+        assert!(sep.ends_with("\x1b[0m"), "expected SGR reset suffix");
+    }
+}

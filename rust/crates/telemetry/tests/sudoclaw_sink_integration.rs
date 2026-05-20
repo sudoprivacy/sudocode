@@ -73,24 +73,31 @@ fn multiple_events_in_sequence() {
 
     sink.record(TelemetryEvent::HttpRequestStarted {
         session_id: "trace-test".to_string(),
+        request_id: "req_test-001".to_string(),
         attempt: 1,
         method: "POST".to_string(),
         path: "/v1/messages".to_string(),
+        timestamp_ms: 1500,
         attributes: serde_json::Map::new(),
     });
 
     sink.record(TelemetryEvent::HttpRequestSucceeded {
         session_id: "trace-test".to_string(),
+        request_id: "req_test-001".to_string(),
         attempt: 1,
         method: "POST".to_string(),
         path: "/v1/messages".to_string(),
         status: 200,
-        request_id: Some("req-123".to_string()),
+        start_timestamp_ms: 1500,
+        end_timestamp_ms: 2000,
+        duration_ms: 500,
+        provider_request_id: Some("req-123".to_string()),
         attributes: serde_json::Map::new(),
     });
 
     sink.record(TelemetryEvent::HttpResponseUsage {
         session_id: "trace-test".to_string(),
+        request_id: "req_test-001".to_string(),
         timestamp_ms: 2000,
         input_tokens: 500,
         output_tokens: 200,

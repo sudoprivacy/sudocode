@@ -454,6 +454,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let total_turns = cli.runtime.usage().turns();
             if let Some(tracer) = cli.session_tracer() {
                 tracer.record_usage(
+                    "session_summary".to_string(),
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cache_creation_input_tokens,
@@ -1426,6 +1427,7 @@ fn run_repl(
     let total_turns = cli.runtime.usage().turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
+            "session_summary".to_string(),
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_creation_input_tokens,
@@ -2040,6 +2042,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             let total_turns = session.runtime.usage().turns();
             if let Some(tracer) = session.runtime.session_tracer() {
                 tracer.record_usage(
+                    "session_summary".to_string(),
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cache_creation_input_tokens,
@@ -2319,6 +2322,7 @@ impl AcpSdkDelegate {
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
             tracer.record_usage(
+                "session_summary".to_string(),
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_creation_input_tokens,

@@ -251,6 +251,7 @@ impl OpenAiCompatClient {
         self.http
             .send_json(&url, &headers, &body, &self.retry_policy, expect_success)
             .await
+            .map(|result| result.response)
     }
 }
 

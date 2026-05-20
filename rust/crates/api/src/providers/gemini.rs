@@ -335,7 +335,7 @@ impl GeminiClient {
             headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
 
-        let response = self
+        let result = self
             .http
             .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
                 check_gemini_response(response)
@@ -343,7 +343,7 @@ impl GeminiClient {
             .await?;
 
         Ok(MessageStream {
-            response,
+            response: result.response,
             parser: SseParser::new(),
             pending: VecDeque::new(),
             done: false,

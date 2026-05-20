@@ -168,7 +168,7 @@ impl CodexClient {
             ("originator".to_string(), "codex_cli_rs".to_string()),
         ];
 
-        let response = self
+        let result = self
             .http
             .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
                 check_codex_response(response)
@@ -176,7 +176,7 @@ impl CodexClient {
             .await?;
 
         Ok(MessageStream {
-            response,
+            response: result.response,
             parser: SseParser::new(),
             pending: VecDeque::new(),
             done: false,

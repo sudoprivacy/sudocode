@@ -198,53 +198,45 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     );
 
     let events = sink.events();
-    assert_eq!(events.len(), 7);
+    // After optimization: no more duplicate SessionTrace records
+    // Events: HttpRequestStarted, HttpRequestDebug, HttpRequestSucceeded, Analytics
+    assert_eq!(events.len(), 4);
     assert!(matches!(
         &events[0],
         TelemetryEvent::HttpRequestStarted {
             session_id,
+            request_id,
             attempt: 1,
             method,
             path,
             ..
-        } if session_id == "session-telemetry" && method == "POST" && path == "/v1/messages"
+        } if session_id == "session-telemetry" && request_id.starts_with("req_") && method == "POST" && path == "/v1/messages"
     ));
     assert!(matches!(
         &events[1],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_started"
-    ));
-    assert!(matches!(
-        &events[2],
         TelemetryEvent::HttpRequestDebug {
+            request_id,
             method,
             url,
             ..
-        } if method == "POST" && url.contains("/v1/messages")
+        } if request_id.starts_with("req_") && method == "POST" && url.contains("/v1/messages")
+    ));
+    assert!(matches!(
+        &events[2],
+        TelemetryEvent::HttpRequestSucceeded {
+            request_id,
+            provider_request_id,
+            status: 200,
+            ..
+        } if request_id.starts_with("req_") && provider_request_id.as_deref() == Some("req_profile_123")
     ));
     assert!(matches!(
         &events[3],
-        TelemetryEvent::HttpRequestSucceeded {
-            request_id,
-            status: 200,
-            ..
-        } if request_id.as_deref() == Some("req_profile_123")
-    ));
-    assert!(matches!(
-        &events[4],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_succeeded"
-    ));
-    assert!(matches!(
-        &events[5],
         TelemetryEvent::Analytics(event)
             if event.namespace == "api"
                 && event.action == "message_usage"
-                && event.properties.get("request_id") == Some(&json!("req_profile_123"))
                 && event.properties.get("total_tokens") == Some(&json!(7))
                 && event.properties.get("estimated_cost_usd") == Some(&json!("$0.0001"))
-    ));
-    assert!(matches!(
-        &events[6],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "analytics"
     ));
 }
 

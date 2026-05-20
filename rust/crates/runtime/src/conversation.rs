@@ -193,6 +193,12 @@ pub struct ConversationRuntime<C, T> {
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter + Send>>,
     session_tracer: Option<SessionTracer>,
+    /// File operation tracker for the current turn.
+    file_tracker: crate::file_tracker::TurnFileTracker,
+    /// Current turn ID for file tracking.
+    current_turn_id: Option<String>,
+    /// User request intent for the current turn.
+    user_request_intent: Option<crate::file_intent::UserRequestIntent>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -229,6 +235,10 @@ where
         feature_config: &RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
+        let workspace_root = session
+            .workspace_root()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         Self {
             session,
             api_client,
@@ -245,6 +255,9 @@ where
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
             session_tracer: None,
+            file_tracker: crate::file_tracker::TurnFileTracker::new(workspace_root),
+            current_turn_id: None,
+            user_request_intent: None,
         }
     }
 
@@ -440,6 +453,7 @@ where
     /// 3. For every `tool_use` block in that partial message, generate a
     ///    synthetic `tool_result` with `is_error: true` so the API contract
     ///    (every `tool_use` must have a matching `tool_result`) is maintained.
+    /// 4. Cleanup draft files created during this turn.
     fn finalize_cancelled_turn(&mut self, events: Vec<AssistantEvent>) {
         // Build partial assistant message from whatever events arrived.
         let mut text = String::new();
@@ -510,6 +524,13 @@ where
                 true,
             ));
         }
+
+        // Cleanup draft files created during this turn.
+        let cleaned = self.cleanup_current_turn_drafts();
+        if !cleaned.is_empty() {
+            // Log cleaned files for debugging (could be sent to observer in future)
+            // Note: This is silent cleanup, no token consumption
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -557,6 +578,21 @@ where
                 )));
             }
         }
+
+        // Start file tracking for this turn
+        let turn_id = format!(
+            "turn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        self.current_turn_id = Some(turn_id.clone());
+        self.file_tracker.start_turn(turn_id.clone());
+
+        // Analyze user request for file intent
+        self.user_request_intent = Some(crate::file_intent::UserRequestIntent::analyze(&label));
 
         self.record_turn_started(&label);
         self.session
@@ -800,6 +836,11 @@ where
 
         let auto_compaction = self.maybe_auto_compact();
 
+        // End file tracking for this turn
+        self.file_tracker.end_turn();
+        self.current_turn_id = None;
+        self.user_request_intent = None;
+
         let summary = TurnSummary {
             assistant_messages,
             tool_results,
@@ -859,6 +900,49 @@ where
 
     pub fn session_mut(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    /// Access the file tracker for the current turn.
+    #[must_use]
+    pub fn file_tracker(&self) -> &crate::file_tracker::TurnFileTracker {
+        &self.file_tracker
+    }
+
+    /// Access the file tracker mutably.
+    pub fn file_tracker_mut(&mut self) -> &mut crate::file_tracker::TurnFileTracker {
+        &mut self.file_tracker
+    }
+
+    /// Get the current turn ID.
+    #[must_use]
+    pub fn current_turn_id(&self) -> Option<&str> {
+        self.current_turn_id.as_deref()
+    }
+
+    /// Get the user request intent for the current turn.
+    #[must_use]
+    pub fn user_request_intent(&self) -> Option<&crate::file_intent::UserRequestIntent> {
+        self.user_request_intent.as_ref()
+    }
+
+    /// Cleanup draft files for the current turn (call on abort).
+    /// Returns paths of cleaned files.
+    pub fn cleanup_current_turn_drafts(&mut self) -> Vec<std::path::PathBuf> {
+        if let Some(turn_id) = self.current_turn_id.clone() {
+            self.file_tracker.cleanup_turn_drafts(&turn_id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Rollback all file operations for the current turn (call on abort).
+    /// Returns error messages for failed operations.
+    pub fn rollback_current_turn(&mut self) -> Vec<String> {
+        if let Some(turn_id) = self.current_turn_id.clone() {
+            self.file_tracker.rollback_turn(&turn_id)
+        } else {
+            Vec::new()
+        }
     }
 
     #[must_use]

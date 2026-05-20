@@ -9,7 +9,15 @@ use std::path::{Path, PathBuf};
 
 /// Directories to skip during scanning.
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", "build", "vendor", ".venv", "venv", "__pycache__",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
     ".drafts",
 ];
 

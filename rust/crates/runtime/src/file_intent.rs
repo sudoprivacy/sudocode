@@ -254,15 +254,12 @@ const DRAFT_EXTENSIONS: &[&str] = &[".tmp", ".temp", ".bak", ".backup", ".log", 
 /// Final file extensions.
 const FINAL_EXTENSIONS: &[&str] = &[
     // Documents
-    ".md", ".txt", ".pdf", ".docx", ".pptx",
-    // Data files
+    ".md", ".txt", ".pdf", ".docx", ".pptx", // Data files
     ".json", ".yaml", ".yml", ".csv", ".xlsx",
     // Code files (user may explicitly request)
-    ".py", ".sh", ".bash", ".zsh", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".kt",
-    ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".lua",
-    // Config files
-    ".toml", ".ini", ".conf", ".cfg",
-    // Web/images
+    ".py", ".sh", ".bash", ".zsh", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".kt", ".c",
+    ".cpp", ".h", ".hpp", ".rb", ".php", ".lua", // Config files
+    ".toml", ".ini", ".conf", ".cfg", // Web/images
     ".html", ".css", ".scss", ".png", ".jpg", ".svg",
 ];
 
@@ -444,13 +441,19 @@ mod tests {
 
     #[test]
     fn test_detect_file_intent_draft_pattern() {
-        assert_eq!(detect_file_intent("temp_script.py", "", None), FileIntent::Draft);
+        assert_eq!(
+            detect_file_intent("temp_script.py", "", None),
+            FileIntent::Draft
+        );
     }
 
     #[test]
     fn test_detect_file_intent_final_extension() {
         assert_eq!(detect_file_intent("report.md", "", None), FileIntent::Final);
-        assert_eq!(detect_file_intent("process.py", "", None), FileIntent::Final);
+        assert_eq!(
+            detect_file_intent("process.py", "", None),
+            FileIntent::Final
+        );
     }
 
     #[test]

@@ -90,12 +90,12 @@ pub use conversation::{
     AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
     RuntimeObserver, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
 };
+pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{
     edit_file, edit_file_with_intent, glob_search, grep_search, read_file, write_file,
     write_file_with_intent, EditFileOutput, FileOpResult, GlobSearchOutput, GrepSearchInput,
     GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
-pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS_DIR_NAME};
 pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
 pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};

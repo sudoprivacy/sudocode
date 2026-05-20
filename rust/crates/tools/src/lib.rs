@@ -2339,8 +2339,12 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
     };
 
     to_pretty_json(
-        write_file(&StdFsBackend, actual_path.to_str().unwrap_or(&input.path), &input.content)
-            .map_err(io_to_string)?,
+        write_file(
+            &StdFsBackend,
+            actual_path.to_str().unwrap_or(&input.path),
+            &input.content,
+        )
+        .map_err(io_to_string)?,
     )
 }
 

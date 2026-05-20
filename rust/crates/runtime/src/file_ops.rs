@@ -751,6 +751,131 @@ fn expand_braces(pattern: &str) -> Vec<String> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// File Intent-aware operations
+// ---------------------------------------------------------------------------
+
+use crate::file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
+use crate::file_redirect::redirect_to_drafts;
+use crate::file_tracker::FileOp;
+
+/// Result of a file operation with intent tracking.
+#[derive(Debug)]
+pub struct FileOpResult<T> {
+    /// The original file operation result.
+    pub output: T,
+
+    /// The actual path written (may differ from requested if redirected).
+    pub actual_path: String,
+
+    /// File operation record for tracking.
+    pub file_op: Option<FileOp>,
+}
+
+/// Write a file with intent detection.
+///
+/// If the file is classified as Draft, it will be redirected to `.drafts/`.
+/// Returns the result along with file operation tracking info.
+pub fn write_file_with_intent(
+    fs: &dyn FsBackend,
+    path: &str,
+    content: &str,
+    workspace_root: &Path,
+    user_intent: Option<&UserRequestIntent>,
+) -> io::Result<FileOpResult<WriteFileOutput>> {
+    // Detect file intent
+    let intent = detect_file_intent(path, content, user_intent);
+
+    // Determine actual path
+    let requested_path = Path::new(path);
+    let actual_path = if intent == FileIntent::Draft {
+        redirect_to_drafts(requested_path, workspace_root)
+    } else {
+        requested_path.to_path_buf()
+    };
+
+    let actual_path_str = actual_path.to_string_lossy().into_owned();
+
+    // Check if file exists (for determining Create vs Edit)
+    let original_content = fs.read_to_string(&actual_path_str).ok();
+    let kind = if original_content.is_some() {
+        FileOpKind::Edit
+    } else {
+        FileOpKind::Create
+    };
+
+    // Perform the write
+    let output = write_file(fs, &actual_path_str, content)?;
+
+    // Create file operation record
+    let file_op = FileOp {
+        path: actual_path.clone(),
+        kind,
+        intent,
+        original_content,
+        requested_path: requested_path.to_path_buf(),
+    };
+
+    Ok(FileOpResult {
+        output,
+        actual_path: actual_path_str,
+        file_op: Some(file_op),
+    })
+}
+
+/// Edit a file with intent detection.
+///
+/// If the edited file becomes classified as Draft, it will be moved to `.drafts/`.
+/// Returns the result along with file operation tracking info.
+pub fn edit_file_with_intent(
+    fs: &dyn FsBackend,
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    workspace_root: &Path,
+    user_intent: Option<&UserRequestIntent>,
+) -> io::Result<FileOpResult<EditFileOutput>> {
+    let requested_path = Path::new(path);
+
+    // Read original content first
+    let original_content = fs.read_to_string(path)?;
+
+    // Perform the edit
+    let output = edit_file(fs, path, old_string, new_string, replace_all)?;
+
+    // Detect intent from edited content
+    let edited_content = fs.read_to_string(path)?;
+    let intent = detect_file_intent(path, &edited_content, user_intent);
+
+    // Determine actual path (may need to move to .drafts/)
+    let actual_path = if intent == FileIntent::Draft {
+        let dest = redirect_to_drafts(requested_path, workspace_root);
+        // Move the file
+        fs.rename(path, &dest.to_string_lossy())?;
+        dest
+    } else {
+        requested_path.to_path_buf()
+    };
+
+    let actual_path_str = actual_path.to_string_lossy().into_owned();
+
+    // Create file operation record
+    let file_op = FileOp {
+        path: actual_path.clone(),
+        kind: FileOpKind::Edit,
+        intent,
+        original_content: Some(original_content),
+        requested_path: requested_path.to_path_buf(),
+    };
+
+    Ok(FileOpResult {
+        output,
+        actual_path: actual_path_str,
+        file_op: Some(file_op),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

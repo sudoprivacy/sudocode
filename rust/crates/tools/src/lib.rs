@@ -2328,15 +2328,46 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    to_pretty_json(write_file(&StdFsBackend, &input.path, &input.content).map_err(io_to_string)?)
+    // Detect file intent and redirect if draft
+    let intent = runtime::detect_file_intent(&input.path, &input.content, None);
+    let actual_path = match intent {
+        runtime::FileIntent::Draft => {
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+        }
+        runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
+    };
+
+    to_pretty_json(
+        write_file(&StdFsBackend, actual_path.to_str().unwrap_or(&input.path), &input.content)
+            .map_err(io_to_string)?,
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput) -> Result<String, String> {
+    // Read existing content for intent detection
+    let existing_content = std::fs::read_to_string(&input.path).ok();
+    let content_for_detection = existing_content.as_deref().unwrap_or(&input.new_string);
+
+    // Detect file intent
+    let intent = runtime::detect_file_intent(&input.path, content_for_detection, None);
+
+    // Draft files should not be edited from workspace root - they're in .drafts/
+    // If file is draft and not in .drafts/, redirect
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let actual_path = if intent == runtime::FileIntent::Draft
+        && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+    {
+        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+    } else {
+        std::path::PathBuf::from(&input.path)
+    };
+
     to_pretty_json(
         edit_file(
             &StdFsBackend,
-            &input.path,
+            actual_path.to_str().unwrap_or(&input.path),
             &input.old_string,
             &input.new_string,
             input.replace_all.unwrap_or(false),

@@ -317,6 +317,49 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
 }
 
+// ---------------------------------------------------------------------------
+// Bash with file change tracking
+// ---------------------------------------------------------------------------
+
+use crate::file_snapshot::FileChangeSnapshotWithMtime;
+
+/// Result of bash execution with file change tracking.
+#[derive(Debug)]
+pub struct BashWithTrackingResult {
+    /// The original bash output.
+    pub output: BashCommandOutput,
+
+    /// File changes detected during execution.
+    pub file_changes: FileChangeSnapshotWithMtime,
+}
+
+/// Execute a bash command with file change tracking.
+///
+/// Captures a snapshot before and after execution to detect
+/// files created or modified by the command.
+pub fn execute_bash_with_tracking(
+    input: BashCommandInput,
+    workspace_root: Option<&std::path::Path>,
+) -> io::Result<BashWithTrackingResult> {
+    let cwd = workspace_root
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| env::current_dir().unwrap_or_default());
+
+    // Capture before snapshot
+    let mut snapshot = FileChangeSnapshotWithMtime::capture_before(&cwd);
+
+    // Execute the command
+    let output = execute_bash(input)?;
+
+    // Capture after snapshot
+    snapshot.capture_after(&cwd);
+
+    Ok(BashWithTrackingResult {
+        output,
+        file_changes: snapshot,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{execute_bash, BashCommandInput};

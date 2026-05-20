@@ -123,7 +123,8 @@ mod tests {
 
     #[test]
     fn test_redirect_with_collision() {
-        let tmp_dir = std::env::temp_dir().join(format!("scode-test-collision-{}", std::process::id()));
+        let dir_name = format!("scode-test-collision-{}", std::process::id());
+        let tmp_dir = std::env::temp_dir().join(dir_name);
         fs::create_dir_all(&tmp_dir).expect("create temp dir");
 
         // Create existing file in drafts

@@ -234,7 +234,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let tmp_dir = std::env::temp_dir().join(format!("scode-snapshot-test-{}-{}", std::process::id(), unique_id));
+        let dir_name = format!("scode-snapshot-test-{}-{}", std::process::id(), unique_id);
+        let tmp_dir = std::env::temp_dir().join(dir_name);
 
         // Ensure clean state
         if tmp_dir.exists() {

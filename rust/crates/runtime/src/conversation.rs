@@ -235,7 +235,8 @@ where
         feature_config: &RuntimeFeatureConfig,
     ) -> Self {
         let usage_tracker = UsageTracker::from_session(&session);
-        let workspace_root = session.workspace_root()
+        let workspace_root = session
+            .workspace_root()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
         Self {

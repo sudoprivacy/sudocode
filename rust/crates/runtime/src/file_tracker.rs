@@ -161,7 +161,11 @@ impl TurnFileTracker {
     }
 
     /// Cleanup with specified strategy.
-    pub fn cleanup_with_strategy(&mut self, turn_id: &str, strategy: CleanupStrategy) -> CleanupResult {
+    pub fn cleanup_with_strategy(
+        &mut self,
+        turn_id: &str,
+        strategy: CleanupStrategy,
+    ) -> CleanupResult {
         match strategy {
             CleanupStrategy::DraftsOnly => {
                 let cleaned = self.cleanup_turn_drafts(turn_id);
@@ -220,7 +224,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let tmp_dir = std::env::temp_dir().join(format!("scode-tracker-test-{}-{}", std::process::id(), unique_id));
+        let dir_name = format!("scode-tracker-test-{}-{}", std::process::id(), unique_id);
+        let tmp_dir = std::env::temp_dir().join(dir_name);
 
         // Ensure clean state
         if tmp_dir.exists() {

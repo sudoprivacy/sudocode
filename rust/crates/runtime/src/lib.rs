@@ -62,7 +62,10 @@ mod usage;
 pub mod worker_boot;
 
 pub use acp_sdk_server::AcpError;
-pub use bash::{execute_bash, execute_bash_with_tracking, BashCommandInput, BashCommandOutput, BashWithTrackingResult};
+pub use bash::{
+    execute_bash, execute_bash_with_tracking, BashCommandInput, BashCommandOutput,
+    BashWithTrackingResult,
+};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{

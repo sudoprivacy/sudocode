@@ -1506,6 +1506,15 @@ impl BuiltRuntime {
         self
     }
 
+    fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("runtime should exist before overriding session known date");
+        self.runtime = Some(runtime.with_session_known_date(date));
+        self
+    }
+
     fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.plugins_active {
             self.plugin_registry.shutdown()?;
@@ -2575,7 +2584,14 @@ impl LiveCli {
         emit_output: bool,
     ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
         let hook_abort_signal = runtime::HookAbortSignal::new();
-        let runtime = build_runtime(
+        // `build_runtime` stamps `prompt_known_date` with today's local date,
+        // which is correct only for a freshly-created runtime. The REPL
+        // rebuilds the runtime on every turn, so without carrying this date
+        // forward a long-running session that crosses midnight would have its
+        // known date silently advanced to today on every turn — suppressing
+        // the date-rollover reminder added in #128 (see issue #135).
+        let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
+        let mut runtime = build_runtime(
             self.runtime.session().clone(),
             &self.session.id,
             RuntimeConfig {
@@ -2584,6 +2600,9 @@ impl LiveCli {
             },
         )?
         .with_hook_abort_signal(hook_abort_signal.clone());
+        if let Some(known) = inherited_known_date {
+            runtime = runtime.with_session_known_date(known);
+        }
         let hook_abort_monitor = HookAbortMonitor::spawn(hook_abort_signal);
 
         Ok((runtime, hook_abort_monitor))

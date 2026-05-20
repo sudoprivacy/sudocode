@@ -271,6 +271,17 @@ where
         self
     }
 
+    /// Date currently treated as "when the cached system prompt was frozen".
+    /// Exposed so the CLI can propagate this state across runtime rebuilds —
+    /// the runtime advances it after firing a date-rollover reminder, and a
+    /// rebuild that didn't carry it forward would reset the state and re-fire
+    /// the reminder (or suppress it entirely when the rebuild stamps today's
+    /// date over the original known date).
+    #[must_use]
+    pub fn prompt_known_date(&self) -> Option<&str> {
+        self.prompt_known_date.as_deref()
+    }
+
     #[must_use]
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
@@ -2662,6 +2673,77 @@ mod tests {
             second_turn_user_blocks.len(),
             1,
             "reminder must not repeat after rollover acknowledged"
+        );
+        assert!(matches!(
+            &second_turn_user_blocks[0],
+            ContentBlock::Text { text } if text == "second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn prompt_known_date_advances_after_rollover_and_can_be_carried_over() {
+        // Models the CLI rebuild path: a fresh runtime inherits the previous
+        // runtime's `prompt_known_date()` so the rollover reminder fires
+        // exactly once per actual date change, even when the runtime is
+        // reconstructed every turn (see issue #135).
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut first = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        first.today_override = Some("2026-05-19".to_string());
+
+        first
+            .run_turn("first", None, None)
+            .await
+            .expect("first turn");
+        // Reminder fires and the runtime advances its known date to today.
+        assert_eq!(first.prompt_known_date(), Some("2026-05-19"));
+
+        let carried = first
+            .prompt_known_date()
+            .expect("known date should be set")
+            .to_string();
+
+        // Simulate `prepare_turn_runtime` rebuilding the runtime for the next
+        // turn while inheriting the advanced known date from the previous
+        // runtime.
+        let mut second = ConversationRuntime::new(
+            first.session().clone(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date(carried);
+        second.today_override = Some("2026-05-19".to_string());
+
+        second
+            .run_turn("second", None, None)
+            .await
+            .expect("second turn");
+
+        let requests = captured.lock().expect("captured mutex");
+        let second_turn_user_blocks = requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .last()
+            .expect("user message")
+            .blocks
+            .clone();
+        assert_eq!(
+            second_turn_user_blocks.len(),
+            1,
+            "carrying over the advanced known date must suppress a duplicate reminder"
         );
         assert!(matches!(
             &second_turn_user_blocks[0],

@@ -202,8 +202,8 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
 
     let events = sink.events();
     // After optimization: no more duplicate SessionTrace records
-    // Events: HttpRequestStarted, HttpRequestDebug, HttpRequestSucceeded, Analytics
-    assert_eq!(events.len(), 4);
+    // Events: HttpRequestStarted, HttpRequestDebug, HttpResponseDebug, HttpRequestSucceeded, Analytics
+    assert_eq!(events.len(), 5);
     assert!(matches!(
         &events[0],
         TelemetryEvent::HttpRequestStarted {
@@ -226,6 +226,15 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     ));
     assert!(matches!(
         &events[2],
+        TelemetryEvent::HttpResponseDebug {
+            session_id,
+            request_id,
+            status: 200,
+            ..
+        } if session_id == "session-telemetry" && request_id.starts_with("req_")
+    ));
+    assert!(matches!(
+        &events[3],
         TelemetryEvent::HttpRequestSucceeded {
             request_id,
             provider_request_id,
@@ -234,7 +243,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
         } if request_id.starts_with("req_") && provider_request_id.as_deref() == Some("req_profile_123")
     ));
     assert!(matches!(
-        &events[3],
+        &events[4],
         TelemetryEvent::Analytics(event)
             if event.namespace == "api"
                 && event.action == "message_usage"

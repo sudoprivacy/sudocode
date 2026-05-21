@@ -165,6 +165,7 @@ pub trait SdkAcpDelegate: Send + 'static {
         session_id: &str,
         prompt: String,
         observer: &mut SdkSessionObserver,
+        trace_id: Option<&str>,
     ) -> Result<(StopReason, Option<PromptUsage>), AcpError>;
 
     /// Run a prompt with permission prompting bridged to the ACP client.
@@ -174,6 +175,7 @@ pub trait SdkAcpDelegate: Send + 'static {
         prompt: String,
         observer: &mut SdkSessionObserver,
         prompter: &mut dyn PermissionPrompter,
+        trace_id: Option<&str>,
     ) -> Result<(StopReason, Option<PromptUsage>), AcpError>;
 
     /// Install a question prompter for AskUserQuestion tool execution within a session.
@@ -667,6 +669,11 @@ pub(crate) async fn run_acp_on_transport(
                         return Ok(());
                     }
 
+                    // Extract traceId from _meta if present
+                    let trace_id = req.meta.as_ref().and_then(|m| {
+                        m.get("traceId").and_then(|v| v.as_str().map(String::from))
+                    });
+
                     let d = Arc::clone(&delegate);
                     let sid = req.session_id.to_string();
                     let cx_inner = cx.clone();
@@ -691,6 +698,7 @@ pub(crate) async fn run_acp_on_transport(
                         let sid_for_perm = sid.clone();
                         let images_for_blocking = images.clone();
                         let prompt_text_for_blocking = prompt_text.clone();
+                        let trace_id_for_blocking = trace_id.clone();
                         let blocking_handle = tokio::task::spawn_blocking(move || {
                             let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
                             let mut bridge = AcpPermissionBridge { tx: bridge_tx };
@@ -737,6 +745,7 @@ pub(crate) async fn run_acp_on_transport(
                                     prompt_text_for_blocking,
                                     &mut observer,
                                     &mut bridge,
+                                    trace_id_for_blocking.as_deref(),
                                 )
                             };
                             // Return the Result instead of unwrapping, so we can handle errors

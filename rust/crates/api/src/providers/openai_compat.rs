@@ -165,13 +165,14 @@ impl OpenAiCompatClient {
     pub async fn send_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageResponse, ApiError> {
         let request = MessageRequest {
             stream: false,
             ..request.clone()
         };
         preflight_message_request(&request)?;
-        let response = self.send_request(&request).await?;
+        let response = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
         // Some backends return {"error":{"message":"...","type":"...","code":...}}
@@ -220,9 +221,10 @@ impl OpenAiCompatClient {
     pub async fn stream_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
-        let response = self.send_request(&request.clone().with_streaming()).await?;
+        let response = self.send_request(&request.clone().with_streaming(), trace_id).await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
@@ -234,7 +236,7 @@ impl OpenAiCompatClient {
     }
 
     /// Build URL, headers, body and send through `HttpTransport` with retries.
-    async fn send_request(&self, request: &MessageRequest) -> Result<reqwest::Response, ApiError> {
+    async fn send_request(&self, request: &MessageRequest, trace_id: Option<&str>) -> Result<reqwest::Response, ApiError> {
         check_request_body_size(request, self.config())?;
 
         let url = chat_completions_endpoint(&self.base_url);
@@ -249,7 +251,7 @@ impl OpenAiCompatClient {
         ];
 
         self.http
-            .send_json(&url, &headers, &body, &self.retry_policy, expect_success)
+            .send_json(&url, &headers, &body, &self.retry_policy, expect_success, trace_id)
             .await
             .map(|result| result.response)
     }
@@ -274,15 +276,17 @@ impl Provider for OpenAiCompatClient {
     fn send_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, MessageResponse> {
-        Box::pin(async move { self.send_message(request).await })
+        Box::pin(async move { self.send_message(request, trace_id).await })
     }
 
     fn stream_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, Self::Stream> {
-        Box::pin(async move { self.stream_message(request).await })
+        Box::pin(async move { self.stream_message(request, trace_id).await })
     }
 }
 

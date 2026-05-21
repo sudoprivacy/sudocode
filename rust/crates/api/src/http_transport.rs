@@ -130,6 +130,11 @@ impl HttpTransport {
     /// `check_response` is provider-specific error parsing (non-2xx → `ApiError`).
     /// The transport uses `error.is_retryable()` to decide whether to retry.
     /// Returns `HttpRequestResult` with the response and client-generated `request_id`.
+    ///
+    /// # Arguments
+    /// * `trace_id` - Optional external trace ID for request tracking. If provided,
+    ///   it will be used as the `request_id` and sent as `X-Request-ID` header.
+    ///   This enables end-to-end tracing from SudoWork to SudoRouter.
     pub async fn send_json<F, Fut>(
         &self,
         url: &str,
@@ -137,6 +142,7 @@ impl HttpTransport {
         body: &Value,
         retry_policy: &RetryPolicy,
         check_response: F,
+        trace_id: Option<&str>,
     ) -> Result<HttpRequestResult, ApiError>
     where
         F: Fn(reqwest::Response) -> Fut,
@@ -146,8 +152,10 @@ impl HttpTransport {
         let mut attempts = 0u32;
         let mut last_error: Option<ApiError>;
 
-        // Generate a unique request_id for this entire request lifecycle (including retries)
-        let request_id = format!("req_{}", uuid::Uuid::new_v4());
+        // Use external trace_id if provided, otherwise generate a new request_id
+        let request_id = trace_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
 
         loop {
             attempts += 1;
@@ -165,9 +173,11 @@ impl HttpTransport {
             }
 
             // Log debug (every attempt — matches existing Anthropic behavior).
+            // Include X-Request-ID in the logged headers for visibility.
             if let Some(tracer) = &self.session_tracer {
-                let masked = telemetry::mask_sensitive_headers(headers);
-                tracer.record_http_request_debug(&request_id, url, "POST", masked, body.clone());
+                let mut logged_headers = telemetry::mask_sensitive_headers(headers);
+                logged_headers.insert("X-Request-ID".to_string(), Value::String(request_id.clone()));
+                tracer.record_http_request_debug(&request_id, url, "POST", logged_headers, body.clone());
             }
 
             // Build and send request.
@@ -175,6 +185,12 @@ impl HttpTransport {
                 let mut builder = self.inner.post(url);
                 for (name, value) in headers {
                     builder = builder.header(name.as_str(), value.as_str());
+                }
+                // Add X-Request-ID header for end-to-end tracing
+                builder = builder.header("X-Request-ID", &request_id);
+                // Debug: print when trace_id is provided (from external source)
+                if trace_id.is_some() {
+                    eprintln!("[TRACE-ID] Sending request with X-Request-ID: {}", request_id);
                 }
                 builder.json(body).send().await.map_err(ApiError::from)
             };

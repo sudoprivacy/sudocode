@@ -203,34 +203,36 @@ impl ProviderClient {
     pub async fn send_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageResponse, ApiError> {
         match self {
-            Self::Anthropic(client) => client.send_message(request).await,
-            Self::Xai(client) | Self::OpenAi(client) => client.send_message(request).await,
-            Self::Codex(client) => client.send_message(request).await,
-            Self::Gemini(client) => client.send_message(request).await,
+            Self::Anthropic(client) => client.send_message(request, trace_id).await,
+            Self::Xai(client) | Self::OpenAi(client) => client.send_message(request, trace_id).await,
+            Self::Codex(client) => client.send_message(request, trace_id).await,
+            Self::Gemini(client) => client.send_message(request, trace_id).await,
         }
     }
 
     pub async fn stream_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         match self {
             Self::Anthropic(client) => client
-                .stream_message(request)
+                .stream_message(request, trace_id)
                 .await
                 .map(MessageStream::Anthropic),
             Self::Xai(client) | Self::OpenAi(client) => client
-                .stream_message(request)
+                .stream_message(request, trace_id)
                 .await
                 .map(MessageStream::OpenAiCompat),
             Self::Codex(client) => client
-                .stream_message(request)
+                .stream_message(request, trace_id)
                 .await
                 .map(MessageStream::Codex),
             Self::Gemini(client) => client
-                .stream_message(request)
+                .stream_message(request, trace_id)
                 .await
                 .map(MessageStream::Gemini),
         }

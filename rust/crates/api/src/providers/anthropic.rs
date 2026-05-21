@@ -299,6 +299,7 @@ impl AnthropicClient {
     pub async fn send_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageResponse, ApiError> {
         let request = MessageRequest {
             stream: false,
@@ -313,7 +314,7 @@ impl AnthropicClient {
 
         self.preflight_message_request(&request).await?;
 
-        let result = self.send_request(&request).await?;
+        let result = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(result.response.headers());
         let body = result.response.text().await.map_err(ApiError::from)?;
         let mut response = serde_json::from_str::<MessageResponse>(&body).map_err(|error| {
@@ -353,9 +354,10 @@ impl AnthropicClient {
     pub async fn stream_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         self.preflight_message_request(request).await?;
-        let result = self.send_request(&request.clone().with_streaming()).await?;
+        let result = self.send_request(&request.clone().with_streaming(), trace_id).await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
             client_request_id: Some(result.request_id),
@@ -415,7 +417,11 @@ impl AnthropicClient {
     }
 
     /// Build URL, headers, body and send through `HttpTransport` with retries.
-    async fn send_request(&self, request: &MessageRequest) -> Result<crate::HttpRequestResult, ApiError> {
+    async fn send_request(
+        &self,
+        request: &MessageRequest,
+        trace_id: Option<&str>,
+    ) -> Result<crate::HttpRequestResult, ApiError> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body);
@@ -433,7 +439,7 @@ impl AnthropicClient {
         headers.extend(self.request_profile.header_pairs());
 
         self.http
-            .send_json(&url, &headers, &body, &self.retry_policy, expect_success)
+            .send_json(&url, &headers, &body, &self.retry_policy, expect_success, trace_id)
             .await
             .map_err(|e| enrich_bearer_auth_error(e, &self.auth))
     }
@@ -801,15 +807,17 @@ impl Provider for AnthropicClient {
     fn send_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, MessageResponse> {
-        Box::pin(async move { self.send_message(request).await })
+        Box::pin(async move { self.send_message(request, trace_id).await })
     }
 
     fn stream_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, Self::Stream> {
-        Box::pin(async move { self.stream_message(request).await })
+        Box::pin(async move { self.stream_message(request, trace_id).await })
     }
 }
 

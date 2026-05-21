@@ -31,6 +31,9 @@ const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead
 pub struct ApiRequest {
     pub system_prompt: SystemPrompt,
     pub messages: Vec<ConversationMessage>,
+    /// Optional trace ID for end-to-end request tracking.
+    /// Passed through to the HTTP layer as X-Request-ID header.
+    pub trace_id: Option<String>,
 }
 
 /// Streamed events emitted while processing a single assistant turn.
@@ -199,6 +202,8 @@ pub struct ConversationRuntime<C, T> {
     current_turn_id: Option<String>,
     /// User request intent for the current turn.
     user_request_intent: Option<crate::file_intent::UserRequestIntent>,
+    /// Trace ID for the current request (passed from ACP _meta.traceId).
+    trace_id: Option<String>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -258,6 +263,7 @@ where
             file_tracker: crate::file_tracker::TurnFileTracker::new(workspace_root),
             current_turn_id: None,
             user_request_intent: None,
+            trace_id: None,
         }
     }
 
@@ -314,6 +320,19 @@ where
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
         self
+    }
+
+    /// Set the trace ID for the next request.
+    /// This is called before run_turn to pass the traceId from ACP _meta.
+    #[must_use]
+    pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Set the trace ID in-place (non-builder pattern).
+    pub fn set_trace_id(&mut self, trace_id: impl Into<String>) {
+        self.trace_id = Some(trace_id.into());
     }
 
     fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
@@ -630,6 +649,7 @@ where
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
+                trace_id: self.trace_id.clone(),
             };
             let mut stream = match self.api_client.stream(request).await {
                 Ok(stream) => stream,

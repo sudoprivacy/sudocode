@@ -176,8 +176,17 @@ impl HttpTransport {
             // Include X-Request-ID in the logged headers for visibility.
             if let Some(tracer) = &self.session_tracer {
                 let mut logged_headers = telemetry::mask_sensitive_headers(headers);
-                logged_headers.insert("X-Request-ID".to_string(), Value::String(request_id.clone()));
-                tracer.record_http_request_debug(&request_id, url, "POST", logged_headers, body.clone());
+                logged_headers.insert(
+                    "X-Request-ID".to_string(),
+                    Value::String(request_id.clone()),
+                );
+                tracer.record_http_request_debug(
+                    &request_id,
+                    url,
+                    "POST",
+                    logged_headers,
+                    body.clone(),
+                );
             }
 
             // Build and send request.
@@ -190,7 +199,10 @@ impl HttpTransport {
                 builder = builder.header("X-Request-ID", &request_id);
                 // Debug: print when trace_id is provided (from external source)
                 if trace_id.is_some() {
-                    eprintln!("[TRACE-ID] Sending request with X-Request-ID: {}", request_id);
+                    eprintln!(
+                        "[TRACE-ID] Sending request with X-Request-ID: {}",
+                        request_id
+                    );
                 }
                 builder.json(body).send().await.map_err(ApiError::from)
             };
@@ -244,11 +256,23 @@ impl HttpTransport {
                         Err(error)
                             if error.is_retryable() && attempts <= retry_policy.max_retries + 1 =>
                         {
-                            self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                            self.record_failure(
+                                &request_id,
+                                attempts,
+                                &path,
+                                &error,
+                                start_timestamp_ms,
+                            );
                             last_error = Some(error);
                         }
                         Err(error) => {
-                            self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                            self.record_failure(
+                                &request_id,
+                                attempts,
+                                &path,
+                                &error,
+                                start_timestamp_ms,
+                            );
                             return Err(error);
                         }
                     }

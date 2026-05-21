@@ -207,7 +207,9 @@ impl ProviderClient {
     ) -> Result<MessageResponse, ApiError> {
         match self {
             Self::Anthropic(client) => client.send_message(request, trace_id).await,
-            Self::Xai(client) | Self::OpenAi(client) => client.send_message(request, trace_id).await,
+            Self::Xai(client) | Self::OpenAi(client) => {
+                client.send_message(request, trace_id).await
+            }
             Self::Codex(client) => client.send_message(request, trace_id).await,
             Self::Gemini(client) => client.send_message(request, trace_id).await,
         }

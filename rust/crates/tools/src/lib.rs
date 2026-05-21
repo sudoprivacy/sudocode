@@ -5414,10 +5414,13 @@ async fn stream_with_provider(
     }
 
     let response = client
-        .send_message(&MessageRequest {
-            stream: false,
-            ..message_request.clone()
-        }, None)
+        .send_message(
+            &MessageRequest {
+                stream: false,
+                ..message_request.clone()
+            },
+            None,
+        )
         .await?;
     let mut events = response_to_events(response);
     push_prompt_cache_record(client, &mut events);

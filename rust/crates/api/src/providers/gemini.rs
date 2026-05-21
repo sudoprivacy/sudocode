@@ -339,9 +339,14 @@ impl GeminiClient {
 
         let result = self
             .http
-            .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
-                check_gemini_response(response)
-            }, trace_id)
+            .send_json(
+                &url,
+                &headers,
+                &payload,
+                &self.retry_policy,
+                |response| check_gemini_response(response),
+                trace_id,
+            )
             .await?;
 
         Ok(MessageStream {

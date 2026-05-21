@@ -585,11 +585,20 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
             attrs.insert("method".to_string(), Value::String(method.clone()));
             attrs.insert("path".to_string(), Value::String(path.clone()));
             attrs.insert("status".to_string(), Value::from(*status));
-            attrs.insert("start_timestamp_ms".to_string(), Value::from(*start_timestamp_ms));
-            attrs.insert("end_timestamp_ms".to_string(), Value::from(*end_timestamp_ms));
+            attrs.insert(
+                "start_timestamp_ms".to_string(),
+                Value::from(*start_timestamp_ms),
+            );
+            attrs.insert(
+                "end_timestamp_ms".to_string(),
+                Value::from(*end_timestamp_ms),
+            );
             attrs.insert("duration_ms".to_string(), Value::from(*duration_ms));
             if let Some(rid) = provider_request_id {
-                attrs.insert("provider_request_id".to_string(), Value::String(rid.clone()));
+                attrs.insert(
+                    "provider_request_id".to_string(),
+                    Value::String(rid.clone()),
+                );
             }
             (session_id.clone(), "request_succeeded".to_string(), attrs)
         }
@@ -613,8 +622,14 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
             attrs.insert("path".to_string(), Value::String(path.clone()));
             attrs.insert("error".to_string(), Value::String(error.clone()));
             attrs.insert("retryable".to_string(), Value::Bool(*retryable));
-            attrs.insert("start_timestamp_ms".to_string(), Value::from(*start_timestamp_ms));
-            attrs.insert("end_timestamp_ms".to_string(), Value::from(*end_timestamp_ms));
+            attrs.insert(
+                "start_timestamp_ms".to_string(),
+                Value::from(*start_timestamp_ms),
+            );
+            attrs.insert(
+                "end_timestamp_ms".to_string(),
+                Value::from(*end_timestamp_ms),
+            );
             attrs.insert("duration_ms".to_string(), Value::from(*duration_ms));
             (session_id.clone(), "request_failed".to_string(), attrs)
         }
@@ -1055,13 +1070,7 @@ mod tests {
         let sink = Arc::new(MemoryTelemetrySink::default());
         let tracer = SessionTracer::new("session-123", sink.clone());
 
-        tracer.record_http_request_started(
-            "req_test-123",
-            1,
-            "POST",
-            "/v1/messages",
-            Map::new(),
-        );
+        tracer.record_http_request_started("req_test-123", 1, "POST", "/v1/messages", Map::new());
         tracer.record_analytics(
             AnalyticsEvent::new("cli", "prompt_sent")
                 .with_property("model", Value::String("claude-opus".to_string())),

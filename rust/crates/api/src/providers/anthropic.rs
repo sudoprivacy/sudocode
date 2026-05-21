@@ -357,7 +357,9 @@ impl AnthropicClient {
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         self.preflight_message_request(request).await?;
-        let result = self.send_request(&request.clone().with_streaming(), trace_id).await?;
+        let result = self
+            .send_request(&request.clone().with_streaming(), trace_id)
+            .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
             client_request_id: Some(result.request_id),
@@ -439,7 +441,14 @@ impl AnthropicClient {
         headers.extend(self.request_profile.header_pairs());
 
         self.http
-            .send_json(&url, &headers, &body, &self.retry_policy, expect_success, trace_id)
+            .send_json(
+                &url,
+                &headers,
+                &body,
+                &self.retry_policy,
+                expect_success,
+                trace_id,
+            )
             .await
             .map_err(|e| enrich_bearer_auth_error(e, &self.auth))
     }
@@ -889,7 +898,9 @@ impl MessageStream {
                         }
                         if let Some(tracer) = &self.session_tracer {
                             // Use client_request_id if available, otherwise generate a fallback
-                            let request_id = self.client_request_id.clone()
+                            let request_id = self
+                                .client_request_id
+                                .clone()
                                 .unwrap_or_else(|| "unknown".to_string());
                             tracer.record_usage(
                                 request_id,

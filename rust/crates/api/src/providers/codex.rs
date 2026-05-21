@@ -172,9 +172,14 @@ impl CodexClient {
 
         let result = self
             .http
-            .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
-                check_codex_response(response)
-            }, trace_id)
+            .send_json(
+                &url,
+                &headers,
+                &payload,
+                &self.retry_policy,
+                |response| check_codex_response(response),
+                trace_id,
+            )
             .await?;
 
         Ok(MessageStream {

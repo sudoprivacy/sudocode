@@ -224,7 +224,9 @@ impl OpenAiCompatClient {
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
-        let response = self.send_request(&request.clone().with_streaming(), trace_id).await?;
+        let response = self
+            .send_request(&request.clone().with_streaming(), trace_id)
+            .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
@@ -236,7 +238,11 @@ impl OpenAiCompatClient {
     }
 
     /// Build URL, headers, body and send through `HttpTransport` with retries.
-    async fn send_request(&self, request: &MessageRequest, trace_id: Option<&str>) -> Result<reqwest::Response, ApiError> {
+    async fn send_request(
+        &self,
+        request: &MessageRequest,
+        trace_id: Option<&str>,
+    ) -> Result<reqwest::Response, ApiError> {
         check_request_body_size(request, self.config())?;
 
         let url = chat_completions_endpoint(&self.base_url);
@@ -251,7 +257,14 @@ impl OpenAiCompatClient {
         ];
 
         self.http
-            .send_json(&url, &headers, &body, &self.retry_policy, expect_success, trace_id)
+            .send_json(
+                &url,
+                &headers,
+                &body,
+                &self.retry_policy,
+                expect_success,
+                trace_id,
+            )
             .await
             .map(|result| result.response)
     }

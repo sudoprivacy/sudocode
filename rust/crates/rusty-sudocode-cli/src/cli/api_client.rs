@@ -349,13 +349,13 @@ impl AnthropicRuntimeClient {
         apply_stall_timeout: bool,
         trace_id: Option<&str>,
     ) -> Result<AssistantEventStream, RuntimeError> {
-        let provider_stream =
-            self.client
-                .stream_message(message_request, trace_id)
-                .await
-                .map_err(|error| {
-                    RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
-                })?;
+        let provider_stream = self
+            .client
+            .stream_message(message_request, trace_id)
+            .await
+            .map_err(|error| {
+                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+            })?;
 
         let state = CliStreamState {
             provider_stream,
@@ -437,15 +437,16 @@ impl AnthropicRuntimeClient {
                         // non-streaming request.
                         if state.buffer.is_empty() && !state.saw_stop {
                             if let Some(fallback_request) = state.fallback_request.take() {
-                                let response =
-                                    state.client.send_message(&fallback_request, None).await.map_err(
-                                        |error| {
-                                            RuntimeError::new(format_user_visible_api_error(
-                                                &state.session_id,
-                                                &error,
-                                            ))
-                                        },
-                                    )?;
+                                let response = state
+                                    .client
+                                    .send_message(&fallback_request, None)
+                                    .await
+                                    .map_err(|error| {
+                                        RuntimeError::new(format_user_visible_api_error(
+                                            &state.session_id,
+                                            &error,
+                                        ))
+                                    })?;
                                 // response_to_events does sync I/O (no await),
                                 // so the dyn Write borrow is safe here.
                                 let mut stdout = io::stdout();

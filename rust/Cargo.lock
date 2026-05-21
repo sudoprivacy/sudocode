@@ -179,6 +179,7 @@ version = "0.1.7"
 dependencies = [
  "base64",
  "criterion",
+ "httpdate",
  "reqwest",
  "runtime",
  "serde",

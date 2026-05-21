@@ -1,5 +1,6 @@
 use std::env::VarError;
 use std::fmt::{Display, Formatter};
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
@@ -60,6 +61,10 @@ pub enum ApiError {
         retryable: bool,
         /// Suggested user action based on error type (e.g., "Reduce prompt size" for 413)
         suggested_action: Option<String>,
+        /// Whole seconds parsed from the `Retry-After` response header, when
+        /// present. Stored as `NonZeroU32` (not `Duration`) to keep `ApiError`
+        /// compact; the retry loop honors this over plain exponential backoff.
+        retry_after: Option<NonZeroU32>,
     },
     RetriesExhausted {
         attempts: u32,
@@ -155,6 +160,31 @@ impl ApiError {
         match self {
             Self::Api { request_id, .. } => request_id.as_deref(),
             Self::RetriesExhausted { last_error, .. } => last_error.request_id(),
+            Self::MissingCredentials { .. }
+            | Self::ContextWindowExceeded { .. }
+            | Self::ExpiredOAuthToken
+            | Self::Auth(_)
+            | Self::InvalidApiKeyEnv(_)
+            | Self::Http(_)
+            | Self::Io(_)
+            | Self::Json { .. }
+            | Self::InvalidSseFrame(_)
+            | Self::BackoffOverflow { .. }
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::Configuration(_) => None,
+        }
+    }
+
+    /// Delay requested by the server via the `Retry-After` header, if any.
+    /// The HTTP transport retry loop uses this as a lower bound on the next
+    /// backoff sleep.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Api { retry_after, .. } => {
+                retry_after.map(|secs| Duration::from_secs(u64::from(secs.get())))
+            }
+            Self::RetriesExhausted { last_error, .. } => last_error.retry_after(),
             Self::MissingCredentials { .. }
             | Self::ContextWindowExceeded { .. }
             | Self::ExpiredOAuthToken
@@ -505,6 +535,7 @@ mod tests {
             body: String::new(),
             retryable: true,
             suggested_action: None,
+            retry_after: None,
         };
 
         assert!(error.is_generic_fatal_wrapper());
@@ -528,6 +559,7 @@ mod tests {
                 body: String::new(),
                 retryable: true,
                 suggested_action: None,
+                retry_after: None,
             }),
         };
 
@@ -549,6 +581,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         assert!(error.is_context_window_failure());
@@ -569,6 +602,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         assert!(error.is_context_window_failure());

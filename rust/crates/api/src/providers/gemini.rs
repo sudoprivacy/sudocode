@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
-use crate::http_transport::{HttpTransport, RetryPolicy};
+use crate::http_transport::{parse_retry_after, HttpTransport, RetryPolicy};
 use crate::providers::registry::Credential;
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
@@ -380,6 +380,7 @@ async fn check_gemini_response(response: reqwest::Response) -> Result<reqwest::R
     if status.is_success() {
         return Ok(response);
     }
+    let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let (error_type, message) = serde_json::from_str::<Value>(&body)
         .ok()
@@ -399,6 +400,7 @@ async fn check_gemini_response(response: reqwest::Response) -> Result<reqwest::R
         body,
         retryable: matches!(status.as_u16(), 429 | 500 | 502 | 503),
         suggested_action: None,
+        retry_after,
     })
 }
 

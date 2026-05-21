@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
-use crate::http_transport::{request_id_from_headers, HttpTransport, RetryPolicy};
+use crate::http_transport::{
+    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+};
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
@@ -205,6 +207,7 @@ impl OpenAiCompatClient {
                         reqwest::StatusCode::from_u16(code.unwrap_or(400))
                             .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
                     ),
+                    retry_after: None,
                 });
             }
         }
@@ -1366,6 +1369,7 @@ fn parse_sse_frame(
                 body: payload.clone(),
                 retryable: false,
                 suggested_action: suggested_action_for_status(status),
+                retry_after: None,
             });
         }
     }
@@ -1403,6 +1407,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     }
 
     let request_id = request_id_from_headers(response.headers());
+    let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
@@ -1421,6 +1426,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         body,
         retryable,
         suggested_action,
+        retry_after,
     })
 }
 

@@ -4,6 +4,7 @@
 //! Provider-specific error parsing is injected via the `check_response` callback.
 
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,8 +67,20 @@ impl RetryPolicy {
             .map_or(self.max_backoff, |delay| delay.min(self.max_backoff)))
     }
 
-    fn jittered_backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
-        let base = self.backoff_for_attempt(attempt)?;
+    /// Compute the next retry sleep for `attempt`, honoring a server-provided
+    /// `Retry-After` delay when present. The base is the larger of the
+    /// exponential backoff and the `Retry-After` value (capped at
+    /// `max_backoff`), with additive jitter on top.
+    fn delay_for_attempt(
+        &self,
+        attempt: u32,
+        retry_after: Option<Duration>,
+    ) -> Result<Duration, ApiError> {
+        let backoff = self.backoff_for_attempt(attempt)?;
+        let base = match retry_after {
+            Some(requested) => backoff.max(requested.min(self.max_backoff)),
+            None => backoff,
+        };
         Ok(base + jitter_for_base(base))
     }
 }
@@ -291,7 +304,8 @@ impl HttpTransport {
                 break;
             }
 
-            tokio::time::sleep(retry_policy.jittered_backoff_for_attempt(attempts)?).await;
+            let retry_after = last_error.as_ref().and_then(ApiError::retry_after);
+            tokio::time::sleep(retry_policy.delay_for_attempt(attempts, retry_after)?).await;
         }
 
         Err(ApiError::RetriesExhausted {
@@ -326,6 +340,28 @@ impl HttpTransport {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Parse the `Retry-After` response header into a whole-second delay.
+///
+/// Per RFC 7231 the value is either a non-negative integer count of seconds
+/// or an HTTP-date. The header being absent, unparseable, zero, or carrying
+/// an HTTP-date already in the past yields `None`. The result is stored in
+/// `ApiError::Api` as a `NonZeroU32` to keep that type compact.
+#[must_use]
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<NonZeroU32> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let seconds = if let Ok(seconds) = raw.parse::<u64>() {
+        seconds
+    } else {
+        let target = httpdate::parse_http_date(raw).ok()?;
+        target.duration_since(SystemTime::now()).ok()?.as_secs()
+    };
+    NonZeroU32::new(u32::try_from(seconds).ok()?)
+}
 
 /// Mask sensitive response header values for debug capture logs.
 fn mask_response_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> {
@@ -460,11 +496,110 @@ mod tests {
         };
         for attempt in 1..=3 {
             let base = policy.backoff_for_attempt(attempt).unwrap();
-            let jittered = policy.jittered_backoff_for_attempt(attempt).unwrap();
+            let jittered = policy.delay_for_attempt(attempt, None).unwrap();
             // jitter in [0, base], so jittered in [base, 2*base].
             assert!(jittered >= base, "jittered must be >= base");
             assert!(jittered <= base * 2, "jittered must be <= 2*base");
         }
+    }
+
+    #[test]
+    fn delay_for_attempt_honors_retry_after_when_larger_than_backoff() {
+        let policy = RetryPolicy {
+            max_retries: 8,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_secs(128),
+        };
+        let retry_after = Duration::from_secs(30);
+        let delay = policy.delay_for_attempt(1, Some(retry_after)).unwrap();
+        assert!(delay >= retry_after, "delay must not undercut Retry-After");
+        assert!(
+            delay <= retry_after * 2,
+            "delay must stay within base + jitter"
+        );
+    }
+
+    #[test]
+    fn delay_for_attempt_keeps_backoff_when_retry_after_is_smaller() {
+        let policy = RetryPolicy {
+            max_retries: 8,
+            initial_backoff: Duration::from_secs(10),
+            max_backoff: Duration::from_secs(128),
+        };
+        let backoff = policy.backoff_for_attempt(1).unwrap();
+        let delay = policy
+            .delay_for_attempt(1, Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(
+            delay >= backoff,
+            "delay must not undercut exponential backoff"
+        );
+        assert!(delay <= backoff * 2, "delay must stay within base + jitter");
+    }
+
+    #[test]
+    fn delay_for_attempt_caps_retry_after_at_max_backoff() {
+        let policy = RetryPolicy {
+            max_retries: 8,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_secs(128),
+        };
+        let delay = policy
+            .delay_for_attempt(1, Some(Duration::from_secs(5_000)))
+            .unwrap();
+        // Base is capped at max_backoff (128s); jitter adds at most another base.
+        assert!(delay >= Duration::from_secs(128), "base must reach the cap");
+        assert!(
+            delay <= Duration::from_secs(256),
+            "delay must not exceed 2x cap"
+        );
+    }
+
+    fn retry_after_header_map(value: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn parse_retry_after_reads_integer_seconds() {
+        assert_eq!(
+            parse_retry_after(&retry_after_header_map("60")),
+            NonZeroU32::new(60)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_reads_future_http_date() {
+        let future = SystemTime::now() + Duration::from_secs(125);
+        let formatted = httpdate::fmt_http_date(future);
+        let parsed = parse_retry_after(&retry_after_header_map(&formatted))
+            .expect("future date parses")
+            .get();
+        // Allow for sub-second truncation and test execution time.
+        assert!(parsed <= 125);
+        assert!(parsed >= 115);
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_yields_none() {
+        assert_eq!(
+            parse_retry_after(&retry_after_header_map("Thu, 01 Jan 2015 00:00:00 GMT")),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_missing_header_yields_none() {
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn parse_retry_after_garbage_yields_none() {
+        assert_eq!(
+            parse_retry_after(&retry_after_header_map("not-a-delay")),
+            None
+        );
     }
 
     #[test]

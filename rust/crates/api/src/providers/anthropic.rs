@@ -12,7 +12,9 @@ use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
 use crate::error::ApiError;
-use crate::http_transport::{request_id_from_headers, HttpTransport, RetryPolicy};
+use crate::http_transport::{
+    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+};
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
 use super::registry::{self, model_token_limit};
@@ -926,6 +928,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     }
 
     let request_id = request_id_from_headers(response.headers());
+    let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_else(|_| String::new());
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
@@ -942,6 +945,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         body,
         retryable,
         suggested_action: None,
+        retry_after,
     })
 }
 
@@ -964,6 +968,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
         body,
         retryable,
         suggested_action,
+        retry_after,
     } = error
     else {
         return error;
@@ -977,6 +982,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     let Some(bearer_token) = auth.bearer_token() else {
@@ -988,6 +994,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     };
     if !bearer_token.starts_with("sk-ant-") {
@@ -999,6 +1006,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     // Only append the hint when the AuthSource is pure BearerToken. If both
@@ -1014,6 +1022,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
             body,
             retryable,
             suggested_action,
+            retry_after,
         };
     }
     let enriched_message = match message {
@@ -1028,6 +1037,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
         body,
         retryable,
         suggested_action,
+        retry_after,
     }
 }
 
@@ -1642,6 +1652,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1683,6 +1694,7 @@ mod tests {
             body: String::new(),
             retryable: true,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1712,6 +1724,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1740,6 +1753,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when
@@ -1765,6 +1779,7 @@ mod tests {
             body: String::new(),
             retryable: false,
             suggested_action: None,
+            retry_after: None,
         };
 
         // when

@@ -175,7 +175,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "api"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64",
  "criterion",
@@ -527,7 +527,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "commands"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "plugins",
  "runtime",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "commands",
  "runtime",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "api",
  "serde_json",
@@ -1917,7 +1917,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -2861,7 +2861,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "api",
  "arboard",
@@ -3353,7 +3353,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "chrono",
  "dirs",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "api",
  "async-trait",

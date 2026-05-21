@@ -5337,7 +5337,7 @@ async fn stream_with_provider(
     client: &ProviderClient,
     message_request: &MessageRequest,
 ) -> Result<Vec<AssistantEvent>, ApiError> {
-    let mut stream = client.stream_message(message_request).await?;
+    let mut stream = client.stream_message(message_request, None).await?;
     let mut events = Vec::new();
     let mut pending_tools: BTreeMap<u32, (String, String, String, Option<String>)> =
         BTreeMap::new();
@@ -5414,10 +5414,13 @@ async fn stream_with_provider(
     }
 
     let response = client
-        .send_message(&MessageRequest {
-            stream: false,
-            ..message_request.clone()
-        })
+        .send_message(
+            &MessageRequest {
+                stream: false,
+                ..message_request.clone()
+            },
+            None,
+        )
         .await?;
     let mut events = response_to_events(response);
     push_prompt_cache_record(client, &mut events);

@@ -15,6 +15,25 @@ use crate::http_client::build_http_client_or_default;
 
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
+const ONEAPI_REQUEST_ID_HEADER: &str = "x-oneapi-request-id";
+
+/// Result of a successful HTTP request with tracking information.
+pub struct HttpRequestResult {
+    /// The HTTP response.
+    pub response: reqwest::Response,
+    /// Client-generated unique request ID for tracking.
+    pub request_id: String,
+}
+
+/// Returns the current timestamp in milliseconds since Unix epoch.
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
 
 // ---------------------------------------------------------------------------
 // RetryPolicy
@@ -110,6 +129,12 @@ impl HttpTransport {
     ///
     /// `check_response` is provider-specific error parsing (non-2xx → `ApiError`).
     /// The transport uses `error.is_retryable()` to decide whether to retry.
+    /// Returns `HttpRequestResult` with the response and client-generated `request_id`.
+    ///
+    /// # Arguments
+    /// * `trace_id` - Optional external trace ID for request tracking. If provided,
+    ///   it will be used as the `request_id` and sent as `X-Request-ID` header.
+    ///   This enables end-to-end tracing from SudoWork to SudoRouter.
     pub async fn send_json<F, Fut>(
         &self,
         url: &str,
@@ -117,7 +142,8 @@ impl HttpTransport {
         body: &Value,
         retry_policy: &RetryPolicy,
         check_response: F,
-    ) -> Result<reqwest::Response, ApiError>
+        trace_id: Option<&str>,
+    ) -> Result<HttpRequestResult, ApiError>
     where
         F: Fn(reqwest::Response) -> Fut,
         Fut: Future<Output = Result<reqwest::Response, ApiError>>,
@@ -126,18 +152,41 @@ impl HttpTransport {
         let mut attempts = 0u32;
         let mut last_error: Option<ApiError>;
 
+        // Use external trace_id if provided, otherwise generate a new request_id
+        let request_id = trace_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+
         loop {
             attempts += 1;
+            let start_timestamp_ms = current_timestamp_ms();
 
             // Log started.
             if let Some(tracer) = &self.session_tracer {
-                tracer.record_http_request_started(attempts, "POST", &path, Map::new());
+                tracer.record_http_request_started(
+                    &request_id,
+                    attempts,
+                    "POST",
+                    &path,
+                    Map::new(),
+                );
             }
 
             // Log debug (every attempt — matches existing Anthropic behavior).
+            // Include X-Request-ID in the logged headers for visibility.
             if let Some(tracer) = &self.session_tracer {
-                let masked = telemetry::mask_sensitive_headers(headers);
-                tracer.record_http_request_debug(url, "POST", masked, body.clone());
+                let mut logged_headers = telemetry::mask_sensitive_headers(headers);
+                logged_headers.insert(
+                    "X-Request-ID".to_string(),
+                    Value::String(request_id.clone()),
+                );
+                tracer.record_http_request_debug(
+                    &request_id,
+                    url,
+                    "POST",
+                    logged_headers,
+                    body.clone(),
+                );
             }
 
             // Build and send request.
@@ -146,41 +195,94 @@ impl HttpTransport {
                 for (name, value) in headers {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
+                // Add X-Request-ID header for end-to-end tracing
+                builder = builder.header("X-Request-ID", &request_id);
+                // Debug: print when trace_id is provided (from external source)
+                if trace_id.is_some() {
+                    eprintln!(
+                        "[TRACE-ID] Sending request with X-Request-ID: {}",
+                        request_id
+                    );
+                }
                 builder.json(body).send().await.map_err(ApiError::from)
             };
 
             match send_result {
-                Ok(response) => match check_response(response).await {
-                    Ok(response) => {
-                        if let Some(tracer) = &self.session_tracer {
-                            tracer.record_http_request_succeeded(
-                                attempts,
-                                "POST",
-                                &path,
-                                response.status().as_u16(),
-                                request_id_from_headers(response.headers()),
-                                Map::new(),
-                            );
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let response_headers = mask_response_headers(response.headers());
+
+                    // Check if this is a streaming response (content-type: text/event-stream)
+                    let is_streaming = response_headers
+                        .get("content-type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.contains("text/event-stream"))
+                        .unwrap_or(false);
+
+                    match check_response(response).await {
+                        Ok(response) => {
+                            // Log response debug after successful check
+                            // For streaming responses, body is consumed via SSE events
+                            if let Some(tracer) = &self.session_tracer {
+                                tracer.record_http_response_debug(
+                                    &request_id,
+                                    status,
+                                    response_headers,
+                                    if is_streaming {
+                                        serde_json::json!({"streaming": true, "note": "Response body consumed via SSE events"})
+                                    } else {
+                                        Value::Null
+                                    },
+                                );
+                            }
+
+                            if let Some(tracer) = &self.session_tracer {
+                                tracer.record_http_request_succeeded(
+                                    &request_id,
+                                    attempts,
+                                    "POST",
+                                    &path,
+                                    status,
+                                    start_timestamp_ms,
+                                    request_id_from_headers(response.headers()),
+                                    Map::new(),
+                                );
+                            }
+                            return Ok(HttpRequestResult {
+                                response,
+                                request_id,
+                            });
                         }
-                        return Ok(response);
+                        Err(error)
+                            if error.is_retryable() && attempts <= retry_policy.max_retries + 1 =>
+                        {
+                            self.record_failure(
+                                &request_id,
+                                attempts,
+                                &path,
+                                &error,
+                                start_timestamp_ms,
+                            );
+                            last_error = Some(error);
+                        }
+                        Err(error) => {
+                            self.record_failure(
+                                &request_id,
+                                attempts,
+                                &path,
+                                &error,
+                                start_timestamp_ms,
+                            );
+                            return Err(error);
+                        }
                     }
-                    Err(error)
-                        if error.is_retryable() && attempts <= retry_policy.max_retries + 1 =>
-                    {
-                        self.record_failure(attempts, &path, &error);
-                        last_error = Some(error);
-                    }
-                    Err(error) => {
-                        self.record_failure(attempts, &path, &error);
-                        return Err(error);
-                    }
-                },
+                }
                 Err(error) if error.is_retryable() && attempts <= retry_policy.max_retries + 1 => {
-                    self.record_failure(attempts, &path, &error);
+                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
                     last_error = Some(error);
                 }
                 Err(error) => {
-                    self.record_failure(attempts, &path, &error);
+                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
                     return Err(error);
                 }
             }
@@ -198,14 +300,23 @@ impl HttpTransport {
         })
     }
 
-    fn record_failure(&self, attempt: u32, path: &str, error: &ApiError) {
+    fn record_failure(
+        &self,
+        request_id: &str,
+        attempt: u32,
+        path: &str,
+        error: &ApiError,
+        start_timestamp_ms: u64,
+    ) {
         if let Some(tracer) = &self.session_tracer {
             tracer.record_http_request_failed(
+                request_id,
                 attempt,
                 "POST",
                 path,
                 error.to_string(),
                 error.is_retryable(),
+                start_timestamp_ms,
                 Map::new(),
             );
         }
@@ -215,6 +326,24 @@ impl HttpTransport {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Mask sensitive response header values for debug capture logs.
+fn mask_response_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> {
+    let mut map = Map::new();
+    for (key, value) in headers {
+        let key_str = key.to_string();
+        let value_str = value.to_str().unwrap_or("").to_string();
+        // Mask sensitive headers
+        let lower = key_str.to_ascii_lowercase();
+        let masked = if lower == "set-cookie" || lower.contains("auth") {
+            "... (hidden)".to_string()
+        } else {
+            value_str
+        };
+        map.insert(key_str, Value::String(masked));
+    }
+    map
+}
 
 /// Extract the URL path for logging
 /// (e.g., `"https://api.anthropic.com/v1/messages"` → `"/v1/messages"`).
@@ -230,11 +359,16 @@ fn extract_path(url: &str) -> String {
     url.to_string()
 }
 
-/// Extract request ID from response headers (`request-id` or `x-request-id`).
+/// Extract request ID from response headers.
+/// Checks multiple header names in order of preference:
+/// 1. `request-id` (Anthropic standard)
+/// 2. `x-request-id` (Common alternative)
+/// 3. `x-oneapi-request-id` (OneAPI gateways)
 pub fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get(REQUEST_ID_HEADER)
         .or_else(|| headers.get(ALT_REQUEST_ID_HEADER))
+        .or_else(|| headers.get(ONEAPI_REQUEST_ID_HEADER))
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
 }

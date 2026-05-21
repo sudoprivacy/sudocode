@@ -35,7 +35,7 @@ async fn send_message_uses_openai_compatible_endpoint_and_auth() {
     let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
         .with_base_url(server.base_url());
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("request should succeed");
 
@@ -73,21 +73,24 @@ async fn send_message_blocks_oversized_xai_requests_before_the_http_call() {
     let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
         .with_base_url(server.base_url());
     let error = client
-        .send_message(&MessageRequest {
-            model: "grok-3".to_string(),
-            max_tokens: 64_000,
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                content: vec![InputContentBlock::Text {
-                    text: "x".repeat(300_000),
+        .send_message(
+            &MessageRequest {
+                model: "grok-3".to_string(),
+                max_tokens: 64_000,
+                messages: vec![InputMessage {
+                    role: "user".to_string(),
+                    content: vec![InputContentBlock::Text {
+                        text: "x".repeat(300_000),
+                    }],
                 }],
-            }],
-            system: Some("Keep the answer short.".to_string()),
-            tools: None,
-            tool_choice: None,
-            stream: false,
-            ..Default::default()
-        })
+                system: Some("Keep the answer short.".to_string()),
+                tools: None,
+                tool_choice: None,
+                stream: false,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect_err("oversized request should fail local context-window preflight");
 
@@ -122,7 +125,7 @@ async fn send_message_accepts_full_chat_completions_endpoint_override() {
     let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
         .with_base_url(endpoint_url);
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("request should succeed");
 
@@ -156,7 +159,7 @@ async fn stream_message_normalizes_text_and_multiple_tool_calls() {
     let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
         .with_base_url(server.base_url());
     let mut stream = client
-        .stream_message(&sample_request(false))
+        .stream_message(&sample_request(false), None)
         .await
         .expect("stream should start");
 
@@ -255,7 +258,7 @@ async fn openai_streaming_requests_opt_into_usage_chunks() {
     let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
         .with_base_url(server.base_url());
     let mut stream = client
-        .stream_message(&sample_request(false))
+        .stream_message(&sample_request(false), None)
         .await
         .expect("stream should start");
 
@@ -331,7 +334,7 @@ async fn provider_client_dispatches_xai_requests() {
     assert!(matches!(client, ProviderClient::Xai(_)));
 
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("provider-dispatched request should succeed");
 

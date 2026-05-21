@@ -48,7 +48,7 @@ async fn send_message_posts_json_and_parses_response() {
         .with_auth_token(Some("proxy-token".to_string()))
         .with_base_url(server.base_url());
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("request should succeed");
 
@@ -114,21 +114,24 @@ async fn send_message_blocks_oversized_requests_before_the_http_call() {
 
     let client = AnthropicClient::new("test-key").with_base_url(server.base_url());
     let error = client
-        .send_message(&MessageRequest {
-            model: "claude-sonnet-4-6".to_string(),
-            max_tokens: 64_000,
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                content: vec![InputContentBlock::Text {
-                    text: "x".repeat(600_000),
+        .send_message(
+            &MessageRequest {
+                model: "claude-sonnet-4-6".to_string(),
+                max_tokens: 64_000,
+                messages: vec![InputMessage {
+                    role: "user".to_string(),
+                    content: vec![InputContentBlock::Text {
+                        text: "x".repeat(600_000),
+                    }],
                 }],
-            }],
-            system: Some("Keep the answer short.".to_string()),
-            tools: None,
-            tool_choice: None,
-            stream: false,
-            ..Default::default()
-        })
+                system: Some("Keep the answer short.".to_string()),
+                tools: None,
+                tool_choice: None,
+                stream: false,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect_err("oversized request should fail local context-window preflight");
 
@@ -173,7 +176,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
         .with_session_tracer(SessionTracer::new("session-telemetry", sink.clone()));
 
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("request should succeed");
 
@@ -198,53 +201,54 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     );
 
     let events = sink.events();
-    assert_eq!(events.len(), 7);
+    // After optimization: no more duplicate SessionTrace records
+    // Events: HttpRequestStarted, HttpRequestDebug, HttpResponseDebug, HttpRequestSucceeded, Analytics
+    assert_eq!(events.len(), 5);
     assert!(matches!(
         &events[0],
         TelemetryEvent::HttpRequestStarted {
             session_id,
+            request_id,
             attempt: 1,
             method,
             path,
             ..
-        } if session_id == "session-telemetry" && method == "POST" && path == "/v1/messages"
+        } if session_id == "session-telemetry" && request_id.starts_with("req_") && method == "POST" && path == "/v1/messages"
     ));
     assert!(matches!(
         &events[1],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_started"
-    ));
-    assert!(matches!(
-        &events[2],
         TelemetryEvent::HttpRequestDebug {
+            request_id,
             method,
             url,
             ..
-        } if method == "POST" && url.contains("/v1/messages")
+        } if request_id.starts_with("req_") && method == "POST" && url.contains("/v1/messages")
+    ));
+    assert!(matches!(
+        &events[2],
+        TelemetryEvent::HttpResponseDebug {
+            session_id,
+            request_id,
+            status: 200,
+            ..
+        } if session_id == "session-telemetry" && request_id.starts_with("req_")
     ));
     assert!(matches!(
         &events[3],
         TelemetryEvent::HttpRequestSucceeded {
             request_id,
+            provider_request_id,
             status: 200,
             ..
-        } if request_id.as_deref() == Some("req_profile_123")
+        } if request_id.starts_with("req_") && provider_request_id.as_deref() == Some("req_profile_123")
     ));
     assert!(matches!(
         &events[4],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "http_request_succeeded"
-    ));
-    assert!(matches!(
-        &events[5],
         TelemetryEvent::Analytics(event)
             if event.namespace == "api"
                 && event.action == "message_usage"
-                && event.properties.get("request_id") == Some(&json!("req_profile_123"))
                 && event.properties.get("total_tokens") == Some(&json!(7))
                 && event.properties.get("estimated_cost_usd") == Some(&json!("$0.0001"))
-    ));
-    assert!(matches!(
-        &events[6],
-        TelemetryEvent::SessionTrace(trace) if trace.name == "analytics"
     ));
 }
 
@@ -271,7 +275,7 @@ async fn send_message_parses_prompt_cache_token_usage_from_response() {
 
     let client = AnthropicClient::new("test-key").with_base_url(server.base_url());
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("request should succeed");
 
@@ -306,7 +310,7 @@ async fn given_empty_usage_object_when_send_message_parses_response_then_usage_d
 
     // when
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("response with empty usage object should still parse");
 
@@ -364,7 +368,7 @@ async fn stream_message_parses_sse_events_with_tool_use() {
         .with_base_url(server.base_url())
         .with_prompt_cache(PromptCache::new("stream-session"));
     let mut stream = client
-        .stream_message(&sample_request(false))
+        .stream_message(&sample_request(false), None)
         .await
         .expect("stream should start");
 
@@ -457,7 +461,7 @@ async fn retries_retryable_failures_before_succeeding() {
         .with_retry_policy(2, Duration::from_millis(1), Duration::from_millis(2));
 
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("retry should eventually succeed");
 
@@ -489,7 +493,7 @@ async fn provider_client_dispatches_anthropic_requests() {
         .expect("anthropic provider client should be constructed");
 
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("provider-dispatched request should succeed");
 
@@ -529,7 +533,7 @@ async fn surfaces_retry_exhaustion_for_persistent_retryable_errors() {
         .with_retry_policy(1, Duration::from_millis(1), Duration::from_millis(2));
 
     let error = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect_err("persistent 503 should fail");
 
@@ -598,7 +602,7 @@ async fn retries_multiple_retryable_failures_with_exponential_backoff_and_jitter
     let started_at = std::time::Instant::now();
 
     let response = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("8-retry policy should absorb 5 retryable failures");
 
@@ -647,11 +651,11 @@ async fn send_message_reuses_recent_completion_cache_entries() {
         .with_prompt_cache(PromptCache::new("integration-session"));
 
     let first = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("first request should succeed");
     let second = client
-        .send_message(&sample_request(false))
+        .send_message(&sample_request(false), None)
         .await
         .expect("second request should reuse cache");
 
@@ -711,11 +715,11 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
         }));
 
     client
-        .send_message(&request)
+        .send_message(&request, None)
         .await
         .expect("first response should succeed");
     client
-        .send_message(&request)
+        .send_message(&request, None)
         .await
         .expect("second response should succeed");
 
@@ -737,19 +741,22 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
 async fn live_stream_smoke_test() {
     let client = ApiClient::from_env().expect("ANTHROPIC_API_KEY must be set");
     let mut stream = client
-        .stream_message(&MessageRequest {
-            model: std::env::var("ANTHROPIC_MODEL")
-                .unwrap_or_else(|_| "claude-3-7-sonnet-latest".to_string()),
-            max_tokens: 32,
-            messages: vec![InputMessage::user_text(
-                "Reply with exactly: hello from rust",
-            )],
-            system: None,
-            tools: None,
-            tool_choice: None,
-            stream: false,
-            ..Default::default()
-        })
+        .stream_message(
+            &MessageRequest {
+                model: std::env::var("ANTHROPIC_MODEL")
+                    .unwrap_or_else(|_| "claude-3-7-sonnet-latest".to_string()),
+                max_tokens: 32,
+                messages: vec![InputMessage::user_text(
+                    "Reply with exactly: hello from rust",
+                )],
+                system: None,
+                tools: None,
+                tool_choice: None,
+                stream: false,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .expect("live stream should start");
 

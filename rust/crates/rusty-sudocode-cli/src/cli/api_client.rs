@@ -138,6 +138,7 @@ impl ApiClient for AnthropicRuntimeClient {
             system_dynamic: Some(request.system_prompt.dynamic_text()),
             breakpoint_last_message: true,
         });
+        let trace_id = request.trace_id.as_deref();
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: max_tokens_for_model(&self.model),
@@ -161,7 +162,7 @@ impl ApiClient for AnthropicRuntimeClient {
 
         for attempt in 1..=max_attempts {
             let result = self
-                .try_start_stream(&message_request, is_post_tool && attempt == 1)
+                .try_start_stream(&message_request, is_post_tool && attempt == 1, trace_id)
                 .await;
             match result {
                 Ok(stream) => return Ok(stream),
@@ -346,14 +347,15 @@ impl AnthropicRuntimeClient {
         &mut self,
         message_request: &MessageRequest,
         apply_stall_timeout: bool,
+        trace_id: Option<&str>,
     ) -> Result<AssistantEventStream, RuntimeError> {
-        let provider_stream =
-            self.client
-                .stream_message(message_request)
-                .await
-                .map_err(|error| {
-                    RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
-                })?;
+        let provider_stream = self
+            .client
+            .stream_message(message_request, trace_id)
+            .await
+            .map_err(|error| {
+                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+            })?;
 
         let state = CliStreamState {
             provider_stream,
@@ -435,15 +437,16 @@ impl AnthropicRuntimeClient {
                         // non-streaming request.
                         if state.buffer.is_empty() && !state.saw_stop {
                             if let Some(fallback_request) = state.fallback_request.take() {
-                                let response =
-                                    state.client.send_message(&fallback_request).await.map_err(
-                                        |error| {
-                                            RuntimeError::new(format_user_visible_api_error(
-                                                &state.session_id,
-                                                &error,
-                                            ))
-                                        },
-                                    )?;
+                                let response = state
+                                    .client
+                                    .send_message(&fallback_request, None)
+                                    .await
+                                    .map_err(|error| {
+                                        RuntimeError::new(format_user_visible_api_error(
+                                            &state.session_id,
+                                            &error,
+                                        ))
+                                    })?;
                                 // response_to_events does sync I/O (no await),
                                 // so the dyn Write borrow is safe here.
                                 let mut stdout = io::stdout();

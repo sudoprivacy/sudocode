@@ -454,6 +454,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let total_turns = cli.runtime.usage().turns();
             if let Some(tracer) = cli.session_tracer() {
                 tracer.record_usage(
+                    "session_summary".to_string(),
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cache_creation_input_tokens,
@@ -1426,6 +1427,7 @@ fn run_repl(
     let total_turns = cli.runtime.usage().turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
+            "session_summary".to_string(),
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_creation_input_tokens,
@@ -1513,6 +1515,13 @@ impl BuiltRuntime {
             .expect("runtime should exist before overriding session known date");
         self.runtime = Some(runtime.with_session_known_date(date));
         self
+    }
+
+    /// Set the trace ID for the next request.
+    fn set_trace_id(&mut self, trace_id: impl Into<String>) {
+        if let Some(ref mut runtime) = self.runtime {
+            runtime.set_trace_id(trace_id);
+        }
     }
 
     fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1880,6 +1889,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        trace_id: Option<&str>,
     ) -> Result<
         (
             runtime::acp_sdk_server::AcpStopReason,
@@ -1887,7 +1897,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         ),
         runtime::AcpError,
     > {
-        self.run_prompt_impl(session_id, prompt, observer, None)
+        self.run_prompt_impl(session_id, prompt, observer, None, trace_id)
     }
 
     fn run_prompt_with_prompter(
@@ -1896,6 +1906,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
         prompter: &mut dyn runtime::PermissionPrompter,
+        trace_id: Option<&str>,
     ) -> Result<
         (
             runtime::acp_sdk_server::AcpStopReason,
@@ -1903,7 +1914,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         ),
         runtime::AcpError,
     > {
-        self.run_prompt_impl(session_id, prompt, observer, Some(prompter))
+        self.run_prompt_impl(session_id, prompt, observer, Some(prompter), trace_id)
     }
 
     fn set_question_prompter(
@@ -2040,6 +2051,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             let total_turns = session.runtime.usage().turns();
             if let Some(tracer) = session.runtime.session_tracer() {
                 tracer.record_usage(
+                    "session_summary".to_string(),
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.cache_creation_input_tokens,
@@ -2186,6 +2198,7 @@ impl AcpSdkDelegate {
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
         prompter: Option<&mut dyn runtime::PermissionPrompter>,
+        trace_id: Option<&str>,
     ) -> Result<
         (
             runtime::acp_sdk_server::AcpStopReason,
@@ -2201,6 +2214,11 @@ impl AcpSdkDelegate {
         let _guard = ScopedCurrentDir::change_to(&session.cwd).map_err(|e| {
             runtime::AcpError::internal(format!("failed to enter session cwd: {e}"))
         })?;
+
+        // Set trace_id on the runtime if provided
+        if let Some(tid) = trace_id {
+            session.runtime.set_trace_id(tid);
+        }
 
         // Pre-send token estimation and auto-compact logic
         let model = session
@@ -2319,6 +2337,7 @@ impl AcpSdkDelegate {
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
             tracer.record_usage(
+                "session_summary".to_string(),
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_creation_input_tokens,

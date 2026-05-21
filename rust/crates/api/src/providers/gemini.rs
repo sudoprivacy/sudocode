@@ -289,14 +289,16 @@ impl GeminiClient {
     pub async fn send_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageResponse, ApiError> {
-        let mut stream = self.stream_message(request).await?;
+        let mut stream = self.stream_message(request, trace_id).await?;
         collect_stream(&mut stream, request).await
     }
 
     pub async fn stream_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
 
@@ -335,15 +337,20 @@ impl GeminiClient {
             headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
 
-        let response = self
+        let result = self
             .http
-            .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
-                check_gemini_response(response)
-            })
+            .send_json(
+                &url,
+                &headers,
+                &payload,
+                &self.retry_policy,
+                |response| check_gemini_response(response),
+                trace_id,
+            )
             .await?;
 
         Ok(MessageStream {
-            response,
+            response: result.response,
             parser: SseParser::new(),
             pending: VecDeque::new(),
             done: false,

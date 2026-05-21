@@ -16,7 +16,7 @@ pub use error::ApiError;
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with, ProxyConfig,
 };
-pub use http_transport::{request_id_from_headers, HttpTransport, RetryPolicy};
+pub use http_transport::{request_id_from_headers, HttpRequestResult, HttpTransport, RetryPolicy};
 pub use prompt_cache::{
     CacheBreakEvent, PromptCache, PromptCacheConfig, PromptCachePaths, PromptCacheRecord,
     PromptCacheStats,

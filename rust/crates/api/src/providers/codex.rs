@@ -138,16 +138,18 @@ impl CodexClient {
     pub async fn send_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageResponse, ApiError> {
         // Codex subscription requires streaming; collect the stream into a
         // single response.
-        let mut stream = self.stream_message(request).await?;
+        let mut stream = self.stream_message(request, trace_id).await?;
         collect_stream(&mut stream, request).await
     }
 
     pub async fn stream_message(
         &self,
         request: &MessageRequest,
+        trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
 
@@ -168,15 +170,20 @@ impl CodexClient {
             ("originator".to_string(), "codex_cli_rs".to_string()),
         ];
 
-        let response = self
+        let result = self
             .http
-            .send_json(&url, &headers, &payload, &self.retry_policy, |response| {
-                check_codex_response(response)
-            })
+            .send_json(
+                &url,
+                &headers,
+                &payload,
+                &self.retry_policy,
+                |response| check_codex_response(response),
+                trace_id,
+            )
             .await?;
 
         Ok(MessageStream {
-            response,
+            response: result.response,
             parser: SseParser::new(),
             pending: VecDeque::new(),
             done: false,

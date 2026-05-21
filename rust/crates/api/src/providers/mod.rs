@@ -66,11 +66,13 @@ pub trait Provider {
     fn send_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, MessageResponse>;
 
     fn stream_message<'a>(
         &'a self,
         request: &'a MessageRequest,
+        trace_id: Option<&'a str>,
     ) -> ProviderFuture<'a, Self::Stream>;
 }
 

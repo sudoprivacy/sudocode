@@ -2397,28 +2397,61 @@ impl Drop for MinimalRawMode {
     }
 }
 
-/// Polls for a standalone ESC keypress using crossterm's event system.
-/// Crossterm handles the escape-sequence timeout (distinguishing lone ESC from
-/// arrow keys / other `\x1b`-prefixed sequences). Returns true when ESC is
-/// detected, false when `stop` is set.
+/// Polls stdin for a standalone ESC keypress.
+///
+/// Uses `nix::poll` + `nix::unistd::read` directly to avoid crossterm's
+/// built-in escape-sequence disambiguation timeout (~100 ms).  After reading
+/// `0x1b` we wait **20 ms** for follow-up bytes: if none arrive it is a lone
+/// ESC; if bytes follow we drain them and continue (arrow keys, etc.).
+///
+/// Returns `true` when ESC is detected, `false` when `stop` is set.
 #[cfg(unix)]
 fn poll_stdin_for_esc(stop: &Arc<AtomicBool>) -> bool {
-    use crossterm::event::{Event, KeyCode};
-    use std::time::Duration;
+    use nix::poll::{poll, PollFd, PollFlags};
+    use nix::unistd::read;
+    use std::os::unix::io::AsFd;
+
+    let stdin = std::io::stdin();
 
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
         }
 
-        if let Ok(true) = crossterm::event::poll(Duration::from_millis(100)) {
-            if let Ok(Event::Key(key)) = crossterm::event::read() {
-                if key.code == KeyCode::Esc {
-                    return true;
-                }
-            }
+        // Wait up to 100 ms for any input (keeps stop-flag polling responsive).
+        let ready = {
+            let pollfd = PollFd::new(stdin.as_fd(), PollFlags::POLLIN);
+            let mut fds = [pollfd];
+            poll(&mut fds, 100u16).ok().is_some_and(|n| n > 0)
+                && fds[0]
+                    .revents()
+                    .is_some_and(|r| r.contains(PollFlags::POLLIN))
+        };
+        if !ready {
+            continue;
         }
-        // timeout or error — check stop flag and retry
+
+        // Read one byte without going through BufReader so follow-up polling
+        // is not confused by bytes already drained into userspace buffers.
+        let mut byte = [0u8; 1];
+        if read(0, &mut byte).ok() != Some(1) || byte[0] != 0x1b {
+            continue;
+        }
+
+        // Check whether more bytes arrive within 20 ms.  A standalone ESC has
+        // no follow-up; terminal escape sequences (arrow keys, etc.) do.
+        let has_more = {
+            let pollfd = PollFd::new(stdin.as_fd(), PollFlags::POLLIN);
+            let mut fds = [pollfd];
+            poll(&mut fds, 20u16).ok().is_some_and(|n| n > 0)
+        };
+        if !has_more {
+            return true; // standalone ESC
+        }
+
+        // Escape sequence — drain the remaining bytes and keep polling.
+        let mut discard = [0u8; 64];
+        let _ = read(0, &mut discard);
     }
 }
 

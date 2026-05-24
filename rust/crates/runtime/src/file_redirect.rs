@@ -66,40 +66,6 @@ pub fn get_drafts_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(DRAFTS_DIR_NAME)
 }
 
-/// Clean up old draft files (optional utility).
-///
-/// Remove draft files older than `max_age_days` days.
-pub fn cleanup_old_drafts(workspace_root: &Path, max_age_days: u64) -> Vec<PathBuf> {
-    let drafts_dir = workspace_root.join(DRAFTS_DIR_NAME);
-    let mut removed = Vec::new();
-
-    if !drafts_dir.exists() {
-        return removed;
-    }
-
-    let now = SystemTime::now();
-    let max_age = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
-
-    if let Ok(entries) = fs::read_dir(&drafts_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Ok(age) = now.duration_since(modified) {
-                            if age > max_age {
-                                let _ = fs::remove_file(&path);
-                                removed.push(path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    removed
-}
 
 #[cfg(test)]
 mod tests {

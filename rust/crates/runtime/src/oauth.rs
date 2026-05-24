@@ -496,10 +496,6 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".nexus").join("sudocode"))
 }
 
-fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {
-    read_credentials_root_with(path, &StdFsBackend)
-}
-
 fn read_credentials_root_with(
     path: &PathBuf,
     fs: &dyn FsBackend,
@@ -523,10 +519,6 @@ fn read_credentials_root_with(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
         Err(error) => Err(error),
     }
-}
-
-fn write_credentials_root(path: &PathBuf, root: &Map<String, Value>) -> io::Result<()> {
-    write_credentials_root_with(path, root, &StdFsBackend)
 }
 
 fn write_credentials_root_with(

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;
@@ -62,14 +62,16 @@ pub trait HookProgressReporter: Send {
 #[derive(Debug, Clone)]
 pub struct HookAbortSignal {
     aborted: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
+    // Wrapped in Mutex<Arc<...>> so reset() can swap in a fresh Notify,
+    // discarding any permit stored by a previous notify_one() call.
+    notify: Arc<Mutex<Arc<tokio::sync::Notify>>>,
 }
 
 impl Default for HookAbortSignal {
     fn default() -> Self {
         Self {
             aborted: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            notify: Arc::new(Mutex::new(Arc::new(tokio::sync::Notify::new()))),
         }
     }
 }
@@ -82,12 +84,16 @@ impl HookAbortSignal {
 
     pub fn abort(&self) {
         self.aborted.store(true, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        // notify_one stores a permit so the wakeup is never lost even if
+        // cancelled() has not been polled yet when abort() fires.
+        self.notify.lock().unwrap().notify_one();
     }
 
-    /// Clear the abort flag so a new turn can run.
+    /// Clear the abort flag and discard any stored permit so the next turn
+    /// starts clean.
     pub fn reset(&self) {
         self.aborted.store(false, Ordering::SeqCst);
+        *self.notify.lock().unwrap() = Arc::new(tokio::sync::Notify::new());
     }
 
     #[must_use]
@@ -101,7 +107,10 @@ impl HookAbortSignal {
         if self.is_aborted() {
             return;
         }
-        self.notify.notified().await;
+        // Snapshot the current Notify before awaiting so a concurrent reset()
+        // replacing the inner Arc does not affect this wait.
+        let notify = self.notify.lock().unwrap().clone();
+        notify.notified().await;
     }
 }
 

@@ -1,12 +1,32 @@
+use std::cell::RefCell;
 use std::env;
 use std::io;
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
 use tokio::time::timeout;
+
+thread_local! {
+    static BASH_ABORT_FLAG: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Set the abort flag for bash commands on the current thread.  Call this
+/// before executing a tool turn and clear it (`None`) after.
+pub fn set_bash_abort_flag(flag: Option<Arc<AtomicBool>>) {
+    BASH_ABORT_FLAG.with(|f| *f.borrow_mut() = flag);
+}
+
+fn current_bash_abort_flag() -> Option<Arc<AtomicBool>> {
+    BASH_ABORT_FLAG.with(|f| f.borrow().clone())
+}
 
 use crate::lane_events::{LaneEvent, ShipMergeMethod, ShipProvenance};
 use crate::sandbox::{
@@ -185,7 +205,80 @@ async fn execute_bash_async(
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     command.stdin(Stdio::null());
 
-    let output_result = if let Some(timeout_ms) = input.timeout {
+    // Put the child in its own process group so the killer thread can send
+    // SIGTERM to the whole group (child + any grandchildren it spawns).
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let abort_flag = current_bash_abort_flag();
+
+    let output_result = if abort_flag.is_some() {
+        // Spawn with piped I/O so we can capture output (command.output() does
+        // this automatically; spawn() does not).
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let pgid = child.id().map(|pid| pid as i32);
+
+        // Background thread: poll the abort flag every 10 ms and send SIGTERM
+        // to the process group when the user presses ESC.
+        let killer_done = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let killer_thread = {
+            let done = Arc::clone(&killer_done);
+            let abort = abort_flag.expect("checked above");
+            thread::spawn(move || loop {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                if abort.load(Ordering::Relaxed) {
+                    if let Some(pgid) = pgid {
+                        let _ = nix::sys::signal::killpg(
+                            nix::unistd::Pid::from_raw(pgid),
+                            nix::sys::signal::Signal::SIGTERM,
+                        );
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            })
+        };
+
+        let result = if let Some(timeout_ms) = input.timeout {
+            match timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
+                Ok(r) => (r?, false),
+                Err(_) => {
+                    killer_done.store(true, Ordering::Relaxed);
+                    #[cfg(unix)]
+                    let _ = killer_thread.join();
+                    return Ok(BashCommandOutput {
+                        stdout: String::new(),
+                        stderr: format!("Command exceeded timeout of {timeout_ms} ms"),
+                        raw_output_path: None,
+                        interrupted: true,
+                        is_image: None,
+                        background_task_id: None,
+                        backgrounded_by_user: None,
+                        assistant_auto_backgrounded: None,
+                        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
+                        return_code_interpretation: Some(String::from("timeout")),
+                        no_output_expected: Some(true),
+                        structured_content: None,
+                        persisted_output_path: None,
+                        persisted_output_size: None,
+                        sandbox_status: Some(sandbox_status),
+                    });
+                }
+            }
+        } else {
+            (child.wait_with_output().await?, false)
+        };
+
+        killer_done.store(true, Ordering::Relaxed);
+        #[cfg(unix)]
+        let _ = killer_thread.join();
+        result
+    } else if let Some(timeout_ms) = input.timeout {
         match timeout(Duration::from_millis(timeout_ms), command.output()).await {
             Ok(result) => (result?, false),
             Err(_) => {

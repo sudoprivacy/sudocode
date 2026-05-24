@@ -668,9 +668,23 @@ where
                     tokio::select! {
                         biased;
                         () = abort.cancelled() => {
+                            if std::env::var("SCODE_ESC_DEBUG").as_deref() == Ok("1") {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() % 100_000)
+                                    .unwrap_or(0);
+                                eprintln!("[conv +{ts}ms] abort.cancelled() fired");
+                            }
                             // Drop the stream to close the HTTP connection
                             // and stop token consumption.
                             drop(stream);
+                            if std::env::var("SCODE_ESC_DEBUG").as_deref() == Ok("1") {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() % 100_000)
+                                    .unwrap_or(0);
+                                eprintln!("[conv +{ts}ms] stream dropped");
+                            }
                             self.finalize_cancelled_turn(collected);
                             return Ok(TurnSummary {
                                 assistant_messages: Vec::new(),
@@ -751,7 +765,24 @@ where
                 break;
             }
 
+            // Expose the abort flag to synchronous tool execution (e.g. bash)
+            // so the subprocess can be killed when the user presses ESC.
+            crate::bash::set_bash_abort_flag(Some(self.hook_abort_signal.abort_flag()));
+
             for (tool_use_id, tool_name, input) in pending_tool_uses {
+                if self.hook_abort_signal.is_aborted() {
+                    crate::bash::set_bash_abort_flag(None);
+                    self.finalize_cancelled_turn(Vec::new());
+                    return Ok(TurnSummary {
+                        assistant_messages: Vec::new(),
+                        tool_results: Vec::new(),
+                        prompt_cache_events: Vec::new(),
+                        iterations,
+                        usage: self.usage_tracker.cumulative_usage(),
+                        auto_compaction: None,
+                        cancelled: true,
+                    });
+                }
                 let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
                 let effective_input = pre_hook_result
                     .updated_input()
@@ -852,6 +883,9 @@ where
                 self.record_tool_finished(iterations, &result_message);
                 tool_results.push(result_message);
             }
+
+            // Clear the abort flag now that this tool batch is done.
+            crate::bash::set_bash_abort_flag(None);
         }
 
         let auto_compaction = self.maybe_auto_compact();

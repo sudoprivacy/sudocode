@@ -101,16 +101,48 @@ impl HookAbortSignal {
         self.aborted.load(Ordering::SeqCst)
     }
 
+    /// Returns a shared reference to the underlying abort flag so callers
+    /// outside the async runtime (e.g. synchronous tool execution) can check
+    /// or monitor cancellation without going through tokio primitives.
+    #[must_use]
+    pub fn abort_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.aborted)
+    }
+
     /// Returns a future that resolves when the abort signal is triggered.
     /// If already aborted, resolves immediately.
     pub async fn cancelled(&self) {
-        if self.is_aborted() {
-            return;
+        let debug = std::env::var("SCODE_ESC_DEBUG").as_deref() == Ok("1");
+        let mut iter = 0u32;
+        loop {
+            if self.is_aborted() {
+                if debug {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() % 100_000)
+                        .unwrap_or(0);
+                    eprintln!("[cancelled +{ts}ms] is_aborted=true after {iter} iters");
+                }
+                return;
+            }
+            if debug && iter == 0 {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() % 100_000)
+                    .unwrap_or(0);
+                eprintln!("[cancelled +{ts}ms] entering notified().await (iter {iter})");
+            }
+            let notify = self.notify.lock().unwrap().clone();
+            let _ = tokio::time::timeout(Duration::from_millis(10), notify.notified()).await;
+            iter += 1;
+            if debug && iter % 10 == 0 {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() % 100_000)
+                    .unwrap_or(0);
+                eprintln!("[cancelled +{ts}ms] still looping iter={iter}");
+            }
         }
-        // Snapshot the current Notify before awaiting so a concurrent reset()
-        // replacing the inner Arc does not affect this wait.
-        let notify = self.notify.lock().unwrap().clone();
-        notify.notified().await;
     }
 }
 

@@ -2876,6 +2876,7 @@ dependencies = [
  "futures",
  "futures-util",
  "mock-anthropic-service",
+ "nix",
  "plugins",
  "pulldown-cmark",
  "runtime",

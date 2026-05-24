@@ -25,6 +25,7 @@ use std::net::TcpListener;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -2356,6 +2357,71 @@ impl AcpSdkDelegate {
     }
 }
 
+/// Minimal raw mode for ESC detection: disables ICANON and ECHO but preserves
+/// OPOST (output newline processing) and ISIG (Ctrl-C signal delivery).
+/// Automatically restores the original terminal settings on drop.
+#[cfg(unix)]
+struct MinimalRawMode {
+    orig: nix::sys::termios::Termios,
+}
+
+#[cfg(unix)]
+impl MinimalRawMode {
+    fn enter() -> Option<Self> {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            return None;
+        }
+        let orig = nix::sys::termios::tcgetattr(std::io::stdin()).ok()?;
+        let mut raw = orig.clone();
+        raw.local_flags.remove(
+            nix::sys::termios::LocalFlags::ICANON
+                | nix::sys::termios::LocalFlags::ECHO
+                | nix::sys::termios::LocalFlags::ECHOE
+                | nix::sys::termios::LocalFlags::IEXTEN,
+        );
+        nix::sys::termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, &raw)
+            .ok()?;
+        Some(Self { orig })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MinimalRawMode {
+    fn drop(&mut self) {
+        let _ = nix::sys::termios::tcsetattr(
+            std::io::stdin(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.orig,
+        );
+    }
+}
+
+/// Polls for a standalone ESC keypress using crossterm's event system.
+/// Crossterm handles the escape-sequence timeout (distinguishing lone ESC from
+/// arrow keys / other `\x1b`-prefixed sequences). Returns true when ESC is
+/// detected, false when `stop` is set.
+#[cfg(unix)]
+fn poll_stdin_for_esc(stop: &Arc<AtomicBool>) -> bool {
+    use crossterm::event::{Event, KeyCode};
+    use std::time::Duration;
+
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        if let Ok(true) = crossterm::event::poll(Duration::from_millis(100)) {
+            if let Ok(Event::Key(key)) = crossterm::event::read() {
+                if key.code == KeyCode::Esc {
+                    return true;
+                }
+            }
+        }
+        // timeout or error — check stop flag and retry
+    }
+}
+
 struct HookAbortMonitor {
     stop_tx: Option<Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
@@ -2369,6 +2435,24 @@ impl HookAbortMonitor {
                 .build()
             else {
                 return;
+            };
+
+            // Spawn an ESC-key detector thread (Unix/tty only).  It enters minimal
+            // raw mode so individual keypresses are readable, then polls stdin for a
+            // standalone ESC that is not part of an escape sequence.
+            let esc_stop = Arc::new(AtomicBool::new(false));
+            #[cfg(unix)]
+            let esc_thread = {
+                let esc_stop_ref = Arc::clone(&esc_stop);
+                let abort_for_esc = abort_signal.clone();
+                thread::spawn(move || {
+                    // `raw` keeps the minimal raw mode active for the duration
+                    // of the poll; dropping it restores the original mode.
+                    let raw = MinimalRawMode::enter();
+                    if raw.is_some() && poll_stdin_for_esc(&esc_stop_ref) {
+                        abort_for_esc.abort();
+                    }
+                })
             };
 
             runtime.block_on(async move {
@@ -2385,6 +2469,10 @@ impl HookAbortMonitor {
                     _ = wait_for_stop => {}
                 }
             });
+
+            esc_stop.store(true, Ordering::Relaxed);
+            #[cfg(unix)]
+            let _ = esc_thread.join();
         })
     }
 

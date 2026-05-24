@@ -341,6 +341,10 @@ pub fn edit_file(
 // - trust_resolver.rs: #[cfg(test)] only module
 // ---------------------------------------------------------------------------
 
+/// Maximum wall-clock time allowed for a glob walk. Returns partial results
+/// with `truncated = true` when the deadline is exceeded.
+const GLOB_TIMEOUT_SECS: u64 = 10;
+
 /// Expands a glob pattern and returns matching filenames.
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
@@ -361,7 +365,8 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
 
     let mut seen = HashSet::new();
     let mut matches = Vec::new();
-    for pat in &expanded {
+    let mut timed_out = false;
+    'outer: for pat in &expanded {
         let compiled = Pattern::new(pat)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
         let walk_root = derive_glob_walk_root(pat);
@@ -369,6 +374,10 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
             .into_iter()
             .filter_entry(|entry| !should_skip_glob_dir(entry));
         for entry in entries.flatten() {
+            if started.elapsed().as_secs() >= GLOB_TIMEOUT_SECS {
+                timed_out = true;
+                break 'outer;
+            }
             let candidate = entry.path();
             if entry.file_type().is_file()
                 && compiled.matches_path(candidate)
@@ -386,7 +395,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
             .map(Reverse)
     });
 
-    let truncated = matches.len() > 100;
+    let truncated = timed_out || matches.len() > 100;
     let filenames = matches
         .into_iter()
         .take(100)

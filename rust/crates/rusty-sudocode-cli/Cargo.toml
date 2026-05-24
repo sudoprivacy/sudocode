@@ -1,35 +1,42 @@
 [package]
-name = "rusty-sudocode-cli"
+name = "sudocode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Your own personal AI coding agent. Any OS. Any Platform."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "coding", "agent", "llm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [[bin]]
 name = "scode"
 path = "src/main.rs"
 
 [dependencies]
-api = { path = "../api" }
+api = { path = "../api", package = "sudocode-api", version = "0.1.7" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-commands = { path = "../commands" }
-compat-harness = { path = "../compat-harness" }
+commands = { path = "../commands", package = "sudocode-commands", version = "0.1.7" }
+compat-harness = { path = "../compat-harness", package = "sudocode-compat-harness", version = "0.1.7" }
 crossterm = "0.28"
 futures = "0.3"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"
-runtime = { path = "../runtime" }
-plugins = { path = "../plugins" }
-telemetry = { path = "../telemetry" }
+runtime = { path = "../runtime", package = "sudocode-runtime", version = "0.1.7" }
+plugins = { path = "../plugins", package = "sudocode-plugins", version = "0.1.7" }
+telemetry = { path = "../telemetry", package = "sudocode-telemetry", version = "0.1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 syntect = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
-tools = { path = "../tools" }
+tools = { path = "../tools", package = "sudocode-tools", version = "0.1.7" }
 
 [lints]
 workspace = true

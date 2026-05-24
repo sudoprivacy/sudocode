@@ -1,9 +1,16 @@
 [package]
-name = "telemetry"
+name = "sudocode-telemetry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Telemetry and usage tracking for the sudocode CLI."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "telemetry"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

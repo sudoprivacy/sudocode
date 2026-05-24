@@ -1,9 +1,16 @@
 [package]
-name = "nexus-vfs-client"
+name = "sudocode-nexus-vfs-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "gRPC VFS client for sudocode remote filesystem access."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "grpc"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
 tonic = { version = "0.13", features = ["transport"] }

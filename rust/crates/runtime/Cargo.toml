@@ -1,9 +1,16 @@
 [package]
-name = "runtime"
+name = "sudocode-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Core runtime for the sudocode CLI — session, permissions, MCP, file ops."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "runtime"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
 agent-client-protocol = { workspace = true }
@@ -15,28 +22,15 @@ base64 = "0.22"
 chrono = "0.4"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# Nexus kernel rlib — provides `kernel::abi::KernelAbi` trait that
-# `runtime::spawn_task::<K>` is generic over. `default-features =
-# false` keeps the kernel runtime defaults (mimalloc, connector
-# stack, py-hook adapters) off in the sudocode build — sudocode does
-# not need them and they would bloat the standalone CLI.
-#
-# Cross-repo git-dep pinned to the nexus PR branch that introduced
-# the trait (PR #4026, `feat/kernel-abi-trait`). Bump the rev when
-# nexus pushes new commits to the branch; the lockstep merge order
-# is "nexus PR #4026 lands → bump rev to merged commit on develop →
-# this sudocode PR lands". Until the nexus PR lands, this pin is
-# the one stable rev both repos see.
-kernel = { git = "https://github.com/nexi-lab/nexus", rev = "b3a0bdb9d", default-features = false }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"
-nexus-vfs-client = { path = "../nexus-vfs-client" }
-plugins = { path = "../plugins" }
+nexus-vfs-client = { path = "../nexus-vfs-client", package = "sudocode-nexus-vfs-client", version = "0.1.7" }
+plugins = { path = "../plugins", package = "sudocode-plugins", version = "0.1.7" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-telemetry = { path = "../telemetry" }
+telemetry = { path = "../telemetry", package = "sudocode-telemetry", version = "0.1.7" }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tower-http = { workspace = true }
 walkdir = "2"

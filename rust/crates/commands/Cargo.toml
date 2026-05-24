@@ -1,14 +1,21 @@
 [package]
-name = "commands"
+name = "sudocode-commands"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Slash-command implementations for the sudocode CLI."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "commands"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [lints]
 workspace = true
 
 [dependencies]
-plugins = { path = "../plugins" }
-runtime = { path = "../runtime" }
+plugins = { path = "../plugins", package = "sudocode-plugins", version = "0.1.7" }
+runtime = { path = "../runtime", package = "sudocode-runtime", version = "0.1.7" }
 serde_json.workspace = true

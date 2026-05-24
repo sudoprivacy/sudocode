@@ -1,18 +1,25 @@
 [package]
-name = "api"
+name = "sudocode-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Anthropic API client for the sudocode CLI."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "anthropic", "api"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
 base64 = "0.22"
 httpdate = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-runtime = { path = "../runtime" }
+runtime = { path = "../runtime", package = "sudocode-runtime", version = "0.1.7" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-telemetry = { path = "../telemetry" }
+telemetry = { path = "../telemetry", package = "sudocode-telemetry", version = "0.1.7" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 

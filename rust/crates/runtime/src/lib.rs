@@ -47,7 +47,6 @@ pub mod sandbox;
 mod session;
 pub mod session_control;
 pub use session_control::SessionStore;
-pub mod spawn_task;
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;
@@ -99,9 +98,7 @@ pub use file_ops::{
 pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS_DIR_NAME};
 pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
 pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
-pub use fs_backend::{
-    FsBackend, FsDirEntry, FsMetadata, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
-};
+pub use fs_backend::{FsBackend, FsDirEntry, FsMetadata, NexusVfsFsBackend, StdFsBackend};
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{
     HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,

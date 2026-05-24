@@ -10,7 +10,7 @@ name = "mock-anthropic-service"
 path = "src/main.rs"
 
 [dependencies]
-api = { path = "../api" }
+api = { path = "../api", package = "sudocode-api" }
 serde_json.workspace = true
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 

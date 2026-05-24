@@ -1,18 +1,25 @@
 [package]
-name = "tools"
+name = "sudocode-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Tool implementations (Read, Write, Bash, Glob, etc.) for the sudocode CLI."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "tools"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
-api = { path = "../api" }
+api = { path = "../api", package = "sudocode-api", version = "0.1.7" }
 async-trait = "0.1"
-commands = { path = "../commands" }
+commands = { path = "../commands", package = "sudocode-commands", version = "0.1.7" }
 flate2 = "1"
 futures = "0.3"
-plugins = { path = "../plugins" }
-runtime = { path = "../runtime" }
+plugins = { path = "../plugins", package = "sudocode-plugins", version = "0.1.7" }
+runtime = { path = "../runtime", package = "sudocode-runtime", version = "0.1.7" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

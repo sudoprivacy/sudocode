@@ -1,9 +1,16 @@
 [package]
-name = "plugins"
+name = "sudocode-plugins"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+description = "Plugin configuration types for the sudocode CLI."
+repository = "https://github.com/sudoprivacy/sudocode"
+homepage = "https://github.com/sudoprivacy/sudocode"
+keywords = ["ai", "agent", "llm", "cli", "plugins"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+authors = ["sudoprivacy"]
+publish = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

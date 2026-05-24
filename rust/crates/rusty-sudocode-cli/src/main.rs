@@ -2666,10 +2666,6 @@ impl LiveCli {
                     )?;
                 } else {
                     spinner.clear(&mut stdout)?;
-                    let final_text = final_assistant_text(&summary);
-                    if !final_text.is_empty() {
-                        println!("{final_text}");
-                    }
                     if let Some(event) = summary.auto_compaction {
                         println!(
                             "{}",

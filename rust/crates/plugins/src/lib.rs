@@ -174,7 +174,7 @@ pub fn discover_marketplace_manifest(
 ) -> Result<Option<MarketplaceManifest>, MarketplaceDiscoveryError> {
     for relative in [MARKETPLACE_NEXUS_PATH, MARKETPLACE_AGENTS_PATH] {
         let path = repo_root.join(relative);
-        let metadata = match fs::metadata(&path) {
+        let entry_metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
@@ -183,6 +183,14 @@ pub fn discover_marketplace_manifest(
                     detail: error.to_string(),
                 });
             }
+        };
+        let metadata = if entry_metadata.file_type().is_symlink() {
+            fs::metadata(&path).map_err(|error| MarketplaceDiscoveryError {
+                path: path.clone(),
+                detail: error.to_string(),
+            })?
+        } else {
+            entry_metadata
         };
         if !metadata.is_file() {
             return Err(MarketplaceDiscoveryError {
@@ -4905,6 +4913,32 @@ mod tests {
             err.path.display()
         );
         assert_eq!(err.detail, "not a file");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marketplace_broken_symlink_primary_surfaces_error_without_fallback() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("marketplace-broken-symlink-primary");
+        let nexus_dir = root.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&nexus_dir).expect("nexus marketplace dir");
+        let nexus_path = nexus_dir.join("marketplace.json");
+        symlink(nexus_dir.join("missing.json"), &nexus_path).expect("broken marketplace symlink");
+        let agents_path = root.join(".agents").join("plugins");
+        write_file(
+            agents_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        );
+        let err = discover_marketplace_manifest(&root)
+            .expect_err("broken nexus manifest symlink must return Err");
+        assert!(
+            err.path
+                .ends_with(".nexus/sudocode/plugins/marketplace.json"),
+            "error path must point to the broken nexus symlink, got: {}",
+            err.path.display()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -98,7 +98,10 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginRegistry};
+use plugins::{
+    render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginManagerConfig,
+    PluginRegistry,
+};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
@@ -4097,7 +4100,10 @@ fn build_runtime_with_plugin_state(
     plugin_registry.initialize()?;
     let policy = permission_policy(config.permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
-    let system_prompt = config.system_prompt.clone();
+    let mut system_prompt = config.system_prompt.clone();
+    if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
+        system_prompt.dynamic_sections.push(section);
+    }
     let emit_output = config.emit_output;
     let mut runtime = ConversationRuntime::new_with_features(
         session,

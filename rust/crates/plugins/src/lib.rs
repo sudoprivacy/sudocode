@@ -1007,6 +1007,63 @@ pub struct PluginLoadOutcome {
     pub failures: Vec<PluginLoadError>,
 }
 
+/// Render a summary of active `SudoCode` plugin capabilities for injection into
+/// the runtime system prompt.
+///
+/// Only enabled, successfully loaded plugins appear.  Disabled plugins and
+/// load failures are excluded so the model only sees genuinely available
+/// capabilities.  Returns `None` when no plugins are active.
+#[must_use]
+pub fn render_plugin_capabilities_section(loaded_plugins: &[LoadedPlugin]) -> Option<String> {
+    let enabled: Vec<&LoadedPlugin> = loaded_plugins
+        .iter()
+        .filter(|p| p.summary.enabled)
+        .collect();
+    if enabled.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["# Available SudoCode plugins".to_string()];
+    for plugin in enabled {
+        let cs = &plugin.capability_summary;
+        let mut parts = Vec::new();
+        if cs.tool_count > 0 {
+            parts.push(format!(
+                "{} tool{}",
+                cs.tool_count,
+                if cs.tool_count == 1 { "" } else { "s" }
+            ));
+        }
+        let hook_count =
+            cs.pre_tool_hook_count + cs.post_tool_hook_count + cs.post_tool_use_failure_hook_count;
+        if hook_count > 0 {
+            parts.push(format!(
+                "{} hook{}",
+                hook_count,
+                if hook_count == 1 { "" } else { "s" }
+            ));
+        }
+        if cs.has_skills {
+            parts.push("skills".to_string());
+        }
+        if cs.has_mcp_servers {
+            parts.push("MCP servers".to_string());
+        }
+        if cs.has_apps {
+            parts.push("apps".to_string());
+        }
+        let capability_str = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("; provides {}", parts.join(", "))
+        };
+        lines.push(format!(
+            " - {} ({}){}: {}",
+            cs.display_name, cs.plugin_id, capability_str, cs.description
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn resolve_capability_path(root: Option<&Path>, relative: Option<&str>) -> Vec<PathBuf> {
     let Some(relative) = relative else {
         return Vec::new();
@@ -4644,5 +4701,203 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[allow(clippy::struct_excessive_bools)]
+    struct PluginFixture {
+        plugin_id: String,
+        display_name: String,
+        description: String,
+        tool_count: usize,
+        pre_hook: usize,
+        post_hook: usize,
+        post_fail_hook: usize,
+        has_skills: bool,
+        has_mcp_servers: bool,
+        has_apps: bool,
+        enabled: bool,
+    }
+
+    impl PluginFixture {
+        fn new(plugin_id: &str, display_name: &str, description: &str) -> Self {
+            Self {
+                plugin_id: plugin_id.to_string(),
+                display_name: display_name.to_string(),
+                description: description.to_string(),
+                tool_count: 0,
+                pre_hook: 0,
+                post_hook: 0,
+                post_fail_hook: 0,
+                has_skills: false,
+                has_mcp_servers: false,
+                has_apps: false,
+                enabled: true,
+            }
+        }
+
+        fn tools(mut self, n: usize) -> Self {
+            self.tool_count = n;
+            self
+        }
+        fn pre_hooks(mut self, n: usize) -> Self {
+            self.pre_hook = n;
+            self
+        }
+        fn post_hooks(mut self, n: usize) -> Self {
+            self.post_hook = n;
+            self
+        }
+        fn post_fail_hooks(mut self, n: usize) -> Self {
+            self.post_fail_hook = n;
+            self
+        }
+        fn with_skills(mut self) -> Self {
+            self.has_skills = true;
+            self
+        }
+        fn with_mcp(mut self) -> Self {
+            self.has_mcp_servers = true;
+            self
+        }
+        fn with_apps(mut self) -> Self {
+            self.has_apps = true;
+            self
+        }
+        fn disabled(mut self) -> Self {
+            self.enabled = false;
+            self
+        }
+
+        fn build(self) -> super::LoadedPlugin {
+            let (name, source) = self.plugin_id.split_once('@').map_or_else(
+                || (self.plugin_id.clone(), "unknown".to_string()),
+                |(n, s)| (n.to_string(), s.to_string()),
+            );
+            super::LoadedPlugin {
+                summary: super::PluginSummary {
+                    metadata: super::PluginMetadata {
+                        id: self.plugin_id.clone(),
+                        name: name.clone(),
+                        version: "1.0.0".to_string(),
+                        description: self.description.clone(),
+                        kind: super::PluginKind::External,
+                        source: source.clone(),
+                        default_enabled: true,
+                        root: None,
+                    },
+                    enabled: self.enabled,
+                },
+                root: None,
+                kind: super::PluginKind::External,
+                source,
+                capabilities: super::PluginCapabilityMetadata::default(),
+                skill_roots: vec![],
+                mcp_config_paths: vec![],
+                app_config_paths: vec![],
+                capability_summary: super::PluginCapabilitySummary {
+                    plugin_id: self.plugin_id,
+                    display_name: self.display_name,
+                    description: self.description,
+                    tool_count: self.tool_count,
+                    pre_tool_hook_count: self.pre_hook,
+                    post_tool_hook_count: self.post_hook,
+                    post_tool_use_failure_hook_count: self.post_fail_hook,
+                    has_skills: self.has_skills,
+                    has_mcp_servers: self.has_mcp_servers,
+                    has_apps: self.has_apps,
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_empty_returns_none() {
+        assert!(super::render_plugin_capabilities_section(&[]).is_none());
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_surfaces_enabled_plugin() {
+        let plugin = PluginFixture::new("my-plugin@external", "My Plugin", "Does things")
+            .tools(2)
+            .pre_hooks(1)
+            .build();
+        let section = super::render_plugin_capabilities_section(&[plugin]).unwrap();
+        assert!(section.contains("# Available SudoCode plugins"));
+        assert!(section.contains("my-plugin@external"));
+        assert!(section.contains("My Plugin"));
+        assert!(section.contains("Does things"));
+        assert!(section.contains("2 tools"));
+        assert!(section.contains("1 hook"));
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_omits_provides_when_no_capabilities() {
+        let plugin = PluginFixture::new("bare@bundled", "Bare Plugin", "Nothing special").build();
+        let section = super::render_plugin_capabilities_section(&[plugin]).unwrap();
+        assert!(
+            !section.contains("provides"),
+            "no 'provides' clause expected"
+        );
+        assert!(section.contains("bare@bundled"));
+        assert!(section.contains("Bare Plugin"));
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_includes_all_capability_flags() {
+        let plugin = PluginFixture::new("full@bundled", "Full Plugin", "Everything")
+            .tools(3)
+            .pre_hooks(1)
+            .post_hooks(2)
+            .post_fail_hooks(1)
+            .with_skills()
+            .with_mcp()
+            .with_apps()
+            .build();
+        let section = super::render_plugin_capabilities_section(&[plugin]).unwrap();
+        assert!(section.contains("3 tools"));
+        assert!(section.contains("4 hooks"));
+        assert!(section.contains("skills"));
+        assert!(section.contains("MCP servers"));
+        assert!(section.contains("apps"));
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_lists_multiple_plugins() {
+        let plugins = vec![
+            PluginFixture::new("alpha@bundled", "Alpha", "First plugin")
+                .tools(1)
+                .build(),
+            PluginFixture::new("beta@external", "Beta", "Second plugin").build(),
+        ];
+        let section = super::render_plugin_capabilities_section(&plugins).unwrap();
+        assert!(section.contains("alpha@bundled"));
+        assert!(section.contains("beta@external"));
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_skips_disabled_plugins() {
+        let disabled = PluginFixture::new("hidden@bundled", "Hidden", "Should not appear")
+            .disabled()
+            .build();
+        assert!(
+            super::render_plugin_capabilities_section(&[disabled]).is_none(),
+            "disabled plugin must not produce a section"
+        );
+    }
+
+    #[test]
+    fn render_plugin_capabilities_section_omits_disabled_among_mixed() {
+        let plugins = vec![
+            PluginFixture::new("visible@bundled", "Visible", "Active plugin").build(),
+            PluginFixture::new("hidden@bundled", "Hidden", "Disabled plugin")
+                .disabled()
+                .build(),
+        ];
+        let section = super::render_plugin_capabilities_section(&plugins).unwrap();
+        assert!(section.contains("visible@bundled"));
+        assert!(
+            !section.contains("hidden@bundled"),
+            "disabled plugin must not appear in section"
+        );
     }
 }

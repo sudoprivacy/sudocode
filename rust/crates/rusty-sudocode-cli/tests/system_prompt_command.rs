@@ -50,12 +50,12 @@ fn install_and_enable_plugin(config_home: &Path, plugin_name: &str, description:
     )
     .expect("plugin manifest write");
 
-    // External plugins require an explicit enabledPlugins entry; write it to
-    // the user-level settings file that ConfigLoader reads from config_home.
+    // External plugins require an explicit enabled entry; write it to the
+    // user-level settings file that ConfigLoader reads from config_home.
     let plugin_id = format!("{plugin_name}@external");
     fs::write(
         config_home.join("settings.json"),
-        format!(r#"{{"enabledPlugins":{{"{plugin_id}":true}}}}"#),
+        format!(r#"{{"plugins":{{"enabled":{{"{plugin_id}":{{"enabled":true}}}}}}}}"#),
     )
     .expect("settings.json write");
 }
@@ -125,6 +125,19 @@ fn system_prompt_json_sections_include_plugin_section() {
     assert!(
         message.contains("json-test-plugin"),
         "JSON message missing plugin id"
+    );
+    let sections = parsed["sections"].as_array().expect("sections field");
+    assert!(
+        sections.iter().any(|section| section
+            .as_str()
+            .is_some_and(|text| text.contains("# Available SudoCode plugins"))),
+        "JSON sections missing plugin section"
+    );
+    assert!(
+        sections.iter().any(|section| section
+            .as_str()
+            .is_some_and(|text| text.contains("json-test-plugin"))),
+        "JSON sections missing plugin id"
     );
 
     fs::remove_dir_all(root).ok();

@@ -868,6 +868,7 @@ impl PluginRegistryReport {
                 .registry
                 .plugins()
                 .iter()
+                .filter(|plugin| plugin.is_enabled())
                 .map(LoadedPlugin::from_registered)
                 .collect(),
             failures: self
@@ -4280,6 +4281,51 @@ mod tests {
         assert_eq!(outcome.failures[0].kind, PluginKind::External);
         assert_eq!(outcome.failures[0].source, "external");
         assert!(outcome.failures[0].message.contains("broken manifest"));
+    }
+
+    #[test]
+    fn load_outcome_excludes_disabled_plugins() {
+        let _guard = env_guard();
+        let config_home = temp_dir("outcome-disabled-home");
+        let source_a = temp_dir("outcome-disabled-source-a");
+        let source_b = temp_dir("outcome-disabled-source-b");
+
+        write_external_plugin(&source_a, "enabled-plugin", "1.0.0");
+        write_external_plugin(&source_b, "disabled-plugin", "1.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(source_a.to_str().expect("utf8"))
+            .expect("install enabled-plugin");
+        manager
+            .install(source_b.to_str().expect("utf8"))
+            .expect("install disabled-plugin");
+        manager
+            .disable("disabled-plugin@external")
+            .expect("disable disabled-plugin");
+
+        let report = manager
+            .plugin_registry_report()
+            .expect("registry report builds");
+        let outcome = report.load_outcome();
+
+        let ids: Vec<&str> = outcome
+            .loaded_plugins
+            .iter()
+            .map(|p| p.summary.metadata.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"enabled-plugin@external"),
+            "enabled plugin should appear in outcome; got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"disabled-plugin@external"),
+            "disabled plugin must be excluded from outcome; got {ids:?}"
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_a);
+        let _ = fs::remove_dir_all(source_b);
     }
 
     // --- Store roots: cache and data path helpers ---

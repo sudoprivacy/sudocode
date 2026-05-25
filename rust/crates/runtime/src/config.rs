@@ -976,7 +976,8 @@ fn parse_optional_plugin_config(root: &JsonValue) -> Result<RuntimePluginConfig,
 
     let mut config = RuntimePluginConfig::default();
     if let Some(enabled_plugins) = object.get("enabledPlugins") {
-        config.enabled_plugins = parse_bool_map(enabled_plugins, "merged settings.enabledPlugins")?;
+        config.enabled_plugins =
+            parse_plugin_enabled_map(enabled_plugins, "merged settings.enabledPlugins")?;
     }
 
     let Some(plugins_value) = object.get("plugins") else {
@@ -985,7 +986,8 @@ fn parse_optional_plugin_config(root: &JsonValue) -> Result<RuntimePluginConfig,
     let plugins = expect_object(plugins_value, "merged settings.plugins")?;
 
     if let Some(enabled_value) = plugins.get("enabled") {
-        config.enabled_plugins = parse_bool_map(enabled_value, "merged settings.plugins.enabled")?;
+        config.enabled_plugins =
+            parse_plugin_enabled_map(enabled_value, "merged settings.plugins.enabled")?;
     }
     config.external_directories =
         optional_string_array(plugins, "externalDirectories", "merged settings.plugins")?
@@ -1509,6 +1511,54 @@ fn parse_bool_map(value: &JsonValue, context: &str) -> Result<BTreeMap<String, b
                 })
         })
         .collect()
+}
+
+/// Parses a SudoCode plugin enabled-state map accepting both legacy bool values and
+/// structured object entries.
+///
+/// Accepted forms per entry:
+///   - `"plugin-id@source": true`                  (legacy boolean)
+///   - `"plugin-id@source": { "enabled": true }`   (structured object)
+fn parse_plugin_enabled_map(
+    value: &JsonValue,
+    context: &str,
+) -> Result<BTreeMap<String, bool>, ConfigError> {
+    let Some(map) = value.as_object() else {
+        return Err(ConfigError::Parse(format!(
+            "{context}: expected JSON object"
+        )));
+    };
+    let mut result = BTreeMap::new();
+    for (key, val) in map {
+        if key.is_empty() {
+            return Err(ConfigError::Parse(format!(
+                "{context}: SudoCode plugin id must not be empty"
+            )));
+        }
+        let enabled = match val {
+            JsonValue::Bool(b) => *b,
+            JsonValue::Object(obj) => match obj.get("enabled") {
+                Some(JsonValue::Bool(b)) => *b,
+                Some(other) => return Err(ConfigError::Parse(format!(
+                    "{context}.{key}: SudoCode plugin entry `enabled` must be a boolean, got {}",
+                    other.render()
+                ))),
+                None => {
+                    return Err(ConfigError::Parse(format!(
+                        "{context}.{key}: SudoCode plugin object entry must include `enabled`"
+                    )))
+                }
+            },
+            other => {
+                return Err(ConfigError::Parse(format!(
+                    "{context}.{key}: SudoCode plugin entry must be a boolean or object, got {}",
+                    other.render()
+                )))
+            }
+        };
+        result.insert(key.clone(), enabled);
+    }
+    Ok(result)
 }
 
 fn optional_string_array(
@@ -2168,6 +2218,108 @@ mod tests {
             Some("plugin-cache/installed.json")
         );
         assert_eq!(loaded.plugins().bundled_root(), Some("./bundled-plugins"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn parses_structured_plugin_config_object_entries() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "plugins": {
+                "enabled": {
+                  "enabled-tool@builtin": { "enabled": true },
+                  "disabled-tool@external": { "enabled": false },
+                  "bool-style@bundled": true
+                }
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("enabled-tool@builtin"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("disabled-tool@external"),
+            Some(&false)
+        );
+        assert_eq!(
+            loaded.plugins().enabled_plugins().get("bool-style@bundled"),
+            Some(&true)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rejects_empty_plugin_id_in_plugin_enabled_config() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{ "plugins": { "enabled": { "": true } } }"#,
+        )
+        .expect("write settings");
+
+        let err = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect_err("config should fail");
+
+        assert!(
+            err.to_string()
+                .contains("SudoCode plugin id must not be empty"),
+            "error was: {err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rejects_invalid_type_in_plugin_enabled_config() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{ "plugins": { "enabled": { "my-plugin@external": 42 } } }"#,
+        )
+        .expect("write settings");
+
+        let err = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect_err("config should fail");
+
+        assert!(
+            err.to_string()
+                .contains("SudoCode plugin entry must be a boolean or object"),
+            "error was: {err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

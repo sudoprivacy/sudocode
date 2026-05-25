@@ -51,7 +51,13 @@ impl ProviderClient {
                                     .and_then(|t| t.as_str().map(String::from))
                             })
                             .unwrap_or_else(|| content.trim().to_string());
-                        AuthSource::BearerToken(token)
+                        // sk-ant-* tokens (API keys and OAuth tokens) must use
+                        // x-api-key header, not Authorization: Bearer.
+                        if token.starts_with("sk-ant-") {
+                            AuthSource::ApiKey(token)
+                        } else {
+                            AuthSource::BearerToken(token)
+                        }
                     }
                     Credential::None => {
                         return Err(ApiError::Configuration(

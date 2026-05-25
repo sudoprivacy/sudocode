@@ -536,6 +536,42 @@ async fn acp_stdio_integration() {
     workspace.cleanup();
 }
 
+/// When the host closes the stdio connection (its stdin reaches EOF), the
+/// agent must exit on its own instead of lingering as an orphaned process.
+#[tokio::test]
+async fn acp_stdio_exits_on_stdin_close() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-eof");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    // Drive a normal handshake so the server is fully up before we disconnect.
+    scenario_initialize(&mut client).await;
+
+    let (mut child, stdin) = match client.transport {
+        Transport::Stdio { child, stdin, .. } => (child, stdin),
+        Transport::WebSocket { .. } => panic!("expected stdio transport"),
+    };
+
+    // Closing stdin signals EOF to the agent, mirroring a host that
+    // disconnected or was killed.
+    drop(stdin);
+
+    let status = timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("agent should exit promptly after stdin closes")
+        .expect("waiting on child should succeed");
+    assert!(
+        status.success() || status.code().is_some(),
+        "agent should terminate cleanly after stdin EOF, got {status:?}"
+    );
+
+    workspace.cleanup();
+}
+
 #[tokio::test]
 async fn acp_ws_integration() {
     let server = MockAnthropicService::spawn()

@@ -8217,7 +8217,7 @@ mod tests {
         fs::create_dir_all(&skill_dir).expect("skill dir should exist");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "# help\n\nGuide on using oh-my-codex plugin\n",
+            "# help\n\nGuide on using SudoCode plugin\n",
         )
         .expect("skill file should exist");
         let original_home = std::env::var("HOME").ok();
@@ -8241,7 +8241,7 @@ mod tests {
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
-            .contains("Guide on using oh-my-codex plugin"));
+            .contains("Guide on using SudoCode plugin"));
 
         let dollar_result = execute_tool(
             "Skill",

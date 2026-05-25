@@ -2174,7 +2174,7 @@ fn detect_claude_code_manifest_contract_gaps(
 
     for (field, detail) in [(
         "agents",
-        "plugin manifest field `agents` uses the Sudo Code plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.",
+        "plugin manifest field `agents` uses the SudoCode plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.",
     )] {
         if root.contains_key(field) {
             errors.push(PluginManifestValidationError::UnsupportedManifestContract {
@@ -3270,7 +3270,7 @@ mod tests {
             r#"{
   "name": "oh-my-claudecode",
   "version": "4.10.2",
-  "description": "Sudo Code plugin manifest",
+  "description": "SudoCode plugin manifest",
   "hooks": {
     "SessionStart": ["scripts/session-start.mjs"]
   },
@@ -3282,9 +3282,9 @@ mod tests {
         );
 
         let error = load_plugin_from_directory(&root)
-            .expect_err("Sudo Code plugin manifest should fail with guidance");
+            .expect_err("SudoCode plugin manifest should fail with guidance");
         let rendered = error.to_string();
-        assert!(rendered.contains("field `agents` uses the Sudo Code plugin contract"));
+        assert!(rendered.contains("field `agents` uses the SudoCode plugin contract"));
         assert!(rendered.contains("field `commands` uses Sudo Code-style directory globs"));
         assert!(rendered.contains("hook `SessionStart` uses the Sudo Code lifecycle contract"));
 

@@ -384,6 +384,8 @@ impl OpenAiSseParser {
 #[derive(Debug)]
 struct StreamState {
     model: String,
+    message_id: Option<String>,
+    response_model: Option<String>,
     message_started: bool,
     text_started: bool,
     text_finished: bool,
@@ -399,6 +401,8 @@ impl StreamState {
     fn new(model: String) -> Self {
         Self {
             model,
+            message_id: None,
+            response_model: None,
             message_started: false,
             text_started: false,
             text_finished: false,
@@ -413,26 +417,11 @@ impl StreamState {
 
     fn ingest_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<StreamEvent>, ApiError> {
         let mut events = Vec::new();
-        if !self.message_started {
-            self.message_started = true;
-            events.push(StreamEvent::MessageStart(MessageStartEvent {
-                message: MessageResponse {
-                    id: chunk.id.clone(),
-                    kind: "message".to_string(),
-                    role: "assistant".to_string(),
-                    content: Vec::new(),
-                    model: chunk.model.clone().unwrap_or_else(|| self.model.clone()),
-                    stop_reason: None,
-                    stop_sequence: None,
-                    usage: Usage {
-                        input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 0,
-                    },
-                    request_id: None,
-                },
-            }));
+        if self.message_id.is_none() {
+            self.message_id = Some(chunk.id.clone());
+        }
+        if self.response_model.is_none() {
+            self.response_model = chunk.model.clone();
         }
 
         if let Some(usage) = chunk.usage {
@@ -451,6 +440,7 @@ impl StreamState {
                 .filter(|value| !value.is_empty())
             {
                 if !self.thinking_started {
+                    self.ensure_message_started(&mut events);
                     self.thinking_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
                         index: 0,
@@ -471,6 +461,7 @@ impl StreamState {
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
                 self.close_thinking(&mut events);
                 if !self.text_started {
+                    self.ensure_message_started(&mut events);
                     self.text_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
                         index: self.text_block_index(),
@@ -488,25 +479,40 @@ impl StreamState {
             for tool_call in choice.delta.tool_calls {
                 self.close_thinking(&mut events);
                 let tool_index_offset = self.tool_index_offset();
-                let state = self.tool_calls.entry(tool_call.index).or_default();
-                state.apply(tool_call);
-                let block_index = state.block_index(tool_index_offset);
-                if !state.started {
-                    if let Some(start_event) = state.start_event(tool_index_offset)? {
-                        state.started = true;
-                        events.push(StreamEvent::ContentBlockStart(start_event));
+                let (start_event, delta_event, stop_event) = {
+                    let state = self.tool_calls.entry(tool_call.index).or_default();
+                    state.apply(tool_call);
+                    let block_index = state.block_index(tool_index_offset);
+                    let start_event = if !state.started {
+                        if let Some(event) = state.start_event(tool_index_offset)? {
+                            state.started = true;
+                            Some(event)
+                        } else {
+                            continue;
+                        }
                     } else {
-                        continue;
-                    }
+                        None
+                    };
+                    let delta_event = state.delta_event(tool_index_offset);
+                    let stop_event = if choice.finish_reason.as_deref() == Some("tool_calls")
+                        && !state.stopped
+                    {
+                        state.stopped = true;
+                        Some(ContentBlockStopEvent { index: block_index })
+                    } else {
+                        None
+                    };
+                    (start_event, delta_event, stop_event)
+                };
+                if let Some(start_event) = start_event {
+                    self.ensure_message_started(&mut events);
+                    events.push(StreamEvent::ContentBlockStart(start_event));
                 }
-                if let Some(delta_event) = state.delta_event(tool_index_offset) {
+                if let Some(delta_event) = delta_event {
                     events.push(StreamEvent::ContentBlockDelta(delta_event));
                 }
-                if choice.finish_reason.as_deref() == Some("tool_calls") && !state.stopped {
-                    state.stopped = true;
-                    events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                        index: block_index,
-                    }));
+                if let Some(stop_event) = stop_event {
+                    events.push(StreamEvent::ContentBlockStop(stop_event));
                 }
             }
 
@@ -545,22 +551,27 @@ impl StreamState {
         }
 
         let tool_index_offset = self.tool_index_offset();
+        let mut tool_events = Vec::new();
         for state in self.tool_calls.values_mut() {
             if !state.started {
                 if let Some(start_event) = state.start_event(tool_index_offset)? {
                     state.started = true;
-                    events.push(StreamEvent::ContentBlockStart(start_event));
+                    tool_events.push(StreamEvent::ContentBlockStart(start_event));
                     if let Some(delta_event) = state.delta_event(tool_index_offset) {
-                        events.push(StreamEvent::ContentBlockDelta(delta_event));
+                        tool_events.push(StreamEvent::ContentBlockDelta(delta_event));
                     }
                 }
             }
             if state.started && !state.stopped {
                 state.stopped = true;
-                events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                tool_events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
                     index: state.block_index(tool_index_offset),
                 }));
             }
+        }
+        if !tool_events.is_empty() {
+            self.ensure_message_started(&mut events);
+            events.extend(tool_events);
         }
 
         if self.message_started {
@@ -583,6 +594,34 @@ impl StreamState {
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
         Ok(events)
+    }
+
+    fn ensure_message_started(&mut self, events: &mut Vec<StreamEvent>) {
+        if self.message_started {
+            return;
+        }
+        self.message_started = true;
+        events.push(StreamEvent::MessageStart(MessageStartEvent {
+            message: MessageResponse {
+                id: self.message_id.clone().unwrap_or_default(),
+                kind: "message".to_string(),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                model: self
+                    .response_model
+                    .clone()
+                    .unwrap_or_else(|| self.model.clone()),
+                stop_reason: None,
+                stop_sequence: None,
+                usage: Usage {
+                    input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    output_tokens: 0,
+                },
+                request_id: None,
+            },
+        }));
     }
 
     fn close_thinking(&mut self, events: &mut Vec<StreamEvent>) {
@@ -1675,6 +1714,41 @@ mod tests {
             events[6],
             StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 1 })
         ));
+    }
+
+    #[test]
+    fn streaming_contentless_stop_and_usage_chunks_emit_no_message() {
+        let mut state = StreamState::new("gpt-5".to_string());
+        let mut events = state
+            .ingest_chunk(super::ChatCompletionChunk {
+                id: "chatcmpl_empty".to_string(),
+                model: Some("gpt-5".to_string()),
+                choices: vec![super::ChunkChoice {
+                    delta: super::ChunkDelta::default(),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: None,
+            })
+            .expect("contentless stop chunk");
+        events.extend(
+            state
+                .ingest_chunk(super::ChatCompletionChunk {
+                    id: "chatcmpl_empty".to_string(),
+                    model: None,
+                    choices: Vec::new(),
+                    usage: Some(super::OpenAiUsage {
+                        prompt_tokens: 9,
+                        completion_tokens: 0,
+                    }),
+                })
+                .expect("usage-only chunk"),
+        );
+        events.extend(state.finish().expect("finish"));
+
+        assert!(
+            events.is_empty(),
+            "contentless chunks should let the runtime fallback path handle the empty response"
+        );
     }
 
     #[test]

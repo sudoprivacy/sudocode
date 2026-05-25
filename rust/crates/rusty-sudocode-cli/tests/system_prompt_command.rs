@@ -84,16 +84,24 @@ fn system_prompt_includes_active_plugin_capabilities() {
         text.contains("# Available SudoCode plugins"),
         "system-prompt missing 'Available SudoCode plugins' section;\nfull output:\n{text}"
     );
+    let plugin_section = text
+        .split("# Available SudoCode plugins")
+        .nth(1)
+        .expect("plugin section");
     assert!(
-        text.contains("greet-plugin"),
-        "system-prompt missing plugin id;\nfull output:\n{text}"
+        plugin_section.contains("Plugin 1"),
+        "system-prompt missing plugin capability entry;\nfull output:\n{text}"
     );
     assert!(
-        text.contains("Manifest descriptions are intentionally omitted"),
-        "system-prompt missing plugin metadata safety note;\nfull output:\n{text}"
+        plugin_section.contains("manifest metadata is untrusted"),
+        "system-prompt missing plugin metadata omission note;\nfull output:\n{text}"
     );
     assert!(
-        !text.contains("A greeting SudoCode plugin"),
+        !plugin_section.contains("greet-plugin"),
+        "system-prompt should not include plugin manifest ids;\nfull output:\n{text}"
+    );
+    assert!(
+        !plugin_section.contains("A greeting SudoCode plugin"),
         "system-prompt should not include plugin manifest descriptions;\nfull output:\n{text}"
     );
 
@@ -126,9 +134,17 @@ fn system_prompt_json_sections_include_plugin_section() {
         message.contains("# Available SudoCode plugins"),
         "JSON message missing plugin section"
     );
+    let plugin_message_section = message
+        .split("# Available SudoCode plugins")
+        .nth(1)
+        .expect("plugin message section");
     assert!(
-        message.contains("json-test-plugin"),
-        "JSON message missing plugin id"
+        plugin_message_section.contains("Plugin 1"),
+        "JSON message missing plugin capability entry"
+    );
+    assert!(
+        !plugin_message_section.contains("json-test-plugin"),
+        "JSON message should not include plugin manifest ids"
     );
     let sections = parsed["sections"].as_array().expect("sections field");
     assert!(
@@ -140,8 +156,17 @@ fn system_prompt_json_sections_include_plugin_section() {
     assert!(
         sections.iter().any(|section| section
             .as_str()
-            .is_some_and(|text| text.contains("json-test-plugin"))),
-        "JSON sections missing plugin id"
+            .is_some_and(|text| text.contains("Plugin 1"))),
+        "JSON sections missing plugin capability entry"
+    );
+    let plugin_section = sections
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|text| text.contains("# Available SudoCode plugins"))
+        .expect("JSON sections missing plugin section");
+    assert!(
+        !plugin_section.contains("json-test-plugin"),
+        "JSON plugin section should not include plugin manifest ids"
     );
 
     fs::remove_dir_all(root).ok();

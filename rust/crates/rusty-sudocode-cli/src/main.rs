@@ -3805,9 +3805,15 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         .feature_config()
         .clone()
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
+    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?;
     let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config, &plugin_load_outcome)?;
-    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
-        .with_runtime_tools(runtime_tools)?;
+    let tool_registry = match tool_registry.with_runtime_tools(runtime_tools) {
+        Ok(tool_registry) => tool_registry,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     Ok(RuntimePluginState {
         feature_config,
         tool_registry,
@@ -4136,16 +4142,28 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
-    let policy = permission_policy(config.permission_mode, &feature_config, &tool_registry)
-        .map_err(std::io::Error::other)?;
+    let policy = match permission_policy(config.permission_mode, &feature_config, &tool_registry) {
+        Ok(policy) => policy,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     let mut system_prompt = config.system_prompt.clone();
     if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
         system_prompt.dynamic_sections.push(section);
     }
     let emit_output = config.emit_output;
+    let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(error);
+        }
+    };
     let mut runtime = ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone())?,
+        client,
         CliToolExecutor::new(
             config.allowed_tools,
             emit_output,
@@ -4161,12 +4179,7 @@ fn build_runtime_with_plugin_state(
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }
     if let Err(error) = plugin_registry.initialize() {
-        if let Some(state) = &mcp_state {
-            let _ = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .shutdown();
-        }
+        shutdown_mcp_state_best_effort(&mcp_state);
         return Err(Box::new(error));
     }
     Ok(BuiltRuntime::new(
@@ -4175,6 +4188,15 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     ))
+}
+
+fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    if let Some(state) = mcp_state {
+        let _ = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
+    }
 }
 
 struct CliHookProgressReporter;

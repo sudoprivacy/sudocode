@@ -55,8 +55,9 @@ fn plugin_section_appended_to_dynamic_sections() {
 
     let dynamic = prompt.dynamic_text();
     assert!(dynamic.contains("# Available SudoCode plugins"));
-    assert!(dynamic.contains("test-plugin@external"));
-    assert!(dynamic.contains("Test Plugin"));
+    assert!(dynamic.contains("Plugin 1"));
+    assert!(!dynamic.contains("test-plugin@external"));
+    assert!(!dynamic.contains("Test Plugin"));
 }
 
 #[test]

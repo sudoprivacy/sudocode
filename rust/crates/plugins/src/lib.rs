@@ -2474,7 +2474,13 @@ fn resolve_hook_entry(root: &Path, entry: &str) -> String {
 }
 
 fn is_literal_command(entry: &str) -> bool {
-    !entry.starts_with("./") && !entry.starts_with("../") && !Path::new(entry).is_absolute()
+    if entry.starts_with("./") || entry.starts_with("../") || Path::new(entry).is_absolute() {
+        return false;
+    }
+    if entry.split_whitespace().count() == 1 && (entry.contains('/') || entry.contains('\\')) {
+        return false;
+    }
+    true
 }
 
 fn run_lifecycle_commands(

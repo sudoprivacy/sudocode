@@ -214,6 +214,7 @@ impl HookRunner {
             false,
             abort_signal,
             reporter,
+            &self.config,
         )
     }
 
@@ -264,6 +265,7 @@ impl HookRunner {
             is_error,
             abort_signal,
             reporter,
+            &self.config,
         )
     }
 
@@ -314,6 +316,7 @@ impl HookRunner {
             true,
             abort_signal,
             reporter,
+            &self.config,
         )
     }
 
@@ -344,6 +347,7 @@ impl HookRunner {
         is_error: bool,
         abort_signal: Option<&HookAbortSignal>,
         mut reporter: Option<&mut dyn HookProgressReporter>,
+        config: &RuntimeHookConfig,
     ) -> HookRunResult {
         if commands.is_empty() {
             return HookRunResult::allow(Vec::new());
@@ -368,6 +372,7 @@ impl HookRunner {
         let mut result = HookRunResult::allow(Vec::new());
 
         for command in commands {
+            let hook_source = config.hook_source(event.as_str(), command);
             if let Some(reporter) = reporter.as_deref_mut() {
                 reporter.on_event(&HookProgressEvent::Started {
                     event,
@@ -385,6 +390,7 @@ impl HookRunner {
                 is_error,
                 &payload,
                 abort_signal,
+                hook_source,
             ) {
                 HookCommandOutcome::Allow { parsed } => {
                     if let Some(reporter) = reporter.as_deref_mut() {
@@ -448,6 +454,7 @@ impl HookRunner {
         is_error: bool,
         payload: &str,
         abort_signal: Option<&HookAbortSignal>,
+        hook_source: Option<&str>,
     ) -> HookCommandOutcome {
         let mut child = shell_command(command);
         child.stdin(Stdio::piped());
@@ -476,13 +483,16 @@ impl HookRunner {
                         }
                     }
                     Some(2) => HookCommandOutcome::Deny {
-                        parsed: parsed.with_fallback_message(format!(
-                            "{} hook denied tool `{tool_name}`",
-                            event.as_str()
+                        parsed: parsed.with_fallback_message(format_hook_denial(
+                            hook_source,
+                            event,
+                            tool_name,
                         )),
                     },
                     Some(code) => HookCommandOutcome::Failed {
                         parsed: parsed.with_fallback_message(format_hook_failure(
+                            hook_source,
+                            event,
                             command,
                             code,
                             primary_message.as_deref(),
@@ -490,26 +500,26 @@ impl HookRunner {
                         )),
                     },
                     None => HookCommandOutcome::Failed {
-                        parsed: parsed.with_fallback_message(format!(
-                            "{} hook `{command}` terminated by signal while handling `{}`",
-                            event.as_str(),
-                            tool_name
+                        parsed: parsed.with_fallback_message(format_hook_signal(
+                            hook_source,
+                            event,
+                            command,
+                            tool_name,
                         )),
                     },
                 }
             }
             Ok(CommandExecution::Cancelled) => HookCommandOutcome::Cancelled {
-                message: format!(
-                    "{} hook `{command}` cancelled while handling `{tool_name}`",
-                    event.as_str()
-                ),
+                message: format_hook_cancelled(hook_source, event, command, tool_name),
             },
             Err(error) => HookCommandOutcome::Failed {
                 parsed: ParsedHookOutput {
-                    messages: vec![format!(
-                        "{} hook `{command}` failed to start for `{}`: {error}",
-                        event.as_str(),
-                        tool_name
+                    messages: vec![format_hook_start_error(
+                        hook_source,
+                        event,
+                        command,
+                        tool_name,
+                        &error,
                     )],
                     ..ParsedHookOutput::default()
                 },
@@ -748,8 +758,31 @@ fn looks_like_json_attempt(value: &str) -> bool {
     matches!(value.trim_start().chars().next(), Some('{' | '['))
 }
 
-fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &str) -> String {
-    let mut message = format!("Hook `{command}` exited with status {code}");
+fn format_hook_denial(source: Option<&str>, event: HookEvent, tool_name: &str) -> String {
+    match source {
+        Some(source) => format!(
+            "SudoCode plugin `{source}` {} hook denied tool `{tool_name}`",
+            event.as_str()
+        ),
+        None => format!("{} hook denied tool `{tool_name}`", event.as_str()),
+    }
+}
+
+fn format_hook_failure(
+    source: Option<&str>,
+    event: HookEvent,
+    command: &str,
+    code: i32,
+    stdout: Option<&str>,
+    stderr: &str,
+) -> String {
+    let mut message = match source {
+        Some(source) => format!(
+            "SudoCode plugin `{source}` {} hook `{command}` exited with status {code}",
+            event.as_str()
+        ),
+        None => format!("Hook `{command}` exited with status {code}"),
+    };
     if let Some(stdout) = stdout.filter(|stdout| !stdout.is_empty()) {
         message.push_str(": ");
         message.push_str(stdout);
@@ -758,6 +791,61 @@ fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &
         message.push_str(stderr);
     }
     message
+}
+
+fn format_hook_signal(
+    source: Option<&str>,
+    event: HookEvent,
+    command: &str,
+    tool_name: &str,
+) -> String {
+    match source {
+        Some(source) => format!(
+            "SudoCode plugin `{source}` {} hook `{command}` terminated by signal while handling `{tool_name}`",
+            event.as_str()
+        ),
+        None => format!(
+            "{} hook `{command}` terminated by signal while handling `{tool_name}`",
+            event.as_str()
+        ),
+    }
+}
+
+fn format_hook_cancelled(
+    source: Option<&str>,
+    event: HookEvent,
+    command: &str,
+    tool_name: &str,
+) -> String {
+    match source {
+        Some(source) => format!(
+            "SudoCode plugin `{source}` {} hook `{command}` cancelled while handling `{tool_name}`",
+            event.as_str()
+        ),
+        None => format!(
+            "{} hook `{command}` cancelled while handling `{tool_name}`",
+            event.as_str()
+        ),
+    }
+}
+
+fn format_hook_start_error(
+    source: Option<&str>,
+    event: HookEvent,
+    command: &str,
+    tool_name: &str,
+    error: &std::io::Error,
+) -> String {
+    match source {
+        Some(source) => format!(
+            "SudoCode plugin `{source}` {} hook `{command}` failed to start for `{tool_name}`: {error}",
+            event.as_str()
+        ),
+        None => format!(
+            "{} hook `{command}` failed to start for `{tool_name}`: {error}",
+            event.as_str()
+        ),
+    }
 }
 
 fn shell_command(command: &str) -> CommandWithStdin {
@@ -888,6 +976,22 @@ mod tests {
 
         assert!(result.is_denied());
         assert_eq!(result.messages(), &["blocked by hook".to_string()]);
+    }
+
+    #[test]
+    fn plugin_hook_fallback_messages_include_source() {
+        let runner = HookRunner::new(RuntimeHookConfig::new_with_sources(
+            vec![(shell_snippet("exit 2"), "guard-plugin@external".to_string())],
+            Vec::new(),
+            Vec::new(),
+        ));
+
+        let result = runner.run_pre_tool_use("Bash", r#"{"command":"pwd"}"#);
+
+        assert!(result.is_denied());
+        let message = &result.messages()[0];
+        assert!(message.contains("SudoCode plugin"));
+        assert!(message.contains("guard-plugin@external"));
     }
 
     #[test]

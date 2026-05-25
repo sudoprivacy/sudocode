@@ -511,6 +511,62 @@ mod tests {
     }
 
     #[test]
+    fn relative_hook_paths_without_dot_slash_are_rooted() {
+        // given: manifest path looks like a path, not a shell snippet
+        let config_home = temp_dir("config-relative-hook");
+        let source_root = temp_dir("source-relative-hook");
+        fs::create_dir_all(source_root.join(".claude-plugin")).expect("manifest dir");
+        fs::create_dir_all(source_root.join("hooks")).expect("hooks dir");
+        let pre_path = source_root.join("hooks").join("pre.sh");
+        fs::write(&pre_path, "#!/bin/sh\nprintf '%s\\n' relative-rooted\n")
+            .expect("write pre hook");
+        make_executable(&pre_path);
+        fs::write(
+            source_root.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "name": "relative-hook",
+  "version": "1.0.0",
+  "description": "relative hook path",
+  "hooks": {
+    "PreToolUse": ["hooks/pre.sh"]
+  }
+}"#,
+        )
+        .expect("write manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(source_root.to_str().expect("utf8 path"))
+            .expect("plugin install should succeed");
+        let registry = manager.plugin_registry().expect("registry should build");
+
+        // when
+        let projected = registry.projected_hooks().expect("projected hooks");
+        let runner = HookRunner::from_registry(&registry).expect("plugin hooks should load");
+
+        // then
+        assert_eq!(projected.pre_tool_use.len(), 1);
+        let resolved = Path::new(&projected.pre_tool_use[0].command);
+        assert!(
+            resolved.starts_with(config_home.join("plugins").join("installed")),
+            "relative hook path should resolve inside installed plugin root, got: {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.ends_with("hooks/pre.sh"),
+            "relative hook path should keep its manifest-relative suffix, got: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            runner.run_pre_tool_use("Read", r#"{"path":"README.md"}"#),
+            HookRunResult::allow(vec!["relative-rooted".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
     fn disabled_plugin_hooks_are_excluded() {
         // given: two plugins installed, first disabled
         let config_home = temp_dir("config-disabled");

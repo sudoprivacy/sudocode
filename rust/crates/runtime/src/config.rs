@@ -175,6 +175,7 @@ pub struct RuntimeHookConfig {
     pre_tool_use: Vec<String>,
     post_tool_use: Vec<String>,
     post_tool_use_failure: Vec<String>,
+    hook_sources: BTreeMap<String, String>,
 }
 
 /// Raw permission rule lists grouped by allow, deny, and ask behavior.
@@ -704,7 +705,21 @@ impl RuntimeHookConfig {
             pre_tool_use,
             post_tool_use,
             post_tool_use_failure,
+            hook_sources: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn new_with_sources(
+        pre_tool_use: Vec<(String, String)>,
+        post_tool_use: Vec<(String, String)>,
+        post_tool_use_failure: Vec<(String, String)>,
+    ) -> Self {
+        let mut config = Self::default();
+        config.extend_with_sources("PreToolUse", pre_tool_use);
+        config.extend_with_sources("PostToolUse", post_tool_use);
+        config.extend_with_sources("PostToolUseFailure", post_tool_use_failure);
+        config
     }
 
     #[must_use]
@@ -718,6 +733,13 @@ impl RuntimeHookConfig {
     }
 
     #[must_use]
+    pub fn hook_source(&self, event: &str, command: &str) -> Option<&str> {
+        self.hook_sources
+            .get(&hook_source_key(event, command))
+            .map(String::as_str)
+    }
+
+    #[must_use]
     pub fn merged(&self, other: &Self) -> Self {
         let mut merged = self.clone();
         merged.extend(other);
@@ -725,17 +747,48 @@ impl RuntimeHookConfig {
     }
 
     pub fn extend(&mut self, other: &Self) {
-        extend_unique(&mut self.pre_tool_use, other.pre_tool_use());
-        extend_unique(&mut self.post_tool_use, other.post_tool_use());
-        extend_unique(
+        extend_hook_commands(
+            &mut self.pre_tool_use,
+            &mut self.hook_sources,
+            "PreToolUse",
+            other.pre_tool_use(),
+            &other.hook_sources,
+        );
+        extend_hook_commands(
+            &mut self.post_tool_use,
+            &mut self.hook_sources,
+            "PostToolUse",
+            other.post_tool_use(),
+            &other.hook_sources,
+        );
+        extend_hook_commands(
             &mut self.post_tool_use_failure,
+            &mut self.hook_sources,
+            "PostToolUseFailure",
             other.post_tool_use_failure(),
+            &other.hook_sources,
         );
     }
 
     #[must_use]
     pub fn post_tool_use_failure(&self) -> &[String] {
         &self.post_tool_use_failure
+    }
+
+    fn extend_with_sources(&mut self, event: &'static str, entries: Vec<(String, String)>) {
+        let commands = match event {
+            "PreToolUse" => &mut self.pre_tool_use,
+            "PostToolUse" => &mut self.post_tool_use,
+            "PostToolUseFailure" => &mut self.post_tool_use_failure,
+            _ => return,
+        };
+        for (command, source) in entries {
+            if !commands.contains(&command) {
+                self.hook_sources
+                    .insert(hook_source_key(event, &command), source);
+                commands.push(command);
+            }
+        }
     }
 }
 
@@ -939,6 +992,7 @@ fn parse_optional_hooks_config_object(
         post_tool_use: optional_string_array(hooks, "PostToolUse", context)?.unwrap_or_default(),
         post_tool_use_failure: optional_string_array(hooks, "PostToolUseFailure", context)?
             .unwrap_or_default(),
+        hook_sources: BTreeMap::new(),
     })
 }
 
@@ -1621,16 +1675,25 @@ fn deep_merge_objects(
     }
 }
 
-fn extend_unique(target: &mut Vec<String>, values: &[String]) {
+fn extend_hook_commands(
+    target: &mut Vec<String>,
+    target_sources: &mut BTreeMap<String, String>,
+    event: &'static str,
+    values: &[String],
+    value_sources: &BTreeMap<String, String>,
+) {
     for value in values {
-        push_unique(target, value.clone());
+        if !target.contains(value) {
+            if let Some(source) = value_sources.get(&hook_source_key(event, value)) {
+                target_sources.insert(hook_source_key(event, value), source.clone());
+            }
+            target.push(value.clone());
+        }
     }
 }
 
-fn push_unique(target: &mut Vec<String>, value: String) {
-    if !target.iter().any(|existing| existing == &value) {
-        target.push(value);
-    }
+fn hook_source_key(event: &str, command: &str) -> String {
+    format!("{event}\u{0}{command}")
 }
 
 #[cfg(test)]

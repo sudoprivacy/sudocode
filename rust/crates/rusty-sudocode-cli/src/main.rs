@@ -98,7 +98,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{PluginHooks, PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginRegistry};
+use plugins::{PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginRegistry};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
@@ -3758,7 +3758,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     let plugin_load_outcome = plugin_registry_report.load_outcome();
     let plugin_registry = plugin_registry_report.into_registry()?;
     let plugin_hook_config =
-        runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
+        runtime_hook_config_from_plugin_hooks(plugin_registry.projected_hooks()?);
     let feature_config = runtime_config
         .feature_config()
         .clone()
@@ -3811,11 +3811,25 @@ fn resolve_plugin_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn runtime_hook_config_from_plugin_hooks(hooks: PluginHooks) -> runtime::RuntimeHookConfig {
-    runtime::RuntimeHookConfig::new(
-        hooks.pre_tool_use,
-        hooks.post_tool_use,
-        hooks.post_tool_use_failure,
+fn runtime_hook_config_from_plugin_hooks(
+    hooks: plugins::ProjectedPluginHooks,
+) -> runtime::RuntimeHookConfig {
+    runtime::RuntimeHookConfig::new_with_sources(
+        hooks
+            .pre_tool_use
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
+        hooks
+            .post_tool_use
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
+        hooks
+            .post_tool_use_failure
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
     )
 }
 

@@ -2663,6 +2663,7 @@ impl LiveCli {
     }
 
     fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
+        self.runtime.shutdown_mcp()?;
         self.runtime.shutdown_plugins()?;
         self.runtime = runtime;
         Ok(())
@@ -3546,6 +3547,8 @@ impl LiveCli {
     }
 
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.runtime.shutdown_mcp()?;
+        self.runtime.shutdown_plugins()?;
         let runtime = build_runtime(
             self.runtime.session().clone(),
             &self.session.id,
@@ -4105,7 +4108,6 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
-    plugin_registry.initialize()?;
     let policy = permission_policy(config.permission_mode, &feature_config, &tool_registry)
         .map_err(std::io::Error::other)?;
     let mut system_prompt = config.system_prompt.clone();
@@ -4129,6 +4131,15 @@ fn build_runtime_with_plugin_state(
     .with_session_known_date(runtime::today_local());
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
+    }
+    if let Err(error) = plugin_registry.initialize() {
+        if let Some(state) = &mcp_state {
+            let _ = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shutdown();
+        }
+        return Err(Box::new(error));
     }
     Ok(BuiltRuntime::new(
         runtime,

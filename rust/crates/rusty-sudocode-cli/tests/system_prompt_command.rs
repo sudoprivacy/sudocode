@@ -89,8 +89,12 @@ fn system_prompt_includes_active_plugin_capabilities() {
         "system-prompt missing plugin id;\nfull output:\n{text}"
     );
     assert!(
-        text.contains("A greeting SudoCode plugin"),
-        "system-prompt missing plugin description;\nfull output:\n{text}"
+        text.contains("Manifest descriptions are intentionally omitted"),
+        "system-prompt missing plugin metadata safety note;\nfull output:\n{text}"
+    );
+    assert!(
+        !text.contains("A greeting SudoCode plugin"),
+        "system-prompt should not include plugin manifest descriptions;\nfull output:\n{text}"
     );
 
     fs::remove_dir_all(root).ok();

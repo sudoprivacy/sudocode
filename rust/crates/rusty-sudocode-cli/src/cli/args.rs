@@ -171,6 +171,7 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Manage plugins
+    #[command(alias = "marketplace")]
     Plugins {
         /// Plugin action (list, enable, disable, …)
         action: Option<String>,
@@ -519,11 +520,14 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                     }),
                 }
             }
-            Cmd::Plugins { action, target } => Ok(CliAction::Plugins {
-                action,
-                target,
-                output_format,
-            }),
+            Cmd::Plugins { action, target } => {
+                let (action, target) = normalize_plugin_cli_action(action, target);
+                Ok(CliAction::Plugins {
+                    action,
+                    target,
+                    output_format,
+                })
+            }
             Cmd::SystemPrompt { cwd, date } => {
                 let resolved_cwd = cwd.unwrap_or(env::current_dir().map_err(|e| e.to_string())?);
                 let resolved_date = date.unwrap_or_else(runtime::today_local);
@@ -926,6 +930,16 @@ fn parse_local_help_action(args: &[String]) -> Option<Result<CliAction, String>>
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn normalize_plugin_cli_action(
+    action: Option<String>,
+    target: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match (action.as_deref(), target.as_deref()) {
+        (Some("marketplace"), None | Some("available")) => (Some("available".to_string()), None),
+        _ => (action, target),
+    }
+}
+
 pub(crate) fn join_optional_args(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let trimmed = joined.trim();
@@ -1154,6 +1168,14 @@ pub(crate) fn resolve_repl_model(cli_model: String) -> String {
 mod tests {
     use super::*;
 
+    fn parse_words(words: &[&str]) -> CliAction {
+        let args = words
+            .iter()
+            .map(|word| (*word).to_string())
+            .collect::<Vec<_>>();
+        parse_args(&args).expect("parse cli args")
+    }
+
     #[test]
     fn informational_variants_are_whitelisted() {
         assert!(CliAction::Help {
@@ -1194,5 +1216,33 @@ mod tests {
             auth_mode: None,
         }
         .is_informational());
+    }
+
+    #[test]
+    fn marketplace_cli_aliases_route_to_plugins_available() {
+        let expected = CliAction::Plugins {
+            action: Some("available".to_string()),
+            target: None,
+            output_format: CliOutputFormat::Text,
+        };
+
+        assert_eq!(parse_words(&["marketplace", "available"]), expected);
+        assert_eq!(parse_words(&["plugins", "marketplace"]), expected);
+        assert_eq!(
+            parse_words(&["plugins", "marketplace", "available"]),
+            expected
+        );
+    }
+
+    #[test]
+    fn marketplace_cli_alias_without_action_routes_to_plugins_list() {
+        assert_eq!(
+            parse_words(&["marketplace"]),
+            CliAction::Plugins {
+                action: None,
+                target: None,
+                output_format: CliOutputFormat::Text,
+            }
+        );
     }
 }

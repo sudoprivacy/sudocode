@@ -1322,6 +1322,41 @@ impl PluginManager {
         self.config.config_home.join(SETTINGS_FILE_NAME)
     }
 
+    /// Base directory for all SudoCode plugin cache data.
+    #[must_use]
+    pub fn cache_root(&self) -> PathBuf {
+        self.config.config_home.join("plugins").join("cache")
+    }
+
+    /// Deterministic, versioned cache directory for a specific plugin revision.
+    ///
+    /// Layout: `plugins/cache/<source>/<name>/<version>`
+    /// Each component is sanitized so path-unsafe characters cannot escape the subtree.
+    #[must_use]
+    pub fn plugin_cache_dir(&self, id: &PluginId, version: &str) -> PathBuf {
+        self.cache_root()
+            .join(sanitize_path_component(&id.source))
+            .join(sanitize_path_component(&id.name))
+            .join(sanitize_path_component(version))
+    }
+
+    /// Stable data directory for a plugin, independent of version.
+    ///
+    /// Layout: `plugins/data/<name>-<source>`
+    /// Survives plugin updates so persistent plugin state is preserved.
+    #[must_use]
+    pub fn plugin_data_dir(&self, id: &PluginId) -> PathBuf {
+        self.config
+            .config_home
+            .join("plugins")
+            .join("data")
+            .join(format!(
+                "{}-{}",
+                sanitize_path_component(&id.name),
+                sanitize_path_component(&id.source)
+            ))
+    }
+
     pub fn plugin_registry(&self) -> Result<PluginRegistry, PluginError> {
         self.plugin_registry_report()?.into_registry()
     }
@@ -2495,6 +2530,25 @@ fn sanitize_plugin_id(plugin_id: &str) -> String {
             other => other,
         })
         .collect()
+}
+
+/// Sanitize a single path component so it cannot escape its parent directory.
+///
+/// Replaces `/`, `\`, `:`, and `@` with `-`.  Pure-dot components (`.`, `..`)
+/// have their dots replaced with `-` to prevent path traversal via `.join()`.
+fn sanitize_path_component(component: &str) -> String {
+    let sanitized: String = component
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '@' => '-',
+            other => other,
+        })
+        .collect();
+    if sanitized.chars().all(|c| c == '.') {
+        sanitized.replace('.', "-")
+    } else {
+        sanitized
+    }
 }
 
 fn describe_install_source(source: &PluginInstallSource) -> String {
@@ -4216,5 +4270,151 @@ mod tests {
         assert_eq!(outcome.failures[0].kind, PluginKind::External);
         assert_eq!(outcome.failures[0].source, "external");
         assert!(outcome.failures[0].message.contains("broken manifest"));
+    }
+
+    // --- Store roots: cache and data path helpers ---
+
+    #[test]
+    fn cache_root_is_under_plugins_cache() {
+        let config_home = temp_dir("cache-root");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        assert_eq!(
+            manager.cache_root(),
+            config_home.join("plugins").join("cache")
+        );
+    }
+
+    #[test]
+    fn plugin_cache_dir_follows_source_plugin_version_layout() {
+        let config_home = temp_dir("cache-dir-layout");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("my-plugin", "external");
+        let cache_dir = manager.plugin_cache_dir(&id, "1.2.3");
+        assert_eq!(
+            cache_dir,
+            config_home
+                .join("plugins")
+                .join("cache")
+                .join("external")
+                .join("my-plugin")
+                .join("1.2.3")
+        );
+    }
+
+    #[test]
+    fn plugin_cache_dir_sanitizes_special_chars_in_all_components() {
+        let config_home = temp_dir("cache-dir-sanitize");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("my/plugin", "org:registry");
+        let cache_dir = manager.plugin_cache_dir(&id, "1.0.0/beta");
+        assert_eq!(
+            cache_dir,
+            config_home
+                .join("plugins")
+                .join("cache")
+                .join("org-registry")
+                .join("my-plugin")
+                .join("1.0.0-beta")
+        );
+    }
+
+    #[test]
+    fn plugin_cache_dir_blocks_dot_dot_path_traversal() {
+        let config_home = temp_dir("cache-dir-traversal");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("..", "..");
+        let cache_dir = manager.plugin_cache_dir(&id, "..");
+        let cache_root = config_home.join("plugins").join("cache");
+        assert!(
+            cache_dir.starts_with(&cache_root),
+            "cache_dir must remain under cache_root"
+        );
+        let relative = cache_dir
+            .strip_prefix(&cache_root)
+            .expect("must be under cache root");
+        for component in relative.components() {
+            assert_ne!(
+                component.as_os_str(),
+                "..",
+                "sanitized path must not contain .. components"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_data_dir_follows_plugin_dash_source_layout() {
+        let config_home = temp_dir("data-dir-layout");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("my-plugin", "external");
+        let data_dir = manager.plugin_data_dir(&id);
+        assert_eq!(
+            data_dir,
+            config_home
+                .join("plugins")
+                .join("data")
+                .join("my-plugin-external")
+        );
+    }
+
+    #[test]
+    fn plugin_data_dir_sanitizes_special_chars() {
+        let config_home = temp_dir("data-dir-sanitize");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("my/plugin", "org:registry");
+        let data_dir = manager.plugin_data_dir(&id);
+        assert_eq!(
+            data_dir,
+            config_home
+                .join("plugins")
+                .join("data")
+                .join("my-plugin-org-registry")
+        );
+    }
+
+    #[test]
+    fn cache_and_data_roots_are_distinct_from_installed_root() {
+        let config_home = temp_dir("roots-distinct");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let id = PluginId::new("myplugin", "external");
+        let install_root = manager.install_root();
+        let cache_root = manager.cache_root();
+        let data_dir = manager.plugin_data_dir(&id);
+        assert_ne!(install_root, cache_root);
+        assert_ne!(install_root, data_dir);
+        assert_ne!(cache_root, data_dir);
+    }
+
+    #[test]
+    fn installed_plugin_discovery_unaffected_by_store_roots() {
+        let _guard = env_guard();
+        let config_home = temp_dir("store-roots-compat");
+        let bundled_root = temp_dir("store-roots-compat-bundled");
+        let install_root = config_home.join("plugins").join("installed");
+        let fixture_root = install_root.join("compat-plugin");
+        write_file(
+            fixture_root.join(MANIFEST_RELATIVE_PATH).as_path(),
+            r#"{"name":"compat-plugin","version":"1.0.0","description":"backward compat test"}"#,
+        );
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let manager = PluginManager::new(config);
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("list installed should succeed");
+        assert_eq!(installed.len(), 1, "exactly one installed plugin expected");
+        assert_eq!(
+            installed[0].metadata.id, "compat-plugin@external",
+            "installed plugin id must match"
+        );
+
+        // Verify the new root helpers do not clash with the installed path.
+        let id = PluginId::new("compat-plugin", "external");
+        assert_ne!(manager.cache_root(), install_root);
+        assert_ne!(manager.plugin_data_dir(&id), install_root);
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
     }
 }

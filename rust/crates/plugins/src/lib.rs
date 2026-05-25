@@ -167,6 +167,38 @@ impl PluginLifecycle {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInterface {
+    #[serde(rename = "display_name", default)]
+    pub display_name: Option<String>,
+    #[serde(rename = "short_description", default)]
+    pub short_description: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCapabilityMetadata {
+    #[serde(default)]
+    pub interface: Option<PluginInterface>,
+    #[serde(default)]
+    pub skills: Option<String>,
+    #[serde(rename = "mcpServers", default)]
+    pub mcp_servers: Option<String>,
+    #[serde(default)]
+    pub apps: Option<String>,
+}
+
+impl PluginCapabilityMetadata {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.interface.is_none()
+            && self.skills.is_none()
+            && self.mcp_servers.is_none()
+            && self.apps.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub name: String,
@@ -183,6 +215,8 @@ pub struct PluginManifest {
     pub tools: Vec<PluginToolManifest>,
     #[serde(default)]
     pub commands: Vec<PluginCommandManifest>,
+    #[serde(flatten)]
+    pub capabilities: PluginCapabilityMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -292,6 +326,14 @@ struct RawPluginManifest {
     pub tools: Vec<RawPluginToolManifest>,
     #[serde(default)]
     pub commands: Vec<PluginCommandManifest>,
+    #[serde(default)]
+    pub interface: Option<PluginInterface>,
+    #[serde(default)]
+    pub skills: Option<String>,
+    #[serde(rename = "mcpServers", default)]
+    pub mcp_servers: Option<String>,
+    #[serde(default)]
+    pub apps: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,6 +485,7 @@ pub struct BuiltinPlugin {
     hooks: PluginHooks,
     lifecycle: PluginLifecycle,
     tools: Vec<PluginTool>,
+    capabilities: PluginCapabilityMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -451,6 +494,7 @@ pub struct BundledPlugin {
     hooks: PluginHooks,
     lifecycle: PluginLifecycle,
     tools: Vec<PluginTool>,
+    capabilities: PluginCapabilityMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -459,6 +503,7 @@ pub struct ExternalPlugin {
     hooks: PluginHooks,
     lifecycle: PluginLifecycle,
     tools: Vec<PluginTool>,
+    capabilities: PluginCapabilityMetadata,
 }
 
 pub trait Plugin {
@@ -466,6 +511,7 @@ pub trait Plugin {
     fn hooks(&self) -> &PluginHooks;
     fn lifecycle(&self) -> &PluginLifecycle;
     fn tools(&self) -> &[PluginTool];
+    fn capabilities(&self) -> &PluginCapabilityMetadata;
     fn validate(&self) -> Result<(), PluginError>;
     fn initialize(&self) -> Result<(), PluginError>;
     fn shutdown(&self) -> Result<(), PluginError>;
@@ -493,6 +539,10 @@ impl Plugin for BuiltinPlugin {
 
     fn tools(&self) -> &[PluginTool] {
         &self.tools
+    }
+
+    fn capabilities(&self) -> &PluginCapabilityMetadata {
+        &self.capabilities
     }
 
     fn validate(&self) -> Result<(), PluginError> {
@@ -523,6 +573,10 @@ impl Plugin for BundledPlugin {
 
     fn tools(&self) -> &[PluginTool] {
         &self.tools
+    }
+
+    fn capabilities(&self) -> &PluginCapabilityMetadata {
+        &self.capabilities
     }
 
     fn validate(&self) -> Result<(), PluginError> {
@@ -565,6 +619,10 @@ impl Plugin for ExternalPlugin {
 
     fn tools(&self) -> &[PluginTool] {
         &self.tools
+    }
+
+    fn capabilities(&self) -> &PluginCapabilityMetadata {
+        &self.capabilities
     }
 
     fn validate(&self) -> Result<(), PluginError> {
@@ -625,6 +683,14 @@ impl Plugin for PluginDefinition {
         }
     }
 
+    fn capabilities(&self) -> &PluginCapabilityMetadata {
+        match self {
+            Self::Builtin(plugin) => plugin.capabilities(),
+            Self::Bundled(plugin) => plugin.capabilities(),
+            Self::External(plugin) => plugin.capabilities(),
+        }
+    }
+
     fn validate(&self) -> Result<(), PluginError> {
         match self {
             Self::Builtin(plugin) => plugin.validate(),
@@ -678,6 +744,11 @@ impl RegisteredPlugin {
     #[must_use]
     pub fn tools(&self) -> &[PluginTool] {
         self.definition.tools()
+    }
+
+    #[must_use]
+    pub fn capabilities(&self) -> &PluginCapabilityMetadata {
+        self.definition.capabilities()
     }
 
     #[must_use]
@@ -788,6 +859,138 @@ impl PluginRegistryReport {
         } else {
             Err(PluginError::LoadFailures(self.failures))
         }
+    }
+
+    #[must_use]
+    pub fn load_outcome(&self) -> PluginLoadOutcome {
+        PluginLoadOutcome {
+            loaded_plugins: self
+                .registry
+                .plugins()
+                .iter()
+                .map(LoadedPlugin::from_registered)
+                .collect(),
+            failures: self
+                .failures
+                .iter()
+                .map(PluginLoadError::from_failure)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLoadError {
+    pub plugin_root: PathBuf,
+    pub kind: PluginKind,
+    pub source: String,
+    pub message: String,
+}
+
+impl PluginLoadError {
+    #[must_use]
+    fn from_failure(failure: &PluginLoadFailure) -> Self {
+        Self {
+            plugin_root: failure.plugin_root.clone(),
+            kind: failure.kind,
+            source: failure.source.clone(),
+            message: failure.error().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginCapabilitySummary {
+    pub plugin_id: String,
+    pub display_name: String,
+    pub description: String,
+    pub tool_count: usize,
+    pub pre_tool_hook_count: usize,
+    pub post_tool_hook_count: usize,
+    pub post_tool_use_failure_hook_count: usize,
+    pub has_skills: bool,
+    pub has_mcp_servers: bool,
+    pub has_apps: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedPlugin {
+    pub summary: PluginSummary,
+    pub root: Option<PathBuf>,
+    pub kind: PluginKind,
+    pub source: String,
+    pub capabilities: PluginCapabilityMetadata,
+    pub skill_roots: Vec<PathBuf>,
+    pub mcp_config_paths: Vec<PathBuf>,
+    pub app_config_paths: Vec<PathBuf>,
+    pub capability_summary: PluginCapabilitySummary,
+}
+
+impl LoadedPlugin {
+    #[must_use]
+    fn from_registered(plugin: &RegisteredPlugin) -> Self {
+        let metadata = plugin.metadata();
+        let capabilities = plugin.capabilities().clone();
+        let root = metadata.root.clone();
+        let skill_roots = resolve_capability_path(root.as_deref(), capabilities.skills.as_deref());
+        let mcp_config_paths =
+            resolve_capability_path(root.as_deref(), capabilities.mcp_servers.as_deref());
+        let app_config_paths =
+            resolve_capability_path(root.as_deref(), capabilities.apps.as_deref());
+        let display_name = capabilities
+            .interface
+            .as_ref()
+            .and_then(|interface| interface.display_name.clone())
+            .unwrap_or_else(|| metadata.name.clone());
+        let description = capabilities
+            .interface
+            .as_ref()
+            .and_then(|interface| interface.short_description.clone())
+            .unwrap_or_else(|| metadata.description.clone());
+        let hooks = plugin.hooks();
+
+        Self {
+            summary: plugin.summary(),
+            root,
+            kind: metadata.kind,
+            source: metadata.source.clone(),
+            capabilities: capabilities.clone(),
+            skill_roots,
+            mcp_config_paths,
+            app_config_paths,
+            capability_summary: PluginCapabilitySummary {
+                plugin_id: metadata.id.clone(),
+                display_name,
+                description,
+                tool_count: plugin.tools().len(),
+                pre_tool_hook_count: hooks.pre_tool_use.len(),
+                post_tool_hook_count: hooks.post_tool_use.len(),
+                post_tool_use_failure_hook_count: hooks.post_tool_use_failure.len(),
+                has_skills: capabilities.skills.is_some(),
+                has_mcp_servers: capabilities.mcp_servers.is_some(),
+                has_apps: capabilities.apps.is_some(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginLoadOutcome {
+    pub loaded_plugins: Vec<LoadedPlugin>,
+    pub failures: Vec<PluginLoadError>,
+}
+
+fn resolve_capability_path(root: Option<&Path>, relative: Option<&str>) -> Vec<PathBuf> {
+    let Some(relative) = relative else {
+        return Vec::new();
+    };
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        vec![path.to_path_buf()]
+    } else if let Some(root) = root {
+        vec![root.join(path)]
+    } else {
+        vec![path.to_path_buf()]
     }
 }
 
@@ -1591,6 +1794,7 @@ pub fn builtin_plugins() -> Vec<PluginDefinition> {
         hooks: PluginHooks::default(),
         lifecycle: PluginLifecycle::default(),
         tools: Vec::new(),
+        capabilities: PluginCapabilityMetadata::default(),
     })]
 }
 
@@ -1614,24 +1818,28 @@ fn load_plugin_definition(
     let hooks = resolve_hooks(root, &manifest.hooks);
     let lifecycle = resolve_lifecycle(root, &manifest.lifecycle);
     let tools = resolve_tools(root, &metadata.id, &metadata.name, &manifest.tools);
+    let capabilities = manifest.capabilities;
     Ok(match kind {
         PluginKind::Builtin => PluginDefinition::Builtin(BuiltinPlugin {
             metadata,
             hooks,
             lifecycle,
             tools,
+            capabilities,
         }),
         PluginKind::Bundled => PluginDefinition::Bundled(BundledPlugin {
             metadata,
             hooks,
             lifecycle,
             tools,
+            capabilities,
         }),
         PluginKind::External => PluginDefinition::External(ExternalPlugin {
             metadata,
             hooks,
             lifecycle,
             tools,
+            capabilities,
         }),
     })
 }
@@ -1673,20 +1881,10 @@ fn detect_claude_code_manifest_contract_gaps(
 
     let mut errors = Vec::new();
 
-    for (field, detail) in [
-        (
-            "skills",
-            "plugin manifest field `skills` uses the Sudo Code plugin contract; `scode` does not load plugin-managed skills and instead discovers skills from local roots such as `.nexus/sudocode/skills`, `.omc/skills`, `.agents/skills`, `~/.omc/skills`, and `~/.claude/skills/omc-learned`.",
-        ),
-        (
-            "mcpServers",
-            "plugin manifest field `mcpServers` uses the Sudo Code plugin contract; `scode` does not import MCP servers from plugin manifests.",
-        ),
-        (
-            "agents",
-            "plugin manifest field `agents` uses the Sudo Code plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.",
-        ),
-    ] {
+    for (field, detail) in [(
+        "agents",
+        "plugin manifest field `agents` uses the Sudo Code plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.",
+    )] {
         if root.contains_key(field) {
             errors.push(PluginManifestValidationError::UnsupportedManifestContract {
                 detail: detail.to_string(),
@@ -1807,6 +2005,12 @@ fn build_plugin_manifest(
         lifecycle: raw.lifecycle,
         tools,
         commands,
+        capabilities: PluginCapabilityMetadata {
+            interface: raw.interface,
+            skills: raw.skills,
+            mcp_servers: raw.mcp_servers,
+            apps: raw.apps,
+        },
     })
 }
 
@@ -2719,8 +2923,6 @@ mod tests {
         let error = load_plugin_from_directory(&root)
             .expect_err("Sudo Code plugin manifest should fail with guidance");
         let rendered = error.to_string();
-        assert!(rendered.contains("field `skills` uses the Sudo Code plugin contract"));
-        assert!(rendered.contains("field `mcpServers` uses the Sudo Code plugin contract"));
         assert!(rendered.contains("field `agents` uses the Sudo Code plugin contract"));
         assert!(rendered.contains("field `commands` uses Sudo Code-style directory globs"));
         assert!(rendered.contains("hook `SessionStart` uses the Sudo Code lifecycle contract"));
@@ -3790,9 +3992,7 @@ mod tests {
     fn write_manifest_at(root: &Path, relative: &str, name: &str) {
         write_file(
             root.join(relative).as_path(),
-            &format!(
-                "{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"description\":\"test\"}}"
-            ),
+            &format!("{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"description\":\"test\"}}"),
         );
     }
 
@@ -3906,5 +4106,115 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn load_plugin_from_directory_preserves_v2_capability_metadata() {
+        let root = temp_dir("manifest-v2-capabilities");
+        write_file(
+            root.join(MANIFEST_SUDOCODE_PLUGIN_PATH).as_path(),
+            r#"{
+  "name": "capability-demo",
+  "version": "1.0.0",
+  "description": "Capability metadata test",
+  "interface": {
+    "display_name": "Capability Demo",
+    "short_description": "Short capability description",
+    "keywords": ["skills", "mcp"]
+  },
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}"#,
+        );
+
+        let manifest = load_plugin_from_directory(&root).expect("manifest should load");
+        let capabilities = manifest.capabilities;
+        let interface = capabilities.interface.expect("interface metadata");
+        assert_eq!(interface.display_name.as_deref(), Some("Capability Demo"));
+        assert_eq!(
+            interface.short_description.as_deref(),
+            Some("Short capability description")
+        );
+        assert_eq!(interface.keywords, vec!["skills", "mcp"]);
+        assert_eq!(capabilities.skills.as_deref(), Some("./skills"));
+        assert_eq!(capabilities.mcp_servers.as_deref(), Some("./.mcp.json"));
+        assert_eq!(capabilities.apps.as_deref(), Some("./.app.json"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_registry_report_load_outcome_projects_capability_paths() {
+        let _guard = env_guard();
+        let config_home = temp_dir("outcome-home");
+        let source_root = temp_dir("outcome-source");
+        write_file(
+            source_root.join(MANIFEST_SUDOCODE_PLUGIN_PATH).as_path(),
+            r#"{
+  "name": "projection-demo",
+  "version": "1.0.0",
+  "description": "Projection metadata test",
+  "interface": {
+    "display_name": "Projection Demo",
+    "short_description": "Projected capabilities"
+  },
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json"
+}"#,
+        );
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(source_root.to_str().expect("utf8 path"))
+            .expect("install should succeed");
+
+        let report = manager
+            .plugin_registry_report()
+            .expect("registry report should build");
+        let outcome = report.load_outcome();
+        let loaded = outcome
+            .loaded_plugins
+            .iter()
+            .find(|plugin| plugin.summary.metadata.id == "projection-demo@external")
+            .expect("installed plugin should be projected");
+        let root = loaded.root.as_ref().expect("external plugin root");
+        assert_eq!(loaded.skill_roots, vec![root.join("skills")]);
+        assert_eq!(loaded.mcp_config_paths, vec![root.join(".mcp.json")]);
+        assert_eq!(loaded.app_config_paths, vec![root.join(".app.json")]);
+        assert_eq!(loaded.capability_summary.display_name, "Projection Demo");
+        assert_eq!(
+            loaded.capability_summary.description,
+            "Projected capabilities"
+        );
+        assert!(loaded.capability_summary.has_skills);
+        assert!(loaded.capability_summary.has_mcp_servers);
+        assert!(loaded.capability_summary.has_apps);
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_registry_report_load_outcome_includes_load_failures() {
+        let failure = PluginLoadFailure::new(
+            PathBuf::from("/tmp/missing-plugin"),
+            PluginKind::External,
+            "external".to_string(),
+            PluginError::InvalidManifest("broken manifest".to_string()),
+        );
+        let report = PluginRegistryReport::new(PluginRegistry::new(Vec::new()), vec![failure]);
+        let outcome = report.load_outcome();
+
+        assert!(outcome.loaded_plugins.is_empty());
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].plugin_root,
+            PathBuf::from("/tmp/missing-plugin")
+        );
+        assert_eq!(outcome.failures[0].kind, PluginKind::External);
+        assert_eq!(outcome.failures[0].source, "external");
+        assert!(outcome.failures[0].message.contains("broken manifest"));
     }
 }

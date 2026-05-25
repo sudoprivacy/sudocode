@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use plugins::PluginLoadOutcome;
 use runtime::{McpServerManager, McpTool, PermissionMode, ToolError};
 use serde_json::json;
 use tools::RuntimeToolDefinition;
@@ -20,8 +21,10 @@ pub(crate) struct RuntimeMcpState {
 impl RuntimeMcpState {
     pub(crate) fn new(
         runtime_config: &runtime::RuntimeConfig,
+        plugin_load_outcome: &PluginLoadOutcome,
     ) -> Result<Option<(Self, runtime::McpToolDiscoveryReport)>, Box<dyn std::error::Error>> {
-        let mut manager = McpServerManager::from_runtime_config(runtime_config);
+        let servers = merged_mcp_servers(runtime_config, plugin_load_outcome)?;
+        let mut manager = McpServerManager::from_servers(&servers);
         if manager.server_names().is_empty() && manager.unsupported_servers().is_empty() {
             return Ok(None);
         }
@@ -213,10 +216,31 @@ impl RuntimeMcpState {
     }
 }
 
+pub(crate) fn merged_mcp_servers(
+    runtime_config: &runtime::RuntimeConfig,
+    plugin_load_outcome: &PluginLoadOutcome,
+) -> Result<BTreeMap<String, runtime::ScopedMcpServerConfig>, Box<dyn std::error::Error>> {
+    let mut servers = runtime_config.mcp().servers().clone();
+    for plugin in &plugin_load_outcome.loaded_plugins {
+        if !plugin.summary.enabled {
+            continue;
+        }
+        for path in &plugin.mcp_config_paths {
+            let plugin_servers = runtime::load_plugin_mcp_servers(path)?;
+            for (server_name, server_config) in plugin_servers {
+                servers.entry(server_name).or_insert(server_config);
+            }
+        }
+    }
+    Ok(servers)
+}
+
 pub(crate) fn build_runtime_mcp_state(
     runtime_config: &runtime::RuntimeConfig,
+    plugin_load_outcome: &PluginLoadOutcome,
 ) -> Result<RuntimePluginStateBuildOutput, Box<dyn std::error::Error>> {
-    let Some((mcp_state, discovery)) = RuntimeMcpState::new(runtime_config)? else {
+    let Some((mcp_state, discovery)) = RuntimeMcpState::new(runtime_config, plugin_load_outcome)?
+    else {
         return Ok((None, Vec::new()));
     };
 
@@ -320,4 +344,168 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
         .and_then(|annotations| annotations.get(key))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use plugins::{
+        LoadedPlugin, PluginCapabilityMetadata, PluginCapabilitySummary, PluginKind,
+        PluginLoadOutcome, PluginMetadata, PluginSummary,
+    };
+
+    use super::merged_mcp_servers;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("sudocode-cli-mcp-{label}-{nanos}"))
+    }
+
+    fn loaded_plugin_with_mcp_path(path: PathBuf) -> LoadedPlugin {
+        loaded_plugin_with_mcp_path_enabled(path, true)
+    }
+
+    fn loaded_plugin_with_mcp_path_enabled(path: PathBuf, enabled: bool) -> LoadedPlugin {
+        let metadata = PluginMetadata {
+            id: "plugin-demo@external".to_string(),
+            name: "plugin-demo".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Plugin demo".to_string(),
+            kind: PluginKind::External,
+            source: "external".to_string(),
+            default_enabled: true,
+            root: path.parent().map(PathBuf::from),
+        };
+        LoadedPlugin {
+            summary: PluginSummary {
+                metadata: metadata.clone(),
+                enabled,
+            },
+            root: metadata.root.clone(),
+            kind: metadata.kind,
+            source: metadata.source.clone(),
+            capabilities: PluginCapabilityMetadata::default(),
+            skill_roots: Vec::new(),
+            mcp_config_paths: vec![path],
+            app_config_paths: Vec::new(),
+            capability_summary: PluginCapabilitySummary {
+                plugin_id: metadata.id,
+                display_name: metadata.name,
+                description: metadata.description,
+                tool_count: 0,
+                pre_tool_hook_count: 0,
+                post_tool_hook_count: 0,
+                post_tool_use_failure_hook_count: 0,
+                has_skills: false,
+                has_mcp_servers: true,
+                has_apps: false,
+            },
+        }
+    }
+
+    #[test]
+    fn merged_mcp_servers_keeps_runtime_config_on_name_collision() {
+        let root = temp_dir("merge");
+        let cwd = root.join("project");
+        let home = root.join("home");
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&cwd).expect("cwd");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(&plugin_root).expect("plugin");
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "mcpServers": {
+                "shared": {"command": "uvx", "args": ["runtime-server"]}
+              }
+            }"#,
+        )
+        .expect("runtime config");
+        let plugin_mcp = plugin_root.join(".mcp.json");
+        fs::write(
+            &plugin_mcp,
+            r#"{
+              "mcpServers": {
+                "shared": {"command": "./plugin-server"},
+                "plugin-only": {"command": "./plugin-only"}
+              }
+            }"#,
+        )
+        .expect("plugin mcp config");
+
+        let runtime_config = runtime::ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("runtime config should load");
+        let outcome = PluginLoadOutcome {
+            loaded_plugins: vec![loaded_plugin_with_mcp_path(plugin_mcp)],
+            failures: Vec::new(),
+        };
+
+        let merged = merged_mcp_servers(&runtime_config, &outcome).expect("merge should work");
+        match &merged.get("shared").expect("shared server").config {
+            runtime::McpServerConfig::Stdio(stdio) => {
+                assert_eq!(stdio.command, "uvx");
+                assert_eq!(stdio.args, vec!["runtime-server"]);
+            }
+            other => panic!("expected stdio config, got {other:?}"),
+        }
+        match &merged
+            .get("plugin-only")
+            .expect("plugin-only server")
+            .config
+        {
+            runtime::McpServerConfig::Stdio(stdio) => {
+                assert_eq!(
+                    stdio.command,
+                    plugin_root.join("plugin-only").display().to_string()
+                );
+            }
+            other => panic!("expected stdio config, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn merged_mcp_servers_ignores_disabled_plugins() {
+        let root = temp_dir("disabled");
+        let cwd = root.join("project");
+        let home = root.join("home");
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&cwd).expect("cwd");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(&plugin_root).expect("plugin");
+        let plugin_mcp = plugin_root.join(".mcp.json");
+        fs::write(
+            &plugin_mcp,
+            r#"{
+              "mcpServers": {
+                "disabled-only": {"command": "./disabled-server"}
+              }
+            }"#,
+        )
+        .expect("plugin mcp config");
+
+        let runtime_config = runtime::ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("runtime config should load");
+        let outcome = PluginLoadOutcome {
+            loaded_plugins: vec![loaded_plugin_with_mcp_path_enabled(plugin_mcp, false)],
+            failures: Vec::new(),
+        };
+
+        let merged = merged_mcp_servers(&runtime_config, &outcome).expect("merge should work");
+        assert!(
+            !merged.contains_key("disabled-only"),
+            "disabled plugin MCP servers should not be projected"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }

@@ -3683,14 +3683,16 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     runtime_config: &runtime::RuntimeConfig,
 ) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
     let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
-    let plugin_registry = plugin_manager.plugin_registry()?;
+    let plugin_registry_report = plugin_manager.plugin_registry_report()?;
+    let plugin_load_outcome = plugin_registry_report.load_outcome();
+    let plugin_registry = plugin_registry_report.into_registry()?;
     let plugin_hook_config =
         runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
     let feature_config = runtime_config
         .feature_config()
         .clone()
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
-    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config)?;
+    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config, &plugin_load_outcome)?;
     let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
         .with_runtime_tools(runtime_tools)?;
     Ok(RuntimePluginState {

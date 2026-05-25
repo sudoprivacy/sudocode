@@ -226,6 +226,7 @@ pub struct McpStdioServerConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub current_dir: Option<PathBuf>,
     pub tool_call_timeout_ms: Option<u64>,
 }
 
@@ -863,6 +864,47 @@ fn merge_mcp_servers(
     Ok(())
 }
 
+pub fn load_plugin_mcp_servers(
+    path: &Path,
+) -> Result<BTreeMap<String, ScopedMcpServerConfig>, ConfigError> {
+    let Some(parsed) = read_optional_json_object(path)? else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut servers = BTreeMap::new();
+    if parsed.object.contains_key("mcpServers") {
+        merge_mcp_servers(&mut servers, ConfigSource::Local, &parsed.object, path)?;
+    } else {
+        let mut wrapped = BTreeMap::new();
+        wrapped.insert(
+            "mcpServers".to_string(),
+            JsonValue::Object(parsed.object.clone()),
+        );
+        merge_mcp_servers(&mut servers, ConfigSource::Local, &wrapped, path)?;
+    }
+
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    for server in servers.values_mut() {
+        absolutize_plugin_mcp_server(root, &mut server.config);
+    }
+    Ok(servers)
+}
+
+fn absolutize_plugin_mcp_server(root: &Path, config: &mut McpServerConfig) {
+    let McpServerConfig::Stdio(stdio) = config else {
+        return;
+    };
+    stdio.current_dir = Some(root.to_path_buf());
+    let command_path = Path::new(&stdio.command);
+    if command_path.is_absolute() {
+        return;
+    }
+    if stdio.command.starts_with("./") || stdio.command.starts_with("../") {
+        let command_path = command_path.strip_prefix(".").unwrap_or(command_path);
+        stdio.command = root.join(command_path).display().to_string();
+    }
+}
+
 fn parse_optional_model(root: &JsonValue) -> Option<String> {
     root.as_object()
         .and_then(|object| object.get("model"))
@@ -1276,6 +1318,7 @@ fn parse_mcp_server_config(
             command: expect_string(object, "command", context)?.to_string(),
             args: optional_string_array(object, "args", context)?.unwrap_or_default(),
             env: optional_string_map(object, "env", context)?.unwrap_or_default(),
+            current_dir: optional_string(object, "currentDir", context)?.map(PathBuf::from),
             tool_call_timeout_ms: optional_u64(object, "toolCallTimeoutMs", context)?,
         })),
         "sse" => Ok(McpServerConfig::Sse(parse_mcp_remote_server_config(
@@ -1557,8 +1600,8 @@ fn push_unique(target: &mut Vec<String>, value: String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_merge_objects, parse_permission_mode_label, ConfigLoader, ConfigSource,
-        McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeHookConfig,
+        deep_merge_objects, load_plugin_mcp_servers, parse_permission_mode_label, ConfigLoader,
+        ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeHookConfig,
         RuntimePluginConfig, SUDOCODE_SETTINGS_SCHEMA_NAME,
     };
     use crate::json::JsonValue;
@@ -1929,6 +1972,74 @@ mod tests {
         assert_eq!(oauth.client_id, "runtime-client");
         assert_eq!(oauth.callback_port, Some(54_545));
         assert_eq!(oauth.scopes, vec!["org:read", "user:write"]);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn loads_plugin_mcp_servers_from_wrapped_file_and_resolves_stdio_commands() {
+        let root = temp_dir();
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&plugin_root).expect("plugin dir");
+        let mcp_path = plugin_root.join(".mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{
+              "mcpServers": {
+                "plugin-tools": {
+                  "command": "./bin/server",
+                  "args": ["--stdio"],
+                  "env": {"TOKEN": "x"}
+                }
+              }
+            }"#,
+        )
+        .expect("write plugin mcp config");
+
+        let servers = load_plugin_mcp_servers(&mcp_path).expect("plugin mcp should parse");
+        let server = servers.get("plugin-tools").expect("server exists");
+        assert_eq!(server.scope, ConfigSource::Local);
+        match &server.config {
+            McpServerConfig::Stdio(stdio) => {
+                assert_eq!(
+                    stdio.command,
+                    plugin_root.join("bin/server").display().to_string()
+                );
+                assert_eq!(stdio.args, vec!["--stdio"]);
+                assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("x"));
+                assert_eq!(stdio.current_dir.as_deref(), Some(plugin_root.as_path()));
+            }
+            other => panic!("expected stdio server, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn loads_plugin_mcp_servers_from_raw_server_map() {
+        let root = temp_dir();
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&plugin_root).expect("plugin dir");
+        let mcp_path = plugin_root.join(".mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{
+              "remote": {
+                "type": "http",
+                "url": "https://example.test/mcp"
+              }
+            }"#,
+        )
+        .expect("write plugin mcp config");
+
+        let servers = load_plugin_mcp_servers(&mcp_path).expect("plugin mcp should parse");
+        let server = servers.get("remote").expect("server exists");
+        match &server.config {
+            McpServerConfig::Http(remote) => {
+                assert_eq!(remote.url, "https://example.test/mcp");
+            }
+            other => panic!("expected http server, got {other:?}"),
+        }
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

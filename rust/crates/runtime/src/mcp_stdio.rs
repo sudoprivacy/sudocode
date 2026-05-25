@@ -1154,6 +1154,9 @@ impl McpStdioProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(current_dir) = &transport.current_dir {
+            command.current_dir(current_dir);
+        }
         apply_env(&mut command, &transport.env);
 
         let mut child = command.spawn()?;
@@ -1770,6 +1773,7 @@ mod tests {
                 command: "/bin/sh".to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "secret-value".to_string())]),
+                current_dir: None,
                 tool_call_timeout_ms: None,
             }),
         };
@@ -1788,6 +1792,7 @@ mod tests {
             command: "python3".to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
             env,
+            current_dir: None,
             tool_call_timeout_ms: None,
         }
     }
@@ -1837,6 +1842,7 @@ mod tests {
                 command: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env,
+                current_dir: None,
                 tool_call_timeout_ms: None,
             }),
         }
@@ -2056,6 +2062,7 @@ mod tests {
                 command: "/bin/sh".to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "direct-secret".to_string())]),
+                current_dir: None,
                 tool_call_timeout_ms: None,
             };
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
@@ -2318,6 +2325,7 @@ mod tests {
                             "MCP_TOOL_CALL_DELAY_MS".to_string(),
                             "200".to_string(),
                         )]),
+                        current_dir: None,
                         tool_call_timeout_ms: Some(25),
                     }),
                 },
@@ -2371,6 +2379,7 @@ mod tests {
                             "MCP_INVALID_TOOL_CALL_RESPONSE".to_string(),
                             "1".to_string(),
                         )]),
+                        current_dir: None,
                         tool_call_timeout_ms: Some(1_000),
                     }),
                 },
@@ -2706,6 +2715,7 @@ mod tests {
                             command: broken_script_path.display().to_string(),
                             args: Vec::new(),
                             env: BTreeMap::new(),
+                            current_dir: None,
                             tool_call_timeout_ms: None,
                         }),
                     },

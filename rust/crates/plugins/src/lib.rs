@@ -174,8 +174,21 @@ pub fn discover_marketplace_manifest(
 ) -> Result<Option<MarketplaceManifest>, MarketplaceDiscoveryError> {
     for relative in [MARKETPLACE_NEXUS_PATH, MARKETPLACE_AGENTS_PATH] {
         let path = repo_root.join(relative);
-        if !path.is_file() {
-            continue;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(MarketplaceDiscoveryError {
+                    path: path.clone(),
+                    detail: error.to_string(),
+                });
+            }
+        };
+        if !metadata.is_file() {
+            return Err(MarketplaceDiscoveryError {
+                path: path.clone(),
+                detail: "not a file".to_string(),
+            });
         }
         let contents = fs::read_to_string(&path).map_err(|e| MarketplaceDiscoveryError {
             path: path.clone(),
@@ -4866,6 +4879,32 @@ mod tests {
             display.contains("marketplace.json"),
             "error display must name the file: {display}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_non_file_primary_surfaces_error_without_fallback() {
+        let root = temp_dir("marketplace-non-file-primary");
+        let nexus_path = root
+            .join(".nexus")
+            .join("sudocode")
+            .join("plugins")
+            .join("marketplace.json");
+        fs::create_dir_all(&nexus_path).expect("nexus marketplace directory");
+        let agents_path = root.join(".agents").join("plugins");
+        write_file(
+            agents_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        );
+        let err = discover_marketplace_manifest(&root)
+            .expect_err("non-file nexus manifest path must return Err");
+        assert!(
+            err.path
+                .ends_with(".nexus/sudocode/plugins/marketplace.json"),
+            "error path must point to the non-file nexus path, got: {}",
+            err.path.display()
+        );
+        assert_eq!(err.detail, "not a file");
         let _ = fs::remove_dir_all(root);
     }
 

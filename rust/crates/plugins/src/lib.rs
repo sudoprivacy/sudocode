@@ -152,6 +152,32 @@ impl PluginHooks {
     }
 }
 
+/// A single hook command tagged with the `SudoCode` plugin that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginHookEntry {
+    pub plugin_id: String,
+    pub command: String,
+}
+
+/// Hook commands grouped by lifecycle stage.  Each entry carries the identifier
+/// of the `SudoCode` plugin that contributed the command so that error messages
+/// and audit logs can attribute results back to the originating plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectedPluginHooks {
+    pub pre_tool_use: Vec<PluginHookEntry>,
+    pub post_tool_use: Vec<PluginHookEntry>,
+    pub post_tool_use_failure: Vec<PluginHookEntry>,
+}
+
+impl ProjectedPluginHooks {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pre_tool_use.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.post_tool_use_failure.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginLifecycle {
     #[serde(rename = "Init", default)]
@@ -1058,6 +1084,37 @@ impl PluginRegistry {
                 plugin.validate()?;
                 Ok(acc.merged_with(plugin.hooks()))
             })
+    }
+
+    /// Like [`aggregated_hooks`] but preserves per-entry provenance so that
+    /// errors and audit messages can be attributed to the contributing
+    /// `SudoCode` plugin.  Disabled plugins are excluded.
+    pub fn projected_hooks(&self) -> Result<ProjectedPluginHooks, PluginError> {
+        let mut projected = ProjectedPluginHooks::default();
+        for plugin in self.plugins.iter().filter(|p| p.is_enabled()) {
+            plugin.validate()?;
+            let id = plugin.metadata().id.clone();
+            let hooks = plugin.hooks();
+            for cmd in &hooks.pre_tool_use {
+                projected.pre_tool_use.push(PluginHookEntry {
+                    plugin_id: id.clone(),
+                    command: cmd.clone(),
+                });
+            }
+            for cmd in &hooks.post_tool_use {
+                projected.post_tool_use.push(PluginHookEntry {
+                    plugin_id: id.clone(),
+                    command: cmd.clone(),
+                });
+            }
+            for cmd in &hooks.post_tool_use_failure {
+                projected.post_tool_use_failure.push(PluginHookEntry {
+                    plugin_id: id.clone(),
+                    command: cmd.clone(),
+                });
+            }
+        }
+        Ok(projected)
     }
 
     pub fn aggregated_tools(&self) -> Result<Vec<PluginTool>, PluginError> {
@@ -2383,14 +2440,26 @@ fn validate_command_path(root: &Path, entry: &str, kind: &str) -> Result<(), Plu
     };
     if !path.exists() {
         return Err(PluginError::InvalidManifest(format!(
-            "{kind} path `{}` does not exist",
+            "SudoCode plugin {kind} path `{}` does not exist",
             path.display()
         )));
     }
     if !path.is_file() {
         return Err(PluginError::InvalidManifest(format!(
-            "{kind} path `{}` must point to a file",
+            "SudoCode plugin {kind} path `{}` must point to a file",
             path.display()
+        )));
+    }
+    // Reject paths that resolve outside the plugin root directory to prevent
+    // one plugin from executing scripts belonging to another plugin or to the
+    // host system.
+    let canonical_root = root.canonicalize().map_err(PluginError::Io)?;
+    let canonical_path = path.canonicalize().map_err(PluginError::Io)?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(PluginError::InvalidManifest(format!(
+            "SudoCode plugin {kind} path `{}` must be within the plugin root `{}`",
+            path.display(),
+            root.display(),
         )));
     }
     Ok(())

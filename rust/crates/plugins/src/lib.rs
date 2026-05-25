@@ -1781,12 +1781,35 @@ impl PluginManager {
         enabled: Option<bool>,
     ) -> Result<(), PluginError> {
         update_settings_json(&self.settings_path(), |root| {
-            let enabled_plugins = ensure_object(root, "enabledPlugins");
-            match enabled {
-                Some(value) => {
+            if let Some(value) = enabled {
+                if root
+                    .get("plugins")
+                    .and_then(Value::as_object)
+                    .and_then(|plugins| plugins.get("enabled"))
+                    .is_some()
+                {
+                    let plugins = ensure_object(root, "plugins");
+                    let enabled_plugins = ensure_object(plugins, "enabled");
+                    let mut entry = Map::new();
+                    entry.insert("enabled".to_string(), Value::Bool(value));
+                    enabled_plugins.insert(plugin_id.to_string(), Value::Object(entry));
+                } else {
+                    let enabled_plugins = ensure_object(root, "enabledPlugins");
                     enabled_plugins.insert(plugin_id.to_string(), Value::Bool(value));
                 }
-                None => {
+            } else {
+                if let Some(enabled_plugins) = root
+                    .get_mut("enabledPlugins")
+                    .and_then(Value::as_object_mut)
+                {
+                    enabled_plugins.remove(plugin_id);
+                }
+                if let Some(enabled_plugins) = root
+                    .get_mut("plugins")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|plugins| plugins.get_mut("enabled"))
+                    .and_then(Value::as_object_mut)
+                {
                     enabled_plugins.remove(plugin_id);
                 }
             }
@@ -2843,6 +2866,29 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn load_structured_enabled_plugins(path: &Path) -> BTreeMap<String, bool> {
+        let contents = fs::read_to_string(path).expect("settings should exist");
+        let root: Value = serde_json::from_str(&contents).expect("settings json");
+        root.get("plugins")
+            .and_then(Value::as_object)
+            .and_then(|plugins| plugins.get("enabled"))
+            .and_then(Value::as_object)
+            .map(|enabled_plugins| {
+                enabled_plugins
+                    .iter()
+                    .map(|(plugin_id, value)| {
+                        let enabled = value
+                            .as_object()
+                            .and_then(|entry| entry.get("enabled"))
+                            .and_then(Value::as_bool)
+                            .expect("plugin state should be an object with enabled bool");
+                        (plugin_id.clone(), enabled)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn load_plugin_from_directory_validates_required_fields() {
         let _guard = env_guard();
@@ -3278,6 +3324,40 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn write_enabled_state_updates_existing_structured_plugin_config() {
+        let _guard = env_guard();
+        let config_home = temp_dir("structured-enabled-state");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        write_file(
+            manager.settings_path().as_path(),
+            r#"{
+  "plugins": {
+    "enabled": {
+      "demo@external": { "enabled": true }
+    }
+  }
+}"#,
+        );
+
+        manager
+            .write_enabled_state("demo@external", Some(false))
+            .expect("disable should update structured state");
+        assert_eq!(
+            load_structured_enabled_plugins(&manager.settings_path()).get("demo@external"),
+            Some(&false)
+        );
+        assert!(load_enabled_plugins(&manager.settings_path()).is_empty());
+
+        manager
+            .write_enabled_state("demo@external", None)
+            .expect("remove should clear structured state");
+        assert!(!load_structured_enabled_plugins(&manager.settings_path())
+            .contains_key("demo@external"));
+
+        let _ = fs::remove_dir_all(config_home);
     }
 
     #[test]

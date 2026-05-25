@@ -986,8 +986,10 @@ fn parse_optional_plugin_config(root: &JsonValue) -> Result<RuntimePluginConfig,
     let plugins = expect_object(plugins_value, "merged settings.plugins")?;
 
     if let Some(enabled_value) = plugins.get("enabled") {
-        config.enabled_plugins =
-            parse_plugin_enabled_map(enabled_value, "merged settings.plugins.enabled")?;
+        config.enabled_plugins.extend(parse_plugin_enabled_map(
+            enabled_value,
+            "merged settings.plugins.enabled",
+        )?);
     }
     config.external_directories =
         optional_string_array(plugins, "externalDirectories", "merged settings.plugins")?
@@ -2249,6 +2251,60 @@ mod tests {
         assert_eq!(
             loaded.plugins().enabled_plugins().get("bool-style@bundled"),
             Some(&true)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn merges_legacy_and_structured_plugin_config_entries() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "enabledPlugins": {
+                "legacy-only@builtin": true,
+                "overridden@external": true
+              },
+              "plugins": {
+                "enabled": {
+                  "structured-only@bundled": { "enabled": true },
+                  "overridden@external": { "enabled": false }
+                }
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("legacy-only@builtin"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("structured-only@bundled"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("overridden@external"),
+            Some(&false)
         );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

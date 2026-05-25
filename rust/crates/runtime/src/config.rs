@@ -1495,25 +1495,7 @@ fn optional_u64(
     }
 }
 
-fn parse_bool_map(value: &JsonValue, context: &str) -> Result<BTreeMap<String, bool>, ConfigError> {
-    let Some(map) = value.as_object() else {
-        return Err(ConfigError::Parse(format!(
-            "{context}: expected JSON object"
-        )));
-    };
-    map.iter()
-        .map(|(key, value)| {
-            value
-                .as_bool()
-                .map(|enabled| (key.clone(), enabled))
-                .ok_or_else(|| {
-                    ConfigError::Parse(format!("{context}: field {key} must be a boolean"))
-                })
-        })
-        .collect()
-}
-
-/// Parses a SudoCode plugin enabled-state map accepting both legacy bool values and
+/// Parses a `SudoCode` plugin enabled-state map accepting both legacy bool values and
 /// structured object entries.
 ///
 /// Accepted forms per entry:
@@ -1539,10 +1521,12 @@ fn parse_plugin_enabled_map(
             JsonValue::Bool(b) => *b,
             JsonValue::Object(obj) => match obj.get("enabled") {
                 Some(JsonValue::Bool(b)) => *b,
-                Some(other) => return Err(ConfigError::Parse(format!(
-                    "{context}.{key}: SudoCode plugin entry `enabled` must be a boolean, got {}",
-                    other.render()
-                ))),
+                Some(other) => {
+                    let rendered = other.render();
+                    return Err(ConfigError::Parse(format!(
+                        "{context}.{key}: SudoCode plugin entry `enabled` must be a boolean, got {rendered}"
+                    )));
+                }
                 None => {
                     return Err(ConfigError::Parse(format!(
                         "{context}.{key}: SudoCode plugin object entry must include `enabled`"
@@ -1550,10 +1534,10 @@ fn parse_plugin_enabled_map(
                 }
             },
             other => {
+                let rendered = other.render();
                 return Err(ConfigError::Parse(format!(
-                    "{context}.{key}: SudoCode plugin entry must be a boolean or object, got {}",
-                    other.render()
-                )))
+                    "{context}.{key}: SudoCode plugin entry must be a boolean or object, got {rendered}"
+                )));
             }
         };
         result.insert(key.clone(), enabled);

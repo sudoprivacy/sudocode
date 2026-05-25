@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use plugins::{
-    discover_marketplace_manifest, MarketplaceManifest, PluginError, PluginLoadFailure,
-    PluginLoadOutcome, PluginManager, PluginSummary,
+    discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,
+    PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary,
 };
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
@@ -240,9 +240,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "plugin",
         aliases: &["plugins", "marketplace"],
-        summary: "Manage Sudo Code plugins",
+        summary: "Manage SudoCode plugins",
         argument_hint: Some(
-            "[list|available|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
+            "[list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         ),
         resume_supported: false,
     },
@@ -1720,11 +1720,14 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             target: None,
         }),
         ["list", ..] => Err(usage_error("plugin list", "")),
-        ["available"] => Ok(SlashCommand::Plugins {
-            action: Some("available".to_string()),
-            target: None,
-        }),
+        ["available"] | ["marketplace"] | ["marketplace", "available"] => {
+            Ok(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            })
+        }
         ["available", ..] => Err(usage_error("plugin available", "")),
+        ["marketplace", ..] => Err(usage_error("plugin marketplace", "")),
         ["install"] => Err(usage_error("plugin install", "<path>")),
         ["install", target @ ..] => Ok(SlashCommand::Plugins {
             action: Some("install".to_string()),
@@ -1787,10 +1790,10 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
         )),
         [action, ..] => Err(command_error(
             &format!(
-                "Unknown /plugin action '{action}'. Use list, available, add <path>, install <path>, enable <name>, disable <name>, remove <id>, uninstall <id>, or update <id>."
+                "Unknown /plugin action '{action}'. Use list, available, marketplace, add <path>, install <path>, enable <name>, disable <name>, remove <id>, uninstall <id>, or update <id>."
             ),
             "plugin",
-            "/plugin [list|available|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
+            "/plugin [list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         )),
     }
 }
@@ -2253,8 +2256,9 @@ pub fn handle_plugins_slash_command(
         }
         Some("available") => {
             let message = match discover_marketplace_manifest(cwd) {
-                None => "Plugins\n  No marketplace manifest found.\n  Hint             Create .nexus/sudocode/plugins/marketplace.json to list available plugins.".to_string(),
-                Some(ref manifest) => render_marketplace_report(manifest),
+                Ok(None) => "Plugins\n  No marketplace manifest found.\n  Hint             Create .nexus/sudocode/plugins/marketplace.json to list available SudoCode plugins.".to_string(),
+                Ok(Some(ref manifest)) => render_marketplace_report(manifest),
+                Err(ref err) => render_marketplace_error(err),
             };
             Ok(PluginsCommandResult {
                 message,
@@ -2368,7 +2372,7 @@ fn render_marketplace_report(manifest: &MarketplaceManifest) -> String {
         format!("  Source           {}", manifest.source_path.display()),
     ];
     if manifest.entries.is_empty() {
-        lines.push("  No plugins listed in marketplace manifest.".to_string());
+        lines.push("  No SudoCode plugins listed in marketplace manifest.".to_string());
         return lines.join("\n");
     }
     lines.push(String::new());
@@ -2384,6 +2388,14 @@ fn render_marketplace_report(manifest: &MarketplaceManifest) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn render_marketplace_error(err: &MarketplaceDiscoveryError) -> String {
+    format!(
+        "Plugins\n  Status           error\n  Path             {}\n  Error            {}",
+        err.path.display(),
+        err.detail,
+    )
 }
 
 pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
@@ -4330,17 +4342,17 @@ mod tests {
         handle_plugins_slash_command, handle_skills_slash_command_json,
         handle_skills_slash_command_with_plugins, handle_slash_command, load_agents_from_roots,
         load_skills_from_roots, render_agents_report, render_agents_report_json,
-        render_mcp_report_json_for, render_plugins_report, render_plugins_report_with_failures,
-        render_skills_report, render_slash_command_help, render_slash_command_help_detail,
-        resolve_skill_invocation_with_plugins, resolve_skill_path, resolve_skill_path_with_plugins,
-        resume_supported_slash_commands, slash_command_specs, suggest_slash_commands,
-        validate_slash_command_input, DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch,
-        SlashCommand,
+        render_marketplace_error, render_mcp_report_json_for, render_plugins_report,
+        render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
+        render_slash_command_help_detail, resolve_skill_invocation_with_plugins,
+        resolve_skill_path, resolve_skill_path_with_plugins, resume_supported_slash_commands,
+        slash_command_specs, suggest_slash_commands, validate_slash_command_input,
+        DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{
-        LoadedPlugin, PluginCapabilityMetadata, PluginCapabilitySummary, PluginError, PluginKind,
-        PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginMetadata,
-        PluginSummary,
+        LoadedPlugin, MarketplaceDiscoveryError, PluginCapabilityMetadata, PluginCapabilitySummary,
+        PluginError, PluginKind, PluginLoadFailure, PluginLoadOutcome, PluginManager,
+        PluginManagerConfig, PluginMetadata, PluginSummary,
     };
     use runtime::{
         CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, MessageRole, Session,
@@ -4893,7 +4905,7 @@ mod tests {
         assert!(help.contains("/session"), "help must mention /session");
         assert!(help.contains("/sandbox"));
         assert!(help.contains(
-            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
+            "/plugin [list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]"
         ));
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents [list|help]"));
@@ -4962,7 +4974,7 @@ mod tests {
 
         // then
         assert!(help.contains("/plugin"));
-        assert!(help.contains("Summary          Manage Sudo Code plugins"));
+        assert!(help.contains("Summary          Manage SudoCode plugins"));
         assert!(help.contains("Aliases          /plugins, /marketplace"));
         assert!(help.contains("Category         Tools"));
     }
@@ -6235,5 +6247,158 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_marketplace_subcommand_is_alias_for_available() {
+        // `/plugin marketplace` and `/plugin marketplace available` both map to the
+        // available action — consistent with `scode plugins marketplace` CLI routing.
+        assert_eq!(
+            SlashCommand::parse("/plugin marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/plugins marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/plugins marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn marketplace_available_via_top_level_alias() {
+        // `/marketplace available` uses the top-level `marketplace` command alias.
+        assert_eq!(
+            SlashCommand::parse("/marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        // `/marketplace` with no args also resolves to a list (same as `/plugin`).
+        assert_eq!(
+            SlashCommand::parse("/marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: None,
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_surfaces_error_for_malformed_nexus_manifest() {
+        let config_home = temp_dir("avail-malformed-home");
+        let cwd = temp_dir("avail-malformed-cwd");
+        let manifest_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(manifest_dir.join("marketplace.json"), "not valid json {{{")
+            .expect("write broken manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("command layer should not propagate discovery errors");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("Status") && result.message.contains("error"),
+            "malformed manifest should report error status: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("marketplace.json"),
+            "error message should name the broken file: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_nexus_error_not_hidden_by_agents_fallback() {
+        // A broken nexus manifest must surface as an error — not silently fall through
+        // to a valid agents manifest.
+        let config_home = temp_dir("avail-no-fallback-home");
+        let cwd = temp_dir("avail-no-fallback-cwd");
+
+        // Write broken nexus manifest.
+        let nexus_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&nexus_dir).expect("nexus dir");
+        fs::write(nexus_dir.join("marketplace.json"), "{ bad json")
+            .expect("write broken nexus manifest");
+
+        // Write a valid agents fallback.
+        let agents_dir = cwd.join(".agents").join("plugins");
+        fs::create_dir_all(&agents_dir).expect("agents dir");
+        fs::write(
+            agents_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        )
+        .expect("write valid agents manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("command layer should not propagate discovery errors");
+        // Must report an error (broken nexus), not the agents plugin list.
+        assert!(
+            result.message.contains("error"),
+            "broken nexus must surface as error, not fall back: {}",
+            result.message
+        );
+        assert!(
+            !result.message.contains("agents-plugin"),
+            "agents fallback must not hide broken nexus: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn render_marketplace_error_includes_path_and_detail() {
+        let err = MarketplaceDiscoveryError {
+            path: PathBuf::from("/repo/.nexus/sudocode/plugins/marketplace.json"),
+            detail: "expected `:` at line 1 column 5".to_string(),
+        };
+        let rendered = render_marketplace_error(&err);
+        assert!(rendered.contains("error"), "should include error status");
+        assert!(
+            rendered.contains("marketplace.json"),
+            "should name the file: {rendered}"
+        );
+        assert!(
+            rendered.contains("expected `:`"),
+            "should include parse detail: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plugin_summary_uses_sudocode_terminology() {
+        // The /plugin command spec must say "SudoCode" (not "Sudo Code").
+        let spec = slash_command_specs()
+            .iter()
+            .find(|s| s.name == "plugin")
+            .expect("plugin spec must exist");
+        assert!(
+            spec.summary.contains("SudoCode"),
+            "plugin summary must say SudoCode: {}",
+            spec.summary
+        );
+        assert!(
+            !spec.summary.contains("Sudo Code"),
+            "plugin summary must not say 'Sudo Code': {}",
+            spec.summary
+        );
     }
 }

@@ -132,6 +132,29 @@ pub struct MarketplaceManifest {
     pub source_path: PathBuf,
 }
 
+/// Error returned when a marketplace manifest file exists but cannot be read or parsed.
+///
+/// A present-but-broken manifest is always an error; the discovery function never silently
+/// falls through to the next candidate when a file is found.
+#[derive(Debug)]
+pub struct MarketplaceDiscoveryError {
+    pub path: PathBuf,
+    pub detail: String,
+}
+
+impl Display for MarketplaceDiscoveryError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "failed to load marketplace manifest `{}`: {}",
+            self.path.display(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for MarketplaceDiscoveryError {}
+
 #[derive(Deserialize)]
 struct RawMarketplaceManifest {
     #[serde(default)]
@@ -142,23 +165,34 @@ struct RawMarketplaceManifest {
 /// (`.nexus/sudocode/plugins/marketplace.json`) then falling back to the
 /// compatibility path (`.agents/plugins/marketplace.json`).
 ///
-/// Returns `None` if neither file exists or neither can be parsed.
-#[must_use]
-pub fn discover_marketplace_manifest(repo_root: &Path) -> Option<MarketplaceManifest> {
+/// Returns `Ok(None)` when neither path exists.
+///
+/// Returns `Err` if a candidate file **exists** but cannot be read or parsed — the
+/// broken primary path is never silently skipped in favour of the fallback.
+pub fn discover_marketplace_manifest(
+    repo_root: &Path,
+) -> Result<Option<MarketplaceManifest>, MarketplaceDiscoveryError> {
     for relative in [MARKETPLACE_NEXUS_PATH, MARKETPLACE_AGENTS_PATH] {
         let path = repo_root.join(relative);
-        if path.is_file() {
-            if let Ok(contents) = fs::read_to_string(&path) {
-                if let Ok(raw) = serde_json::from_str::<RawMarketplaceManifest>(&contents) {
-                    return Some(MarketplaceManifest {
-                        entries: raw.plugins,
-                        source_path: path,
-                    });
-                }
-            }
+        if !path.is_file() {
+            continue;
         }
+        let contents = fs::read_to_string(&path).map_err(|e| MarketplaceDiscoveryError {
+            path: path.clone(),
+            detail: e.to_string(),
+        })?;
+        let raw = serde_json::from_str::<RawMarketplaceManifest>(&contents).map_err(|e| {
+            MarketplaceDiscoveryError {
+                path: path.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+        return Ok(Some(MarketplaceManifest {
+            entries: raw.plugins,
+            source_path: path,
+        }));
     }
-    None
+    Ok(None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1578,8 +1612,10 @@ impl PluginManager {
     }
 
     /// Discover the marketplace manifest from the given repo root.
-    #[must_use]
-    pub fn marketplace(&self, repo_root: &Path) -> Option<MarketplaceManifest> {
+    pub fn marketplace(
+        &self,
+        repo_root: &Path,
+    ) -> Result<Option<MarketplaceManifest>, MarketplaceDiscoveryError> {
         discover_marketplace_manifest(repo_root)
     }
 
@@ -4722,7 +4758,9 @@ mod tests {
         let root = temp_dir("marketplace-absent");
         fs::create_dir_all(&root).expect("root dir");
         assert!(
-            discover_marketplace_manifest(&root).is_none(),
+            discover_marketplace_manifest(&root)
+                .expect("no file should be Ok(None)")
+                .is_none(),
             "no manifest should return None"
         );
         let _ = fs::remove_dir_all(root);
@@ -4736,7 +4774,9 @@ mod tests {
             manifest_path.join("marketplace.json").as_path(),
             r#"{"plugins":[{"name":"alpha","version":"1.0.0","description":"alpha plugin","source":"https://example.com/alpha"},{"name":"beta","version":"2.1.0","description":"beta plugin"}]}"#,
         );
-        let manifest = discover_marketplace_manifest(&root).expect("manifest should be found");
+        let manifest = discover_marketplace_manifest(&root)
+            .expect("valid manifest should be Ok")
+            .expect("manifest should be Some");
         assert_eq!(manifest.entries.len(), 2);
         assert_eq!(manifest.entries[0].name, "alpha");
         assert_eq!(manifest.entries[0].version, "1.0.0");
@@ -4760,7 +4800,9 @@ mod tests {
             manifest_path.join("marketplace.json").as_path(),
             r#"{"plugins":[{"name":"gamma","version":"0.5.0","description":"gamma plugin"}]}"#,
         );
-        let manifest = discover_marketplace_manifest(&root).expect("agents fallback should work");
+        let manifest = discover_marketplace_manifest(&root)
+            .expect("valid fallback should be Ok")
+            .expect("agents fallback should be Some");
         assert_eq!(manifest.entries.len(), 1);
         assert_eq!(manifest.entries[0].name, "gamma");
         assert!(manifest
@@ -4772,7 +4814,6 @@ mod tests {
     #[test]
     fn marketplace_nexus_path_takes_precedence_over_agents() {
         let root = temp_dir("marketplace-precedence");
-        // Write both manifests.
         let nexus_path = root.join(".nexus").join("sudocode").join("plugins");
         write_file(
             nexus_path.join("marketplace.json").as_path(),
@@ -4783,7 +4824,9 @@ mod tests {
             agents_path.join("marketplace.json").as_path(),
             r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
         );
-        let manifest = discover_marketplace_manifest(&root).expect("manifest should be found");
+        let manifest = discover_marketplace_manifest(&root)
+            .expect("valid nexus manifest should be Ok")
+            .expect("nexus manifest should be Some");
         assert_eq!(manifest.entries.len(), 1);
         assert_eq!(
             manifest.entries[0].name, "nexus-plugin",
@@ -4792,6 +4835,53 @@ mod tests {
         assert!(manifest
             .source_path
             .ends_with(".nexus/sudocode/plugins/marketplace.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_malformed_primary_surfaces_error_without_fallback() {
+        let root = temp_dir("marketplace-malformed-primary");
+        // Write a broken nexus manifest.
+        let nexus_path = root.join(".nexus").join("sudocode").join("plugins");
+        write_file(
+            nexus_path.join("marketplace.json").as_path(),
+            "not valid json {{{",
+        );
+        // Also write a valid agents fallback — it must NOT be loaded.
+        let agents_path = root.join(".agents").join("plugins");
+        write_file(
+            agents_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        );
+        let err = discover_marketplace_manifest(&root)
+            .expect_err("malformed nexus manifest must return Err");
+        assert!(
+            err.path
+                .ends_with(".nexus/sudocode/plugins/marketplace.json"),
+            "error path must point to the broken nexus file, got: {}",
+            err.path.display()
+        );
+        let display = err.to_string();
+        assert!(
+            display.contains("marketplace.json"),
+            "error display must name the file: {display}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_malformed_fallback_surfaces_error() {
+        let root = temp_dir("marketplace-malformed-fallback");
+        // No nexus manifest — only a broken agents one.
+        let agents_path = root.join(".agents").join("plugins");
+        write_file(agents_path.join("marketplace.json").as_path(), "{ broken");
+        let err = discover_marketplace_manifest(&root)
+            .expect_err("malformed agents manifest must return Err");
+        assert!(
+            err.path.ends_with(".agents/plugins/marketplace.json"),
+            "error path must point to the broken agents file, got: {}",
+            err.path.display()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4808,7 +4898,8 @@ mod tests {
         );
         let manifest = manager
             .marketplace(&repo_root)
-            .expect("manager.marketplace should delegate to discovery");
+            .expect("valid manifest should be Ok")
+            .expect("manager.marketplace should return Some");
         assert_eq!(manifest.entries[0].name, "delta");
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(repo_root);

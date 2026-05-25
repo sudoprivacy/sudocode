@@ -42,7 +42,7 @@ tower-http = { workspace = true }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["process"] }
+nix = { version = "0.29", features = ["poll", "process"] }
 
 [lints]
 workspace = true

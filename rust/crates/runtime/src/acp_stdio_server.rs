@@ -20,14 +20,54 @@ pub async fn run_acp_stdio_server(
     delegate: Box<dyn SdkAcpDelegate>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // When launched over stdio by a host (e.g. an editor), the agent must not
-    // outlive that host. Closing stdin makes the transport below return, but a
-    // host that is killed abruptly can orphan us without our stdin observing
-    // EOF (for instance when stdin is inherited rather than a private pipe).
-    // The watchdog guarantees we still exit once we are reparented away.
+    // outlive that host. Two independent signals drive shutdown:
+    //
+    // * `spawn_stdin_eof_watchdog` exits when stdin's writer end is closed
+    //   (graceful disconnect). The SDK transport keeps its future alive on
+    //   stdin EOF because stdout is still open, so we need our own probe.
+    // * `spawn_parent_exit_watchdog` exits when the original parent process
+    //   dies and we are reparented (host killed abruptly, stdin inherited).
+    spawn_stdin_eof_watchdog();
     spawn_parent_exit_watchdog();
 
     let delegate: SharedDelegate = Arc::new(Mutex::new(delegate));
     run_acp_on_transport(&config, delegate, new_abort_registry(), Stdio::new()).await
+}
+
+/// Watch for stdin's writer end closing and exit when it does.
+///
+/// Uses `poll(2)` on fd 0 without consuming bytes: `POLLHUP` is always
+/// reported in `revents` regardless of the requested events, so a closed
+/// writer wakes the poll even though we never registered for `POLLIN`. This
+/// avoids racing the SDK transport's own stdin reader.
+#[cfg(unix)]
+fn spawn_stdin_eof_watchdog() {
+    use std::os::fd::AsFd;
+
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+
+    tokio::task::spawn_blocking(|| {
+        let stdin = std::io::stdin();
+        let exit_flags = PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL;
+        loop {
+            let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLPRI)];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Ok(_) => {
+                    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+                    if revents.intersects(exit_flags) {
+                        std::process::exit(0);
+                    }
+                }
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(_) => return,
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_stdin_eof_watchdog() {
+    // Non-unix: rely on the transport returning on stdin EOF.
 }
 
 /// Watch for the parent process going away and exit when it does.

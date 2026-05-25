@@ -24,6 +24,10 @@ const MANIFEST_FILE_NAME: &str = "plugin.json";
 const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
 const MANIFEST_SUDOCODE_PLUGIN_PATH: &str = ".sudocode-plugin/plugin.json";
 const MANIFEST_CODEX_PLUGIN_PATH: &str = ".codex-plugin/plugin.json";
+/// Primary marketplace manifest path: SudoCode-native location.
+const MARKETPLACE_NEXUS_PATH: &str = ".nexus/sudocode/plugins/marketplace.json";
+/// Compatibility fallback marketplace manifest path.
+const MARKETPLACE_AGENTS_PATH: &str = ".agents/plugins/marketplace.json";
 
 /// Typed plugin identifier in `<name>@<source>` format.
 ///
@@ -104,6 +108,57 @@ impl PluginKind {
             Self::External => EXTERNAL_MARKETPLACE,
         }
     }
+}
+
+/// A single entry in a marketplace manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketplaceEntry {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    /// Optional install source (URL or local path).
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// A parsed marketplace manifest with the path it was loaded from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketplaceManifest {
+    pub entries: Vec<MarketplaceEntry>,
+    pub source_path: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct RawMarketplaceManifest {
+    #[serde(default)]
+    plugins: Vec<MarketplaceEntry>,
+}
+
+/// Discover a marketplace manifest by checking the SudoCode-native path first
+/// (`.nexus/sudocode/plugins/marketplace.json`) then falling back to the
+/// compatibility path (`.agents/plugins/marketplace.json`).
+///
+/// Returns `None` if neither file exists or neither can be parsed.
+#[must_use]
+pub fn discover_marketplace_manifest(repo_root: &Path) -> Option<MarketplaceManifest> {
+    for relative in [MARKETPLACE_NEXUS_PATH, MARKETPLACE_AGENTS_PATH] {
+        let path = repo_root.join(relative);
+        if path.is_file() {
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(raw) = serde_json::from_str::<RawMarketplaceManifest>(&contents) {
+                    return Some(MarketplaceManifest {
+                        entries: raw.plugins,
+                        source_path: path,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1520,6 +1575,12 @@ impl PluginManager {
     pub fn validate_plugin_source(&self, source: &str) -> Result<PluginManifest, PluginError> {
         let path = resolve_local_source(source)?;
         load_plugin_from_directory(&path)
+    }
+
+    /// Discover the marketplace manifest from the given repo root.
+    #[must_use]
+    pub fn marketplace(&self, repo_root: &Path) -> Option<MarketplaceManifest> {
+        discover_marketplace_manifest(repo_root)
     }
 
     pub fn install(&mut self, source: &str) -> Result<InstallOutcome, PluginError> {
@@ -4654,6 +4715,103 @@ mod tests {
             second,
             config_home.join("plugins").join("data").join("a-b%2Dc")
         );
+    }
+
+    #[test]
+    fn marketplace_returns_none_when_no_manifest_exists() {
+        let root = temp_dir("marketplace-absent");
+        fs::create_dir_all(&root).expect("root dir");
+        assert!(
+            discover_marketplace_manifest(&root).is_none(),
+            "no manifest should return None"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_parses_nexus_manifest_entries() {
+        let root = temp_dir("marketplace-nexus-entries");
+        let manifest_path = root.join(".nexus").join("sudocode").join("plugins");
+        write_file(
+            manifest_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"alpha","version":"1.0.0","description":"alpha plugin","source":"https://example.com/alpha"},{"name":"beta","version":"2.1.0","description":"beta plugin"}]}"#,
+        );
+        let manifest = discover_marketplace_manifest(&root).expect("manifest should be found");
+        assert_eq!(manifest.entries.len(), 2);
+        assert_eq!(manifest.entries[0].name, "alpha");
+        assert_eq!(manifest.entries[0].version, "1.0.0");
+        assert_eq!(manifest.entries[0].description, "alpha plugin");
+        assert_eq!(
+            manifest.entries[0].source.as_deref(),
+            Some("https://example.com/alpha")
+        );
+        assert_eq!(manifest.entries[1].name, "beta");
+        assert!(manifest
+            .source_path
+            .ends_with(".nexus/sudocode/plugins/marketplace.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_falls_back_to_agents_path() {
+        let root = temp_dir("marketplace-agents-fallback");
+        let manifest_path = root.join(".agents").join("plugins");
+        write_file(
+            manifest_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"gamma","version":"0.5.0","description":"gamma plugin"}]}"#,
+        );
+        let manifest = discover_marketplace_manifest(&root).expect("agents fallback should work");
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].name, "gamma");
+        assert!(manifest
+            .source_path
+            .ends_with(".agents/plugins/marketplace.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_nexus_path_takes_precedence_over_agents() {
+        let root = temp_dir("marketplace-precedence");
+        // Write both manifests.
+        let nexus_path = root.join(".nexus").join("sudocode").join("plugins");
+        write_file(
+            nexus_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"nexus-plugin","version":"1.0.0","description":"from nexus"}]}"#,
+        );
+        let agents_path = root.join(".agents").join("plugins");
+        write_file(
+            agents_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        );
+        let manifest = discover_marketplace_manifest(&root).expect("manifest should be found");
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(
+            manifest.entries[0].name, "nexus-plugin",
+            "nexus path must shadow agents path"
+        );
+        assert!(manifest
+            .source_path
+            .ends_with(".nexus/sudocode/plugins/marketplace.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_manager_method_delegates_to_discovery() {
+        let config_home = temp_dir("marketplace-manager");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        let repo_root = temp_dir("marketplace-manager-repo");
+        let manifest_path = repo_root.join(".nexus").join("sudocode").join("plugins");
+        write_file(
+            manifest_path.join("marketplace.json").as_path(),
+            r#"{"plugins":[{"name":"delta","version":"3.0.0","description":"delta plugin"}]}"#,
+        );
+        let manifest = manager
+            .marketplace(&repo_root)
+            .expect("manager.marketplace should delegate to discovery");
+        assert_eq!(manifest.entries[0].name, "delta");
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(repo_root);
     }
 
     #[test]

@@ -4,7 +4,10 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use plugins::{PluginError, PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary};
+use plugins::{
+    discover_marketplace_manifest, MarketplaceManifest, PluginError, PluginLoadFailure,
+    PluginLoadOutcome, PluginManager, PluginSummary,
+};
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
     ScopedMcpServerConfig, Session,
@@ -239,7 +242,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         aliases: &["plugins", "marketplace"],
         summary: "Manage Sudo Code plugins",
         argument_hint: Some(
-            "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
+            "[list|available|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         ),
         resume_supported: false,
     },
@@ -1717,9 +1720,19 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             target: None,
         }),
         ["list", ..] => Err(usage_error("plugin list", "")),
+        ["available"] => Ok(SlashCommand::Plugins {
+            action: Some("available".to_string()),
+            target: None,
+        }),
+        ["available", ..] => Err(usage_error("plugin available", "")),
         ["install"] => Err(usage_error("plugin install", "<path>")),
         ["install", target @ ..] => Ok(SlashCommand::Plugins {
             action: Some("install".to_string()),
+            target: Some(target.join(" ")),
+        }),
+        ["add"] => Err(usage_error("plugin add", "<path>")),
+        ["add", target @ ..] => Ok(SlashCommand::Plugins {
+            action: Some("add".to_string()),
             target: Some(target.join(" ")),
         }),
         ["enable"] => Err(usage_error("plugin enable", "<name>")),
@@ -1752,6 +1765,16 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             "plugin",
             "/plugin uninstall <id>",
         )),
+        ["remove"] => Err(usage_error("plugin remove", "<id>")),
+        ["remove", target] => Ok(SlashCommand::Plugins {
+            action: Some("remove".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["remove", ..] => Err(command_error(
+            "Unexpected arguments for /plugin remove.",
+            "plugin",
+            "/plugin remove <id>",
+        )),
         ["update"] => Err(usage_error("plugin update", "<id>")),
         ["update", target] => Ok(SlashCommand::Plugins {
             action: Some("update".to_string()),
@@ -1764,10 +1787,10 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
         )),
         [action, ..] => Err(command_error(
             &format!(
-                "Unknown /plugin action '{action}'. Use list, install <path>, enable <name>, disable <name>, uninstall <id>, or update <id>."
+                "Unknown /plugin action '{action}'. Use list, available, add <path>, install <path>, enable <name>, disable <name>, remove <id>, uninstall <id>, or update <id>."
             ),
             "plugin",
-            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
+            "/plugin [list|available|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         )),
     }
 }
@@ -2216,6 +2239,7 @@ pub fn handle_plugins_slash_command(
     action: Option<&str>,
     target: Option<&str>,
     manager: &mut PluginManager,
+    cwd: &Path,
 ) -> Result<PluginsCommandResult, PluginError> {
     match action {
         None | Some("list") => {
@@ -2227,7 +2251,17 @@ pub fn handle_plugins_slash_command(
                 reload_runtime: false,
             })
         }
-        Some("install") => {
+        Some("available") => {
+            let message = match discover_marketplace_manifest(cwd) {
+                None => "Plugins\n  No marketplace manifest found.\n  Hint             Create .nexus/sudocode/plugins/marketplace.json to list available plugins.".to_string(),
+                Some(ref manifest) => render_marketplace_report(manifest),
+            };
+            Ok(PluginsCommandResult {
+                message,
+                reload_runtime: false,
+            })
+        }
+        Some("install" | "add") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
                     message: "Usage: /plugins install <path>".to_string(),
@@ -2278,7 +2312,7 @@ pub fn handle_plugins_slash_command(
                 reload_runtime: true,
             })
         }
-        Some("uninstall") => {
+        Some("uninstall" | "remove") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
                     message: "Usage: /plugins uninstall <plugin-id>".to_string(),
@@ -2321,11 +2355,35 @@ pub fn handle_plugins_slash_command(
         }
         Some(other) => Ok(PluginsCommandResult {
             message: format!(
-                "Unknown /plugins action '{other}'. Use list, install, enable, disable, uninstall, or update."
+                "Unknown /plugins action '{other}'. Use list, available, add, install, enable, disable, remove, uninstall, or update."
             ),
             reload_runtime: false,
         }),
     }
+}
+
+fn render_marketplace_report(manifest: &MarketplaceManifest) -> String {
+    let mut lines = vec![
+        "Plugins (available)".to_string(),
+        format!("  Source           {}", manifest.source_path.display()),
+    ];
+    if manifest.entries.is_empty() {
+        lines.push("  No plugins listed in marketplace manifest.".to_string());
+        return lines.join("\n");
+    }
+    lines.push(String::new());
+    for entry in &manifest.entries {
+        lines.push(format!(
+            "  {name:<20} v{version:<10} {desc}",
+            name = entry.name,
+            version = entry.version,
+            desc = entry.description,
+        ));
+        if let Some(source) = &entry.source {
+            lines.push(format!("  {:<20} {source}", ""));
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
@@ -5895,10 +5953,12 @@ mod tests {
         write_external_plugin(&source_root, "demo", "1.0.0");
 
         let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
         let install = handle_plugins_slash_command(
             Some("install"),
             Some(source_root.to_str().expect("utf8 path")),
             &mut manager,
+            cwd,
         )
         .expect("install command should succeed");
         assert!(install.reload_runtime);
@@ -5907,7 +5967,7 @@ mod tests {
         assert!(install.message.contains("Version          1.0.0"));
         assert!(install.message.contains("Status           enabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(!list.reload_runtime);
         assert!(list.message.contains("demo"));
@@ -5925,33 +5985,36 @@ mod tests {
         write_external_plugin(&source_root, "demo", "1.0.0");
 
         let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
         handle_plugins_slash_command(
             Some("install"),
             Some(source_root.to_str().expect("utf8 path")),
             &mut manager,
+            cwd,
         )
         .expect("install command should succeed");
 
-        let disable = handle_plugins_slash_command(Some("disable"), Some("demo"), &mut manager)
-            .expect("disable command should succeed");
+        let disable =
+            handle_plugins_slash_command(Some("disable"), Some("demo"), &mut manager, cwd)
+                .expect("disable command should succeed");
         assert!(disable.reload_runtime);
         assert!(disable.message.contains("disabled demo@external"));
         assert!(disable.message.contains("Name             demo"));
         assert!(disable.message.contains("Status           disabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(list.message.contains("demo"));
         assert!(list.message.contains("disabled"));
 
-        let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager)
+        let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager, cwd)
             .expect("enable command should succeed");
         assert!(enable.reload_runtime);
         assert!(enable.message.contains("enabled demo@external"));
         assert!(enable.message.contains("Name             demo"));
         assert!(enable.message.contains("Status           enabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(list.message.contains("demo"));
         assert!(list.message.contains("enabled"));
@@ -5971,8 +6034,9 @@ mod tests {
         config.bundled_root = Some(bundled_root.clone());
         let mut manager = PluginManager::new(config);
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
-            .expect("list command should succeed");
+        let list =
+            handle_plugins_slash_command(Some("list"), None, &mut manager, Path::new("/tmp"))
+                .expect("list command should succeed");
         assert!(!list.reload_runtime);
         assert!(list.message.contains("starter"));
         assert!(list.message.contains("v0.1.0"));
@@ -5980,5 +6044,196 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn plugin_add_is_alias_for_install() {
+        assert_eq!(
+            SlashCommand::parse("/plugin add /tmp/myplugin"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("add".to_string()),
+                target: Some("/tmp/myplugin".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_remove_is_alias_for_uninstall() {
+        assert_eq!(
+            SlashCommand::parse("/plugin remove demo@external"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("remove".to_string()),
+                target: Some("demo@external".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_parses_without_target() {
+        assert_eq!(
+            SlashCommand::parse("/plugin available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_returns_no_manifest_hint_when_absent() {
+        let config_home = temp_dir("avail-absent-home");
+        let cwd = temp_dir("avail-absent-cwd");
+        fs::create_dir_all(&cwd).expect("cwd dir");
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("No marketplace manifest"),
+            "should report absent manifest: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_shows_nexus_marketplace_entries() {
+        let config_home = temp_dir("avail-nexus-home");
+        let cwd = temp_dir("avail-nexus-cwd");
+        let manifest_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"demo-plugin","version":"1.0.0","description":"A demo plugin","source":"https://example.com/demo"}]}"#,
+        )
+        .expect("write marketplace.json");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("demo-plugin"),
+            "should list demo-plugin: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("A demo plugin"),
+            "should include description: {}",
+            result.message
+        );
+        assert!(
+            result
+                .message
+                .contains(".nexus/sudocode/plugins/marketplace.json"),
+            "should show source path: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_falls_back_to_agents_manifest() {
+        let config_home = temp_dir("avail-agents-home");
+        let cwd = temp_dir("avail-agents-cwd");
+        let manifest_dir = cwd.join(".agents").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"compat-plugin","version":"0.9.0","description":"A compat plugin"}]}"#,
+        )
+        .expect("write marketplace.json");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("compat-plugin"),
+            "should list compat-plugin from agents fallback: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains(".agents/plugins/marketplace.json"),
+            "should show agents source path: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_add_executes_as_install() {
+        let config_home = temp_dir("add-alias-home");
+        let source_root = temp_dir("add-alias-source");
+        write_external_plugin(&source_root, "via-add", "2.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(
+            Some("add"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+            Path::new("/tmp"),
+        )
+        .expect("add command should succeed");
+        assert!(result.reload_runtime, "add should trigger runtime reload");
+        assert!(
+            result.message.contains("installed via-add@external"),
+            "add should report installed: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_remove_executes_as_uninstall() {
+        let config_home = temp_dir("remove-alias-home");
+        let source_root = temp_dir("remove-alias-source");
+        write_external_plugin(&source_root, "to-remove", "1.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
+        handle_plugins_slash_command(
+            Some("install"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+            cwd,
+        )
+        .expect("install should succeed");
+
+        let result = handle_plugins_slash_command(
+            Some("remove"),
+            Some("to-remove@external"),
+            &mut manager,
+            cwd,
+        )
+        .expect("remove command should succeed");
+        assert!(
+            result.reload_runtime,
+            "remove should trigger runtime reload"
+        );
+        assert!(
+            result.message.contains("uninstalled to-remove@external"),
+            "remove should report uninstalled: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
     }
 }

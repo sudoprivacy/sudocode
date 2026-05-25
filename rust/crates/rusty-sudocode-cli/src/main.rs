@@ -3376,7 +3376,7 @@ impl LiveCli {
         let loader = ConfigLoader::default_for(&cwd);
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
-        let result = handle_plugins_slash_command(action, target, &mut manager)?;
+        let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
         match output_format {
             CliOutputFormat::Text => println!("{}", result.message),
             CliOutputFormat::Json => println!(
@@ -3537,7 +3537,7 @@ impl LiveCli {
         let loader = ConfigLoader::default_for(&cwd);
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
-        let result = handle_plugins_slash_command(action, target, &mut manager)?;
+        let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
         println!("{}", result.message);
         if result.reload_runtime {
             self.reload_runtime_features()?;

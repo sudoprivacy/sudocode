@@ -1352,8 +1352,8 @@ impl PluginManager {
             .join("data")
             .join(format!(
                 "{}-{}",
-                sanitize_path_component(&id.name),
-                sanitize_path_component(&id.source)
+                encode_store_data_component(&id.name),
+                encode_store_data_component(&id.source)
             ))
     }
 
@@ -2549,6 +2549,16 @@ fn sanitize_path_component(component: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn encode_store_data_component(component: &str) -> String {
+    component
+        .bytes()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'.' => (byte as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 fn describe_install_source(source: &PluginInstallSource) -> String {
@@ -4352,12 +4362,12 @@ mod tests {
             config_home
                 .join("plugins")
                 .join("data")
-                .join("my-plugin-external")
+                .join("my%2Dplugin-external")
         );
     }
 
     #[test]
-    fn plugin_data_dir_sanitizes_special_chars() {
+    fn plugin_data_dir_encodes_special_chars() {
         let config_home = temp_dir("data-dir-sanitize");
         let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
         let id = PluginId::new("my/plugin", "org:registry");
@@ -4367,7 +4377,24 @@ mod tests {
             config_home
                 .join("plugins")
                 .join("data")
-                .join("my-plugin-org-registry")
+                .join("my%2Fplugin-org%3Aregistry")
+        );
+    }
+
+    #[test]
+    fn plugin_data_dir_preserves_name_source_boundaries() {
+        let config_home = temp_dir("data-dir-boundaries");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let first = manager.plugin_data_dir(&PluginId::new("a-b", "c"));
+        let second = manager.plugin_data_dir(&PluginId::new("a", "b-c"));
+        assert_ne!(first, second);
+        assert_eq!(
+            first,
+            config_home.join("plugins").join("data").join("a%2Db-c")
+        );
+        assert_eq!(
+            second,
+            config_home.join("plugins").join("data").join("a-b%2Dc")
         );
     }
 

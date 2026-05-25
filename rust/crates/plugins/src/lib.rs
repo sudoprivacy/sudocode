@@ -22,6 +22,60 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 const REGISTRY_FILE_NAME: &str = "installed.json";
 const MANIFEST_FILE_NAME: &str = "plugin.json";
 const MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
+const MANIFEST_SUDOCODE_PLUGIN_PATH: &str = ".sudocode-plugin/plugin.json";
+const MANIFEST_CODEX_PLUGIN_PATH: &str = ".codex-plugin/plugin.json";
+
+/// Typed plugin identifier in `<name>@<source>` format.
+///
+/// The source is a marketplace or origin label such as `external`, `bundled`,
+/// `builtin`, or `local`. Legacy ids that contain no `@` can be normalised to
+/// `<id>@local` via [`PluginId::normalize_legacy`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PluginId {
+    pub name: String,
+    pub source: String,
+}
+
+impl PluginId {
+    #[must_use]
+    pub fn new(name: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            source: source.into(),
+        }
+    }
+
+    /// Parse a `<name>@<source>` string.  Returns `None` if either component is
+    /// empty or the `@` separator is absent.
+    #[must_use]
+    pub fn parse(id: &str) -> Option<Self> {
+        let (name, source) = id.split_once('@')?;
+        if name.is_empty() || source.is_empty() {
+            return None;
+        }
+        Some(Self {
+            name: name.to_string(),
+            source: source.to_string(),
+        })
+    }
+
+    /// Map a potentially legacy id (no `@`) to `<id>@local`.  Ids that already
+    /// contain `@` are returned unchanged.
+    #[must_use]
+    pub fn normalize_legacy(id: &str) -> String {
+        if id.contains('@') {
+            id.to_string()
+        } else {
+            format!("{id}@local")
+        }
+    }
+}
+
+impl Display for PluginId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.source)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1669,20 +1723,39 @@ fn detect_claude_code_manifest_contract_gaps(
 }
 
 fn plugin_manifest_path(root: &Path) -> Result<PathBuf, PluginError> {
+    // Primary: .sudocode-plugin/plugin.json (new SudoCode plugin convention)
+    let sudocode_path = root.join(MANIFEST_SUDOCODE_PLUGIN_PATH);
+    if sudocode_path.exists() {
+        return Ok(sudocode_path);
+    }
+
+    // Preserved legacy: plugin.json at root wins over packaged subdirectories,
+    // matching the original SudoCode discovery order.
     let direct_path = root.join(MANIFEST_FILE_NAME);
     if direct_path.exists() {
         return Ok(direct_path);
     }
 
-    let packaged_path = root.join(MANIFEST_RELATIVE_PATH);
-    if packaged_path.exists() {
-        return Ok(packaged_path);
+    // Legacy packaged: .claude-plugin/plugin.json
+    let claude_path = root.join(MANIFEST_RELATIVE_PATH);
+    if claude_path.exists() {
+        return Ok(claude_path);
+    }
+
+    // Compatibility fallback of last resort: .codex-plugin/plugin.json
+    // Must not shadow any existing SudoCode or Claude legacy manifest.
+    let codex_path = root.join(MANIFEST_CODEX_PLUGIN_PATH);
+    if codex_path.exists() {
+        return Ok(codex_path);
     }
 
     Err(PluginError::NotFound(format!(
-        "plugin manifest not found at {} or {}",
-        direct_path.display(),
-        packaged_path.display()
+        "plugin manifest not found in `{}` (checked {}, {}, {}, and {})",
+        root.display(),
+        MANIFEST_SUDOCODE_PLUGIN_PATH,
+        MANIFEST_FILE_NAME,
+        MANIFEST_RELATIVE_PATH,
+        MANIFEST_CODEX_PLUGIN_PATH,
     )))
 }
 
@@ -3653,5 +3726,185 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(base_dir);
+    }
+
+    // --- PluginId parsing, display, and legacy mapping ---
+
+    #[test]
+    fn plugin_id_parse_roundtrips_name_and_source() {
+        let id = PluginId::parse("my-plugin@external").expect("should parse");
+        assert_eq!(id.name, "my-plugin");
+        assert_eq!(id.source, "external");
+        assert_eq!(id.to_string(), "my-plugin@external");
+    }
+
+    #[test]
+    fn plugin_id_parse_rejects_missing_at_sign() {
+        assert!(PluginId::parse("nope").is_none());
+    }
+
+    #[test]
+    fn plugin_id_parse_rejects_empty_name() {
+        assert!(PluginId::parse("@external").is_none());
+    }
+
+    #[test]
+    fn plugin_id_parse_rejects_empty_source() {
+        assert!(PluginId::parse("plugin@").is_none());
+    }
+
+    #[test]
+    fn plugin_id_parse_handles_source_with_nested_at() {
+        // Only the first '@' is the delimiter; additional '@' belong to the source.
+        let id = PluginId::parse("my-plugin@org@registry").expect("should parse");
+        assert_eq!(id.name, "my-plugin");
+        assert_eq!(id.source, "org@registry");
+        assert_eq!(id.to_string(), "my-plugin@org@registry");
+    }
+
+    #[test]
+    fn plugin_id_display_formats_as_name_at_source() {
+        let id = PluginId::new("starter", "bundled");
+        assert_eq!(format!("{id}"), "starter@bundled");
+    }
+
+    #[test]
+    fn plugin_id_normalize_legacy_appends_local_when_no_at() {
+        assert_eq!(PluginId::normalize_legacy("my-plugin"), "my-plugin@local");
+    }
+
+    #[test]
+    fn plugin_id_normalize_legacy_leaves_qualified_ids_unchanged() {
+        assert_eq!(
+            PluginId::normalize_legacy("my-plugin@external"),
+            "my-plugin@external"
+        );
+        assert_eq!(
+            PluginId::normalize_legacy("starter@bundled"),
+            "starter@bundled"
+        );
+    }
+
+    // --- Manifest path precedence ---
+
+    fn write_manifest_at(root: &Path, relative: &str, name: &str) {
+        write_file(
+            root.join(relative).as_path(),
+            &format!(
+                "{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"description\":\"test\"}}"
+            ),
+        );
+    }
+
+    #[test]
+    fn manifest_discovery_prefers_sudocode_plugin_dir_over_all_others() {
+        let root = temp_dir("manifest-prec-sudocode");
+        write_manifest_at(&root, MANIFEST_SUDOCODE_PLUGIN_PATH, "from-sudocode");
+        write_manifest_at(&root, MANIFEST_FILE_NAME, "from-direct");
+        write_manifest_at(&root, MANIFEST_RELATIVE_PATH, "from-claude");
+        write_manifest_at(&root, MANIFEST_CODEX_PLUGIN_PATH, "from-codex");
+
+        let manifest = load_plugin_from_directory(&root).expect("should load");
+        assert_eq!(manifest.name, "from-sudocode");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_discovery_root_plugin_json_wins_over_claude_and_codex_dirs() {
+        // Preserves original SudoCode ordering: plugin.json beats packaged subdirs
+        // when .sudocode-plugin/ is absent.
+        let root = temp_dir("manifest-prec-direct-wins");
+        write_manifest_at(&root, MANIFEST_FILE_NAME, "from-direct");
+        write_manifest_at(&root, MANIFEST_RELATIVE_PATH, "from-claude");
+        write_manifest_at(&root, MANIFEST_CODEX_PLUGIN_PATH, "from-codex");
+
+        let manifest = load_plugin_from_directory(&root).expect("should load");
+        assert_eq!(manifest.name, "from-direct");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_discovery_falls_back_to_claude_plugin_dir_when_no_direct() {
+        let root = temp_dir("manifest-prec-claude");
+        write_manifest_at(&root, MANIFEST_RELATIVE_PATH, "from-claude");
+        write_manifest_at(&root, MANIFEST_CODEX_PLUGIN_PATH, "from-codex");
+
+        let manifest = load_plugin_from_directory(&root).expect("should load");
+        assert_eq!(manifest.name, "from-claude");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_discovery_codex_only_is_loaded_as_last_resort() {
+        let root = temp_dir("manifest-prec-codex-only");
+        write_manifest_at(&root, MANIFEST_CODEX_PLUGIN_PATH, "from-codex");
+
+        let manifest = load_plugin_from_directory(&root).expect("should load");
+        assert_eq!(manifest.name, "from-codex");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_discovery_falls_back_to_direct_plugin_json() {
+        let root = temp_dir("manifest-prec-direct");
+        write_manifest_at(&root, MANIFEST_FILE_NAME, "from-direct");
+
+        let manifest = load_plugin_from_directory(&root).expect("should load");
+        assert_eq!(manifest.name, "from-direct");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_discovery_errors_when_no_manifest_present() {
+        let root = temp_dir("manifest-prec-none");
+        fs::create_dir_all(&root).expect("create dir");
+
+        let error = load_plugin_from_directory(&root).expect_err("no manifest should fail");
+        let msg = error.to_string();
+        assert!(msg.contains(MANIFEST_SUDOCODE_PLUGIN_PATH));
+        assert!(msg.contains(MANIFEST_FILE_NAME));
+        assert!(msg.contains(MANIFEST_RELATIVE_PATH));
+        assert!(msg.contains(MANIFEST_CODEX_PLUGIN_PATH));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_discovers_plugin_with_sudocode_plugin_dir() {
+        let _guard = env_guard();
+        let config_home = temp_dir("install-sudocode-home");
+        let source_root = temp_dir("install-sudocode-source");
+        write_file(
+            source_root.join(MANIFEST_SUDOCODE_PLUGIN_PATH).as_path(),
+            r#"{"name":"sudocode-dir-plugin","version":"1.0.0","description":"test"}"#,
+        );
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let outcome = manager
+            .install(source_root.to_str().expect("utf8"))
+            .expect("install should succeed");
+        assert_eq!(outcome.plugin_id, "sudocode-dir-plugin@external");
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn install_discovers_plugin_with_codex_plugin_dir() {
+        let _guard = env_guard();
+        let config_home = temp_dir("install-codex-home");
+        let source_root = temp_dir("install-codex-source");
+        write_file(
+            source_root.join(MANIFEST_CODEX_PLUGIN_PATH).as_path(),
+            r#"{"name":"codex-dir-plugin","version":"1.0.0","description":"test"}"#,
+        );
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let outcome = manager
+            .install(source_root.to_str().expect("utf8"))
+            .expect("install should succeed");
+        assert_eq!(outcome.plugin_id, "codex-dir-plugin@external");
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
     }
 }

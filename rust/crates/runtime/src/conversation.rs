@@ -716,6 +716,27 @@ where
             let (mut assistant_message, usage, turn_prompt_cache_events) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
+                    Err(error)
+                        if assistant_messages.last().is_some_and(has_pending_tool_uses)
+                            && error.message == "assistant stream produced no content" =>
+                    {
+                        self.record_empty_post_tool_completion(iterations);
+                        let auto_compaction = self.maybe_auto_compact();
+                        self.file_tracker.end_turn();
+                        self.current_turn_id = None;
+                        self.user_request_intent = None;
+                        let summary = TurnSummary {
+                            assistant_messages,
+                            tool_results,
+                            prompt_cache_events,
+                            iterations,
+                            usage: self.usage_tracker.cumulative_usage(),
+                            auto_compaction,
+                            cancelled: false,
+                        };
+                        self.record_turn_completed(&summary);
+                        return Ok(summary);
+                    }
                     Err(error) => {
                         self.record_turn_failed(iterations, &error);
                         return Err(error);
@@ -1071,6 +1092,16 @@ where
         session_tracer.record("tool_execution_finished", attributes);
     }
 
+    fn record_empty_post_tool_completion(&self, iteration: usize) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+
+        let mut attributes = Map::new();
+        attributes.insert("iteration".to_string(), Value::from(iteration as u64));
+        session_tracer.record("empty_post_tool_completion", attributes);
+    }
+
     fn record_turn_completed(&self, summary: &TurnSummary) {
         let Some(session_tracer) = &self.session_tracer else {
             return;
@@ -1195,6 +1226,13 @@ fn build_assistant_message(
         usage,
         prompt_cache_events,
     ))
+}
+
+fn has_pending_tool_uses(message: &ConversationMessage) -> bool {
+    message
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
 }
 
 fn notify_tool_result(
@@ -1594,6 +1632,70 @@ mod tests {
             &summary.tool_results[0].blocks[0],
             ContentBlock::ToolResult { is_error: true, output, .. } if output == "not now"
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_post_tool_completion_ends_turn_without_visible_message() {
+        struct EmptyAfterToolApiClient {
+            call_count: usize,
+        }
+
+        #[async_trait]
+        impl ApiClient for EmptyAfterToolApiClient {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "write".to_string(),
+                            input: "file".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ])),
+                    2 => {
+                        let last_message = request
+                            .messages
+                            .last()
+                            .expect("tool result should be present");
+                        assert_eq!(last_message.role, MessageRole::Tool);
+                        Ok(events_to_stream(vec![
+                            AssistantEvent::Usage(TokenUsage {
+                                input_tokens: 12,
+                                output_tokens: 0,
+                                cache_creation_input_tokens: 0,
+                                cache_read_input_tokens: 0,
+                            }),
+                            AssistantEvent::MessageStop,
+                        ]))
+                    }
+                    _ => unreachable!("extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyAfterToolApiClient { call_count: 0 },
+            StaticToolExecutor::new().register("write", |_input| Ok("created".to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+
+        let summary = runtime
+            .run_turn("create the file", None, None)
+            .await
+            .expect("empty post-tool completion should be treated as success");
+
+        assert_eq!(summary.assistant_messages.len(), 1);
+        assert_eq!(summary.tool_results.len(), 1);
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(summary.usage.output_tokens, 0);
+        assert_eq!(runtime.session().messages.len(), 3);
     }
 
     #[tokio::test]

@@ -1322,7 +1322,7 @@ impl PluginManager {
         self.config.config_home.join(SETTINGS_FILE_NAME)
     }
 
-    /// Base directory for all SudoCode plugin cache data.
+    /// Base directory for all `SudoCode` plugin cache data.
     #[must_use]
     pub fn cache_root(&self) -> PathBuf {
         self.config.config_home.join("plugins").join("cache")

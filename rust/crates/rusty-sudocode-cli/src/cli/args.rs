@@ -9,9 +9,10 @@ use std::sync::Mutex;
 use api::AuthMode;
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::{
-    classify_skills_slash_command, resolve_skill_invocation, slash_command_specs,
-    SkillSlashDispatch, SlashCommand,
+    classify_skills_slash_command, resolve_skill_invocation, resolve_skill_invocation_with_plugins,
+    slash_command_specs, SkillSlashDispatch, SlashCommand,
 };
+use plugins::PluginLoadOutcome;
 use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 use tools::GlobalToolRegistry;
 
@@ -932,6 +933,14 @@ pub(crate) fn join_optional_args(args: &[String]) -> Option<String> {
 }
 
 pub(crate) fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
+    try_resolve_bare_skill_prompt_with_plugins(cwd, trimmed, None)
+}
+
+pub(crate) fn try_resolve_bare_skill_prompt_with_plugins(
+    cwd: &Path,
+    trimmed: &str,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Option<String> {
     let bare = trimmed.split_whitespace().next().unwrap_or_default();
     let looks_like_skill = !bare.is_empty()
         && !bare.starts_with('/')
@@ -941,7 +950,7 @@ pub(crate) fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option
     if !looks_like_skill {
         return None;
     }
-    match resolve_skill_invocation(cwd, Some(trimmed)) {
+    match resolve_skill_invocation_with_plugins(cwd, Some(trimmed), plugin_load_outcome) {
         Ok(SkillSlashDispatch::Invoke(prompt)) => Some(prompt),
         _ => None,
     }

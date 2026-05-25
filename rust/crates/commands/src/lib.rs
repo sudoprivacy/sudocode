@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use plugins::{PluginError, PluginLoadFailure, PluginManager, PluginSummary};
+use plugins::{PluginError, PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary};
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
     ScopedMcpServerConfig, Session,
@@ -2116,6 +2116,7 @@ enum DefinitionSource {
     UserClaw,
     UserCodex,
     UserClaude,
+    Plugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2123,6 +2124,7 @@ enum DefinitionScope {
     Project,
     UserConfigHome,
     UserHome,
+    Plugin,
 }
 
 impl DefinitionScope {
@@ -2131,6 +2133,7 @@ impl DefinitionScope {
             Self::Project => "Project roots",
             Self::UserConfigHome => "User config roots",
             Self::UserHome => "User home roots",
+            Self::Plugin => "SudoCode plugin roots",
         }
     }
 }
@@ -2143,6 +2146,7 @@ impl DefinitionSource {
             }
             Self::UserClawConfigHome | Self::UserCodexHome => DefinitionScope::UserConfigHome,
             Self::UserClaw | Self::UserCodex | Self::UserClaude => DefinitionScope::UserHome,
+            Self::Plugin => DefinitionScope::Plugin,
         }
     }
 
@@ -2383,6 +2387,14 @@ pub fn handle_mcp_slash_command_json(
 }
 
 pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
+    handle_skills_slash_command_with_plugins(args, cwd, None)
+}
+
+pub fn handle_skills_slash_command_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<String> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
             return Ok(match help_path.as_slice() {
@@ -2395,7 +2407,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
 
     match normalize_optional_args(args) {
         None | Some("list") => {
-            let roots = discover_skill_roots(cwd);
+            let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report(&skills))
         }
@@ -2414,6 +2426,14 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
 }
 
 pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::io::Result<Value> {
+    handle_skills_slash_command_json_with_plugins(args, cwd, None)
+}
+
+pub fn handle_skills_slash_command_json_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<Value> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
             return Ok(match help_path.as_slice() {
@@ -2426,7 +2446,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
 
     match normalize_optional_args(args) {
         None | Some("list") => {
-            let roots = discover_skill_roots(cwd);
+            let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report_json(&skills))
         }
@@ -2462,6 +2482,14 @@ pub fn resolve_skill_invocation(
     cwd: &Path,
     args: Option<&str>,
 ) -> Result<SkillSlashDispatch, String> {
+    resolve_skill_invocation_with_plugins(cwd, args, None)
+}
+
+pub fn resolve_skill_invocation_with_plugins(
+    cwd: &Path,
+    args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<SkillSlashDispatch, String> {
     let dispatch = classify_skills_slash_command(args);
     if let SkillSlashDispatch::Invoke(ref prompt) = dispatch {
         // Extract the skill name from the "$skill [args]" prompt.
@@ -2471,9 +2499,11 @@ pub fn resolve_skill_invocation(
             .next()
             .unwrap_or_default();
         if !skill_token.is_empty() {
-            if let Err(error) = resolve_skill_path(cwd, skill_token) {
+            if let Err(error) =
+                resolve_skill_path_with_plugins(cwd, skill_token, plugin_load_outcome)
+            {
                 let mut message = format!("Unknown skill: {skill_token} ({error})");
-                let roots = discover_skill_roots(cwd);
+                let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
                 if let Ok(available) = load_skills_from_roots(&roots) {
                     let names: Vec<String> = available
                         .iter()
@@ -2494,6 +2524,14 @@ pub fn resolve_skill_invocation(
 }
 
 pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
+    resolve_skill_path_with_plugins(cwd, skill, None)
+}
+
+pub fn resolve_skill_path_with_plugins(
+    cwd: &Path,
+    skill: &str,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<PathBuf> {
     let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
     if requested.is_empty() {
         return Err(std::io::Error::new(
@@ -2502,7 +2540,7 @@ pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
         ));
     }
 
-    let roots = discover_skill_roots(cwd);
+    let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
     for root in &roots {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&root.path)? {
@@ -2876,7 +2914,10 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
 }
 
 #[allow(clippy::too_many_lines)]
-fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
+fn discover_skill_roots_with_plugins(
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
     for ancestor in cwd.ancestors() {
@@ -3035,6 +3076,22 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
             claude_config_dir.join("commands"),
             SkillOrigin::LegacyCommandsDir,
         );
+    }
+
+    if let Some(plugin_load_outcome) = plugin_load_outcome {
+        for plugin in &plugin_load_outcome.loaded_plugins {
+            if !plugin.summary.enabled {
+                continue;
+            }
+            for skill_root in &plugin.skill_roots {
+                push_unique_skill_root(
+                    &mut roots,
+                    DefinitionSource::Plugin,
+                    skill_root.clone(),
+                    SkillOrigin::SkillsDir,
+                );
+            }
+        }
     }
 
     roots
@@ -3550,6 +3607,7 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
         DefinitionScope::Project,
         DefinitionScope::UserConfigHome,
         DefinitionScope::UserHome,
+        DefinitionScope::Plugin,
     ] {
         let group = skills
             .iter()
@@ -3977,6 +4035,7 @@ fn definition_source_id(source: DefinitionSource) -> &'static str {
         DefinitionSource::UserClaw | DefinitionSource::UserCodex | DefinitionSource::UserClaude => {
             "user_scode"
         }
+        DefinitionSource::Plugin => "plugin",
     }
 }
 
@@ -4210,17 +4269,20 @@ pub fn handle_slash_command(
 mod tests {
     use super::{
         classify_skills_slash_command, handle_agents_slash_command_json,
-        handle_plugins_slash_command, handle_skills_slash_command_json, handle_slash_command,
-        load_agents_from_roots, load_skills_from_roots, render_agents_report,
-        render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
-        render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
-        render_slash_command_help_detail, resolve_skill_path, resume_supported_slash_commands,
-        slash_command_specs, suggest_slash_commands, validate_slash_command_input,
-        DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
+        handle_plugins_slash_command, handle_skills_slash_command_json,
+        handle_skills_slash_command_with_plugins, handle_slash_command, load_agents_from_roots,
+        load_skills_from_roots, render_agents_report, render_agents_report_json,
+        render_mcp_report_json_for, render_plugins_report, render_plugins_report_with_failures,
+        render_skills_report, render_slash_command_help, render_slash_command_help_detail,
+        resolve_skill_invocation_with_plugins, resolve_skill_path, resolve_skill_path_with_plugins,
+        resume_supported_slash_commands, slash_command_specs, suggest_slash_commands,
+        validate_slash_command_input, DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch,
+        SlashCommand,
     };
     use plugins::{
-        PluginError, PluginKind, PluginLoadFailure, PluginManager, PluginManagerConfig,
-        PluginMetadata, PluginSummary,
+        LoadedPlugin, PluginCapabilityMetadata, PluginCapabilitySummary, PluginError, PluginKind,
+        PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginMetadata,
+        PluginSummary,
     };
     use runtime::{
         CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, MessageRole, Session,
@@ -4311,6 +4373,47 @@ mod tests {
             format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
         )
         .expect("write skill");
+    }
+
+    fn plugin_load_outcome_with_skill_root(path: PathBuf, enabled: bool) -> PluginLoadOutcome {
+        let metadata = PluginMetadata {
+            id: "skill-plugin@external".to_string(),
+            name: "skill-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Skill plugin".to_string(),
+            kind: PluginKind::External,
+            source: "external".to_string(),
+            default_enabled: true,
+            root: path.parent().map(PathBuf::from),
+        };
+        PluginLoadOutcome {
+            loaded_plugins: vec![LoadedPlugin {
+                summary: PluginSummary {
+                    metadata: metadata.clone(),
+                    enabled,
+                },
+                root: metadata.root.clone(),
+                kind: metadata.kind,
+                source: metadata.source.clone(),
+                capabilities: PluginCapabilityMetadata::default(),
+                skill_roots: vec![path],
+                mcp_config_paths: Vec::new(),
+                app_config_paths: Vec::new(),
+                capability_summary: PluginCapabilitySummary {
+                    plugin_id: metadata.id,
+                    display_name: metadata.name,
+                    description: metadata.description,
+                    tool_count: 0,
+                    pre_tool_hook_count: 0,
+                    post_tool_hook_count: 0,
+                    post_tool_use_failure_hook_count: 0,
+                    has_skills: true,
+                    has_mcp_servers: false,
+                    has_apps: false,
+                },
+            }],
+            failures: Vec::new(),
+        }
     }
 
     fn write_legacy_command(root: &Path, name: &str, description: &str) {
@@ -5205,6 +5308,67 @@ mod tests {
             resolve_skill_path(&workspace, "/handoff").expect("legacy command should resolve"),
             legacy_commands.join("handoff.md")
         );
+    }
+
+    #[test]
+    fn lists_and_resolves_enabled_plugin_skills_after_existing_roots() {
+        let workspace = temp_dir("plugin-skills");
+        let project_skills = workspace.join(".nexus").join("sudocode").join("skills");
+        let plugin_root = workspace.join("plugin").join("skills");
+
+        write_skill(&project_skills, "plan", "Project planning guidance");
+        write_skill(&plugin_root, "plugin-plan", "Plugin planning guidance");
+        write_skill(&plugin_root, "plan", "Plugin shadowed planning guidance");
+        let outcome = plugin_load_outcome_with_skill_root(plugin_root.clone(), true);
+
+        let report = handle_skills_slash_command_with_plugins(None, &workspace, Some(&outcome))
+            .expect("skills list");
+        assert!(report.contains("Project roots:"));
+        assert!(report.contains("plan · Project planning guidance"));
+        assert!(report.contains("SudoCode plugin roots:"));
+        assert!(report.contains("plugin-plan · Plugin planning guidance"));
+        assert!(
+            report.contains("(shadowed by Project roots) plan · Plugin shadowed planning guidance")
+        );
+
+        assert_eq!(
+            resolve_skill_path_with_plugins(&workspace, "plugin-plan", Some(&outcome))
+                .expect("plugin skill should resolve"),
+            plugin_root.join("plugin-plan").join("SKILL.md")
+        );
+        assert_eq!(
+            resolve_skill_path_with_plugins(&workspace, "plan", Some(&outcome))
+                .expect("project skill should keep precedence"),
+            project_skills.join("plan").join("SKILL.md")
+        );
+        assert_eq!(
+            resolve_skill_invocation_with_plugins(
+                &workspace,
+                Some("plugin-plan detail"),
+                Some(&outcome),
+            )
+            .expect("plugin skill should dispatch"),
+            SkillSlashDispatch::Invoke("$plugin-plan detail".to_string())
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn disabled_plugin_skills_are_not_projected() {
+        let workspace = temp_dir("disabled-plugin-skills");
+        let plugin_root = workspace.join("plugin").join("skills");
+        write_skill(&plugin_root, "plugin-plan", "Plugin planning guidance");
+        let outcome = plugin_load_outcome_with_skill_root(plugin_root, false);
+
+        let report = handle_skills_slash_command_with_plugins(None, &workspace, Some(&outcome))
+            .expect("skills list");
+        assert!(!report.contains("plugin-plan"));
+        assert!(
+            resolve_skill_path_with_plugins(&workspace, "plugin-plan", Some(&outcome)).is_err()
+        );
+
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]

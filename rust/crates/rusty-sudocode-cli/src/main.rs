@@ -47,7 +47,8 @@ use cli::args::{
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd, parse_args,
     permission_mode_from_label, require_sudocode_config_for_cwd, resolve_model_alias,
     resolve_model_alias_with_config, resolve_repl_model, try_resolve_bare_skill_prompt,
-    AllowedToolSet, CliAction, CliOutputFormat, LocalHelpTopic,
+    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
+    LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
@@ -88,14 +89,16 @@ use cli::tool_executor::{permission_policy, CliToolExecutor};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command, handle_mcp_slash_command_json, handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json, render_slash_command_help,
-    render_slash_command_help_filtered, resolve_skill_invocation, resume_supported_slash_commands,
-    slash_command_specs, validate_slash_command_input, SkillSlashDispatch, SlashCommand,
+    handle_skills_slash_command, handle_skills_slash_command_json,
+    handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
+    render_slash_command_help, render_slash_command_help_filtered, resolve_skill_invocation,
+    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
+    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
+use plugins::{PluginHooks, PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginRegistry};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
@@ -1167,10 +1170,19 @@ fn run_resume_command(
                 );
             }
             let cwd = env::current_dir()?;
+            let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd)?;
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
-                message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_skills_slash_command_json(args.as_deref(), &cwd)?),
+                message: Some(handle_skills_slash_command_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    Some(&plugin_load_outcome),
+                )?),
+                json: Some(handle_skills_slash_command_json_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    Some(&plugin_load_outcome),
+                )?),
             })
         }
         SlashCommand::Doctor => {
@@ -1400,7 +1412,11 @@ fn run_repl(
                 // matches a known skill name, invoke it as `/skills <input>`
                 // rather than forwarding raw text to the LLM (ROADMAP #36).
                 let cwd = std::env::current_dir().unwrap_or_default();
-                if let Some(prompt) = try_resolve_bare_skill_prompt(&cwd, &trimmed) {
+                if let Some(prompt) = try_resolve_bare_skill_prompt_with_plugins(
+                    &cwd,
+                    &trimmed,
+                    Some(cli.runtime.plugin_load_outcome()),
+                ) {
                     editor.push_history(input);
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn(&prompt) {
@@ -1457,6 +1473,7 @@ pub(crate) struct RuntimePluginState {
     pub(crate) feature_config: runtime::RuntimeFeatureConfig,
     pub(crate) tool_registry: GlobalToolRegistry,
     pub(crate) plugin_registry: PluginRegistry,
+    pub(crate) plugin_load_outcome: PluginLoadOutcome,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
 }
 
@@ -1479,6 +1496,7 @@ struct RuntimeConfig {
 struct BuiltRuntime {
     runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
+    plugin_load_outcome: PluginLoadOutcome,
     plugins_active: bool,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     mcp_active: bool,
@@ -1488,11 +1506,13 @@ impl BuiltRuntime {
     fn new(
         runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
+        plugin_load_outcome: PluginLoadOutcome,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
             plugin_registry,
+            plugin_load_outcome,
             plugins_active: true,
             mcp_state,
             mcp_active: true,
@@ -1522,6 +1542,10 @@ impl BuiltRuntime {
         if let Some(ref mut runtime) = self.runtime {
             runtime.set_trace_id(trace_id);
         }
+    }
+
+    fn plugin_load_outcome(&self) -> &PluginLoadOutcome {
+        &self.plugin_load_outcome
     }
 
     fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -2901,10 +2925,17 @@ impl LiveCli {
                 false
             }
             SlashCommand::Skills { args } => {
-                match classify_skills_slash_command(args.as_deref()) {
+                let cwd = env::current_dir()?;
+                match resolve_skill_invocation_with_plugins(
+                    &cwd,
+                    args.as_deref(),
+                    Some(self.runtime.plugin_load_outcome()),
+                )
+                .map_err(std::io::Error::other)?
+                {
                     SkillSlashDispatch::Invoke(prompt) => self.run_turn(&prompt)?,
                     SkillSlashDispatch::Local => {
-                        Self::print_skills(args.as_deref(), CliOutputFormat::Text)?;
+                        self.print_skills_with_plugins(args.as_deref(), CliOutputFormat::Text)?;
                     }
                 }
                 false
@@ -3307,14 +3338,22 @@ impl LiveCli {
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
-        match output_format {
-            CliOutputFormat::Text => println!("{}", handle_skills_slash_command(args, &cwd)?),
-            CliOutputFormat::Json => println!(
-                "{}",
-                serde_json::to_string_pretty(&handle_skills_slash_command_json(args, &cwd)?)?
-            ),
-        }
-        Ok(())
+        let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd)?;
+        print_skills_for_outcome(args, output_format, &cwd, Some(&plugin_load_outcome))
+    }
+
+    fn print_skills_with_plugins(
+        &self,
+        args: Option<&str>,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        print_skills_for_outcome(
+            args,
+            output_format,
+            &cwd,
+            Some(self.runtime.plugin_load_outcome()),
+        )
     }
 
     fn print_plugins(
@@ -3613,6 +3652,29 @@ impl LiveCli {
     }
 }
 
+fn print_skills_for_outcome(
+    args: Option<&str>,
+    output_format: CliOutputFormat,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match output_format {
+        CliOutputFormat::Text => println!(
+            "{}",
+            handle_skills_slash_command_with_plugins(args, cwd, plugin_load_outcome)?
+        ),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&handle_skills_slash_command_json_with_plugins(
+                args,
+                cwd,
+                plugin_load_outcome,
+            )?)?
+        ),
+    }
+    Ok(())
+}
+
 fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     Ok(initialize_repo(&cwd)?.render())
@@ -3677,6 +3739,15 @@ fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error
     build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config)
 }
 
+fn plugin_load_outcome_for_cwd(
+    cwd: &Path,
+) -> Result<PluginLoadOutcome, Box<dyn std::error::Error>> {
+    let loader = ConfigLoader::default_for(cwd);
+    let runtime_config = loader.load()?;
+    let plugin_manager = build_plugin_manager(cwd, &loader, &runtime_config);
+    Ok(plugin_manager.plugin_registry_report()?.load_outcome())
+}
+
 pub(crate) fn build_runtime_plugin_state_with_loader(
     cwd: &Path,
     loader: &ConfigLoader,
@@ -3699,6 +3770,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         feature_config,
         tool_registry,
         plugin_registry,
+        plugin_load_outcome,
         mcp_state,
     })
 }
@@ -4005,6 +4077,7 @@ fn build_runtime_with_plugin_state(
         feature_config,
         tool_registry,
         plugin_registry,
+        plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
     plugin_registry.initialize()?;
@@ -4029,7 +4102,12 @@ fn build_runtime_with_plugin_state(
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }
-    Ok(BuiltRuntime::new(runtime, plugin_registry, mcp_state))
+    Ok(BuiltRuntime::new(
+        runtime,
+        plugin_registry,
+        plugin_load_outcome,
+        mcp_state,
+    ))
 }
 
 struct CliHookProgressReporter;

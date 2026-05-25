@@ -12,7 +12,7 @@ use api::{
     OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
-use plugins::PluginTool;
+use plugins::{PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginTool};
 use reqwest::blocking::Client;
 use runtime::{
     check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
@@ -3757,9 +3757,48 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    match commands::resolve_skill_path(&cwd, skill) {
+    let plugin_load_outcome = load_plugin_outcome_for_cwd(&cwd);
+    match commands::resolve_skill_path_with_plugins(&cwd, skill, plugin_load_outcome.as_ref()) {
         Ok(path) => Ok(path),
         Err(_) => resolve_skill_path_from_compat_roots(skill),
+    }
+}
+
+fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
+    let loader = ConfigLoader::default_for(cwd);
+    let runtime_config = loader.load().ok()?;
+    let plugin_settings = runtime_config.plugins();
+    let mut plugin_config = PluginManagerConfig::new(loader.config_home().to_path_buf());
+    plugin_config.enabled_plugins = plugin_settings.enabled_plugins().clone();
+    plugin_config.external_dirs = plugin_settings
+        .external_directories()
+        .iter()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path))
+        .collect();
+    plugin_config.install_root = plugin_settings
+        .install_root()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+    plugin_config.registry_path = plugin_settings
+        .registry_path()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+    plugin_config.bundled_root = plugin_settings
+        .bundled_root()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+
+    PluginManager::new(plugin_config)
+        .plugin_registry_report()
+        .ok()
+        .map(|report| report.load_outcome())
+}
+
+fn resolve_plugin_config_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else if value.starts_with('.') {
+        cwd.join(path)
+    } else {
+        config_home.join(path)
     }
 }
 
@@ -8273,6 +8312,86 @@ mod tests {
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
+    }
+
+    #[test]
+    fn skill_tool_resolves_enabled_plugin_skills() {
+        let _guard = env_guard();
+        let root = temp_path("plugin-skill-tool");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        let workspace = root.join("workspace");
+        let plugin_root = config_home
+            .join("plugins")
+            .join("installed")
+            .join("skill-plugin");
+        let skill_dir = plugin_root.join("skills").join("plugin-plan");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(plugin_root.join(".sudocode-plugin"))
+            .expect("manifest dir should exist");
+        fs::write(
+            plugin_root.join(".sudocode-plugin").join("plugin.json"),
+            r#"{
+  "name": "skill-plugin",
+  "version": "1.0.0",
+  "description": "Plugin skill fixture",
+  "skills": "./skills"
+}"#,
+        )
+        .expect("manifest should exist");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: plugin-plan\ndescription: Plugin planning guidance\n---\n# plugin-plan\n",
+        )
+        .expect("skill file should exist");
+        fs::create_dir_all(&config_home).expect("config home should exist");
+        fs::write(
+            config_home.join("settings.json"),
+            r#"{"plugins":{"enabled":{"skill-plugin@external":true}}}"#,
+        )
+        .expect("settings should exist");
+
+        let original_home = std::env::var("HOME").ok();
+        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
+        let original_codex_home = std::env::var("CODEX_HOME").ok();
+        let original_claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &config_home);
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::set_current_dir(&workspace).expect("set cwd");
+
+        let result = execute_tool("Skill", &json!({ "skill": "$plugin-plan" }))
+            .expect("plugin skill should resolve");
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let path = output["path"].as_str().expect("path");
+        assert_eq!(
+            fs::canonicalize(path).expect("resolved skill path should exist"),
+            fs::canonicalize(skill_dir.join("SKILL.md")).expect("expected skill path should exist")
+        );
+        assert_eq!(output["description"], "Plugin planning guidance");
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_config_home {
+            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
+            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
+        }
+        match original_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match original_claude_config_dir {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        fs::remove_dir_all(root).expect("temp tree should clean up");
     }
 
     #[test]

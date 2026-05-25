@@ -2634,7 +2634,7 @@ impl LiveCli {
     }
 
     fn prepare_turn_runtime(
-        &self,
+        &mut self,
         emit_output: bool,
     ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
         let hook_abort_signal = runtime::HookAbortSignal::new();
@@ -2645,9 +2645,12 @@ impl LiveCli {
         // known date silently advanced to today on every turn — suppressing
         // the date-rollover reminder added in #128 (see issue #135).
         let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
+        let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
+        self.shutdown_runtime_resources()?;
         let mut runtime = build_runtime(
-            self.runtime.session().clone(),
-            &self.session.id,
+            session,
+            &session_id,
             RuntimeConfig {
                 emit_output,
                 ..self.config.clone()
@@ -2662,9 +2665,24 @@ impl LiveCli {
         Ok((runtime, hook_abort_monitor))
     }
 
-    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    fn shutdown_runtime_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.runtime.shutdown_mcp()?;
         self.runtime.shutdown_plugins()?;
+        Ok(())
+    }
+
+    fn build_replacement_runtime(
+        &mut self,
+        session: Session,
+        session_id: String,
+        config: RuntimeConfig,
+    ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+        self.shutdown_runtime_resources()?;
+        build_runtime(session, &session_id, config)
+    }
+
+    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
+        self.shutdown_runtime_resources()?;
         self.runtime = runtime;
         Ok(())
     }
@@ -2720,6 +2738,7 @@ impl LiveCli {
                 Ok(())
             }
             Err(error) => {
+                runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
                 spinner.fail(
                     "❌ Request failed",
@@ -3137,10 +3156,11 @@ impl LiveCli {
 
         let previous = self.config.model.clone();
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         let message_count = session.messages.len();
-        let runtime = build_runtime(
+        let runtime = self.build_replacement_runtime(
             session,
-            &self.session.id,
+            session_id,
             RuntimeConfig {
                 model: model.clone(),
                 ..self.config.clone()
@@ -3180,8 +3200,9 @@ impl LiveCli {
 
         let previous = self.config.permission_mode.as_str().to_string();
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         self.config.permission_mode = permission_mode_from_label(normalized);
-        let runtime = build_runtime(session, &self.session.id, self.config.clone())?;
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         println!(
             "{}",
@@ -3207,8 +3228,9 @@ impl LiveCli {
 
         let previous = current_str;
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         self.config.auth_mode = parsed;
-        let runtime = build_runtime(session, &self.session.id, self.config.clone())?;
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         println!("{}", format_auth_switch_report(&previous, parsed.as_str()));
         Ok(true)
@@ -3224,12 +3246,13 @@ impl LiveCli {
 
         let previous_session = self.session.clone();
         let session_state = new_cli_session()?;
-        self.session = create_managed_session_handle(&session_state.session_id)?;
-        let runtime = build_runtime(
-            session_state.with_persistence_path(self.session.path.clone()),
-            &self.session.id,
+        let next_handle = create_managed_session_handle(&session_state.session_id)?;
+        let runtime = self.build_replacement_runtime(
+            session_state.with_persistence_path(next_handle.path.clone()),
+            next_handle.id.clone(),
             self.config.clone(),
         )?;
+        self.session = next_handle;
         self.replace_runtime(runtime)?;
         println!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
@@ -3276,7 +3299,8 @@ impl LiveCli {
         let (handle, session) = load_session_reference(&session_ref)?;
         let message_count = session.messages.len();
         let session_id = session.session_id.clone();
-        let runtime = build_runtime(session, &handle.id, self.config.clone())?;
+        let runtime =
+            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
         self.replace_runtime(runtime)?;
         self.session = SessionHandle {
             id: session_id,
@@ -3436,7 +3460,11 @@ impl LiveCli {
                 let (handle, session) = load_session_reference(target)?;
                 let message_count = session.messages.len();
                 let session_id = session.session_id.clone();
-                let runtime = build_runtime(session, &handle.id, self.config.clone())?;
+                let runtime = self.build_replacement_runtime(
+                    session,
+                    handle.id.clone(),
+                    self.config.clone(),
+                )?;
                 self.replace_runtime(runtime)?;
                 self.session = SessionHandle {
                     id: session_id,
@@ -3461,7 +3489,8 @@ impl LiveCli {
                 let forked = forked.with_persistence_path(handle.path.clone());
                 let message_count = forked.messages.len();
                 forked.save_to_path(&handle.path)?;
-                let runtime = build_runtime(forked, &handle.id, self.config.clone())?;
+                let runtime =
+                    self.build_replacement_runtime(forked, handle.id.clone(), self.config.clone())?;
                 self.replace_runtime(runtime)?;
                 self.session = handle;
                 println!(
@@ -3547,13 +3576,9 @@ impl LiveCli {
     }
 
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.shutdown_mcp()?;
-        self.runtime.shutdown_plugins()?;
-        let runtime = build_runtime(
-            self.runtime.session().clone(),
-            &self.session.id,
-            self.config.clone(),
-        )?;
+        let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         self.persist_session()
     }
@@ -3563,9 +3588,10 @@ impl LiveCli {
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
-        let runtime = build_runtime(
+        let session_id = self.session.id.clone();
+        let runtime = self.build_replacement_runtime(
             result.compacted_session,
-            &self.session.id,
+            session_id,
             self.config.clone(),
         )?;
         self.replace_runtime(runtime)?;
@@ -3575,15 +3601,16 @@ impl LiveCli {
     }
 
     fn run_internal_prompt_text_with_progress(
-        &self,
+        &mut self,
         prompt: &str,
         enable_tools: bool,
         progress: Option<InternalPromptProgressReporter>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
+        let session_id = self.session.id.clone();
+        let mut runtime = self.build_replacement_runtime(
             session,
-            &self.session.id,
+            session_id,
             RuntimeConfig {
                 enable_tools,
                 emit_output: false,
@@ -3598,12 +3625,13 @@ impl LiveCli {
             None,
         ))?;
         let text = final_assistant_text(&summary).trim().to_string();
+        runtime.shutdown_mcp()?;
         runtime.shutdown_plugins()?;
         Ok(text)
     }
 
     fn run_internal_prompt_text(
-        &self,
+        &mut self,
         prompt: &str,
         enable_tools: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {

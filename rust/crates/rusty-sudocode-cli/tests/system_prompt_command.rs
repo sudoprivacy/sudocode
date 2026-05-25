@@ -1,0 +1,157 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .subsec_nanos();
+    std::env::temp_dir().join(format!("scode-spcmd-{label}-{nanos}"))
+}
+
+fn run_system_prompt(
+    cwd: &Path,
+    envs: &[(&str, &str)],
+    extra_args: &[&str],
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(cwd);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.arg("system-prompt");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.output().expect("scode binary should launch")
+}
+
+/// Write a minimal `.sudocode-plugin/plugin.json` manifest under the
+/// install root, and enable the plugin via the config-home settings file.
+///
+/// External plugins default to disabled, so the settings entry is required
+/// to surface them in the system-prompt output.
+fn install_and_enable_plugin(config_home: &Path, plugin_name: &str, description: &str) {
+    let plugin_dir = config_home
+        .join("plugins")
+        .join("installed")
+        .join(plugin_name);
+    let manifest_dir = plugin_dir.join(".sudocode-plugin");
+    fs::create_dir_all(&manifest_dir).expect("plugin manifest dir");
+    fs::write(
+        manifest_dir.join("plugin.json"),
+        format!(
+            r#"{{"name":"{plugin_name}","version":"0.1.0","description":"{description}","defaultEnabled":true}}"#
+        ),
+    )
+    .expect("plugin manifest write");
+
+    // External plugins require an explicit enabledPlugins entry; write it to
+    // the user-level settings file that ConfigLoader reads from config_home.
+    let plugin_id = format!("{plugin_name}@external");
+    fs::write(
+        config_home.join("settings.json"),
+        format!(r#"{{"enabledPlugins":{{"{plugin_id}":true}}}}"#),
+    )
+    .expect("settings.json write");
+}
+
+#[test]
+fn system_prompt_includes_active_plugin_capabilities() {
+    let root = unique_temp_dir("sp-plugin-caps");
+    let config_home = root.join("config-home");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&root).expect("cwd");
+
+    install_and_enable_plugin(&config_home, "greet-plugin", "A greeting SudoCode plugin");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        text.contains("# Available SudoCode plugins"),
+        "system-prompt missing 'Available SudoCode plugins' section;\nfull output:\n{text}"
+    );
+    assert!(
+        text.contains("greet-plugin"),
+        "system-prompt missing plugin id;\nfull output:\n{text}"
+    );
+    assert!(
+        text.contains("A greeting SudoCode plugin"),
+        "system-prompt missing plugin description;\nfull output:\n{text}"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn system_prompt_json_sections_include_plugin_section() {
+    let root = unique_temp_dir("sp-plugin-json");
+    let config_home = root.join("config-home");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&root).expect("cwd");
+
+    install_and_enable_plugin(&config_home, "json-test-plugin", "JSON output test plugin");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
+        &["--output-format", "json"],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt --output-format json should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    let message = parsed["message"].as_str().expect("message field");
+    assert!(
+        message.contains("# Available SudoCode plugins"),
+        "JSON message missing plugin section"
+    );
+    assert!(
+        message.contains("json-test-plugin"),
+        "JSON message missing plugin id"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn system_prompt_omits_plugin_section_when_no_plugins_installed() {
+    let root = unique_temp_dir("sp-no-plugins");
+    let config_home = root.join("config-home");
+    fs::create_dir_all(&config_home).expect("config home");
+    fs::create_dir_all(&root).expect("cwd");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
+        &[],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should succeed without plugins; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        !text.contains("# Available SudoCode plugins"),
+        "no plugin section expected when no plugins installed"
+    );
+
+    fs::remove_dir_all(root).ok();
+}

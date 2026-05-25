@@ -765,13 +765,21 @@ fn print_system_prompt(
     model: &str,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let prompt = load_system_prompt(
-        cwd,
+    let mut prompt = load_system_prompt(
+        cwd.clone(),
         date,
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
     )?;
+    // Mirror what build_runtime_with_plugin_state does for live sessions:
+    // append active SudoCode plugin capabilities so system-prompt output
+    // matches what the runtime actually sends.  Load failures captured inside
+    // PluginLoadOutcome are excluded naturally; Result errors propagate.
+    let outcome = plugin_load_outcome_for_cwd(&cwd)?;
+    if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
+        prompt.dynamic_sections.push(section);
+    }
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),

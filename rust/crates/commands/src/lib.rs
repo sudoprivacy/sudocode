@@ -2294,7 +2294,9 @@ pub fn handle_plugins_slash_command(
             Ok(PluginsCommandResult {
                 message: format!(
                     "Plugins\n  Result           enabled {}\n  Name             {}\n  Version          {}\n  Status           enabled",
-                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
+                    plugin.metadata.id,
+                    plugin_display_label(&plugin),
+                    plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
@@ -2311,7 +2313,9 @@ pub fn handle_plugins_slash_command(
             Ok(PluginsCommandResult {
                 message: format!(
                     "Plugins\n  Result           disabled {}\n  Name             {}\n  Version          {}\n  Status           disabled",
-                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
+                    plugin.metadata.id,
+                    plugin_display_label(&plugin),
+                    plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
@@ -2444,16 +2448,73 @@ pub fn handle_mcp_slash_command(
     args: Option<&str>,
     cwd: &Path,
 ) -> Result<String, runtime::ConfigError> {
+    handle_mcp_slash_command_with_plugins(args, cwd, None)
+}
+
+pub fn handle_mcp_slash_command_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<String, runtime::ConfigError> {
     let loader = ConfigLoader::default_for(cwd);
-    render_mcp_report_for(&loader, cwd, args)
+    render_mcp_report_for(&loader, cwd, args, plugin_load_outcome)
 }
 
 pub fn handle_mcp_slash_command_json(
     args: Option<&str>,
     cwd: &Path,
 ) -> Result<Value, runtime::ConfigError> {
+    handle_mcp_slash_command_json_with_plugins(args, cwd, None)
+}
+
+pub fn handle_mcp_slash_command_json_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<Value, runtime::ConfigError> {
     let loader = ConfigLoader::default_for(cwd);
-    render_mcp_report_json_for(&loader, cwd, args)
+    render_mcp_report_json_for(&loader, cwd, args, plugin_load_outcome)
+}
+
+/// Merge plugin-provided MCP servers (from each enabled plugin's `.mcp.json`)
+/// into the runtime-config servers, returning the merged map plus a provenance
+/// map keyed by server name. User/global runtime servers always win on name
+/// collision (matches `cli::mcp::merged_mcp_servers`). Plugin servers also
+/// carry their plugin id so `scode mcp` can attribute them to a SudoCode
+/// plugin in both text and JSON output.
+fn merge_plugin_mcp_servers(
+    runtime_servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> (
+    BTreeMap<String, ScopedMcpServerConfig>,
+    BTreeMap<String, String>,
+) {
+    let mut servers = runtime_servers.clone();
+    let mut provenance: BTreeMap<String, String> = BTreeMap::new();
+    let Some(outcome) = plugin_load_outcome else {
+        return (servers, provenance);
+    };
+    for plugin in &outcome.loaded_plugins {
+        if !plugin.summary.enabled {
+            continue;
+        }
+        for path in &plugin.mcp_config_paths {
+            // Silently skip plugin MCP files that fail to parse so the rest of
+            // the report still renders; the runtime path surfaces the failure
+            // separately when it actually tries to spawn the server.
+            let Ok(plugin_servers) = runtime::load_plugin_mcp_servers(path) else {
+                continue;
+            };
+            for (server_name, server_config) in plugin_servers {
+                if !servers.contains_key(&server_name) {
+                    provenance
+                        .insert(server_name.clone(), plugin.capability_summary.plugin_id.clone());
+                    servers.insert(server_name, server_config);
+                }
+            }
+        }
+    }
+    (servers, provenance)
 }
 
 pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
@@ -2678,6 +2739,7 @@ fn render_mcp_report_for(
     loader: &ConfigLoader,
     cwd: &Path,
     args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
 ) -> Result<String, runtime::ConfigError> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
@@ -2695,15 +2757,26 @@ fn render_mcp_report_for(
             // as #143 for `status`). Text mode prepends a "Config load error"
             // block before the MCP list; the list falls back to empty.
             match loader.load() {
-                Ok(runtime_config) => Ok(render_mcp_summary_report(
-                    cwd,
-                    runtime_config.mcp().servers(),
-                )),
+                Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
+                    Ok(render_mcp_summary_report(cwd, &servers, &provenance))
+                }
                 Err(err) => {
                     let empty = std::collections::BTreeMap::new();
+                    let empty_prov = std::collections::BTreeMap::new();
+                    let (servers, provenance) =
+                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+                    let prov = if provenance.is_empty() {
+                        empty_prov
+                    } else {
+                        provenance
+                    };
                     Ok(format!(
                         "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial MCP view\n  Details          {err}\n  Hint             `scode doctor` classifies config parse errors; fix the listed field and rerun\n\n{}",
-                        render_mcp_summary_report(cwd, &empty)
+                        render_mcp_summary_report(cwd, &servers, &prov)
                     ))
                 }
             }
@@ -2723,11 +2796,18 @@ fn render_mcp_report_for(
             // the specific server lookup can't succeed, so report the parse
             // error with context.
             match loader.load() {
-                Ok(runtime_config) => Ok(render_mcp_server_report(
-                    cwd,
-                    server_name,
-                    runtime_config.mcp().get(server_name),
-                )),
+                Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
+                    Ok(render_mcp_server_report(
+                        cwd,
+                        server_name,
+                        servers.get(server_name),
+                        provenance.get(server_name).map(String::as_str),
+                    ))
+                }
                 Err(err) => Ok(format!(
                     "Config load error\n  Status           fail\n  Summary          runtime config failed to load; cannot resolve `{server_name}`\n  Details          {err}\n  Hint             `scode doctor` classifies config parse errors; fix the listed field and rerun"
                 )),
@@ -2742,6 +2822,7 @@ fn render_mcp_report_json_for(
     loader: &ConfigLoader,
     cwd: &Path,
     args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
 ) -> Result<Value, runtime::ConfigError> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
@@ -2761,8 +2842,12 @@ fn render_mcp_report_json_for(
             // runs, the existing serializer adds `status: "ok"` below.
             match loader.load() {
                 Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
                     let mut value =
-                        render_mcp_summary_report_json(cwd, runtime_config.mcp().servers());
+                        render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("ok".to_string()));
                         map.insert("config_load_error".to_string(), Value::Null);
@@ -2771,7 +2856,10 @@ fn render_mcp_report_json_for(
                 }
                 Err(err) => {
                     let empty = std::collections::BTreeMap::new();
-                    let mut value = render_mcp_summary_report_json(cwd, &empty);
+                    let (servers, provenance) =
+                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+                    let mut value =
+                        render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("degraded".to_string()));
                         map.insert(
@@ -2797,10 +2885,15 @@ fn render_mcp_report_json_for(
             // #144: same degradation pattern for show action.
             match loader.load() {
                 Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
                     let mut value = render_mcp_server_report_json(
                         cwd,
                         server_name,
-                        runtime_config.mcp().get(server_name),
+                        servers.get(server_name),
+                        provenance.get(server_name).map(String::as_str),
                     );
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("ok".to_string()));
@@ -2837,11 +2930,24 @@ pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
         };
         lines.push(format!(
             "  {name:<20} v{version:<10} {enabled}",
-            name = plugin.metadata.name,
+            name = plugin_display_label(plugin),
             version = plugin.metadata.version,
         ));
     }
     lines.join("\n")
+}
+
+/// User-facing label for a plugin: prefer `interface.display_name` from the v2
+/// manifest, fall back to the raw `name`. The CLI uses this everywhere a human
+/// will read it (`scode plugins`, install/enable/disable reports). The system
+/// prompt deliberately does NOT use this — that channel stays anonymized for
+/// prompt-injection safety.
+fn plugin_display_label(plugin: &PluginSummary) -> &str {
+    plugin
+        .metadata
+        .display_name
+        .as_deref()
+        .unwrap_or(plugin.metadata.name.as_str())
 }
 
 #[must_use]
@@ -2863,7 +2969,7 @@ pub fn render_plugins_report_with_failures(
             };
             lines.push(format!(
                 "  {name:<20} v{version:<10} {enabled}",
-                name = plugin.metadata.name,
+                name = plugin_display_label(plugin),
                 version = plugin.metadata.version,
             ));
         }
@@ -2887,7 +2993,7 @@ pub fn render_plugins_report_with_failures(
 }
 
 fn render_plugin_install_report(plugin_id: &str, plugin: Option<&PluginSummary>) -> String {
-    let name = plugin.map_or(plugin_id, |plugin| plugin.metadata.name.as_str());
+    let name = plugin.map_or(plugin_id, plugin_display_label);
     let version = plugin.map_or("unknown", |plugin| plugin.metadata.version.as_str());
     let enabled = plugin.is_some_and(|plugin| plugin.enabled);
     format!(
@@ -3763,6 +3869,7 @@ fn render_skill_install_report_json(skill: &InstalledSkill) -> Value {
 fn render_mcp_summary_report(
     cwd: &Path,
     servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_provenance: &BTreeMap<String, String>,
 ) -> String {
     let mut lines = vec![
         "MCP".to_string(),
@@ -3776,8 +3883,12 @@ fn render_mcp_summary_report(
 
     lines.push(String::new());
     for (name, server) in servers {
+        let provenance = plugin_provenance
+            .get(name)
+            .map(|plugin_id| format!("  [SudoCode plugin {plugin_id}]"))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {name:<16} {transport:<13} {scope:<7} {summary}",
+            "  {name:<16} {transport:<13} {scope:<7} {summary}{provenance}",
             transport = mcp_transport_label(&server.config),
             scope = config_source_label(server.scope),
             summary = mcp_server_summary(&server.config)
@@ -3790,6 +3901,7 @@ fn render_mcp_summary_report(
 fn render_mcp_summary_report_json(
     cwd: &Path,
     servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_provenance: &BTreeMap<String, String>,
 ) -> Value {
     json!({
         "kind": "mcp",
@@ -3798,7 +3910,18 @@ fn render_mcp_summary_report_json(
         "configured_servers": servers.len(),
         "servers": servers
             .iter()
-            .map(|(name, server)| mcp_server_json(name, server))
+            .map(|(name, server)| {
+                let mut value = mcp_server_json(name, server);
+                if let (Some(map), Some(plugin_id)) =
+                    (value.as_object_mut(), plugin_provenance.get(name))
+                {
+                    map.insert(
+                        "plugin_source".to_string(),
+                        Value::String(plugin_id.clone()),
+                    );
+                }
+                value
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -3807,6 +3930,7 @@ fn render_mcp_server_report(
     cwd: &Path,
     server_name: &str,
     server: Option<&ScopedMcpServerConfig>,
+    plugin_source: Option<&str>,
 ) -> String {
     let Some(server) = server else {
         return format!(
@@ -3825,6 +3949,9 @@ fn render_mcp_server_report(
             mcp_transport_label(&server.config)
         ),
     ];
+    if let Some(plugin_id) = plugin_source {
+        lines.push(format!("  SudoCode plugin   {plugin_id}"));
+    }
 
     match &server.config {
         McpServerConfig::Stdio(config) => {
@@ -3886,15 +4013,25 @@ fn render_mcp_server_report_json(
     cwd: &Path,
     server_name: &str,
     server: Option<&ScopedMcpServerConfig>,
+    plugin_source: Option<&str>,
 ) -> Value {
     match server {
-        Some(server) => json!({
-            "kind": "mcp",
-            "action": "show",
-            "working_directory": cwd.display().to_string(),
-            "found": true,
-            "server": mcp_server_json(server_name, server),
-        }),
+        Some(server) => {
+            let mut server_value = mcp_server_json(server_name, server);
+            if let (Some(map), Some(plugin_id)) = (server_value.as_object_mut(), plugin_source) {
+                map.insert(
+                    "plugin_source".to_string(),
+                    Value::String(plugin_id.to_string()),
+                );
+            }
+            json!({
+                "kind": "mcp",
+                "action": "show",
+                "working_directory": cwd.display().to_string(),
+                "found": true,
+                "server": server_value,
+            })
+        }
         None => json!({
             "kind": "mcp",
             "action": "show",
@@ -4455,6 +4592,7 @@ mod tests {
             source: "external".to_string(),
             default_enabled: true,
             root: path.parent().map(PathBuf::from),
+            display_name: None,
         };
         PluginLoadOutcome {
             loaded_plugins: vec![LoadedPlugin {
@@ -5145,7 +5283,8 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
-                },
+                    display_name: None,
+            },
                 enabled: true,
             },
             PluginSummary {
@@ -5158,7 +5297,8 @@ mod tests {
                     source: "sample".to_string(),
                     default_enabled: false,
                     root: None,
-                },
+                    display_name: None,
+            },
                 enabled: false,
             },
         ]);
@@ -5184,7 +5324,8 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
-                },
+                    display_name: None,
+            },
                 enabled: true,
             }],
             &[PluginLoadFailure::new(
@@ -5700,7 +5841,7 @@ mod tests {
         .expect("write local settings");
 
         let loader = ConfigLoader::new(&workspace, &config_home);
-        let list = super::render_mcp_report_for(&loader, &workspace, None)
+        let list = super::render_mcp_report_for(&loader, &workspace, None, None)
             .expect("mcp list report should render");
         assert!(list.contains("Configured servers 2"));
         assert!(list.contains("alpha"));
@@ -5712,7 +5853,7 @@ mod tests {
         assert!(list.contains("local"));
         assert!(list.contains("wss://remote.example/mcp"));
 
-        let show = super::render_mcp_report_for(&loader, &workspace, Some("show alpha"))
+        let show = super::render_mcp_report_for(&loader, &workspace, Some("show alpha"), None)
             .expect("mcp show report should render");
         assert!(show.contains("Name              alpha"));
         assert!(show.contains("Command           uvx"));
@@ -5720,12 +5861,12 @@ mod tests {
         assert!(show.contains("Env keys          ALPHA_TOKEN"));
         assert!(show.contains("Tool timeout      1200 ms"));
 
-        let remote = super::render_mcp_report_for(&loader, &workspace, Some("show remote"))
+        let remote = super::render_mcp_report_for(&loader, &workspace, Some("show remote"), None)
             .expect("mcp show remote report should render");
         assert!(remote.contains("Transport         ws"));
         assert!(remote.contains("URL               wss://remote.example/mcp"));
 
-        let missing = super::render_mcp_report_for(&loader, &workspace, Some("show missing"))
+        let missing = super::render_mcp_report_for(&loader, &workspace, Some("show missing"), None)
             .expect("missing report should render");
         assert!(missing.contains("server `missing` is not configured"));
 
@@ -5785,7 +5926,7 @@ mod tests {
 
         let loader = ConfigLoader::new(&workspace, &config_home);
         let list =
-            render_mcp_report_json_for(&loader, &workspace, None).expect("mcp list json render");
+            render_mcp_report_json_for(&loader, &workspace, None, None).expect("mcp list json render");
         assert_eq!(list["kind"], "mcp");
         assert_eq!(list["action"], "list");
         assert_eq!(list["configured_servers"], 2);
@@ -5800,7 +5941,7 @@ mod tests {
             "wss://remote.example/mcp"
         );
 
-        let show = render_mcp_report_json_for(&loader, &workspace, Some("show alpha"))
+        let show = render_mcp_report_json_for(&loader, &workspace, Some("show alpha"), None)
             .expect("mcp show json render");
         assert_eq!(show["action"], "show");
         assert_eq!(show["found"], true);
@@ -5808,13 +5949,13 @@ mod tests {
         assert_eq!(show["server"]["details"]["env_keys"][0], "ALPHA_TOKEN");
         assert_eq!(show["server"]["details"]["tool_call_timeout_ms"], 1200);
 
-        let missing = render_mcp_report_json_for(&loader, &workspace, Some("show missing"))
+        let missing = render_mcp_report_json_for(&loader, &workspace, Some("show missing"), None)
             .expect("mcp missing json render");
         assert_eq!(missing["found"], false);
         assert_eq!(missing["server_name"], "missing");
 
         let help =
-            render_mcp_report_json_for(&loader, &workspace, Some("help")).expect("mcp help json");
+            render_mcp_report_json_for(&loader, &workspace, Some("help"), None).expect("mcp help json");
         assert_eq!(help["action"], "help");
         assert_eq!(help["usage"]["sources"][0], ".nexus/sudocode/settings.json");
 
@@ -5850,7 +5991,7 @@ mod tests {
 
         let loader = ConfigLoader::new(&workspace, &config_home);
         // list action: must return Ok (not Err) with degraded envelope.
-        let list = render_mcp_report_json_for(&loader, &workspace, None)
+        let list = render_mcp_report_json_for(&loader, &workspace, None, None)
             .expect("mcp list should not hard-fail on config parse errors (#144)");
         assert_eq!(list["kind"], "mcp");
         assert_eq!(list["action"], "list");
@@ -5870,7 +6011,7 @@ mod tests {
         assert!(list["servers"].as_array().unwrap().is_empty());
 
         // show action: should also degrade (not hard-fail).
-        let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"))
+        let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"), None)
             .expect("mcp show should not hard-fail on config parse errors (#144)");
         assert_eq!(show["kind"], "mcp");
         assert_eq!(show["action"], "show");
@@ -5885,7 +6026,7 @@ mod tests {
         let clean_ws = temp_dir("mcp-degrades-144-clean");
         fs::create_dir_all(&clean_ws).expect("clean ws");
         let clean_loader = ConfigLoader::new(&clean_ws, &config_home);
-        let clean_list = render_mcp_report_json_for(&clean_loader, &clean_ws, None)
+        let clean_list = render_mcp_report_json_for(&clean_loader, &clean_ws, None, None)
             .expect("clean mcp list should succeed");
         assert_eq!(
             clean_list["status"].as_str(),

@@ -20,6 +20,7 @@ fn make_loaded_plugin(id: &str, name: &str, desc: &str, enabled: bool) -> Loaded
                 source: source.clone(),
                 default_enabled: true,
                 root: None,
+                display_name: None,
             },
             enabled,
         },

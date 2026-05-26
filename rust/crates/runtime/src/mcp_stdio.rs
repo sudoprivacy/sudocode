@@ -279,6 +279,12 @@ pub enum McpServerManagerError {
     UnknownServer {
         server_name: String,
     },
+    /// Sticky terminal failure after exceeding the spawn-attempt limit.
+    /// Prevents a broken plugin MCP server from being re-forked indefinitely.
+    PermanentlyFailed {
+        server_name: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for McpServerManagerError {
@@ -322,6 +328,10 @@ impl std::fmt::Display for McpServerManagerError {
                 write!(f, "unknown MCP tool `{qualified_name}`")
             }
             Self::UnknownServer { server_name } => write!(f, "unknown MCP server `{server_name}`"),
+            Self::PermanentlyFailed {
+                server_name,
+                reason,
+            } => write!(f, "MCP server `{server_name}` permanently disabled: {reason}"),
         }
     }
 }
@@ -335,7 +345,8 @@ impl std::error::Error for McpServerManagerError {
             | Self::InvalidResponse { .. }
             | Self::Timeout { .. }
             | Self::UnknownTool { .. }
-            | Self::UnknownServer { .. } => None,
+            | Self::UnknownServer { .. }
+            | Self::PermanentlyFailed { .. } => None,
         }
     }
 }
@@ -356,6 +367,10 @@ impl McpServerManagerError {
             | Self::Timeout { method, .. } => lifecycle_phase_for_method(method),
             Self::UnknownTool { .. } => McpLifecyclePhase::ToolDiscovery,
             Self::UnknownServer { .. } => McpLifecyclePhase::ServerRegistration,
+            // Permanent failure is the sticky version of "couldn't make it
+            // past initialize" — preserve InitializeHandshake so downstream
+            // surfaces (degraded report, doctor) don't misclassify it.
+            Self::PermanentlyFailed { .. } => McpLifecyclePhase::InitializeHandshake,
         }
     }
 
@@ -425,6 +440,17 @@ impl McpServerManagerError {
             Self::UnknownServer { server_name } => {
                 BTreeMap::from([("server".to_string(), server_name.clone())])
             }
+            Self::PermanentlyFailed {
+                server_name,
+                reason,
+            } => BTreeMap::from([
+                ("server".to_string(), server_name.clone()),
+                ("reason".to_string(), reason.clone()),
+                // Track the lifecycle method this failure aborted, matching
+                // other variants. PermanentlyFailed always trips in the
+                // spawn → initialize handshake window.
+                ("method".to_string(), "initialize".to_string()),
+            ]),
         }
     }
 }
@@ -459,11 +485,23 @@ struct ToolRoute {
     raw_name: String,
 }
 
+/// Maximum number of spawn+initialize attempts to make against a single MCP
+/// server within one McpServerManager lifetime. Exceeding this trips a sticky
+/// `permanent_failure` so a broken plugin MCP server cannot loop-fork.
+const MCP_SPAWN_ATTEMPT_LIMIT: u32 = 2;
+
 #[derive(Debug)]
 struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
     process: Option<McpStdioProcess>,
     initialized: bool,
+    /// Total spawn attempts (including retries) made against this server.
+    /// Capped at MCP_SPAWN_ATTEMPT_LIMIT to short-circuit the spawn loop.
+    spawn_attempts: u32,
+    /// Sticky terminal failure that disables further spawn attempts and is
+    /// returned verbatim on every future request. Set once spawn_attempts
+    /// reaches the cap.
+    permanent_failure: Option<String>,
 }
 
 impl ManagedMcpServer {
@@ -472,6 +510,8 @@ impl ManagedMcpServer {
             bootstrap,
             process: None,
             initialized: false,
+            spawn_attempts: 0,
+            permanent_failure: None,
         }
     }
 }
@@ -1048,6 +1088,19 @@ impl McpServerManager {
         &mut self,
         server_name: &str,
     ) -> Result<(), McpServerManagerError> {
+        // Sticky terminal failure short-circuits before any work — prevents
+        // the spawn loop from repeatedly fork()ing a broken plugin server.
+        if let Some(reason) = self
+            .servers
+            .get(server_name)
+            .and_then(|server| server.permanent_failure.clone())
+        {
+            return Err(McpServerManagerError::PermanentlyFailed {
+                server_name: server_name.to_string(),
+                reason,
+            });
+        }
+
         if self.server_process_exited(server_name)? {
             self.reset_server(server_name).await?;
         }
@@ -1063,7 +1116,25 @@ impl McpServerManager {
                 })?;
 
             if needs_spawn {
+                let attempt_count = self
+                    .servers
+                    .get(server_name)
+                    .map(|server| server.spawn_attempts)
+                    .unwrap_or(0);
+                if attempt_count >= MCP_SPAWN_ATTEMPT_LIMIT {
+                    let reason = format!(
+                        "MCP server `{server_name}` exceeded {MCP_SPAWN_ATTEMPT_LIMIT} initialize attempts; refusing to retry spawn"
+                    );
+                    if let Some(server) = self.servers.get_mut(server_name) {
+                        server.permanent_failure = Some(reason.clone());
+                    }
+                    return Err(McpServerManagerError::PermanentlyFailed {
+                        server_name: server_name.to_string(),
+                        reason,
+                    });
+                }
                 let server = self.server_mut(server_name)?;
+                server.spawn_attempts = server.spawn_attempts.saturating_add(1);
                 server.process = Some(spawn_mcp_stdio_process(&server.bootstrap)?);
                 server.initialized = false;
             }
@@ -1410,6 +1481,7 @@ fn default_initialize_params() -> McpInitializeParams {
 
 #[cfg(test)]
 mod tests {
+    use super::MCP_SPAWN_ATTEMPT_LIMIT;
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
@@ -2778,6 +2850,89 @@ mod tests {
             manager.shutdown().await.expect("shutdown");
             cleanup_script(&script_path);
             cleanup_script(&broken_script_path);
+        });
+    }
+
+    fn write_instant_exit_script(counter_path: &Path) -> PathBuf {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let script_path = root.join("instant-exit.sh");
+        let script = format!(
+            "#!/bin/sh\n# Append spawn marker so the test can count invocations.\necho spawn >> {counter}\nexit 0\n",
+            counter = counter_path.display(),
+        );
+        fs::write(&script_path, script).expect("write script");
+        let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod");
+        script_path
+    }
+
+    /// Reproduces the production e2e finding: a plugin MCP server that exits
+    /// immediately after spawn used to trigger 4–8 fork()s during initial
+    /// discovery. With MCP_SPAWN_ATTEMPT_LIMIT in place, spawn must be capped
+    /// at 2, and a follow-up tool call must short-circuit to PermanentlyFailed.
+    #[test]
+    fn manager_caps_spawn_attempts_when_server_exits_immediately() {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let root = temp_dir();
+            fs::create_dir_all(&root).expect("counter dir");
+            let counter_path = root.join("spawn-count.txt");
+            let script_path = write_instant_exit_script(&counter_path);
+            let servers = BTreeMap::from([(
+                "broken".to_string(),
+                ScopedMcpServerConfig {
+                    scope: ConfigSource::Local,
+                    config: McpServerConfig::Stdio(McpStdioServerConfig {
+                        command: script_path.display().to_string(),
+                        args: Vec::new(),
+                        env: BTreeMap::new(),
+                        current_dir: None,
+                        tool_call_timeout_ms: None,
+                    }),
+                },
+            )]);
+            let mut manager = McpServerManager::from_servers(&servers);
+
+            // First discovery exhausts the spawn cap.
+            let report = manager.discover_tools_best_effort().await;
+            assert!(report.tools.is_empty());
+            assert_eq!(report.failed_servers.len(), 1);
+
+            let initial_spawn_count = fs::read_to_string(&counter_path)
+                .unwrap_or_default()
+                .lines()
+                .count();
+            assert!(
+                initial_spawn_count <= usize::try_from(MCP_SPAWN_ATTEMPT_LIMIT)
+                    .expect("attempt limit fits usize"),
+                "spawn attempts must be capped to {MCP_SPAWN_ATTEMPT_LIMIT}, got {initial_spawn_count}"
+            );
+
+            // A follow-up tool call must NOT trigger any additional fork()s —
+            // the sticky permanent_failure must short-circuit before spawn.
+            let call = manager
+                .call_tool(&mcp_tool_name("broken", "anything"), None)
+                .await;
+            assert!(
+                call.is_err(),
+                "call on permanently-failed server must error"
+            );
+            let post_call_spawn_count = fs::read_to_string(&counter_path)
+                .unwrap_or_default()
+                .lines()
+                .count();
+            assert_eq!(
+                post_call_spawn_count, initial_spawn_count,
+                "no extra spawns after the cap is reached"
+            );
+
+            manager.shutdown().await.expect("shutdown");
+            cleanup_script(&script_path);
         });
     }
 

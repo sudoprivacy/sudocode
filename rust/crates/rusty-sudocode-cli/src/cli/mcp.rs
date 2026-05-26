@@ -381,6 +381,7 @@ mod tests {
             source: "external".to_string(),
             default_enabled: true,
             root: path.parent().map(PathBuf::from),
+            display_name: None,
         };
         LoadedPlugin {
             summary: PluginSummary {

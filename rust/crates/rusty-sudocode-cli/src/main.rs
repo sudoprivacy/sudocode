@@ -88,7 +88,8 @@ use cli::status::{
 use cli::tool_executor::{permission_policy, CliToolExecutor};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
-    handle_mcp_slash_command, handle_mcp_slash_command_json, handle_plugins_slash_command,
+    handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
+    handle_plugins_slash_command,
     handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
     render_slash_command_help, render_slash_command_help_filtered, resolve_skill_invocation,
@@ -1107,10 +1108,19 @@ fn run_resume_command(
                 (Some(action), Some(target)) => Some(format!("{action} {target}")),
                 (None, Some(target)) => Some(target.to_string()),
             };
+            let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd).ok();
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
-                message: Some(handle_mcp_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_mcp_slash_command_json(args.as_deref(), &cwd)?),
+                message: Some(handle_mcp_slash_command_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?),
+                json: Some(handle_mcp_slash_command_json_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?),
             })
         }
         SlashCommand::Memory => Ok(ResumeCommandOutcome {
@@ -3353,10 +3363,22 @@ impl LiveCli {
             return run_mcp_serve();
         }
         let cwd = env::current_dir()?;
+        // Include plugin-provided MCP servers so `scode mcp` matches what the
+        // runtime actually wires up. Plugin discovery may fail (e.g. malformed
+        // installed.json) — degrade to runtime-only view instead of erroring,
+        // matching the contract of the underlying handlers.
+        let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd).ok();
         match output_format {
-            CliOutputFormat::Text => println!("{}", handle_mcp_slash_command(args, &cwd)?),
+            CliOutputFormat::Text => println!(
+                "{}",
+                handle_mcp_slash_command_with_plugins(args, &cwd, plugin_load_outcome.as_ref())?
+            ),
             CliOutputFormat::Json => {
-                let value = handle_mcp_slash_command_json(args, &cwd)?;
+                let value = handle_mcp_slash_command_json_with_plugins(
+                    args,
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?;
                 // Propagate ok:false → non-zero exit so automation callers
                 // can rely on exit code instead of inspecting the envelope.
                 let is_error = value.get("ok").and_then(|v| v.as_bool()) == Some(false);
@@ -3404,16 +3426,79 @@ impl LiveCli {
         let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
         match output_format {
             CliOutputFormat::Text => println!("{}", result.message),
-            CliOutputFormat::Json => println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
+            CliOutputFormat::Json => {
+                // For list-style actions, emit a structured `plugins` array
+                // alongside the rendered text so scripts/CI can consume the
+                // data without re-parsing the text payload.
+                let action_name = action.unwrap_or("list");
+                let plugins_array = matches!(action_name, "list").then(|| {
+                    manager
+                        .list_installed_plugins()
+                        .ok()
+                        .map(|plugins| {
+                            plugins
+                                .iter()
+                                .map(|plugin| {
+                                    let mut entry = serde_json::Map::new();
+                                    entry.insert(
+                                        "id".to_string(),
+                                        Value::String(plugin.metadata.id.clone()),
+                                    );
+                                    entry.insert(
+                                        "name".to_string(),
+                                        Value::String(plugin.metadata.name.clone()),
+                                    );
+                                    if let Some(display_name) = &plugin.metadata.display_name
+                                    {
+                                        entry.insert(
+                                            "display_name".to_string(),
+                                            Value::String(display_name.clone()),
+                                        );
+                                    }
+                                    entry.insert(
+                                        "version".to_string(),
+                                        Value::String(plugin.metadata.version.clone()),
+                                    );
+                                    entry.insert(
+                                        "description".to_string(),
+                                        Value::String(plugin.metadata.description.clone()),
+                                    );
+                                    entry.insert(
+                                        "kind".to_string(),
+                                        Value::String(plugin.metadata.kind.to_string()),
+                                    );
+                                    entry.insert(
+                                        "source".to_string(),
+                                        Value::String(plugin.metadata.source.clone()),
+                                    );
+                                    entry.insert(
+                                        "enabled".to_string(),
+                                        Value::Bool(plugin.enabled),
+                                    );
+                                    if let Some(root) = &plugin.metadata.root {
+                                        entry.insert(
+                                            "root".to_string(),
+                                            Value::String(root.display().to_string()),
+                                        );
+                                    }
+                                    Value::Object(entry)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                });
+                let mut envelope = json!({
                     "kind": "plugin",
-                    "action": action.unwrap_or("list"),
+                    "action": action_name,
                     "target": target,
                     "message": result.message,
                     "reload_runtime": result.reload_runtime,
-                }))?
-            ),
+                });
+                if let Some(array) = plugins_array {
+                    envelope["plugins"] = Value::Array(array);
+                }
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
         }
         Ok(())
     }
@@ -4203,30 +4288,64 @@ struct CliHookProgressReporter;
 
 impl runtime::HookProgressReporter for CliHookProgressReporter {
     fn on_event(&mut self, event: &runtime::HookProgressEvent) {
+        // Format SudoCode plugin attribution once; each outcome line includes
+        // it so the user sees *who* ran the hook in addition to *what* happened.
+        fn attribution(plugin_source: Option<&str>) -> String {
+            match plugin_source {
+                Some(plugin_id) => format!(" (SudoCode plugin {plugin_id})"),
+                None => String::new(),
+            }
+        }
         match event {
             runtime::HookProgressEvent::Started {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
             runtime::HookProgressEvent::Completed {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook done {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook done {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
+            ),
+            runtime::HookProgressEvent::Denied {
+                event,
+                tool_name,
+                command,
+                plugin_source,
+            } => eprintln!(
+                "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
+            ),
+            runtime::HookProgressEvent::Failed {
+                event,
+                tool_name,
+                command,
+                plugin_source,
+            } => eprintln!(
+                "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
             runtime::HookProgressEvent::Cancelled {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook cancelled {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
         }
     }

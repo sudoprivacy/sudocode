@@ -95,6 +95,7 @@ enum Scenario {
     WriteFileDenied,
     MultiToolTurnRoundtrip,
     BashStdoutRoundtrip,
+    BashInterruptLongRunning,
     BashPermissionPromptApproved,
     BashPermissionPromptDenied,
     PluginToolRoundtrip,
@@ -112,6 +113,7 @@ impl Scenario {
             "write_file_denied" => Some(Self::WriteFileDenied),
             "multi_tool_turn_roundtrip" => Some(Self::MultiToolTurnRoundtrip),
             "bash_stdout_roundtrip" => Some(Self::BashStdoutRoundtrip),
+            "bash_interrupt_long_running" => Some(Self::BashInterruptLongRunning),
             "bash_permission_prompt_approved" => Some(Self::BashPermissionPromptApproved),
             "bash_permission_prompt_denied" => Some(Self::BashPermissionPromptDenied),
             "plugin_tool_roundtrip" => Some(Self::PluginToolRoundtrip),
@@ -130,6 +132,7 @@ impl Scenario {
             Self::WriteFileDenied => "write_file_denied",
             Self::MultiToolTurnRoundtrip => "multi_tool_turn_roundtrip",
             Self::BashStdoutRoundtrip => "bash_stdout_roundtrip",
+            Self::BashInterruptLongRunning => "bash_interrupt_long_running",
             Self::BashPermissionPromptApproved => "bash_permission_prompt_approved",
             Self::BashPermissionPromptDenied => "bash_permission_prompt_denied",
             Self::PluginToolRoundtrip => "plugin_tool_roundtrip",
@@ -444,6 +447,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"command":"printf 'alpha from bash'","timeout":1000}"#],
             ),
         },
+        Scenario::BashInterruptLongRunning => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "bash interrupt unexpectedly continued: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_bash_interrupt",
+                "bash",
+                &[
+                    r#"{"command":"printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
+                ],
+            ),
+        },
         Scenario::BashPermissionPromptApproved => match latest_tool_result(request) {
             Some((tool_output, is_error)) => {
                 if is_error {
@@ -595,6 +610,21 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"command": "printf 'alpha from bash'", "timeout": 1000}),
             ),
         },
+        Scenario::BashInterruptLongRunning => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_bash_interrupt_unexpected_final",
+                &format!("bash interrupt unexpectedly continued: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_bash_interrupt_tool",
+                "toolu_bash_interrupt",
+                "bash",
+                json!({
+                    "command": "printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+                    "timeout": 120000
+                }),
+            ),
+        },
         Scenario::BashPermissionPromptApproved => match latest_tool_result(request) {
             Some((tool_output, is_error)) => {
                 if is_error {
@@ -670,6 +700,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::WriteFileDenied => "req_write_file_denied",
         Scenario::MultiToolTurnRoundtrip => "req_multi_tool_turn_roundtrip",
         Scenario::BashStdoutRoundtrip => "req_bash_stdout_roundtrip",
+        Scenario::BashInterruptLongRunning => "req_bash_interrupt_long_running",
         Scenario::BashPermissionPromptApproved => "req_bash_permission_prompt_approved",
         Scenario::BashPermissionPromptDenied => "req_bash_permission_prompt_denied",
         Scenario::PluginToolRoundtrip => "req_plugin_tool_roundtrip",

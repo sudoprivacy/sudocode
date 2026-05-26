@@ -292,6 +292,7 @@ scode doctor
 
 - [Usage Guide](./rust/USAGE.md) — commands, integration, local models
 - [Rust Workspace](./rust/README.md) — crate architecture, mock parity harness, internals
+- [Plugins](./docs/plugins.md) — authoring and using `scode` plugins
 - [Model Compatibility](./docs/MODEL_COMPATIBILITY.md) — provider/model support matrix
 - [Container build](./docs/container.md) — `Containerfile` usage
 

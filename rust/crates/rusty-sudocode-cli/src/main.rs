@@ -47,7 +47,8 @@ use cli::args::{
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd, parse_args,
     permission_mode_from_label, require_sudocode_config_for_cwd, resolve_model_alias,
     resolve_model_alias_with_config, resolve_repl_model, try_resolve_bare_skill_prompt,
-    AllowedToolSet, CliAction, CliOutputFormat, LocalHelpTopic,
+    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
+    LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
@@ -87,15 +88,20 @@ use cli::status::{
 use cli::tool_executor::{permission_policy, CliToolExecutor};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
-    handle_mcp_slash_command, handle_mcp_slash_command_json, handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json, render_slash_command_help,
-    render_slash_command_help_filtered, resolve_skill_invocation, resume_supported_slash_commands,
-    slash_command_specs, validate_slash_command_input, SkillSlashDispatch, SlashCommand,
+    handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
+    handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
+    handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
+    render_slash_command_help, render_slash_command_help_filtered, resolve_skill_invocation,
+    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
+    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
+use plugins::{
+    render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginManagerConfig,
+    PluginRegistry,
+};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
@@ -759,13 +765,21 @@ fn print_system_prompt(
     model: &str,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let prompt = load_system_prompt(
-        cwd,
+    let mut prompt = load_system_prompt(
+        cwd.clone(),
         date,
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
     )?;
+    // Mirror what build_runtime_with_plugin_state does for live sessions:
+    // append active SudoCode plugin capabilities so system-prompt output
+    // matches what the runtime actually sends.  Load failures captured inside
+    // PluginLoadOutcome are excluded naturally; Result errors propagate.
+    let outcome = plugin_load_outcome_for_cwd(&cwd)?;
+    if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
+        prompt.dynamic_sections.push(section);
+    }
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -1093,10 +1107,19 @@ fn run_resume_command(
                 (Some(action), Some(target)) => Some(format!("{action} {target}")),
                 (None, Some(target)) => Some(target.to_string()),
             };
+            let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd).ok();
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
-                message: Some(handle_mcp_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_mcp_slash_command_json(args.as_deref(), &cwd)?),
+                message: Some(handle_mcp_slash_command_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?),
+                json: Some(handle_mcp_slash_command_json_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?),
             })
         }
         SlashCommand::Memory => Ok(ResumeCommandOutcome {
@@ -1167,10 +1190,19 @@ fn run_resume_command(
                 );
             }
             let cwd = env::current_dir()?;
+            let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd)?;
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
-                message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
-                json: Some(handle_skills_slash_command_json(args.as_deref(), &cwd)?),
+                message: Some(handle_skills_slash_command_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    Some(&plugin_load_outcome),
+                )?),
+                json: Some(handle_skills_slash_command_json_with_plugins(
+                    args.as_deref(),
+                    &cwd,
+                    Some(&plugin_load_outcome),
+                )?),
             })
         }
         SlashCommand::Doctor => {
@@ -1400,7 +1432,11 @@ fn run_repl(
                 // matches a known skill name, invoke it as `/skills <input>`
                 // rather than forwarding raw text to the LLM (ROADMAP #36).
                 let cwd = std::env::current_dir().unwrap_or_default();
-                if let Some(prompt) = try_resolve_bare_skill_prompt(&cwd, &trimmed) {
+                if let Some(prompt) = try_resolve_bare_skill_prompt_with_plugins(
+                    &cwd,
+                    &trimmed,
+                    Some(cli.runtime.plugin_load_outcome()),
+                ) {
                     editor.push_history(input);
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn(&prompt) {
@@ -1457,6 +1493,7 @@ pub(crate) struct RuntimePluginState {
     pub(crate) feature_config: runtime::RuntimeFeatureConfig,
     pub(crate) tool_registry: GlobalToolRegistry,
     pub(crate) plugin_registry: PluginRegistry,
+    pub(crate) plugin_load_outcome: PluginLoadOutcome,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
 }
 
@@ -1479,6 +1516,7 @@ struct RuntimeConfig {
 struct BuiltRuntime {
     runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
+    plugin_load_outcome: PluginLoadOutcome,
     plugins_active: bool,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     mcp_active: bool,
@@ -1488,11 +1526,13 @@ impl BuiltRuntime {
     fn new(
         runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
+        plugin_load_outcome: PluginLoadOutcome,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
             plugin_registry,
+            plugin_load_outcome,
             plugins_active: true,
             mcp_state,
             mcp_active: true,
@@ -1522,6 +1562,10 @@ impl BuiltRuntime {
         if let Some(ref mut runtime) = self.runtime {
             runtime.set_trace_id(trace_id);
         }
+    }
+
+    fn plugin_load_outcome(&self) -> &PluginLoadOutcome {
+        &self.plugin_load_outcome
     }
 
     fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -2599,7 +2643,7 @@ impl LiveCli {
     }
 
     fn prepare_turn_runtime(
-        &self,
+        &mut self,
         emit_output: bool,
     ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
         let hook_abort_signal = runtime::HookAbortSignal::new();
@@ -2610,9 +2654,12 @@ impl LiveCli {
         // known date silently advanced to today on every turn — suppressing
         // the date-rollover reminder added in #128 (see issue #135).
         let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
+        let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
+        self.shutdown_runtime_resources()?;
         let mut runtime = build_runtime(
-            self.runtime.session().clone(),
-            &self.session.id,
+            session,
+            &session_id,
             RuntimeConfig {
                 emit_output,
                 ..self.config.clone()
@@ -2627,8 +2674,24 @@ impl LiveCli {
         Ok((runtime, hook_abort_monitor))
     }
 
-    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
+    fn shutdown_runtime_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.runtime.shutdown_mcp()?;
         self.runtime.shutdown_plugins()?;
+        Ok(())
+    }
+
+    fn build_replacement_runtime(
+        &mut self,
+        session: Session,
+        session_id: String,
+        config: RuntimeConfig,
+    ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+        self.shutdown_runtime_resources()?;
+        build_runtime(session, &session_id, config)
+    }
+
+    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
+        self.shutdown_runtime_resources()?;
         self.runtime = runtime;
         Ok(())
     }
@@ -2684,6 +2747,7 @@ impl LiveCli {
                 Ok(())
             }
             Err(error) => {
+                runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
                 spinner.fail(
                     "❌ Request failed",
@@ -2901,10 +2965,17 @@ impl LiveCli {
                 false
             }
             SlashCommand::Skills { args } => {
-                match classify_skills_slash_command(args.as_deref()) {
+                let cwd = env::current_dir()?;
+                match resolve_skill_invocation_with_plugins(
+                    &cwd,
+                    args.as_deref(),
+                    Some(self.runtime.plugin_load_outcome()),
+                )
+                .map_err(std::io::Error::other)?
+                {
                     SkillSlashDispatch::Invoke(prompt) => self.run_turn(&prompt)?,
                     SkillSlashDispatch::Local => {
-                        Self::print_skills(args.as_deref(), CliOutputFormat::Text)?;
+                        self.print_skills_with_plugins(args.as_deref(), CliOutputFormat::Text)?;
                     }
                 }
                 false
@@ -3094,10 +3165,11 @@ impl LiveCli {
 
         let previous = self.config.model.clone();
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         let message_count = session.messages.len();
-        let runtime = build_runtime(
+        let runtime = self.build_replacement_runtime(
             session,
-            &self.session.id,
+            session_id,
             RuntimeConfig {
                 model: model.clone(),
                 ..self.config.clone()
@@ -3137,8 +3209,9 @@ impl LiveCli {
 
         let previous = self.config.permission_mode.as_str().to_string();
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         self.config.permission_mode = permission_mode_from_label(normalized);
-        let runtime = build_runtime(session, &self.session.id, self.config.clone())?;
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         println!(
             "{}",
@@ -3164,8 +3237,9 @@ impl LiveCli {
 
         let previous = current_str;
         let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
         self.config.auth_mode = parsed;
-        let runtime = build_runtime(session, &self.session.id, self.config.clone())?;
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         println!("{}", format_auth_switch_report(&previous, parsed.as_str()));
         Ok(true)
@@ -3181,12 +3255,13 @@ impl LiveCli {
 
         let previous_session = self.session.clone();
         let session_state = new_cli_session()?;
-        self.session = create_managed_session_handle(&session_state.session_id)?;
-        let runtime = build_runtime(
-            session_state.with_persistence_path(self.session.path.clone()),
-            &self.session.id,
+        let next_handle = create_managed_session_handle(&session_state.session_id)?;
+        let runtime = self.build_replacement_runtime(
+            session_state.with_persistence_path(next_handle.path.clone()),
+            next_handle.id.clone(),
             self.config.clone(),
         )?;
+        self.session = next_handle;
         self.replace_runtime(runtime)?;
         println!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
@@ -3233,7 +3308,8 @@ impl LiveCli {
         let (handle, session) = load_session_reference(&session_ref)?;
         let message_count = session.messages.len();
         let session_id = session.session_id.clone();
-        let runtime = build_runtime(session, &handle.id, self.config.clone())?;
+        let runtime =
+            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
         self.replace_runtime(runtime)?;
         self.session = SessionHandle {
             id: session_id,
@@ -3286,10 +3362,22 @@ impl LiveCli {
             return run_mcp_serve();
         }
         let cwd = env::current_dir()?;
+        // Include plugin-provided MCP servers so `scode mcp` matches what the
+        // runtime actually wires up. Plugin discovery may fail (e.g. malformed
+        // installed.json) — degrade to runtime-only view instead of erroring,
+        // matching the contract of the underlying handlers.
+        let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd).ok();
         match output_format {
-            CliOutputFormat::Text => println!("{}", handle_mcp_slash_command(args, &cwd)?),
+            CliOutputFormat::Text => println!(
+                "{}",
+                handle_mcp_slash_command_with_plugins(args, &cwd, plugin_load_outcome.as_ref())?
+            ),
             CliOutputFormat::Json => {
-                let value = handle_mcp_slash_command_json(args, &cwd)?;
+                let value = handle_mcp_slash_command_json_with_plugins(
+                    args,
+                    &cwd,
+                    plugin_load_outcome.as_ref(),
+                )?;
                 // Propagate ok:false → non-zero exit so automation callers
                 // can rely on exit code instead of inspecting the envelope.
                 let is_error = value.get("ok").and_then(|v| v.as_bool()) == Some(false);
@@ -3307,14 +3395,22 @@ impl LiveCli {
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
-        match output_format {
-            CliOutputFormat::Text => println!("{}", handle_skills_slash_command(args, &cwd)?),
-            CliOutputFormat::Json => println!(
-                "{}",
-                serde_json::to_string_pretty(&handle_skills_slash_command_json(args, &cwd)?)?
-            ),
-        }
-        Ok(())
+        let plugin_load_outcome = plugin_load_outcome_for_cwd(&cwd)?;
+        print_skills_for_outcome(args, output_format, &cwd, Some(&plugin_load_outcome))
+    }
+
+    fn print_skills_with_plugins(
+        &self,
+        args: Option<&str>,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        print_skills_for_outcome(
+            args,
+            output_format,
+            &cwd,
+            Some(self.runtime.plugin_load_outcome()),
+        )
     }
 
     fn print_plugins(
@@ -3326,19 +3422,79 @@ impl LiveCli {
         let loader = ConfigLoader::default_for(&cwd);
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
-        let result = handle_plugins_slash_command(action, target, &mut manager)?;
+        let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
         match output_format {
             CliOutputFormat::Text => println!("{}", result.message),
-            CliOutputFormat::Json => println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
+            CliOutputFormat::Json => {
+                // For list-style actions, emit a structured `plugins` array
+                // alongside the rendered text so scripts/CI can consume the
+                // data without re-parsing the text payload.
+                let action_name = action.unwrap_or("list");
+                let plugins_array = matches!(action_name, "list").then(|| {
+                    manager
+                        .list_installed_plugins()
+                        .ok()
+                        .map(|plugins| {
+                            plugins
+                                .iter()
+                                .map(|plugin| {
+                                    let mut entry = serde_json::Map::new();
+                                    entry.insert(
+                                        "id".to_string(),
+                                        Value::String(plugin.metadata.id.clone()),
+                                    );
+                                    entry.insert(
+                                        "name".to_string(),
+                                        Value::String(plugin.metadata.name.clone()),
+                                    );
+                                    if let Some(display_name) = &plugin.metadata.display_name {
+                                        entry.insert(
+                                            "display_name".to_string(),
+                                            Value::String(display_name.clone()),
+                                        );
+                                    }
+                                    entry.insert(
+                                        "version".to_string(),
+                                        Value::String(plugin.metadata.version.clone()),
+                                    );
+                                    entry.insert(
+                                        "description".to_string(),
+                                        Value::String(plugin.metadata.description.clone()),
+                                    );
+                                    entry.insert(
+                                        "kind".to_string(),
+                                        Value::String(plugin.metadata.kind.to_string()),
+                                    );
+                                    entry.insert(
+                                        "source".to_string(),
+                                        Value::String(plugin.metadata.source.clone()),
+                                    );
+                                    entry
+                                        .insert("enabled".to_string(), Value::Bool(plugin.enabled));
+                                    if let Some(root) = &plugin.metadata.root {
+                                        entry.insert(
+                                            "root".to_string(),
+                                            Value::String(root.display().to_string()),
+                                        );
+                                    }
+                                    Value::Object(entry)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                });
+                let mut envelope = json!({
                     "kind": "plugin",
-                    "action": action.unwrap_or("list"),
+                    "action": action_name,
                     "target": target,
                     "message": result.message,
                     "reload_runtime": result.reload_runtime,
-                }))?
-            ),
+                });
+                if let Some(array) = plugins_array {
+                    envelope["plugins"] = Value::Array(array);
+                }
+                println!("{}", serde_json::to_string_pretty(&envelope)?);
+            }
         }
         Ok(())
     }
@@ -3385,7 +3541,11 @@ impl LiveCli {
                 let (handle, session) = load_session_reference(target)?;
                 let message_count = session.messages.len();
                 let session_id = session.session_id.clone();
-                let runtime = build_runtime(session, &handle.id, self.config.clone())?;
+                let runtime = self.build_replacement_runtime(
+                    session,
+                    handle.id.clone(),
+                    self.config.clone(),
+                )?;
                 self.replace_runtime(runtime)?;
                 self.session = SessionHandle {
                     id: session_id,
@@ -3410,7 +3570,8 @@ impl LiveCli {
                 let forked = forked.with_persistence_path(handle.path.clone());
                 let message_count = forked.messages.len();
                 forked.save_to_path(&handle.path)?;
-                let runtime = build_runtime(forked, &handle.id, self.config.clone())?;
+                let runtime =
+                    self.build_replacement_runtime(forked, handle.id.clone(), self.config.clone())?;
                 self.replace_runtime(runtime)?;
                 self.session = handle;
                 println!(
@@ -3487,7 +3648,7 @@ impl LiveCli {
         let loader = ConfigLoader::default_for(&cwd);
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
-        let result = handle_plugins_slash_command(action, target, &mut manager)?;
+        let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
         println!("{}", result.message);
         if result.reload_runtime {
             self.reload_runtime_features()?;
@@ -3496,11 +3657,9 @@ impl LiveCli {
     }
 
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let runtime = build_runtime(
-            self.runtime.session().clone(),
-            &self.session.id,
-            self.config.clone(),
-        )?;
+        let session = self.runtime.session().clone();
+        let session_id = self.session.id.clone();
+        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
         self.persist_session()
     }
@@ -3510,9 +3669,10 @@ impl LiveCli {
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
-        let runtime = build_runtime(
+        let session_id = self.session.id.clone();
+        let runtime = self.build_replacement_runtime(
             result.compacted_session,
-            &self.session.id,
+            session_id,
             self.config.clone(),
         )?;
         self.replace_runtime(runtime)?;
@@ -3522,15 +3682,16 @@ impl LiveCli {
     }
 
     fn run_internal_prompt_text_with_progress(
-        &self,
+        &mut self,
         prompt: &str,
         enable_tools: bool,
         progress: Option<InternalPromptProgressReporter>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
+        let session_id = self.session.id.clone();
+        let mut runtime = self.build_replacement_runtime(
             session,
-            &self.session.id,
+            session_id,
             RuntimeConfig {
                 enable_tools,
                 emit_output: false,
@@ -3545,12 +3706,13 @@ impl LiveCli {
             None,
         ))?;
         let text = final_assistant_text(&summary).trim().to_string();
+        runtime.shutdown_mcp()?;
         runtime.shutdown_plugins()?;
         Ok(text)
     }
 
     fn run_internal_prompt_text(
-        &self,
+        &mut self,
         prompt: &str,
         enable_tools: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
@@ -3611,6 +3773,29 @@ impl LiveCli {
         println!("{}", format_issue_report(context));
         Ok(())
     }
+}
+
+fn print_skills_for_outcome(
+    args: Option<&str>,
+    output_format: CliOutputFormat,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match output_format {
+        CliOutputFormat::Text => println!(
+            "{}",
+            handle_skills_slash_command_with_plugins(args, cwd, plugin_load_outcome)?
+        ),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&handle_skills_slash_command_json_with_plugins(
+                args,
+                cwd,
+                plugin_load_outcome,
+            )?)?
+        ),
+    }
+    Ok(())
 }
 
 fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
@@ -3677,26 +3862,44 @@ fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error
     build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config)
 }
 
+fn plugin_load_outcome_for_cwd(
+    cwd: &Path,
+) -> Result<PluginLoadOutcome, Box<dyn std::error::Error>> {
+    let loader = ConfigLoader::default_for(cwd);
+    let runtime_config = loader.load()?;
+    let plugin_manager = build_plugin_manager(cwd, &loader, &runtime_config);
+    Ok(plugin_manager.plugin_registry_report()?.load_outcome())
+}
+
 pub(crate) fn build_runtime_plugin_state_with_loader(
     cwd: &Path,
     loader: &ConfigLoader,
     runtime_config: &runtime::RuntimeConfig,
 ) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
     let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
-    let plugin_registry = plugin_manager.plugin_registry()?;
+    let plugin_registry_report = plugin_manager.plugin_registry_report()?;
+    let plugin_load_outcome = plugin_registry_report.load_outcome();
+    let plugin_registry = plugin_registry_report.into_registry()?;
     let plugin_hook_config =
-        runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
+        runtime_hook_config_from_plugin_hooks(plugin_registry.projected_hooks()?);
     let feature_config = runtime_config
         .feature_config()
         .clone()
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
-    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config)?;
-    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?
-        .with_runtime_tools(runtime_tools)?;
+    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?;
+    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config, &plugin_load_outcome)?;
+    let tool_registry = match tool_registry.with_runtime_tools(runtime_tools) {
+        Ok(tool_registry) => tool_registry,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     Ok(RuntimePluginState {
         feature_config,
         tool_registry,
         plugin_registry,
+        plugin_load_outcome,
         mcp_state,
     })
 }
@@ -3737,11 +3940,25 @@ fn resolve_plugin_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn runtime_hook_config_from_plugin_hooks(hooks: PluginHooks) -> runtime::RuntimeHookConfig {
-    runtime::RuntimeHookConfig::new(
-        hooks.pre_tool_use,
-        hooks.post_tool_use,
-        hooks.post_tool_use_failure,
+fn runtime_hook_config_from_plugin_hooks(
+    hooks: plugins::ProjectedPluginHooks,
+) -> runtime::RuntimeHookConfig {
+    runtime::RuntimeHookConfig::new_with_sources(
+        hooks
+            .pre_tool_use
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
+        hooks
+            .post_tool_use
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
+        hooks
+            .post_tool_use_failure
+            .into_iter()
+            .map(|entry| (entry.command, entry.plugin_id))
+            .collect(),
     )
 }
 
@@ -4003,16 +4220,31 @@ fn build_runtime_with_plugin_state(
         feature_config,
         tool_registry,
         plugin_registry,
+        plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
-    plugin_registry.initialize()?;
-    let policy = permission_policy(config.permission_mode, &feature_config, &tool_registry)
-        .map_err(std::io::Error::other)?;
-    let system_prompt = config.system_prompt.clone();
+    let policy = match permission_policy(config.permission_mode, &feature_config, &tool_registry) {
+        Ok(policy) => policy,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
+    let mut system_prompt = config.system_prompt.clone();
+    if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
+        system_prompt.dynamic_sections.push(section);
+    }
     let emit_output = config.emit_output;
+    let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(error);
+        }
+    };
     let mut runtime = ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone())?,
+        client,
         CliToolExecutor::new(
             config.allowed_tools,
             emit_output,
@@ -4027,37 +4259,89 @@ fn build_runtime_with_plugin_state(
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }
-    Ok(BuiltRuntime::new(runtime, plugin_registry, mcp_state))
+    if let Err(error) = plugin_registry.initialize() {
+        shutdown_mcp_state_best_effort(&mcp_state);
+        return Err(Box::new(error));
+    }
+    Ok(BuiltRuntime::new(
+        runtime,
+        plugin_registry,
+        plugin_load_outcome,
+        mcp_state,
+    ))
+}
+
+fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    if let Some(state) = mcp_state {
+        let _ = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
+    }
 }
 
 struct CliHookProgressReporter;
 
 impl runtime::HookProgressReporter for CliHookProgressReporter {
     fn on_event(&mut self, event: &runtime::HookProgressEvent) {
+        // Format SudoCode plugin attribution once; each outcome line includes
+        // it so the user sees *who* ran the hook in addition to *what* happened.
+        fn attribution(plugin_source: Option<&str>) -> String {
+            match plugin_source {
+                Some(plugin_id) => format!(" (SudoCode plugin {plugin_id})"),
+                None => String::new(),
+            }
+        }
         match event {
             runtime::HookProgressEvent::Started {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
             runtime::HookProgressEvent::Completed {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook done {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook done {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
+            ),
+            runtime::HookProgressEvent::Denied {
+                event,
+                tool_name,
+                command,
+                plugin_source,
+            } => eprintln!(
+                "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
+            ),
+            runtime::HookProgressEvent::Failed {
+                event,
+                tool_name,
+                command,
+                plugin_source,
+            } => eprintln!(
+                "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
             runtime::HookProgressEvent::Cancelled {
                 event,
                 tool_name,
                 command,
+                plugin_source,
             } => eprintln!(
-                "[hook cancelled {event_name}] {tool_name}: {command}",
-                event_name = event.as_str()
+                "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
+                event_name = event.as_str(),
+                attr = attribution(plugin_source.as_deref())
             ),
         }
     }

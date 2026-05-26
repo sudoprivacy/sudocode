@@ -4,7 +4,10 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use plugins::{PluginError, PluginLoadFailure, PluginManager, PluginSummary};
+use plugins::{
+    discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,
+    PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary,
+};
 use runtime::{
     compact_session, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
     ScopedMcpServerConfig, Session,
@@ -237,9 +240,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "plugin",
         aliases: &["plugins", "marketplace"],
-        summary: "Manage Sudo Code plugins",
+        summary: "Manage SudoCode plugins",
         argument_hint: Some(
-            "[list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
+            "[list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         ),
         resume_supported: false,
     },
@@ -1717,9 +1720,22 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             target: None,
         }),
         ["list", ..] => Err(usage_error("plugin list", "")),
+        ["available"] | ["marketplace"] | ["marketplace", "available"] => {
+            Ok(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            })
+        }
+        ["available", ..] => Err(usage_error("plugin available", "")),
+        ["marketplace", ..] => Err(usage_error("plugin marketplace", "")),
         ["install"] => Err(usage_error("plugin install", "<path>")),
         ["install", target @ ..] => Ok(SlashCommand::Plugins {
             action: Some("install".to_string()),
+            target: Some(target.join(" ")),
+        }),
+        ["add"] => Err(usage_error("plugin add", "<path>")),
+        ["add", target @ ..] => Ok(SlashCommand::Plugins {
+            action: Some("add".to_string()),
             target: Some(target.join(" ")),
         }),
         ["enable"] => Err(usage_error("plugin enable", "<name>")),
@@ -1752,6 +1768,16 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
             "plugin",
             "/plugin uninstall <id>",
         )),
+        ["remove"] => Err(usage_error("plugin remove", "<id>")),
+        ["remove", target] => Ok(SlashCommand::Plugins {
+            action: Some("remove".to_string()),
+            target: Some((*target).to_string()),
+        }),
+        ["remove", ..] => Err(command_error(
+            "Unexpected arguments for /plugin remove.",
+            "plugin",
+            "/plugin remove <id>",
+        )),
         ["update"] => Err(usage_error("plugin update", "<id>")),
         ["update", target] => Ok(SlashCommand::Plugins {
             action: Some("update".to_string()),
@@ -1764,10 +1790,10 @@ fn parse_plugin_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParse
         )),
         [action, ..] => Err(command_error(
             &format!(
-                "Unknown /plugin action '{action}'. Use list, install <path>, enable <name>, disable <name>, uninstall <id>, or update <id>."
+                "Unknown /plugin action '{action}'. Use list, available, marketplace, add <path>, install <path>, enable <name>, disable <name>, remove <id>, uninstall <id>, or update <id>."
             ),
             "plugin",
-            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]",
+            "/plugin [list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]",
         )),
     }
 }
@@ -2116,6 +2142,7 @@ enum DefinitionSource {
     UserClaw,
     UserCodex,
     UserClaude,
+    Plugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2123,6 +2150,7 @@ enum DefinitionScope {
     Project,
     UserConfigHome,
     UserHome,
+    Plugin,
 }
 
 impl DefinitionScope {
@@ -2131,6 +2159,7 @@ impl DefinitionScope {
             Self::Project => "Project roots",
             Self::UserConfigHome => "User config roots",
             Self::UserHome => "User home roots",
+            Self::Plugin => "SudoCode plugin roots",
         }
     }
 }
@@ -2143,6 +2172,7 @@ impl DefinitionSource {
             }
             Self::UserClawConfigHome | Self::UserCodexHome => DefinitionScope::UserConfigHome,
             Self::UserClaw | Self::UserCodex | Self::UserClaude => DefinitionScope::UserHome,
+            Self::Plugin => DefinitionScope::Plugin,
         }
     }
 
@@ -2212,6 +2242,7 @@ pub fn handle_plugins_slash_command(
     action: Option<&str>,
     target: Option<&str>,
     manager: &mut PluginManager,
+    cwd: &Path,
 ) -> Result<PluginsCommandResult, PluginError> {
     match action {
         None | Some("list") => {
@@ -2223,7 +2254,18 @@ pub fn handle_plugins_slash_command(
                 reload_runtime: false,
             })
         }
-        Some("install") => {
+        Some("available") => {
+            let message = match discover_marketplace_manifest(cwd) {
+                Ok(None) => "Plugins\n  No marketplace manifest found.\n  Hint             Create .nexus/sudocode/plugins/marketplace.json to list available SudoCode plugins.".to_string(),
+                Ok(Some(ref manifest)) => render_marketplace_report(manifest),
+                Err(ref err) => render_marketplace_error(err),
+            };
+            Ok(PluginsCommandResult {
+                message,
+                reload_runtime: false,
+            })
+        }
+        Some("install" | "add") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
                     message: "Usage: /plugins install <path>".to_string(),
@@ -2252,7 +2294,9 @@ pub fn handle_plugins_slash_command(
             Ok(PluginsCommandResult {
                 message: format!(
                     "Plugins\n  Result           enabled {}\n  Name             {}\n  Version          {}\n  Status           enabled",
-                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
+                    plugin.metadata.id,
+                    plugin_display_label(&plugin),
+                    plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
@@ -2269,12 +2313,14 @@ pub fn handle_plugins_slash_command(
             Ok(PluginsCommandResult {
                 message: format!(
                     "Plugins\n  Result           disabled {}\n  Name             {}\n  Version          {}\n  Status           disabled",
-                    plugin.metadata.id, plugin.metadata.name, plugin.metadata.version
+                    plugin.metadata.id,
+                    plugin_display_label(&plugin),
+                    plugin.metadata.version
                 ),
                 reload_runtime: true,
             })
         }
-        Some("uninstall") => {
+        Some("uninstall" | "remove") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
                     message: "Usage: /plugins uninstall <plugin-id>".to_string(),
@@ -2317,11 +2363,43 @@ pub fn handle_plugins_slash_command(
         }
         Some(other) => Ok(PluginsCommandResult {
             message: format!(
-                "Unknown /plugins action '{other}'. Use list, install, enable, disable, uninstall, or update."
+                "Unknown /plugins action '{other}'. Use list, available, add, install, enable, disable, remove, uninstall, or update."
             ),
             reload_runtime: false,
         }),
     }
+}
+
+fn render_marketplace_report(manifest: &MarketplaceManifest) -> String {
+    let mut lines = vec![
+        "Plugins (available)".to_string(),
+        format!("  Source           {}", manifest.source_path.display()),
+    ];
+    if manifest.entries.is_empty() {
+        lines.push("  No SudoCode plugins listed in marketplace manifest.".to_string());
+        return lines.join("\n");
+    }
+    lines.push(String::new());
+    for entry in &manifest.entries {
+        lines.push(format!(
+            "  {name:<20} v{version:<10} {desc}",
+            name = entry.name,
+            version = entry.version,
+            desc = entry.description,
+        ));
+        if let Some(source) = &entry.source {
+            lines.push(format!("  {:<20} {source}", ""));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_marketplace_error(err: &MarketplaceDiscoveryError) -> String {
+    format!(
+        "Plugins\n  Status           error\n  Path             {}\n  Error            {}",
+        err.path.display(),
+        err.detail,
+    )
 }
 
 pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
@@ -2370,19 +2448,86 @@ pub fn handle_mcp_slash_command(
     args: Option<&str>,
     cwd: &Path,
 ) -> Result<String, runtime::ConfigError> {
+    handle_mcp_slash_command_with_plugins(args, cwd, None)
+}
+
+pub fn handle_mcp_slash_command_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<String, runtime::ConfigError> {
     let loader = ConfigLoader::default_for(cwd);
-    render_mcp_report_for(&loader, cwd, args)
+    render_mcp_report_for(&loader, cwd, args, plugin_load_outcome)
 }
 
 pub fn handle_mcp_slash_command_json(
     args: Option<&str>,
     cwd: &Path,
 ) -> Result<Value, runtime::ConfigError> {
+    handle_mcp_slash_command_json_with_plugins(args, cwd, None)
+}
+
+pub fn handle_mcp_slash_command_json_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<Value, runtime::ConfigError> {
     let loader = ConfigLoader::default_for(cwd);
-    render_mcp_report_json_for(&loader, cwd, args)
+    render_mcp_report_json_for(&loader, cwd, args, plugin_load_outcome)
+}
+
+/// Merge plugin-provided MCP servers (from each enabled plugin's `.mcp.json`)
+/// into the runtime-config servers, returning the merged map plus a provenance
+/// map keyed by server name. User/global runtime servers always win on name
+/// collision (matches `cli::mcp::merged_mcp_servers`). Plugin servers also
+/// carry their plugin id so `scode mcp` can attribute them to a SudoCode
+/// plugin in both text and JSON output.
+fn merge_plugin_mcp_servers(
+    runtime_servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> (
+    BTreeMap<String, ScopedMcpServerConfig>,
+    BTreeMap<String, String>,
+) {
+    let mut servers = runtime_servers.clone();
+    let mut provenance: BTreeMap<String, String> = BTreeMap::new();
+    let Some(outcome) = plugin_load_outcome else {
+        return (servers, provenance);
+    };
+    for plugin in &outcome.loaded_plugins {
+        if !plugin.summary.enabled {
+            continue;
+        }
+        for path in &plugin.mcp_config_paths {
+            // Silently skip plugin MCP files that fail to parse so the rest of
+            // the report still renders; the runtime path surfaces the failure
+            // separately when it actually tries to spawn the server.
+            let Ok(plugin_servers) = runtime::load_plugin_mcp_servers(path) else {
+                continue;
+            };
+            for (server_name, server_config) in plugin_servers {
+                if !servers.contains_key(&server_name) {
+                    provenance.insert(
+                        server_name.clone(),
+                        plugin.capability_summary.plugin_id.clone(),
+                    );
+                    servers.insert(server_name, server_config);
+                }
+            }
+        }
+    }
+    (servers, provenance)
 }
 
 pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
+    handle_skills_slash_command_with_plugins(args, cwd, None)
+}
+
+pub fn handle_skills_slash_command_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<String> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
             return Ok(match help_path.as_slice() {
@@ -2395,7 +2540,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
 
     match normalize_optional_args(args) {
         None | Some("list") => {
-            let roots = discover_skill_roots(cwd);
+            let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report(&skills))
         }
@@ -2414,6 +2559,14 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
 }
 
 pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::io::Result<Value> {
+    handle_skills_slash_command_json_with_plugins(args, cwd, None)
+}
+
+pub fn handle_skills_slash_command_json_with_plugins(
+    args: Option<&str>,
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<Value> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
             return Ok(match help_path.as_slice() {
@@ -2426,7 +2579,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
 
     match normalize_optional_args(args) {
         None | Some("list") => {
-            let roots = discover_skill_roots(cwd);
+            let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
             let skills = load_skills_from_roots(&roots)?;
             Ok(render_skills_report_json(&skills))
         }
@@ -2462,6 +2615,14 @@ pub fn resolve_skill_invocation(
     cwd: &Path,
     args: Option<&str>,
 ) -> Result<SkillSlashDispatch, String> {
+    resolve_skill_invocation_with_plugins(cwd, args, None)
+}
+
+pub fn resolve_skill_invocation_with_plugins(
+    cwd: &Path,
+    args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Result<SkillSlashDispatch, String> {
     let dispatch = classify_skills_slash_command(args);
     if let SkillSlashDispatch::Invoke(ref prompt) = dispatch {
         // Extract the skill name from the "$skill [args]" prompt.
@@ -2471,9 +2632,11 @@ pub fn resolve_skill_invocation(
             .next()
             .unwrap_or_default();
         if !skill_token.is_empty() {
-            if let Err(error) = resolve_skill_path(cwd, skill_token) {
+            if let Err(error) =
+                resolve_skill_path_with_plugins(cwd, skill_token, plugin_load_outcome)
+            {
                 let mut message = format!("Unknown skill: {skill_token} ({error})");
-                let roots = discover_skill_roots(cwd);
+                let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
                 if let Ok(available) = load_skills_from_roots(&roots) {
                     let names: Vec<String> = available
                         .iter()
@@ -2494,6 +2657,14 @@ pub fn resolve_skill_invocation(
 }
 
 pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
+    resolve_skill_path_with_plugins(cwd, skill, None)
+}
+
+pub fn resolve_skill_path_with_plugins(
+    cwd: &Path,
+    skill: &str,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> std::io::Result<PathBuf> {
     let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
     if requested.is_empty() {
         return Err(std::io::Error::new(
@@ -2502,7 +2673,7 @@ pub fn resolve_skill_path(cwd: &Path, skill: &str) -> std::io::Result<PathBuf> {
         ));
     }
 
-    let roots = discover_skill_roots(cwd);
+    let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
     for root in &roots {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&root.path)? {
@@ -2570,6 +2741,7 @@ fn render_mcp_report_for(
     loader: &ConfigLoader,
     cwd: &Path,
     args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
 ) -> Result<String, runtime::ConfigError> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
@@ -2587,15 +2759,26 @@ fn render_mcp_report_for(
             // as #143 for `status`). Text mode prepends a "Config load error"
             // block before the MCP list; the list falls back to empty.
             match loader.load() {
-                Ok(runtime_config) => Ok(render_mcp_summary_report(
-                    cwd,
-                    runtime_config.mcp().servers(),
-                )),
+                Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
+                    Ok(render_mcp_summary_report(cwd, &servers, &provenance))
+                }
                 Err(err) => {
                     let empty = std::collections::BTreeMap::new();
+                    let empty_prov = std::collections::BTreeMap::new();
+                    let (servers, provenance) =
+                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+                    let prov = if provenance.is_empty() {
+                        empty_prov
+                    } else {
+                        provenance
+                    };
                     Ok(format!(
                         "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial MCP view\n  Details          {err}\n  Hint             `scode doctor` classifies config parse errors; fix the listed field and rerun\n\n{}",
-                        render_mcp_summary_report(cwd, &empty)
+                        render_mcp_summary_report(cwd, &servers, &prov)
                     ))
                 }
             }
@@ -2615,11 +2798,18 @@ fn render_mcp_report_for(
             // the specific server lookup can't succeed, so report the parse
             // error with context.
             match loader.load() {
-                Ok(runtime_config) => Ok(render_mcp_server_report(
-                    cwd,
-                    server_name,
-                    runtime_config.mcp().get(server_name),
-                )),
+                Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
+                    Ok(render_mcp_server_report(
+                        cwd,
+                        server_name,
+                        servers.get(server_name),
+                        provenance.get(server_name).map(String::as_str),
+                    ))
+                }
                 Err(err) => Ok(format!(
                     "Config load error\n  Status           fail\n  Summary          runtime config failed to load; cannot resolve `{server_name}`\n  Details          {err}\n  Hint             `scode doctor` classifies config parse errors; fix the listed field and rerun"
                 )),
@@ -2634,6 +2824,7 @@ fn render_mcp_report_json_for(
     loader: &ConfigLoader,
     cwd: &Path,
     args: Option<&str>,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
 ) -> Result<Value, runtime::ConfigError> {
     if let Some(args) = normalize_optional_args(args) {
         if let Some(help_path) = help_path_from_args(args) {
@@ -2653,8 +2844,11 @@ fn render_mcp_report_json_for(
             // runs, the existing serializer adds `status: "ok"` below.
             match loader.load() {
                 Ok(runtime_config) => {
-                    let mut value =
-                        render_mcp_summary_report_json(cwd, runtime_config.mcp().servers());
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
+                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("ok".to_string()));
                         map.insert("config_load_error".to_string(), Value::Null);
@@ -2663,7 +2857,9 @@ fn render_mcp_report_json_for(
                 }
                 Err(err) => {
                     let empty = std::collections::BTreeMap::new();
-                    let mut value = render_mcp_summary_report_json(cwd, &empty);
+                    let (servers, provenance) =
+                        merge_plugin_mcp_servers(&empty, plugin_load_outcome);
+                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("degraded".to_string()));
                         map.insert(
@@ -2689,10 +2885,15 @@ fn render_mcp_report_json_for(
             // #144: same degradation pattern for show action.
             match loader.load() {
                 Ok(runtime_config) => {
+                    let (servers, provenance) = merge_plugin_mcp_servers(
+                        runtime_config.mcp().servers(),
+                        plugin_load_outcome,
+                    );
                     let mut value = render_mcp_server_report_json(
                         cwd,
                         server_name,
-                        runtime_config.mcp().get(server_name),
+                        servers.get(server_name),
+                        provenance.get(server_name).map(String::as_str),
                     );
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("ok".to_string()));
@@ -2729,11 +2930,24 @@ pub fn render_plugins_report(plugins: &[PluginSummary]) -> String {
         };
         lines.push(format!(
             "  {name:<20} v{version:<10} {enabled}",
-            name = plugin.metadata.name,
+            name = plugin_display_label(plugin),
             version = plugin.metadata.version,
         ));
     }
     lines.join("\n")
+}
+
+/// User-facing label for a plugin: prefer `interface.display_name` from the v2
+/// manifest, fall back to the raw `name`. The CLI uses this everywhere a human
+/// will read it (`scode plugins`, install/enable/disable reports). The system
+/// prompt deliberately does NOT use this — that channel stays anonymized for
+/// prompt-injection safety.
+fn plugin_display_label(plugin: &PluginSummary) -> &str {
+    plugin
+        .metadata
+        .display_name
+        .as_deref()
+        .unwrap_or(plugin.metadata.name.as_str())
 }
 
 #[must_use]
@@ -2755,7 +2969,7 @@ pub fn render_plugins_report_with_failures(
             };
             lines.push(format!(
                 "  {name:<20} v{version:<10} {enabled}",
-                name = plugin.metadata.name,
+                name = plugin_display_label(plugin),
                 version = plugin.metadata.version,
             ));
         }
@@ -2779,7 +2993,7 @@ pub fn render_plugins_report_with_failures(
 }
 
 fn render_plugin_install_report(plugin_id: &str, plugin: Option<&PluginSummary>) -> String {
-    let name = plugin.map_or(plugin_id, |plugin| plugin.metadata.name.as_str());
+    let name = plugin.map_or(plugin_id, plugin_display_label);
     let version = plugin.map_or("unknown", |plugin| plugin.metadata.version.as_str());
     let enabled = plugin.is_some_and(|plugin| plugin.enabled);
     format!(
@@ -2876,7 +3090,10 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
 }
 
 #[allow(clippy::too_many_lines)]
-fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
+fn discover_skill_roots_with_plugins(
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
     for ancestor in cwd.ancestors() {
@@ -3035,6 +3252,22 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
             claude_config_dir.join("commands"),
             SkillOrigin::LegacyCommandsDir,
         );
+    }
+
+    if let Some(plugin_load_outcome) = plugin_load_outcome {
+        for plugin in &plugin_load_outcome.loaded_plugins {
+            if !plugin.summary.enabled {
+                continue;
+            }
+            for skill_root in &plugin.skill_roots {
+                push_unique_skill_root(
+                    &mut roots,
+                    DefinitionSource::Plugin,
+                    skill_root.clone(),
+                    SkillOrigin::SkillsDir,
+                );
+            }
+        }
     }
 
     roots
@@ -3550,6 +3783,7 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
         DefinitionScope::Project,
         DefinitionScope::UserConfigHome,
         DefinitionScope::UserHome,
+        DefinitionScope::Plugin,
     ] {
         let group = skills
             .iter()
@@ -3635,6 +3869,7 @@ fn render_skill_install_report_json(skill: &InstalledSkill) -> Value {
 fn render_mcp_summary_report(
     cwd: &Path,
     servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_provenance: &BTreeMap<String, String>,
 ) -> String {
     let mut lines = vec![
         "MCP".to_string(),
@@ -3648,8 +3883,12 @@ fn render_mcp_summary_report(
 
     lines.push(String::new());
     for (name, server) in servers {
+        let provenance = plugin_provenance
+            .get(name)
+            .map(|plugin_id| format!("  [SudoCode plugin {plugin_id}]"))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {name:<16} {transport:<13} {scope:<7} {summary}",
+            "  {name:<16} {transport:<13} {scope:<7} {summary}{provenance}",
             transport = mcp_transport_label(&server.config),
             scope = config_source_label(server.scope),
             summary = mcp_server_summary(&server.config)
@@ -3662,6 +3901,7 @@ fn render_mcp_summary_report(
 fn render_mcp_summary_report_json(
     cwd: &Path,
     servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    plugin_provenance: &BTreeMap<String, String>,
 ) -> Value {
     json!({
         "kind": "mcp",
@@ -3670,7 +3910,18 @@ fn render_mcp_summary_report_json(
         "configured_servers": servers.len(),
         "servers": servers
             .iter()
-            .map(|(name, server)| mcp_server_json(name, server))
+            .map(|(name, server)| {
+                let mut value = mcp_server_json(name, server);
+                if let (Some(map), Some(plugin_id)) =
+                    (value.as_object_mut(), plugin_provenance.get(name))
+                {
+                    map.insert(
+                        "plugin_source".to_string(),
+                        Value::String(plugin_id.clone()),
+                    );
+                }
+                value
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -3679,6 +3930,7 @@ fn render_mcp_server_report(
     cwd: &Path,
     server_name: &str,
     server: Option<&ScopedMcpServerConfig>,
+    plugin_source: Option<&str>,
 ) -> String {
     let Some(server) = server else {
         return format!(
@@ -3697,6 +3949,9 @@ fn render_mcp_server_report(
             mcp_transport_label(&server.config)
         ),
     ];
+    if let Some(plugin_id) = plugin_source {
+        lines.push(format!("  SudoCode plugin   {plugin_id}"));
+    }
 
     match &server.config {
         McpServerConfig::Stdio(config) => {
@@ -3758,15 +4013,25 @@ fn render_mcp_server_report_json(
     cwd: &Path,
     server_name: &str,
     server: Option<&ScopedMcpServerConfig>,
+    plugin_source: Option<&str>,
 ) -> Value {
     match server {
-        Some(server) => json!({
-            "kind": "mcp",
-            "action": "show",
-            "working_directory": cwd.display().to_string(),
-            "found": true,
-            "server": mcp_server_json(server_name, server),
-        }),
+        Some(server) => {
+            let mut server_value = mcp_server_json(server_name, server);
+            if let (Some(map), Some(plugin_id)) = (server_value.as_object_mut(), plugin_source) {
+                map.insert(
+                    "plugin_source".to_string(),
+                    Value::String(plugin_id.to_string()),
+                );
+            }
+            json!({
+                "kind": "mcp",
+                "action": "show",
+                "working_directory": cwd.display().to_string(),
+                "found": true,
+                "server": server_value,
+            })
+        }
         None => json!({
             "kind": "mcp",
             "action": "show",
@@ -3977,6 +4242,7 @@ fn definition_source_id(source: DefinitionSource) -> &'static str {
         DefinitionSource::UserClaw | DefinitionSource::UserCodex | DefinitionSource::UserClaude => {
             "user_scode"
         }
+        DefinitionSource::Plugin => "plugin",
     }
 }
 
@@ -4210,17 +4476,20 @@ pub fn handle_slash_command(
 mod tests {
     use super::{
         classify_skills_slash_command, handle_agents_slash_command_json,
-        handle_plugins_slash_command, handle_skills_slash_command_json, handle_slash_command,
-        load_agents_from_roots, load_skills_from_roots, render_agents_report,
-        render_agents_report_json, render_mcp_report_json_for, render_plugins_report,
+        handle_plugins_slash_command, handle_skills_slash_command_json,
+        handle_skills_slash_command_with_plugins, handle_slash_command, load_agents_from_roots,
+        load_skills_from_roots, render_agents_report, render_agents_report_json,
+        render_marketplace_error, render_mcp_report_json_for, render_plugins_report,
         render_plugins_report_with_failures, render_skills_report, render_slash_command_help,
-        render_slash_command_help_detail, resolve_skill_path, resume_supported_slash_commands,
+        render_slash_command_help_detail, resolve_skill_invocation_with_plugins,
+        resolve_skill_path, resolve_skill_path_with_plugins, resume_supported_slash_commands,
         slash_command_specs, suggest_slash_commands, validate_slash_command_input,
         DefinitionSource, SkillOrigin, SkillRoot, SkillSlashDispatch, SlashCommand,
     };
     use plugins::{
-        PluginError, PluginKind, PluginLoadFailure, PluginManager, PluginManagerConfig,
-        PluginMetadata, PluginSummary,
+        LoadedPlugin, MarketplaceDiscoveryError, PluginCapabilityMetadata, PluginCapabilitySummary,
+        PluginError, PluginKind, PluginLoadFailure, PluginLoadOutcome, PluginManager,
+        PluginManagerConfig, PluginMetadata, PluginSummary,
     };
     use runtime::{
         CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, MessageRole, Session,
@@ -4311,6 +4580,48 @@ mod tests {
             format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
         )
         .expect("write skill");
+    }
+
+    fn plugin_load_outcome_with_skill_root(path: PathBuf, enabled: bool) -> PluginLoadOutcome {
+        let metadata = PluginMetadata {
+            id: "skill-plugin@external".to_string(),
+            name: "skill-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Skill plugin".to_string(),
+            kind: PluginKind::External,
+            source: "external".to_string(),
+            default_enabled: true,
+            root: path.parent().map(PathBuf::from),
+            display_name: None,
+        };
+        PluginLoadOutcome {
+            loaded_plugins: vec![LoadedPlugin {
+                summary: PluginSummary {
+                    metadata: metadata.clone(),
+                    enabled,
+                },
+                root: metadata.root.clone(),
+                kind: metadata.kind,
+                source: metadata.source.clone(),
+                capabilities: PluginCapabilityMetadata::default(),
+                skill_roots: vec![path],
+                mcp_config_paths: Vec::new(),
+                app_config_paths: Vec::new(),
+                capability_summary: PluginCapabilitySummary {
+                    plugin_id: metadata.id,
+                    display_name: metadata.name,
+                    description: metadata.description,
+                    tool_count: 0,
+                    pre_tool_hook_count: 0,
+                    post_tool_hook_count: 0,
+                    post_tool_use_failure_hook_count: 0,
+                    has_skills: true,
+                    has_mcp_servers: false,
+                    has_apps: false,
+                },
+            }],
+            failures: Vec::new(),
+        }
     }
 
     fn write_legacy_command(root: &Path, name: &str, description: &str) {
@@ -4732,7 +5043,7 @@ mod tests {
         assert!(help.contains("/session"), "help must mention /session");
         assert!(help.contains("/sandbox"));
         assert!(help.contains(
-            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
+            "/plugin [list|available|marketplace|add <path>|install <path>|enable <name>|disable <name>|remove <id>|uninstall <id>|update <id>]"
         ));
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents [list|help]"));
@@ -4801,7 +5112,7 @@ mod tests {
 
         // then
         assert!(help.contains("/plugin"));
-        assert!(help.contains("Summary          Manage Sudo Code plugins"));
+        assert!(help.contains("Summary          Manage SudoCode plugins"));
         assert!(help.contains("Aliases          /plugins, /marketplace"));
         assert!(help.contains("Category         Tools"));
     }
@@ -4972,6 +5283,7 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
+                    display_name: None,
                 },
                 enabled: true,
             },
@@ -4985,6 +5297,7 @@ mod tests {
                     source: "sample".to_string(),
                     default_enabled: false,
                     root: None,
+                    display_name: None,
                 },
                 enabled: false,
             },
@@ -5011,6 +5324,7 @@ mod tests {
                     source: "demo".to_string(),
                     default_enabled: false,
                     root: None,
+                    display_name: None,
                 },
                 enabled: true,
             }],
@@ -5205,6 +5519,67 @@ mod tests {
             resolve_skill_path(&workspace, "/handoff").expect("legacy command should resolve"),
             legacy_commands.join("handoff.md")
         );
+    }
+
+    #[test]
+    fn lists_and_resolves_enabled_plugin_skills_after_existing_roots() {
+        let workspace = temp_dir("plugin-skills");
+        let project_skills = workspace.join(".nexus").join("sudocode").join("skills");
+        let plugin_root = workspace.join("plugin").join("skills");
+
+        write_skill(&project_skills, "plan", "Project planning guidance");
+        write_skill(&plugin_root, "plugin-plan", "Plugin planning guidance");
+        write_skill(&plugin_root, "plan", "Plugin shadowed planning guidance");
+        let outcome = plugin_load_outcome_with_skill_root(plugin_root.clone(), true);
+
+        let report = handle_skills_slash_command_with_plugins(None, &workspace, Some(&outcome))
+            .expect("skills list");
+        assert!(report.contains("Project roots:"));
+        assert!(report.contains("plan · Project planning guidance"));
+        assert!(report.contains("SudoCode plugin roots:"));
+        assert!(report.contains("plugin-plan · Plugin planning guidance"));
+        assert!(
+            report.contains("(shadowed by Project roots) plan · Plugin shadowed planning guidance")
+        );
+
+        assert_eq!(
+            resolve_skill_path_with_plugins(&workspace, "plugin-plan", Some(&outcome))
+                .expect("plugin skill should resolve"),
+            plugin_root.join("plugin-plan").join("SKILL.md")
+        );
+        assert_eq!(
+            resolve_skill_path_with_plugins(&workspace, "plan", Some(&outcome))
+                .expect("project skill should keep precedence"),
+            project_skills.join("plan").join("SKILL.md")
+        );
+        assert_eq!(
+            resolve_skill_invocation_with_plugins(
+                &workspace,
+                Some("plugin-plan detail"),
+                Some(&outcome),
+            )
+            .expect("plugin skill should dispatch"),
+            SkillSlashDispatch::Invoke("$plugin-plan detail".to_string())
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn disabled_plugin_skills_are_not_projected() {
+        let workspace = temp_dir("disabled-plugin-skills");
+        let plugin_root = workspace.join("plugin").join("skills");
+        write_skill(&plugin_root, "plugin-plan", "Plugin planning guidance");
+        let outcome = plugin_load_outcome_with_skill_root(plugin_root, false);
+
+        let report = handle_skills_slash_command_with_plugins(None, &workspace, Some(&outcome))
+            .expect("skills list");
+        assert!(!report.contains("plugin-plan"));
+        assert!(
+            resolve_skill_path_with_plugins(&workspace, "plugin-plan", Some(&outcome)).is_err()
+        );
+
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -5466,7 +5841,7 @@ mod tests {
         .expect("write local settings");
 
         let loader = ConfigLoader::new(&workspace, &config_home);
-        let list = super::render_mcp_report_for(&loader, &workspace, None)
+        let list = super::render_mcp_report_for(&loader, &workspace, None, None)
             .expect("mcp list report should render");
         assert!(list.contains("Configured servers 2"));
         assert!(list.contains("alpha"));
@@ -5478,7 +5853,7 @@ mod tests {
         assert!(list.contains("local"));
         assert!(list.contains("wss://remote.example/mcp"));
 
-        let show = super::render_mcp_report_for(&loader, &workspace, Some("show alpha"))
+        let show = super::render_mcp_report_for(&loader, &workspace, Some("show alpha"), None)
             .expect("mcp show report should render");
         assert!(show.contains("Name              alpha"));
         assert!(show.contains("Command           uvx"));
@@ -5486,12 +5861,12 @@ mod tests {
         assert!(show.contains("Env keys          ALPHA_TOKEN"));
         assert!(show.contains("Tool timeout      1200 ms"));
 
-        let remote = super::render_mcp_report_for(&loader, &workspace, Some("show remote"))
+        let remote = super::render_mcp_report_for(&loader, &workspace, Some("show remote"), None)
             .expect("mcp show remote report should render");
         assert!(remote.contains("Transport         ws"));
         assert!(remote.contains("URL               wss://remote.example/mcp"));
 
-        let missing = super::render_mcp_report_for(&loader, &workspace, Some("show missing"))
+        let missing = super::render_mcp_report_for(&loader, &workspace, Some("show missing"), None)
             .expect("missing report should render");
         assert!(missing.contains("server `missing` is not configured"));
 
@@ -5550,8 +5925,8 @@ mod tests {
         .expect("write local settings");
 
         let loader = ConfigLoader::new(&workspace, &config_home);
-        let list =
-            render_mcp_report_json_for(&loader, &workspace, None).expect("mcp list json render");
+        let list = render_mcp_report_json_for(&loader, &workspace, None, None)
+            .expect("mcp list json render");
         assert_eq!(list["kind"], "mcp");
         assert_eq!(list["action"], "list");
         assert_eq!(list["configured_servers"], 2);
@@ -5566,7 +5941,7 @@ mod tests {
             "wss://remote.example/mcp"
         );
 
-        let show = render_mcp_report_json_for(&loader, &workspace, Some("show alpha"))
+        let show = render_mcp_report_json_for(&loader, &workspace, Some("show alpha"), None)
             .expect("mcp show json render");
         assert_eq!(show["action"], "show");
         assert_eq!(show["found"], true);
@@ -5574,13 +5949,13 @@ mod tests {
         assert_eq!(show["server"]["details"]["env_keys"][0], "ALPHA_TOKEN");
         assert_eq!(show["server"]["details"]["tool_call_timeout_ms"], 1200);
 
-        let missing = render_mcp_report_json_for(&loader, &workspace, Some("show missing"))
+        let missing = render_mcp_report_json_for(&loader, &workspace, Some("show missing"), None)
             .expect("mcp missing json render");
         assert_eq!(missing["found"], false);
         assert_eq!(missing["server_name"], "missing");
 
-        let help =
-            render_mcp_report_json_for(&loader, &workspace, Some("help")).expect("mcp help json");
+        let help = render_mcp_report_json_for(&loader, &workspace, Some("help"), None)
+            .expect("mcp help json");
         assert_eq!(help["action"], "help");
         assert_eq!(help["usage"]["sources"][0], ".nexus/sudocode/settings.json");
 
@@ -5616,7 +5991,7 @@ mod tests {
 
         let loader = ConfigLoader::new(&workspace, &config_home);
         // list action: must return Ok (not Err) with degraded envelope.
-        let list = render_mcp_report_json_for(&loader, &workspace, None)
+        let list = render_mcp_report_json_for(&loader, &workspace, None, None)
             .expect("mcp list should not hard-fail on config parse errors (#144)");
         assert_eq!(list["kind"], "mcp");
         assert_eq!(list["action"], "list");
@@ -5636,7 +6011,7 @@ mod tests {
         assert!(list["servers"].as_array().unwrap().is_empty());
 
         // show action: should also degrade (not hard-fail).
-        let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"))
+        let show = render_mcp_report_json_for(&loader, &workspace, Some("show everything"), None)
             .expect("mcp show should not hard-fail on config parse errors (#144)");
         assert_eq!(show["kind"], "mcp");
         assert_eq!(show["action"], "show");
@@ -5651,7 +6026,7 @@ mod tests {
         let clean_ws = temp_dir("mcp-degrades-144-clean");
         fs::create_dir_all(&clean_ws).expect("clean ws");
         let clean_loader = ConfigLoader::new(&clean_ws, &config_home);
-        let clean_list = render_mcp_report_json_for(&clean_loader, &clean_ws, None)
+        let clean_list = render_mcp_report_json_for(&clean_loader, &clean_ws, None, None)
             .expect("clean mcp list should succeed");
         assert_eq!(
             clean_list["status"].as_str(),
@@ -5731,10 +6106,12 @@ mod tests {
         write_external_plugin(&source_root, "demo", "1.0.0");
 
         let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
         let install = handle_plugins_slash_command(
             Some("install"),
             Some(source_root.to_str().expect("utf8 path")),
             &mut manager,
+            cwd,
         )
         .expect("install command should succeed");
         assert!(install.reload_runtime);
@@ -5743,7 +6120,7 @@ mod tests {
         assert!(install.message.contains("Version          1.0.0"));
         assert!(install.message.contains("Status           enabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(!list.reload_runtime);
         assert!(list.message.contains("demo"));
@@ -5761,33 +6138,36 @@ mod tests {
         write_external_plugin(&source_root, "demo", "1.0.0");
 
         let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
         handle_plugins_slash_command(
             Some("install"),
             Some(source_root.to_str().expect("utf8 path")),
             &mut manager,
+            cwd,
         )
         .expect("install command should succeed");
 
-        let disable = handle_plugins_slash_command(Some("disable"), Some("demo"), &mut manager)
-            .expect("disable command should succeed");
+        let disable =
+            handle_plugins_slash_command(Some("disable"), Some("demo"), &mut manager, cwd)
+                .expect("disable command should succeed");
         assert!(disable.reload_runtime);
         assert!(disable.message.contains("disabled demo@external"));
         assert!(disable.message.contains("Name             demo"));
         assert!(disable.message.contains("Status           disabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(list.message.contains("demo"));
         assert!(list.message.contains("disabled"));
 
-        let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager)
+        let enable = handle_plugins_slash_command(Some("enable"), Some("demo"), &mut manager, cwd)
             .expect("enable command should succeed");
         assert!(enable.reload_runtime);
         assert!(enable.message.contains("enabled demo@external"));
         assert!(enable.message.contains("Name             demo"));
         assert!(enable.message.contains("Status           enabled"));
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
+        let list = handle_plugins_slash_command(Some("list"), None, &mut manager, cwd)
             .expect("list command should succeed");
         assert!(list.message.contains("demo"));
         assert!(list.message.contains("enabled"));
@@ -5807,8 +6187,9 @@ mod tests {
         config.bundled_root = Some(bundled_root.clone());
         let mut manager = PluginManager::new(config);
 
-        let list = handle_plugins_slash_command(Some("list"), None, &mut manager)
-            .expect("list command should succeed");
+        let list =
+            handle_plugins_slash_command(Some("list"), None, &mut manager, Path::new("/tmp"))
+                .expect("list command should succeed");
         assert!(!list.reload_runtime);
         assert!(list.message.contains("starter"));
         assert!(list.message.contains("v0.1.0"));
@@ -5816,5 +6197,349 @@ mod tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn plugin_add_is_alias_for_install() {
+        assert_eq!(
+            SlashCommand::parse("/plugin add /tmp/myplugin"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("add".to_string()),
+                target: Some("/tmp/myplugin".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_remove_is_alias_for_uninstall() {
+        assert_eq!(
+            SlashCommand::parse("/plugin remove demo@external"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("remove".to_string()),
+                target: Some("demo@external".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_parses_without_target() {
+        assert_eq!(
+            SlashCommand::parse("/plugin available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_returns_no_manifest_hint_when_absent() {
+        let config_home = temp_dir("avail-absent-home");
+        let cwd = temp_dir("avail-absent-cwd");
+        fs::create_dir_all(&cwd).expect("cwd dir");
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("No marketplace manifest"),
+            "should report absent manifest: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_shows_nexus_marketplace_entries() {
+        let config_home = temp_dir("avail-nexus-home");
+        let cwd = temp_dir("avail-nexus-cwd");
+        let manifest_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"demo-plugin","version":"1.0.0","description":"A demo plugin","source":"https://example.com/demo"}]}"#,
+        )
+        .expect("write marketplace.json");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("demo-plugin"),
+            "should list demo-plugin: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("A demo plugin"),
+            "should include description: {}",
+            result.message
+        );
+        assert!(
+            result
+                .message
+                .contains(".nexus/sudocode/plugins/marketplace.json"),
+            "should show source path: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_falls_back_to_agents_manifest() {
+        let config_home = temp_dir("avail-agents-home");
+        let cwd = temp_dir("avail-agents-cwd");
+        let manifest_dir = cwd.join(".agents").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"compat-plugin","version":"0.9.0","description":"A compat plugin"}]}"#,
+        )
+        .expect("write marketplace.json");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("available command should succeed");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("compat-plugin"),
+            "should list compat-plugin from agents fallback: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains(".agents/plugins/marketplace.json"),
+            "should show agents source path: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_add_executes_as_install() {
+        let config_home = temp_dir("add-alias-home");
+        let source_root = temp_dir("add-alias-source");
+        write_external_plugin(&source_root, "via-add", "2.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(
+            Some("add"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+            Path::new("/tmp"),
+        )
+        .expect("add command should succeed");
+        assert!(result.reload_runtime, "add should trigger runtime reload");
+        assert!(
+            result.message.contains("installed via-add@external"),
+            "add should report installed: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_remove_executes_as_uninstall() {
+        let config_home = temp_dir("remove-alias-home");
+        let source_root = temp_dir("remove-alias-source");
+        write_external_plugin(&source_root, "to-remove", "1.0.0");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let cwd = Path::new("/tmp");
+        handle_plugins_slash_command(
+            Some("install"),
+            Some(source_root.to_str().expect("utf8 path")),
+            &mut manager,
+            cwd,
+        )
+        .expect("install should succeed");
+
+        let result = handle_plugins_slash_command(
+            Some("remove"),
+            Some("to-remove@external"),
+            &mut manager,
+            cwd,
+        )
+        .expect("remove command should succeed");
+        assert!(
+            result.reload_runtime,
+            "remove should trigger runtime reload"
+        );
+        assert!(
+            result.message.contains("uninstalled to-remove@external"),
+            "remove should report uninstalled: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn plugin_marketplace_subcommand_is_alias_for_available() {
+        // `/plugin marketplace` and `/plugin marketplace available` both map to the
+        // available action — consistent with `scode plugins marketplace` CLI routing.
+        assert_eq!(
+            SlashCommand::parse("/plugin marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/plugins marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/plugins marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn marketplace_available_via_top_level_alias() {
+        // `/marketplace available` uses the top-level `marketplace` command alias.
+        assert_eq!(
+            SlashCommand::parse("/marketplace available"),
+            Ok(Some(SlashCommand::Plugins {
+                action: Some("available".to_string()),
+                target: None,
+            }))
+        );
+        // `/marketplace` with no args also resolves to a list (same as `/plugin`).
+        assert_eq!(
+            SlashCommand::parse("/marketplace"),
+            Ok(Some(SlashCommand::Plugins {
+                action: None,
+                target: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn plugin_available_surfaces_error_for_malformed_nexus_manifest() {
+        let config_home = temp_dir("avail-malformed-home");
+        let cwd = temp_dir("avail-malformed-cwd");
+        let manifest_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        fs::write(manifest_dir.join("marketplace.json"), "not valid json {{{")
+            .expect("write broken manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("command layer should not propagate discovery errors");
+        assert!(!result.reload_runtime);
+        assert!(
+            result.message.contains("Status") && result.message.contains("error"),
+            "malformed manifest should report error status: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("marketplace.json"),
+            "error message should name the broken file: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn plugin_available_nexus_error_not_hidden_by_agents_fallback() {
+        // A broken nexus manifest must surface as an error — not silently fall through
+        // to a valid agents manifest.
+        let config_home = temp_dir("avail-no-fallback-home");
+        let cwd = temp_dir("avail-no-fallback-cwd");
+
+        // Write broken nexus manifest.
+        let nexus_dir = cwd.join(".nexus").join("sudocode").join("plugins");
+        fs::create_dir_all(&nexus_dir).expect("nexus dir");
+        fs::write(nexus_dir.join("marketplace.json"), "{ bad json")
+            .expect("write broken nexus manifest");
+
+        // Write a valid agents fallback.
+        let agents_dir = cwd.join(".agents").join("plugins");
+        fs::create_dir_all(&agents_dir).expect("agents dir");
+        fs::write(
+            agents_dir.join("marketplace.json"),
+            r#"{"plugins":[{"name":"agents-plugin","version":"1.0.0","description":"from agents"}]}"#,
+        )
+        .expect("write valid agents manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = handle_plugins_slash_command(Some("available"), None, &mut manager, &cwd)
+            .expect("command layer should not propagate discovery errors");
+        // Must report an error (broken nexus), not the agents plugin list.
+        assert!(
+            result.message.contains("error"),
+            "broken nexus must surface as error, not fall back: {}",
+            result.message
+        );
+        assert!(
+            !result.message.contains("agents-plugin"),
+            "agents fallback must not hide broken nexus: {}",
+            result.message
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn render_marketplace_error_includes_path_and_detail() {
+        let err = MarketplaceDiscoveryError {
+            path: PathBuf::from("/repo/.nexus/sudocode/plugins/marketplace.json"),
+            detail: "expected `:` at line 1 column 5".to_string(),
+        };
+        let rendered = render_marketplace_error(&err);
+        assert!(rendered.contains("error"), "should include error status");
+        assert!(
+            rendered.contains("marketplace.json"),
+            "should name the file: {rendered}"
+        );
+        assert!(
+            rendered.contains("expected `:`"),
+            "should include parse detail: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plugin_summary_uses_sudocode_terminology() {
+        // The /plugin command spec must say "SudoCode" (not "Sudo Code").
+        let spec = slash_command_specs()
+            .iter()
+            .find(|s| s.name == "plugin")
+            .expect("plugin spec must exist");
+        assert!(
+            spec.summary.contains("SudoCode"),
+            "plugin summary must say SudoCode: {}",
+            spec.summary
+        );
+        assert!(
+            !spec.summary.contains("Sudo Code"),
+            "plugin summary must not say 'Sudo Code': {}",
+            spec.summary
+        );
     }
 }

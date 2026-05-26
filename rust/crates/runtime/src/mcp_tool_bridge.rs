@@ -453,6 +453,7 @@ mod tests {
                         log_path.to_string_lossy().into_owned(),
                     ),
                 ]),
+                current_dir: None,
                 tool_call_timeout_ms: Some(1_000),
             }),
         }

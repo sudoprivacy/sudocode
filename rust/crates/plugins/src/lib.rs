@@ -226,6 +226,10 @@ pub struct PluginMetadata {
     pub source: String,
     pub default_enabled: bool,
     pub root: Option<PathBuf>,
+    /// User-friendly name from manifest `interface.display_name`, when present.
+    /// `scode plugins` shows this in preference to `name` so v2 plugins can
+    /// surface a friendlier label without changing their package id.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2014,20 +2018,21 @@ impl PluginManager {
     ) -> Result<(), PluginError> {
         update_settings_json(&self.settings_path(), |root| {
             if let Some(value) = enabled {
-                if root
+                let has_structured = root
                     .get("plugins")
                     .and_then(Value::as_object)
                     .and_then(|plugins| plugins.get("enabled"))
-                    .is_some()
-                {
+                    .is_some();
+                let has_legacy_only = !has_structured && root.get("enabledPlugins").is_some();
+                if has_legacy_only {
+                    let enabled_plugins = ensure_object(root, "enabledPlugins");
+                    enabled_plugins.insert(plugin_id.to_string(), Value::Bool(value));
+                } else {
                     let plugins = ensure_object(root, "plugins");
                     let enabled_plugins = ensure_object(plugins, "enabled");
                     let mut entry = Map::new();
                     entry.insert("enabled".to_string(), Value::Bool(value));
                     enabled_plugins.insert(plugin_id.to_string(), Value::Object(entry));
-                } else {
-                    let enabled_plugins = ensure_object(root, "enabledPlugins");
-                    enabled_plugins.insert(plugin_id.to_string(), Value::Bool(value));
                 }
             } else {
                 if let Some(enabled_plugins) = root
@@ -2081,6 +2086,7 @@ pub fn builtin_plugins() -> Vec<PluginDefinition> {
             source: BUILTIN_MARKETPLACE.to_string(),
             default_enabled: false,
             root: None,
+            display_name: None,
         },
         hooks: PluginHooks::default(),
         lifecycle: PluginLifecycle::default(),
@@ -2096,6 +2102,11 @@ fn load_plugin_definition(
     marketplace: &str,
 ) -> Result<PluginDefinition, PluginError> {
     let manifest = load_plugin_from_directory(root)?;
+    let display_name = manifest
+        .capabilities
+        .interface
+        .as_ref()
+        .and_then(|interface| interface.display_name.clone());
     let metadata = PluginMetadata {
         id: plugin_id(&manifest.name, marketplace),
         name: manifest.name,
@@ -2105,6 +2116,7 @@ fn load_plugin_definition(
         source,
         default_enabled: manifest.default_enabled,
         root: Some(root.to_path_buf()),
+        display_name,
     };
     let hooks = resolve_hooks(root, &manifest.hooks);
     let lifecycle = resolve_lifecycle(root, &manifest.lifecycle);
@@ -2154,12 +2166,25 @@ fn load_manifest_from_path(
             manifest_path.display()
         ))
     })?;
-    let raw_json: Value = serde_json::from_str(&contents)?;
+    // Surface manifest parse errors with the file path so the user knows
+    // *which* file is broken — bare `error: key must be a string at line 1
+    // column 3` from `scode plugins install <dir>` was untraceable otherwise.
+    let raw_json: Value = serde_json::from_str(&contents).map_err(|error| {
+        PluginError::InvalidManifest(format!(
+            "failed to parse plugin manifest at `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
     let compatibility_errors = detect_claude_code_manifest_contract_gaps(&raw_json);
     if !compatibility_errors.is_empty() {
         return Err(PluginError::ManifestValidation(compatibility_errors));
     }
-    let raw_manifest: RawPluginManifest = serde_json::from_value(raw_json)?;
+    let raw_manifest: RawPluginManifest = serde_json::from_value(raw_json).map_err(|error| {
+        PluginError::InvalidManifest(format!(
+            "invalid plugin manifest at `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
     build_plugin_manifest(root, raw_manifest)
 }
 
@@ -2644,7 +2669,28 @@ fn resolve_hook_entry(root: &Path, entry: &str) -> String {
     if is_literal_command(entry) {
         entry.to_string()
     } else {
-        root.join(entry).display().to_string()
+        normalize_path_components(&root.join(entry))
+            .display()
+            .to_string()
+    }
+}
+
+/// Strip `Component::CurDir` (`.`) segments produced by joining `root` with a
+/// relative entry like `./scripts/block.sh`, so the resolved path renders as
+/// `<root>/scripts/block.sh` instead of `<root>/./scripts/block.sh`. Keeps
+/// `..` and absolute prefixes intact — only collapses literal `.` segments.
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
     }
 }
 
@@ -3577,6 +3623,56 @@ mod tests {
     }
 
     #[test]
+    fn write_enabled_state_defaults_to_structured_on_empty_settings() {
+        let _guard = env_guard();
+        let config_home = temp_dir("empty-settings-structured-default");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        // No settings file exists — first write should produce the new structured shape.
+        manager
+            .write_enabled_state("demo@external", Some(true))
+            .expect("first enable on empty settings should succeed");
+        assert_eq!(
+            load_structured_enabled_plugins(&manager.settings_path()).get("demo@external"),
+            Some(&true),
+            "first enable must write structured `plugins.enabled` form"
+        );
+        assert!(
+            load_enabled_plugins(&manager.settings_path()).is_empty(),
+            "first enable must not write deprecated `enabledPlugins`"
+        );
+        let _ = fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn write_enabled_state_preserves_legacy_plugin_config() {
+        let _guard = env_guard();
+        let config_home = temp_dir("legacy-only-preserved");
+        let manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        write_file(
+            manager.settings_path().as_path(),
+            r#"{
+  "enabledPlugins": {
+    "demo@external": true
+  }
+}"#,
+        );
+        // When only the legacy schema is present, writing should preserve it
+        // (don't proactively migrate — that would invalidate user expectations).
+        manager
+            .write_enabled_state("demo@external", Some(false))
+            .expect("disable should update legacy state");
+        assert_eq!(
+            load_enabled_plugins(&manager.settings_path()).get("demo@external"),
+            Some(&false)
+        );
+        assert!(
+            load_structured_enabled_plugins(&manager.settings_path()).is_empty(),
+            "do not auto-migrate legacy-only settings"
+        );
+        let _ = fs::remove_dir_all(config_home);
+    }
+
+    #[test]
     fn write_enabled_state_updates_existing_structured_plugin_config() {
         let _guard = env_guard();
         let config_home = temp_dir("structured-enabled-state");
@@ -3841,13 +3937,13 @@ mod tests {
             .enable("starter@bundled")
             .expect("enable bundled plugin should succeed");
         assert_eq!(
-            load_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
+            load_structured_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
             Some(&true)
         );
 
         let mut reloaded_config = PluginManagerConfig::new(&config_home);
         reloaded_config.bundled_root = Some(bundled_root.clone());
-        reloaded_config.enabled_plugins = load_enabled_plugins(&manager.settings_path());
+        reloaded_config.enabled_plugins = load_structured_enabled_plugins(&manager.settings_path());
         let reloaded_manager = PluginManager::new(reloaded_config);
         let reloaded = reloaded_manager
             .list_installed_plugins()
@@ -3875,13 +3971,13 @@ mod tests {
             .disable("starter@bundled")
             .expect("disable bundled plugin should succeed");
         assert_eq!(
-            load_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
+            load_structured_enabled_plugins(&manager.settings_path()).get("starter@bundled"),
             Some(&false)
         );
 
         let mut reloaded_config = PluginManagerConfig::new(&config_home);
         reloaded_config.bundled_root = Some(bundled_root.clone());
-        reloaded_config.enabled_plugins = load_enabled_plugins(&manager.settings_path());
+        reloaded_config.enabled_plugins = load_structured_enabled_plugins(&manager.settings_path());
         let reloaded_manager = PluginManager::new(reloaded_config);
         let reloaded = reloaded_manager
             .list_installed_plugins()
@@ -5106,6 +5202,7 @@ mod tests {
                         source: source.clone(),
                         default_enabled: true,
                         root: None,
+                        display_name: None,
                     },
                     enabled: self.enabled,
                 },

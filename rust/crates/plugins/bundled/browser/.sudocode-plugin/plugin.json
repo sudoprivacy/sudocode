@@ -1,0 +1,7 @@
+{
+  "name": "browser",
+  "version": "0.1.0",
+  "description": "AI-native browser powered by ai-dev-browser. Explore websites, discover page structure, take screenshots, and automate interactions via CDP.",
+  "defaultEnabled": true,
+  "skills": "../skills"
+}

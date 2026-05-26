@@ -102,6 +102,13 @@ Overrides:
 - `SCODE_INSTALL_DIR=$HOME/.local/bin sh install.sh` — explicit per-user install (no `sudo`).
 - `sh install.sh --prefix /usr/local` — explicit prefix (no `sudo`).
 
+**China mirror** — faster downloads for mainland China users (checksums still verified against GitHub):
+
+```bash
+SCODE_MIRROR=https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \
+  curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
+```
+
 Already built from source? Skip to [Quick Start](#quick-start).
 
 ## Quick Start

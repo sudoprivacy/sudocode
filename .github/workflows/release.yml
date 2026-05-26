@@ -128,3 +128,25 @@ jobs:
             dist/scode-*
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
+
+      - name: Upload to Tencent COS
+        if: env.TENCENT_SECRET_ID != '' && env.TENCENT_SECRET_KEY != ''
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          pip install coscmd --quiet
+          coscmd config \
+            -a "$TENCENT_SECRET_ID" \
+            -s "$TENCENT_SECRET_KEY" \
+            -b sudoclaw-download-1309794936 \
+            -e cos.accelerate.myqcloud.com
+          for file in dist/scode-*.tar.gz dist/scode-*.zip; do
+            [ -f "$file" ] || continue
+            filename=$(basename "$file")
+            echo "Uploading $filename"
+            coscmd upload "$file" "sudocode/release/latest/$filename"
+          done
+          coscmd upload dist/SHA256SUMS.txt "sudocode/release/latest/SHA256SUMS.txt"
+          echo "Done: https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/"

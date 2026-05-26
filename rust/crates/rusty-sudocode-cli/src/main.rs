@@ -89,8 +89,7 @@ use cli::tool_executor::{permission_policy, CliToolExecutor};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
-    handle_plugins_slash_command,
-    handle_skills_slash_command, handle_skills_slash_command_json,
+    handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
     render_slash_command_help, render_slash_command_help_filtered, resolve_skill_invocation,
     resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
@@ -3448,8 +3447,7 @@ impl LiveCli {
                                         "name".to_string(),
                                         Value::String(plugin.metadata.name.clone()),
                                     );
-                                    if let Some(display_name) = &plugin.metadata.display_name
-                                    {
+                                    if let Some(display_name) = &plugin.metadata.display_name {
                                         entry.insert(
                                             "display_name".to_string(),
                                             Value::String(display_name.clone()),
@@ -3471,10 +3469,8 @@ impl LiveCli {
                                         "source".to_string(),
                                         Value::String(plugin.metadata.source.clone()),
                                     );
-                                    entry.insert(
-                                        "enabled".to_string(),
-                                        Value::Bool(plugin.enabled),
-                                    );
+                                    entry
+                                        .insert("enabled".to_string(), Value::Bool(plugin.enabled));
                                     if let Some(root) = &plugin.metadata.root {
                                         entry.insert(
                                             "root".to_string(),

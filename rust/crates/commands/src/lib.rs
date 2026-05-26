@@ -2507,8 +2507,10 @@ fn merge_plugin_mcp_servers(
             };
             for (server_name, server_config) in plugin_servers {
                 if !servers.contains_key(&server_name) {
-                    provenance
-                        .insert(server_name.clone(), plugin.capability_summary.plugin_id.clone());
+                    provenance.insert(
+                        server_name.clone(),
+                        plugin.capability_summary.plugin_id.clone(),
+                    );
                     servers.insert(server_name, server_config);
                 }
             }
@@ -2846,8 +2848,7 @@ fn render_mcp_report_json_for(
                         runtime_config.mcp().servers(),
                         plugin_load_outcome,
                     );
-                    let mut value =
-                        render_mcp_summary_report_json(cwd, &servers, &provenance);
+                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("ok".to_string()));
                         map.insert("config_load_error".to_string(), Value::Null);
@@ -2858,8 +2859,7 @@ fn render_mcp_report_json_for(
                     let empty = std::collections::BTreeMap::new();
                     let (servers, provenance) =
                         merge_plugin_mcp_servers(&empty, plugin_load_outcome);
-                    let mut value =
-                        render_mcp_summary_report_json(cwd, &servers, &provenance);
+                    let mut value = render_mcp_summary_report_json(cwd, &servers, &provenance);
                     if let Some(map) = value.as_object_mut() {
                         map.insert("status".to_string(), Value::String("degraded".to_string()));
                         map.insert(
@@ -5284,7 +5284,7 @@ mod tests {
                     default_enabled: false,
                     root: None,
                     display_name: None,
-            },
+                },
                 enabled: true,
             },
             PluginSummary {
@@ -5298,7 +5298,7 @@ mod tests {
                     default_enabled: false,
                     root: None,
                     display_name: None,
-            },
+                },
                 enabled: false,
             },
         ]);
@@ -5325,7 +5325,7 @@ mod tests {
                     default_enabled: false,
                     root: None,
                     display_name: None,
-            },
+                },
                 enabled: true,
             }],
             &[PluginLoadFailure::new(
@@ -5925,8 +5925,8 @@ mod tests {
         .expect("write local settings");
 
         let loader = ConfigLoader::new(&workspace, &config_home);
-        let list =
-            render_mcp_report_json_for(&loader, &workspace, None, None).expect("mcp list json render");
+        let list = render_mcp_report_json_for(&loader, &workspace, None, None)
+            .expect("mcp list json render");
         assert_eq!(list["kind"], "mcp");
         assert_eq!(list["action"], "list");
         assert_eq!(list["configured_servers"], 2);
@@ -5954,8 +5954,8 @@ mod tests {
         assert_eq!(missing["found"], false);
         assert_eq!(missing["server_name"], "missing");
 
-        let help =
-            render_mcp_report_json_for(&loader, &workspace, Some("help"), None).expect("mcp help json");
+        let help = render_mcp_report_json_for(&loader, &workspace, Some("help"), None)
+            .expect("mcp help json");
         assert_eq!(help["action"], "help");
         assert_eq!(help["usage"]["sources"][0], ".nexus/sudocode/settings.json");
 

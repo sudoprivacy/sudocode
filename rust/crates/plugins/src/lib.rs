@@ -2669,7 +2669,7 @@ fn resolve_hook_entry(root: &Path, entry: &str) -> String {
     if is_literal_command(entry) {
         entry.to_string()
     } else {
-        normalize_path_components(root.join(entry))
+        normalize_path_components(&root.join(entry))
             .display()
             .to_string()
     }
@@ -2679,7 +2679,7 @@ fn resolve_hook_entry(root: &Path, entry: &str) -> String {
 /// relative entry like `./scripts/block.sh`, so the resolved path renders as
 /// `<root>/scripts/block.sh` instead of `<root>/./scripts/block.sh`. Keeps
 /// `..` and absolute prefixes intact — only collapses literal `.` segments.
-fn normalize_path_components(path: PathBuf) -> PathBuf {
+fn normalize_path_components(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -3943,8 +3943,7 @@ mod tests {
 
         let mut reloaded_config = PluginManagerConfig::new(&config_home);
         reloaded_config.bundled_root = Some(bundled_root.clone());
-        reloaded_config.enabled_plugins =
-            load_structured_enabled_plugins(&manager.settings_path());
+        reloaded_config.enabled_plugins = load_structured_enabled_plugins(&manager.settings_path());
         let reloaded_manager = PluginManager::new(reloaded_config);
         let reloaded = reloaded_manager
             .list_installed_plugins()
@@ -3978,8 +3977,7 @@ mod tests {
 
         let mut reloaded_config = PluginManagerConfig::new(&config_home);
         reloaded_config.bundled_root = Some(bundled_root.clone());
-        reloaded_config.enabled_plugins =
-            load_structured_enabled_plugins(&manager.settings_path());
+        reloaded_config.enabled_plugins = load_structured_enabled_plugins(&manager.settings_path());
         let reloaded_manager = PluginManager::new(reloaded_config);
         let reloaded = reloaded_manager
             .list_installed_plugins()
@@ -5205,7 +5203,7 @@ mod tests {
                         default_enabled: true,
                         root: None,
                         display_name: None,
-            },
+                    },
                     enabled: self.enabled,
                 },
                 root: None,

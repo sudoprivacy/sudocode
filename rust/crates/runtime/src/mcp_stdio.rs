@@ -331,7 +331,10 @@ impl std::fmt::Display for McpServerManagerError {
             Self::PermanentlyFailed {
                 server_name,
                 reason,
-            } => write!(f, "MCP server `{server_name}` permanently disabled: {reason}"),
+            } => write!(
+                f,
+                "MCP server `{server_name}` permanently disabled: {reason}"
+            ),
         }
     }
 }

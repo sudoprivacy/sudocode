@@ -101,6 +101,8 @@ pub trait RuntimeObserver {
 /// Trait implemented by tool dispatchers that execute model-requested tools.
 pub trait ToolExecutor: Send {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    fn set_abort_signal(&mut self, _abort_signal: HookAbortSignal) {}
 }
 
 /// Error returned when a tool invocation fails locally.
@@ -303,6 +305,8 @@ where
 
     #[must_use]
     pub fn with_hook_abort_signal(mut self, hook_abort_signal: HookAbortSignal) -> Self {
+        self.tool_executor
+            .set_abort_signal(hook_abort_signal.clone());
         self.hook_abort_signal = hook_abort_signal;
         self
     }
@@ -550,6 +554,73 @@ where
             // Log cleaned files for debugging (could be sent to observer in future)
             // Note: This is silent cleanup, no token consumption
         }
+        self.finish_current_turn_tracking();
+    }
+
+    fn finish_current_turn_tracking(&mut self) {
+        self.file_tracker.end_turn();
+        self.current_turn_id = None;
+        self.user_request_intent = None;
+    }
+
+    fn push_tool_result_message(
+        &mut self,
+        observer: &mut Option<&mut dyn RuntimeObserver>,
+        iterations: usize,
+        tool_results: &mut Vec<ConversationMessage>,
+        result_message: ConversationMessage,
+    ) -> Result<(), RuntimeError> {
+        notify_tool_result(runtime_observer_mut(observer), &result_message);
+        self.session
+            .push_message(result_message.clone())
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        self.record_tool_finished(iterations, &result_message);
+        tool_results.push(result_message);
+        Ok(())
+    }
+
+    fn push_interrupted_tool_results(
+        &mut self,
+        observer: &mut Option<&mut dyn RuntimeObserver>,
+        iterations: usize,
+        tool_results: &mut Vec<ConversationMessage>,
+        pending_tool_uses: &[(String, String, String)],
+        start_index: usize,
+    ) -> Result<(), RuntimeError> {
+        for (tool_use_id, tool_name, _) in &pending_tool_uses[start_index..] {
+            let result_message = ConversationMessage::tool_result(
+                tool_use_id.clone(),
+                tool_name.clone(),
+                INTERRUPT_MESSAGE,
+                true,
+            );
+            self.push_tool_result_message(observer, iterations, tool_results, result_message)?;
+        }
+        Ok(())
+    }
+
+    fn cancelled_summary(
+        &mut self,
+        assistant_messages: Vec<ConversationMessage>,
+        tool_results: Vec<ConversationMessage>,
+        prompt_cache_events: Vec<PromptCacheEvent>,
+        iterations: usize,
+    ) -> TurnSummary {
+        let cleaned = self.cleanup_current_turn_drafts();
+        if !cleaned.is_empty() {
+            // Log cleaned files for debugging (could be sent to observer in future)
+            // Note: This is silent cleanup, no token consumption
+        }
+        self.finish_current_turn_tracking();
+        TurnSummary {
+            assistant_messages,
+            tool_results,
+            prompt_cache_events,
+            iterations,
+            usage: self.usage_tracker.cumulative_usage(),
+            auto_compaction: None,
+            cancelled: true,
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -772,8 +843,41 @@ where
                 break;
             }
 
-            for (tool_use_id, tool_name, input) in pending_tool_uses {
+            for tool_index in 0..pending_tool_uses.len() {
+                if self.hook_abort_signal.is_aborted() {
+                    self.push_interrupted_tool_results(
+                        &mut observer,
+                        iterations,
+                        &mut tool_results,
+                        &pending_tool_uses,
+                        tool_index,
+                    )?;
+                    return Ok(self.cancelled_summary(
+                        assistant_messages,
+                        tool_results,
+                        prompt_cache_events,
+                        iterations,
+                    ));
+                }
+
+                let (tool_use_id, tool_name, input) = pending_tool_uses[tool_index].clone();
                 let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
+                if self.hook_abort_signal.is_aborted() {
+                    self.push_interrupted_tool_results(
+                        &mut observer,
+                        iterations,
+                        &mut tool_results,
+                        &pending_tool_uses,
+                        tool_index,
+                    )?;
+                    return Ok(self.cancelled_summary(
+                        assistant_messages,
+                        tool_results,
+                        prompt_cache_events,
+                        iterations,
+                    ));
+                }
+
                 let effective_input = pre_hook_result
                     .updated_input()
                     .map_or_else(|| input.clone(), ToOwned::to_owned);
@@ -827,6 +931,34 @@ where
                                 Ok(output) => (output, false),
                                 Err(error) => (error.to_string(), true),
                             };
+                        if self.hook_abort_signal.is_aborted() {
+                            output = merge_hook_feedback(pre_hook_result.messages(), output, true);
+                            let result_message = ConversationMessage::tool_result(
+                                tool_use_id,
+                                tool_name,
+                                output,
+                                true,
+                            );
+                            self.push_tool_result_message(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                result_message,
+                            )?;
+                            self.push_interrupted_tool_results(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                &pending_tool_uses,
+                                tool_index + 1,
+                            )?;
+                            return Ok(self.cancelled_summary(
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
+                                iterations,
+                            ));
+                        }
                         output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -866,21 +998,18 @@ where
                         true,
                     ),
                 };
-                notify_tool_result(runtime_observer_mut(&mut observer), &result_message);
-                self.session
-                    .push_message(result_message.clone())
-                    .map_err(|error| RuntimeError::new(error.to_string()))?;
-                self.record_tool_finished(iterations, &result_message);
-                tool_results.push(result_message);
+                self.push_tool_result_message(
+                    &mut observer,
+                    iterations,
+                    &mut tool_results,
+                    result_message,
+                )?;
             }
         }
 
         let auto_compaction = self.maybe_auto_compact();
 
-        // End file tracking for this turn
-        self.file_tracker.end_turn();
-        self.current_turn_id = None;
-        self.user_request_intent = None;
+        self.finish_current_turn_tracking();
 
         let summary = TurnSummary {
             assistant_messages,
@@ -2037,6 +2166,84 @@ mod tests {
                 ObservedRuntimeEvent::TextDelta("The answer is 4.".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn abort_during_tool_execution_cancels_turn_and_synthesizes_remaining_results() {
+        struct TwoToolUseApiClient {
+            calls: usize,
+        }
+
+        #[async_trait]
+        impl ApiClient for TwoToolUseApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                self.calls += 1;
+                assert_eq!(
+                    self.calls, 1,
+                    "cancelled turn must not make a follow-up API call"
+                );
+                Ok(events_to_stream(vec![
+                    AssistantEvent::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "slow".to_string(),
+                        input: "{}".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "tool-2".to_string(),
+                        name: "later".to_string(),
+                        input: "{}".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        let abort_signal = crate::HookAbortSignal::new();
+        let abort_from_tool = abort_signal.clone();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            TwoToolUseApiClient { calls: 0 },
+            StaticToolExecutor::new()
+                .register("slow", move |_input| {
+                    abort_from_tool.abort();
+                    Ok("partial output".to_string())
+                })
+                .register("later", |_input| {
+                    panic!("remaining tool should be synthesized")
+                }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_hook_abort_signal(abort_signal);
+
+        let summary = runtime
+            .run_turn("use tools", None, None)
+            .await
+            .expect("cancelled tool turn should resolve cleanly");
+
+        assert!(summary.cancelled);
+        assert_eq!(summary.tool_results.len(), 2);
+        let ContentBlock::ToolResult {
+            output, is_error, ..
+        } = &summary.tool_results[0].blocks[0]
+        else {
+            panic!("expected first tool result");
+        };
+        assert!(*is_error);
+        assert_eq!(output, "partial output");
+        let ContentBlock::ToolResult {
+            output, is_error, ..
+        } = &summary.tool_results[1].blocks[0]
+        else {
+            panic!("expected synthesized tool result");
+        };
+        assert!(*is_error);
+        assert!(output.contains("Interrupted"));
     }
 
     #[tokio::test]

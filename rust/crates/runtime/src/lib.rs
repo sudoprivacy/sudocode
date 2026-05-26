@@ -63,8 +63,8 @@ pub mod worker_boot;
 
 pub use acp_sdk_server::AcpError;
 pub use bash::{
-    execute_bash, execute_bash_with_tracking, BashCommandInput, BashCommandOutput,
-    BashWithTrackingResult,
+    execute_bash, execute_bash_with_abort, execute_bash_with_tracking, BashCommandInput,
+    BashCommandOutput, BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};

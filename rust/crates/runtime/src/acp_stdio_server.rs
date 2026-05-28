@@ -79,11 +79,15 @@ fn spawn_stdin_eof_watchdog() {
 /// death, so this never fires while the host is still alive.
 #[cfg(unix)]
 fn spawn_parent_exit_watchdog() {
+    use crate::sandbox::detect_container_environment;
+
     let initial_ppid = nix::unistd::getppid();
 
     // Already orphaned before we even started (parent reaped, reparented to
     // init): nothing to serve, so exit immediately.
-    if initial_ppid.as_raw() <= 1 {
+    // Skip this check in containers where ppid=1 is normal.
+    if initial_ppid.as_raw() <= 1 && !detect_container_environment().in_container {
+        eprintln!("[acp-stdio] Exiting: parent process is PID 1 (orphaned) and not running in a container");
         std::process::exit(0);
     }
 
@@ -91,6 +95,7 @@ fn spawn_parent_exit_watchdog() {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if nix::unistd::getppid() != initial_ppid {
+                eprintln!("[acp-stdio] Exiting: parent process changed (parent exited)");
                 std::process::exit(0);
             }
         }

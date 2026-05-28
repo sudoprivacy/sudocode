@@ -73,7 +73,7 @@ impl AnthropicRuntimeClient {
             runtime: tokio::runtime::Runtime::new()?,
             client,
             session_id: session_id.to_string(),
-            model: config.model.clone(),
+            model: resolved.model_id.clone(),
             enable_tools: config.enable_tools,
             emit_output: config.emit_output,
             allowed_tools: config.allowed_tools.clone(),

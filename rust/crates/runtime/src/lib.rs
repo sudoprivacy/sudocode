@@ -63,8 +63,8 @@ pub mod worker_boot;
 
 pub use acp_sdk_server::AcpError;
 pub use bash::{
-    execute_bash, execute_bash_with_tracking, BashCommandInput, BashCommandOutput,
-    BashWithTrackingResult,
+    execute_bash, execute_bash_with_abort, execute_bash_with_tracking, BashCommandInput,
+    BashCommandOutput, BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
@@ -73,13 +73,14 @@ pub use compact::{
     get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
 };
 pub use config::{
-    default_config_home, ConfigEntry, ConfigError, ConfigLoader, ConfigSource, McpConfigCollection,
-    McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig,
-    McpServerConfig, McpStdioServerConfig, McpTransport, McpWebSocketServerConfig,
-    ModelConfigEntry, ModelProviderMapping, OAuthConfig, ProviderConnectionConfig,
-    ProviderFallbackConfig, ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig,
-    RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig,
-    SudoCodeConfig, WebSearchConfig, SAMPLE_SUDOCODE_JSON, SUDOCODE_SETTINGS_SCHEMA_NAME,
+    default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
+    ConfigSource, McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig,
+    McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+    McpWebSocketServerConfig, ModelConfigEntry, ModelProviderMapping, OAuthConfig,
+    ProviderConnectionConfig, ProviderFallbackConfig, ResolvedPermissionMode, RuntimeConfig,
+    RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
+    ScopedMcpServerConfig, SudoCodeConfig, WebSearchConfig, SAMPLE_SUDOCODE_JSON,
+    SUDOCODE_SETTINGS_SCHEMA_NAME,
 };
 pub use config_validate::{
     check_unsupported_format, format_diagnostics, validate_config_file, ConfigDiagnostic,

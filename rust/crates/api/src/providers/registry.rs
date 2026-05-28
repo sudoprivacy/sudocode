@@ -565,7 +565,13 @@ fn resolve_credential(
                     return Ok(Credential::Token(token.clone()));
                 }
             }
-            // 4. Auth file.
+            // 3. OAuth credentials saved by `scode login` (keychain / credentials.json).
+            if matches!(provider_name, "claude" | "anthropic") {
+                if let Ok(Some(token_set)) = runtime::load_oauth_credentials() {
+                    return Ok(Credential::Token(token_set.access_token));
+                }
+            }
+            // 4. Auth file (legacy fallback).
             if let Some(path) = &connection.auth_file {
                 let expanded = expand_tilde(path);
                 if expanded.exists() {

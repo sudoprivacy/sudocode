@@ -2334,7 +2334,7 @@ impl AcpSdkDelegate {
                 // If still over limit after compaction, return friendly error
                 if new_estimated_tokens > context_limit {
                     let user_message = format!(
-                        "对话内容过长，即使压缩后仍超出模型限制。\n\n\
+                        "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
                         当前估算: {} tokens\n\
                         模型限制: {} tokens\n\n\
                         建议解决方案：\n\
@@ -2348,7 +2348,7 @@ impl AcpSdkDelegate {
             } else {
                 // No messages to compact, but request is too large
                 let user_message = format!(
-                    "当前请求内容过大，超出模型处理限制。\n\n\
+                    "[context_window_exceeded][single_request_too_large] 当前请求内容过大，超出模型处理限制。\n\n\
                     当前估算: {} tokens\n\
                     模型限制: {} tokens\n\n\
                     建议解决方案：\n\
@@ -2377,6 +2377,10 @@ impl AcpSdkDelegate {
             total_tokens: u64::from(usage.total_tokens()),
             cache_read_tokens: Some(u64::from(usage.cache_read_input_tokens)),
             cache_write_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
+            context_window_tokens: Some(context_limit as u64),
+            estimated_session_tokens: Some(
+                estimate_session_tokens(session.runtime.session()) as u64
+            ),
         };
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {

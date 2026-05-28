@@ -179,6 +179,15 @@ fn system_prompt_omits_plugin_section_when_no_plugins_installed() {
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&root).expect("cwd");
 
+    // The bundled `browser` plugin ships with `defaultEnabled: true`, so an
+    // empty config home is not "no enabled plugins". Disable it explicitly to
+    // exercise the path where nothing is enabled and the section is omitted.
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"plugins":{"enabled":{"browser@bundled":{"enabled":false}}}}"#,
+    )
+    .expect("settings.json write");
+
     let output = run_system_prompt(
         &root,
         &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],

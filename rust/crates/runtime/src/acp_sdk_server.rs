@@ -35,6 +35,7 @@ use agent_client_protocol_schema::{
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map};
 
 /// Error type returned by ACP agent implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,11 +62,15 @@ impl AcpError {
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
         };
 
+        if raw_message.contains("[context_window_exceeded]") {
+            return raw_message.clone();
+        }
+
         // Check for specific error types and provide friendly messages
         if raw_message.contains("context_window_blocked")
             || raw_message.contains("Context window blocked")
         {
-            return "图片或文本内容过大，超出了模型的处理限制。\n\n建议解决方案：\n1. 使用较小的图片（建议压缩或缩小图片尺寸）\n2. 简化输入内容\n3. 使用支持更大上下文的模型\n4. 清除对话历史后重新开始".to_string();
+            return "[context_window_exceeded][single_request_too_large] 图片或文本内容过大，超出了模型的处理限制。\n\n建议解决方案：\n1. 使用较小的图片（建议压缩或缩小图片尺寸）\n2. 简化输入内容\n3. 使用支持更大上下文的模型\n4. 清除对话历史后重新开始".to_string();
         }
 
         if raw_message.contains("authentication")
@@ -364,6 +369,8 @@ pub struct PromptUsage {
     pub total_tokens: u64,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    pub context_window_tokens: Option<u64>,
+    pub estimated_session_tokens: Option<u64>,
 }
 
 /// Thread-safe handle to a delegate, shared across async handlers.
@@ -941,11 +948,19 @@ pub(crate) async fn run_acp_on_transport(
                             Ok((stop_reason, prompt_usage)) => {
                                 let mut response = PromptResponse::new(stop_reason);
                                 if let Some(u) = prompt_usage {
+                                    let mut meta = Map::new();
+                                    meta.insert(
+                                        "sudocode".to_string(),
+                                        json!({
+                                            "contextWindowTokens": u.context_window_tokens,
+                                            "estimatedSessionTokens": u.estimated_session_tokens,
+                                        }),
+                                    );
                                     response = response.usage(
                                         Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
                                             .cached_read_tokens(u.cache_read_tokens)
                                             .cached_write_tokens(u.cache_write_tokens),
-                                    );
+                                    ).meta(Some(meta));
                                 }
                                 responder.respond(response)?;
                             }

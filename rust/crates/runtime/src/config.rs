@@ -175,6 +175,7 @@ pub struct RuntimeHookConfig {
     pre_tool_use: Vec<String>,
     post_tool_use: Vec<String>,
     post_tool_use_failure: Vec<String>,
+    hook_sources: BTreeMap<String, String>,
 }
 
 /// Raw permission rule lists grouped by allow, deny, and ask behavior.
@@ -226,6 +227,7 @@ pub struct McpStdioServerConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub current_dir: Option<PathBuf>,
     pub tool_call_timeout_ms: Option<u64>,
 }
 
@@ -703,7 +705,21 @@ impl RuntimeHookConfig {
             pre_tool_use,
             post_tool_use,
             post_tool_use_failure,
+            hook_sources: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn new_with_sources(
+        pre_tool_use: Vec<(String, String)>,
+        post_tool_use: Vec<(String, String)>,
+        post_tool_use_failure: Vec<(String, String)>,
+    ) -> Self {
+        let mut config = Self::default();
+        config.extend_with_sources("PreToolUse", pre_tool_use);
+        config.extend_with_sources("PostToolUse", post_tool_use);
+        config.extend_with_sources("PostToolUseFailure", post_tool_use_failure);
+        config
     }
 
     #[must_use]
@@ -717,6 +733,13 @@ impl RuntimeHookConfig {
     }
 
     #[must_use]
+    pub fn hook_source(&self, event: &str, command: &str) -> Option<&str> {
+        self.hook_sources
+            .get(&hook_source_key(event, command))
+            .map(String::as_str)
+    }
+
+    #[must_use]
     pub fn merged(&self, other: &Self) -> Self {
         let mut merged = self.clone();
         merged.extend(other);
@@ -724,17 +747,48 @@ impl RuntimeHookConfig {
     }
 
     pub fn extend(&mut self, other: &Self) {
-        extend_unique(&mut self.pre_tool_use, other.pre_tool_use());
-        extend_unique(&mut self.post_tool_use, other.post_tool_use());
-        extend_unique(
+        extend_hook_commands(
+            &mut self.pre_tool_use,
+            &mut self.hook_sources,
+            "PreToolUse",
+            other.pre_tool_use(),
+            &other.hook_sources,
+        );
+        extend_hook_commands(
+            &mut self.post_tool_use,
+            &mut self.hook_sources,
+            "PostToolUse",
+            other.post_tool_use(),
+            &other.hook_sources,
+        );
+        extend_hook_commands(
             &mut self.post_tool_use_failure,
+            &mut self.hook_sources,
+            "PostToolUseFailure",
             other.post_tool_use_failure(),
+            &other.hook_sources,
         );
     }
 
     #[must_use]
     pub fn post_tool_use_failure(&self) -> &[String] {
         &self.post_tool_use_failure
+    }
+
+    fn extend_with_sources(&mut self, event: &'static str, entries: Vec<(String, String)>) {
+        let commands = match event {
+            "PreToolUse" => &mut self.pre_tool_use,
+            "PostToolUse" => &mut self.post_tool_use,
+            "PostToolUseFailure" => &mut self.post_tool_use_failure,
+            _ => return,
+        };
+        for (command, source) in entries {
+            if !commands.contains(&command) {
+                self.hook_sources
+                    .insert(hook_source_key(event, &command), source);
+                commands.push(command);
+            }
+        }
     }
 }
 
@@ -863,6 +917,47 @@ fn merge_mcp_servers(
     Ok(())
 }
 
+pub fn load_plugin_mcp_servers(
+    path: &Path,
+) -> Result<BTreeMap<String, ScopedMcpServerConfig>, ConfigError> {
+    let Some(parsed) = read_optional_json_object(path)? else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut servers = BTreeMap::new();
+    if parsed.object.contains_key("mcpServers") {
+        merge_mcp_servers(&mut servers, ConfigSource::Local, &parsed.object, path)?;
+    } else {
+        let mut wrapped = BTreeMap::new();
+        wrapped.insert(
+            "mcpServers".to_string(),
+            JsonValue::Object(parsed.object.clone()),
+        );
+        merge_mcp_servers(&mut servers, ConfigSource::Local, &wrapped, path)?;
+    }
+
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    for server in servers.values_mut() {
+        absolutize_plugin_mcp_server(root, &mut server.config);
+    }
+    Ok(servers)
+}
+
+fn absolutize_plugin_mcp_server(root: &Path, config: &mut McpServerConfig) {
+    let McpServerConfig::Stdio(stdio) = config else {
+        return;
+    };
+    stdio.current_dir = Some(root.to_path_buf());
+    let command_path = Path::new(&stdio.command);
+    if command_path.is_absolute() {
+        return;
+    }
+    if stdio.command.starts_with("./") || stdio.command.starts_with("../") {
+        let command_path = command_path.strip_prefix(".").unwrap_or(command_path);
+        stdio.command = root.join(command_path).display().to_string();
+    }
+}
+
 fn parse_optional_model(root: &JsonValue) -> Option<String> {
     root.as_object()
         .and_then(|object| object.get("model"))
@@ -897,6 +992,7 @@ fn parse_optional_hooks_config_object(
         post_tool_use: optional_string_array(hooks, "PostToolUse", context)?.unwrap_or_default(),
         post_tool_use_failure: optional_string_array(hooks, "PostToolUseFailure", context)?
             .unwrap_or_default(),
+        hook_sources: BTreeMap::new(),
     })
 }
 
@@ -934,7 +1030,8 @@ fn parse_optional_plugin_config(root: &JsonValue) -> Result<RuntimePluginConfig,
 
     let mut config = RuntimePluginConfig::default();
     if let Some(enabled_plugins) = object.get("enabledPlugins") {
-        config.enabled_plugins = parse_bool_map(enabled_plugins, "merged settings.enabledPlugins")?;
+        config.enabled_plugins =
+            parse_plugin_enabled_map(enabled_plugins, "merged settings.enabledPlugins")?;
     }
 
     let Some(plugins_value) = object.get("plugins") else {
@@ -943,7 +1040,10 @@ fn parse_optional_plugin_config(root: &JsonValue) -> Result<RuntimePluginConfig,
     let plugins = expect_object(plugins_value, "merged settings.plugins")?;
 
     if let Some(enabled_value) = plugins.get("enabled") {
-        config.enabled_plugins = parse_bool_map(enabled_value, "merged settings.plugins.enabled")?;
+        config.enabled_plugins.extend(parse_plugin_enabled_map(
+            enabled_value,
+            "merged settings.plugins.enabled",
+        )?);
     }
     config.external_directories =
         optional_string_array(plugins, "externalDirectories", "merged settings.plugins")?
@@ -1276,6 +1376,7 @@ fn parse_mcp_server_config(
             command: expect_string(object, "command", context)?.to_string(),
             args: optional_string_array(object, "args", context)?.unwrap_or_default(),
             env: optional_string_map(object, "env", context)?.unwrap_or_default(),
+            current_dir: optional_string(object, "currentDir", context)?.map(PathBuf::from),
             tool_call_timeout_ms: optional_u64(object, "toolCallTimeoutMs", context)?,
         })),
         "sse" => Ok(McpServerConfig::Sse(parse_mcp_remote_server_config(
@@ -1450,22 +1551,54 @@ fn optional_u64(
     }
 }
 
-fn parse_bool_map(value: &JsonValue, context: &str) -> Result<BTreeMap<String, bool>, ConfigError> {
+/// Parses a `SudoCode` plugin enabled-state map accepting both legacy bool values and
+/// structured object entries.
+///
+/// Accepted forms per entry:
+///   - `"plugin-id@source": true`                  (legacy boolean)
+///   - `"plugin-id@source": { "enabled": true }`   (structured object)
+fn parse_plugin_enabled_map(
+    value: &JsonValue,
+    context: &str,
+) -> Result<BTreeMap<String, bool>, ConfigError> {
     let Some(map) = value.as_object() else {
         return Err(ConfigError::Parse(format!(
             "{context}: expected JSON object"
         )));
     };
-    map.iter()
-        .map(|(key, value)| {
-            value
-                .as_bool()
-                .map(|enabled| (key.clone(), enabled))
-                .ok_or_else(|| {
-                    ConfigError::Parse(format!("{context}: field {key} must be a boolean"))
-                })
-        })
-        .collect()
+    let mut result = BTreeMap::new();
+    for (key, val) in map {
+        if key.is_empty() {
+            return Err(ConfigError::Parse(format!(
+                "{context}: SudoCode plugin id must not be empty"
+            )));
+        }
+        let enabled = match val {
+            JsonValue::Bool(b) => *b,
+            JsonValue::Object(obj) => match obj.get("enabled") {
+                Some(JsonValue::Bool(b)) => *b,
+                Some(other) => {
+                    let rendered = other.render();
+                    return Err(ConfigError::Parse(format!(
+                        "{context}.{key}: SudoCode plugin entry `enabled` must be a boolean, got {rendered}"
+                    )));
+                }
+                None => {
+                    return Err(ConfigError::Parse(format!(
+                        "{context}.{key}: SudoCode plugin object entry must include `enabled`"
+                    )))
+                }
+            },
+            other => {
+                let rendered = other.render();
+                return Err(ConfigError::Parse(format!(
+                    "{context}.{key}: SudoCode plugin entry must be a boolean or object, got {rendered}"
+                )));
+            }
+        };
+        result.insert(key.clone(), enabled);
+    }
+    Ok(result)
 }
 
 fn optional_string_array(
@@ -1542,23 +1675,32 @@ fn deep_merge_objects(
     }
 }
 
-fn extend_unique(target: &mut Vec<String>, values: &[String]) {
+fn extend_hook_commands(
+    target: &mut Vec<String>,
+    target_sources: &mut BTreeMap<String, String>,
+    event: &'static str,
+    values: &[String],
+    value_sources: &BTreeMap<String, String>,
+) {
     for value in values {
-        push_unique(target, value.clone());
+        if !target.contains(value) {
+            if let Some(source) = value_sources.get(&hook_source_key(event, value)) {
+                target_sources.insert(hook_source_key(event, value), source.clone());
+            }
+            target.push(value.clone());
+        }
     }
 }
 
-fn push_unique(target: &mut Vec<String>, value: String) {
-    if !target.iter().any(|existing| existing == &value) {
-        target.push(value);
-    }
+fn hook_source_key(event: &str, command: &str) -> String {
+    format!("{event}\u{0}{command}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_merge_objects, parse_permission_mode_label, ConfigLoader, ConfigSource,
-        McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeHookConfig,
+        deep_merge_objects, load_plugin_mcp_servers, parse_permission_mode_label, ConfigLoader,
+        ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode, RuntimeHookConfig,
         RuntimePluginConfig, SUDOCODE_SETTINGS_SCHEMA_NAME,
     };
     use crate::json::JsonValue;
@@ -1934,6 +2076,74 @@ mod tests {
     }
 
     #[test]
+    fn loads_plugin_mcp_servers_from_wrapped_file_and_resolves_stdio_commands() {
+        let root = temp_dir();
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&plugin_root).expect("plugin dir");
+        let mcp_path = plugin_root.join(".mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{
+              "mcpServers": {
+                "plugin-tools": {
+                  "command": "./bin/server",
+                  "args": ["--stdio"],
+                  "env": {"TOKEN": "x"}
+                }
+              }
+            }"#,
+        )
+        .expect("write plugin mcp config");
+
+        let servers = load_plugin_mcp_servers(&mcp_path).expect("plugin mcp should parse");
+        let server = servers.get("plugin-tools").expect("server exists");
+        assert_eq!(server.scope, ConfigSource::Local);
+        match &server.config {
+            McpServerConfig::Stdio(stdio) => {
+                assert_eq!(
+                    stdio.command,
+                    plugin_root.join("bin/server").display().to_string()
+                );
+                assert_eq!(stdio.args, vec!["--stdio"]);
+                assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("x"));
+                assert_eq!(stdio.current_dir.as_deref(), Some(plugin_root.as_path()));
+            }
+            other => panic!("expected stdio server, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn loads_plugin_mcp_servers_from_raw_server_map() {
+        let root = temp_dir();
+        let plugin_root = root.join("plugin");
+        fs::create_dir_all(&plugin_root).expect("plugin dir");
+        let mcp_path = plugin_root.join(".mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{
+              "remote": {
+                "type": "http",
+                "url": "https://example.test/mcp"
+              }
+            }"#,
+        )
+        .expect("write plugin mcp config");
+
+        let servers = load_plugin_mcp_servers(&mcp_path).expect("plugin mcp should parse");
+        let server = servers.get("remote").expect("server exists");
+        match &server.config {
+            McpServerConfig::Http(remote) => {
+                assert_eq!(remote.url, "https://example.test/mcp");
+            }
+            other => panic!("expected http server, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
     fn infers_http_mcp_servers_from_url_only_config() {
         let root = temp_dir();
         let cwd = root.join("project");
@@ -2057,6 +2267,162 @@ mod tests {
             Some("plugin-cache/installed.json")
         );
         assert_eq!(loaded.plugins().bundled_root(), Some("./bundled-plugins"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn parses_structured_plugin_config_object_entries() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "plugins": {
+                "enabled": {
+                  "enabled-tool@builtin": { "enabled": true },
+                  "disabled-tool@external": { "enabled": false },
+                  "bool-style@bundled": true
+                }
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("enabled-tool@builtin"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("disabled-tool@external"),
+            Some(&false)
+        );
+        assert_eq!(
+            loaded.plugins().enabled_plugins().get("bool-style@bundled"),
+            Some(&true)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn merges_legacy_and_structured_plugin_config_entries() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{
+              "enabledPlugins": {
+                "legacy-only@builtin": true,
+                "overridden@external": true
+              },
+              "plugins": {
+                "enabled": {
+                  "structured-only@bundled": { "enabled": true },
+                  "overridden@external": { "enabled": false }
+                }
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("legacy-only@builtin"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("structured-only@bundled"),
+            Some(&true)
+        );
+        assert_eq!(
+            loaded
+                .plugins()
+                .enabled_plugins()
+                .get("overridden@external"),
+            Some(&false)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rejects_empty_plugin_id_in_plugin_enabled_config() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{ "plugins": { "enabled": { "": true } } }"#,
+        )
+        .expect("write settings");
+
+        let err = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect_err("config should fail");
+
+        assert!(
+            err.to_string()
+                .contains("SudoCode plugin id must not be empty"),
+            "error was: {err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rejects_invalid_type_in_plugin_enabled_config() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{ "plugins": { "enabled": { "my-plugin@external": 42 } } }"#,
+        )
+        .expect("write settings");
+
+        let err = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect_err("config should fail");
+
+        assert!(
+            err.to_string()
+                .contains("SudoCode plugin entry must be a boolean or object"),
+            "error was: {err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

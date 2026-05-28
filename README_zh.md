@@ -264,6 +264,7 @@ scode doctor
 
 - [使用指南](./rust/USAGE.md) —— 命令、集成、本地模型
 - [Rust Workspace](./rust/README.md) —— Crate 架构、Mock parity 测试、内部细节
+- [插件](./docs/plugins_zh.md) —— 编写与使用 `scode` 插件
 - [模型兼容性](./docs/MODEL_COMPATIBILITY.md) —— 提供方 / 模型支持矩阵
 - [容器构建](./docs/container.md) —— `Containerfile` 使用方式
 

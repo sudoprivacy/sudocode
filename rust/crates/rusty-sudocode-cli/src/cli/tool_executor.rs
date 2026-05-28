@@ -46,6 +46,7 @@ pub(crate) struct CliToolExecutor {
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     spinner_pause: Option<Arc<AtomicBool>>,
     question_prompter: Option<Box<dyn QuestionPrompter>>,
+    abort_signal: Option<runtime::HookAbortSignal>,
 }
 
 impl CliToolExecutor {
@@ -63,6 +64,7 @@ impl CliToolExecutor {
             mcp_state,
             spinner_pause: None,
             question_prompter: None,
+            abort_signal: None,
         }
     }
 
@@ -189,14 +191,18 @@ impl ToolExecutor for CliToolExecutor {
             self.execute_runtime_tool(tool_name, value)
         } else {
             self.tool_registry
-                .execute(tool_name, &value)
+                .execute_with_abort(tool_name, &value, self.abort_signal.as_ref())
                 .map_err(ToolError::new)
         };
         match result {
             Ok(output) => {
                 if self.emit_output {
                     self.pause_spinner();
-                    let formatted = format_tool_result(tool_name, &output, false);
+                    let interrupted = self
+                        .abort_signal
+                        .as_ref()
+                        .is_some_and(runtime::HookAbortSignal::is_aborted);
+                    let formatted = format_tool_result(tool_name, &output, interrupted);
                     writeln!(io::stdout(), "{formatted}")
                         .and_then(|()| io::stdout().flush())
                         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -216,6 +222,10 @@ impl ToolExecutor for CliToolExecutor {
                 Err(error)
             }
         }
+    }
+
+    fn set_abort_signal(&mut self, abort_signal: runtime::HookAbortSignal) {
+        self.abort_signal = Some(abort_signal);
     }
 }
 

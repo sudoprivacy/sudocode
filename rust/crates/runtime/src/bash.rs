@@ -6,14 +6,21 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
-use tokio::time::timeout;
 
+use crate::hooks::HookAbortSignal;
 use crate::lane_events::{LaneEvent, ShipMergeMethod, ShipProvenance};
 use crate::sandbox::{
     build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
 };
 use crate::ConfigLoader;
+
+/// Default foreground subprocess timeout for tool-backed command execution.
+///
+/// Tool schemas still allow callers to provide a larger or smaller per-call
+/// timeout; this default prevents unbounded foreground commands from pinning a
+/// turn indefinitely when the model omits that field.
+pub const DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS: u64 = 120_000;
 
 /// Input schema for the built-in bash execution tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +76,14 @@ pub struct BashCommandOutput {
 
 /// Executes a shell command with the requested sandbox settings.
 pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
+    execute_bash_with_abort(input, None)
+}
+
+/// Executes a shell command and cooperates with turn cancellation.
+pub fn execute_bash_with_abort(
+    input: BashCommandInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> io::Result<BashCommandOutput> {
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
@@ -104,11 +119,21 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     // creating a nested runtime which would panic.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| {
-            handle.block_on(execute_bash_async(input, sandbox_status, cwd))
+            handle.block_on(execute_bash_async(
+                input,
+                sandbox_status,
+                cwd,
+                abort_signal.cloned(),
+            ))
         })
     } else {
         let runtime = Builder::new_current_thread().enable_all().build()?;
-        runtime.block_on(execute_bash_async(input, sandbox_status, cwd))
+        runtime.block_on(execute_bash_async(
+            input,
+            sandbox_status,
+            cwd,
+            abort_signal.cloned(),
+        ))
     }
 }
 
@@ -178,6 +203,7 @@ async fn execute_bash_async(
     input: BashCommandInput,
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
+    abort_signal: Option<HookAbortSignal>,
 ) -> io::Result<BashCommandOutput> {
     // Detect and emit ship provenance for git push operations
     detect_and_emit_ship_prepared(&input.command);
@@ -185,34 +211,42 @@ async fn execute_bash_async(
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     command.stdin(Stdio::null());
 
-    let output_result = if let Some(timeout_ms) = input.timeout {
-        match timeout(Duration::from_millis(timeout_ms), command.output()).await {
-            Ok(result) => (result?, false),
-            Err(_) => {
-                return Ok(BashCommandOutput {
-                    stdout: String::new(),
-                    stderr: format!("Command exceeded timeout of {timeout_ms} ms"),
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(true),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: Some(sandbox_status),
-                });
-            }
+    command.kill_on_drop(true);
+    let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
+    let output = command.output();
+    tokio::pin!(output);
+    let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::pin!(timeout_sleep);
+    let abort_wait = async {
+        if let Some(signal) = abort_signal {
+            signal.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
         }
-    } else {
-        (command.output().await?, false)
+    };
+    tokio::pin!(abort_wait);
+
+    let output = tokio::select! {
+        biased;
+        () = &mut abort_wait => {
+            return Ok(interrupted_bash_output(
+                "Command interrupted by user",
+                "interrupted",
+                input.dangerously_disable_sandbox,
+                sandbox_status,
+            ));
+        }
+        () = &mut timeout_sleep => {
+            return Ok(interrupted_bash_output(
+                &format!("Command exceeded timeout of {timeout_ms} ms"),
+                "timeout",
+                input.dangerously_disable_sandbox,
+                sandbox_status,
+            ));
+        }
+        result = &mut output => result?,
     };
 
-    let (output, interrupted) = output_result;
     let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
     let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
@@ -228,7 +262,7 @@ async fn execute_bash_async(
         stdout,
         stderr,
         raw_output_path: None,
-        interrupted,
+        interrupted: false,
         is_image: None,
         background_task_id: None,
         backgrounded_by_user: None,
@@ -241,6 +275,31 @@ async fn execute_bash_async(
         persisted_output_size: None,
         sandbox_status: Some(sandbox_status),
     })
+}
+
+fn interrupted_bash_output(
+    stderr: &str,
+    return_code_interpretation: &str,
+    dangerously_disable_sandbox: Option<bool>,
+    sandbox_status: SandboxStatus,
+) -> BashCommandOutput {
+    BashCommandOutput {
+        stdout: String::new(),
+        stderr: stderr.to_string(),
+        raw_output_path: None,
+        interrupted: true,
+        is_image: None,
+        background_task_id: None,
+        backgrounded_by_user: None,
+        assistant_auto_backgrounded: None,
+        dangerously_disable_sandbox,
+        return_code_interpretation: Some(return_code_interpretation.to_string()),
+        no_output_expected: Some(true),
+        structured_content: None,
+        persisted_output_path: None,
+        persisted_output_size: None,
+        sandbox_status: Some(sandbox_status),
+    }
 }
 
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
@@ -362,7 +421,8 @@ pub fn execute_bash_with_tracking(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_bash, BashCommandInput};
+    use super::{execute_bash, execute_bash_with_abort, BashCommandInput};
+    use crate::hooks::HookAbortSignal;
     use crate::sandbox::FilesystemIsolationMode;
 
     #[test]
@@ -401,6 +461,34 @@ mod tests {
         .expect("bash command should execute");
 
         assert!(!output.sandbox_status.expect("sandbox status").enabled);
+    }
+
+    #[test]
+    fn abort_signal_interrupts_foreground_command() {
+        let abort_signal = HookAbortSignal::new();
+        abort_signal.abort();
+
+        let output = execute_bash_with_abort(
+            BashCommandInput {
+                command: String::from("sleep 5"),
+                timeout: Some(10_000),
+                description: None,
+                run_in_background: Some(false),
+                dangerously_disable_sandbox: Some(false),
+                namespace_restrictions: Some(false),
+                isolate_network: Some(false),
+                filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+                allowed_mounts: None,
+            },
+            Some(&abort_signal),
+        )
+        .expect("bash command should return interrupted output");
+
+        assert!(output.interrupted);
+        assert_eq!(
+            output.return_code_interpretation.as_deref(),
+            Some("interrupted")
+        );
     }
 }
 

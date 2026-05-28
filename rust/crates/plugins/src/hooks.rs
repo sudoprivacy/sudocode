@@ -4,7 +4,7 @@ use std::process::Command;
 
 use serde_json::json;
 
-use crate::{PluginError, PluginHooks, PluginRegistry};
+use crate::{PluginError, PluginHookEntry, PluginRegistry, ProjectedPluginHooks};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
@@ -58,17 +58,17 @@ impl HookRunResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookRunner {
-    hooks: PluginHooks,
+    hooks: ProjectedPluginHooks,
 }
 
 impl HookRunner {
     #[must_use]
-    pub fn new(hooks: PluginHooks) -> Self {
+    pub fn new(hooks: ProjectedPluginHooks) -> Self {
         Self { hooks }
     }
 
     pub fn from_registry(plugin_registry: &PluginRegistry) -> Result<Self, PluginError> {
-        Ok(Self::new(plugin_registry.aggregated_hooks()?))
+        Ok(Self::new(plugin_registry.projected_hooks()?))
     }
 
     #[must_use]
@@ -120,13 +120,13 @@ impl HookRunner {
 
     fn run_commands(
         event: HookEvent,
-        commands: &[String],
+        entries: &[PluginHookEntry],
         tool_name: &str,
         tool_input: &str,
         tool_output: Option<&str>,
         is_error: bool,
     ) -> HookRunResult {
-        if commands.is_empty() {
+        if entries.is_empty() {
             return HookRunResult::allow(Vec::new());
         }
 
@@ -134,9 +134,9 @@ impl HookRunner {
 
         let mut messages = Vec::new();
 
-        for command in commands {
+        for entry in entries {
             match Self::run_command(
-                command,
+                entry,
                 event,
                 tool_name,
                 tool_input,
@@ -151,7 +151,11 @@ impl HookRunner {
                 }
                 HookCommandOutcome::Deny { message } => {
                     messages.push(message.unwrap_or_else(|| {
-                        format!("{} hook denied tool `{tool_name}`", event.as_str())
+                        format!(
+                            "SudoCode plugin `{}` {} hook denied tool `{tool_name}`",
+                            entry.plugin_id,
+                            event.as_str()
+                        )
                     }));
                     return HookRunResult {
                         denied: true,
@@ -175,7 +179,7 @@ impl HookRunner {
 
     #[allow(clippy::too_many_arguments)]
     fn run_command(
-        command: &str,
+        entry: &PluginHookEntry,
         event: HookEvent,
         tool_name: &str,
         tool_input: &str,
@@ -183,6 +187,9 @@ impl HookRunner {
         is_error: bool,
         payload: &str,
     ) -> HookCommandOutcome {
+        let command = &entry.command;
+        let plugin_id = &entry.plugin_id;
+
         let mut child = shell_command(command);
         child.stdin(std::process::Stdio::piped());
         child.stdout(std::process::Stdio::piped());
@@ -205,6 +212,7 @@ impl HookRunner {
                     Some(2) => HookCommandOutcome::Deny { message },
                     Some(code) => HookCommandOutcome::Failed {
                         message: format_hook_warning(
+                            plugin_id,
                             command,
                             code,
                             message.as_deref(),
@@ -213,7 +221,7 @@ impl HookRunner {
                     },
                     None => HookCommandOutcome::Failed {
                         message: format!(
-                            "{} hook `{command}` terminated by signal while handling `{tool_name}`",
+                            "SudoCode plugin `{plugin_id}` {} hook `{command}` terminated by signal while handling `{tool_name}`",
                             event.as_str()
                         ),
                     },
@@ -221,7 +229,7 @@ impl HookRunner {
             }
             Err(error) => HookCommandOutcome::Failed {
                 message: format!(
-                    "{} hook `{command}` failed to start for `{tool_name}`: {error}",
+                    "SudoCode plugin `{plugin_id}` {} hook `{command}` failed to start for `{tool_name}`: {error}",
                     event.as_str()
                 ),
             },
@@ -266,8 +274,15 @@ fn parse_tool_input(tool_input: &str) -> serde_json::Value {
     serde_json::from_str(tool_input).unwrap_or_else(|_| json!({ "raw": tool_input }))
 }
 
-fn format_hook_warning(command: &str, code: i32, stdout: Option<&str>, stderr: &str) -> String {
-    let mut message = format!("Hook `{command}` exited with status {code}");
+fn format_hook_warning(
+    plugin_id: &str,
+    command: &str,
+    code: i32,
+    stdout: Option<&str>,
+    stderr: &str,
+) -> String {
+    let mut message =
+        format!("SudoCode plugin `{plugin_id}` hook `{command}` exited with status {code}");
     if let Some(stdout) = stdout.filter(|stdout| !stdout.is_empty()) {
         message.push_str(": ");
         message.push_str(stdout);
@@ -367,7 +382,7 @@ impl CommandWithStdin {
 #[cfg(test)]
 mod tests {
     use super::{HookRunResult, HookRunner};
-    use crate::{PluginManager, PluginManagerConfig};
+    use crate::{PluginHookEntry, PluginManager, PluginManagerConfig, ProjectedPluginHooks};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -496,10 +511,134 @@ mod tests {
     }
 
     #[test]
+    fn relative_hook_paths_without_dot_slash_are_rooted() {
+        // given: manifest path looks like a path, not a shell snippet
+        let config_home = temp_dir("config-relative-hook");
+        let source_root = temp_dir("source-relative-hook");
+        fs::create_dir_all(source_root.join(".claude-plugin")).expect("manifest dir");
+        fs::create_dir_all(source_root.join("hooks")).expect("hooks dir");
+        let pre_path = source_root.join("hooks").join("pre.sh");
+        fs::write(&pre_path, "#!/bin/sh\nprintf '%s\\n' relative-rooted\n")
+            .expect("write pre hook");
+        make_executable(&pre_path);
+        fs::write(
+            source_root.join(".claude-plugin").join("plugin.json"),
+            r#"{
+  "name": "relative-hook",
+  "version": "1.0.0",
+  "description": "relative hook path",
+  "hooks": {
+    "PreToolUse": ["hooks/pre.sh"]
+  }
+}"#,
+        )
+        .expect("write manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(source_root.to_str().expect("utf8 path"))
+            .expect("plugin install should succeed");
+        let registry = manager.plugin_registry().expect("registry should build");
+
+        // when
+        let projected = registry.projected_hooks().expect("projected hooks");
+        let runner = HookRunner::from_registry(&registry).expect("plugin hooks should load");
+
+        // then
+        assert_eq!(projected.pre_tool_use.len(), 1);
+        let resolved = Path::new(&projected.pre_tool_use[0].command);
+        assert!(
+            resolved.starts_with(config_home.join("plugins").join("installed")),
+            "relative hook path should resolve inside installed plugin root, got: {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.ends_with("hooks/pre.sh"),
+            "relative hook path should keep its manifest-relative suffix, got: {}",
+            resolved.display()
+        );
+        assert_eq!(
+            runner.run_pre_tool_use("Read", r#"{"path":"README.md"}"#),
+            HookRunResult::allow(vec!["relative-rooted".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(source_root);
+    }
+
+    #[test]
+    fn disabled_plugin_hooks_are_excluded() {
+        // given: two plugins installed, first disabled
+        let config_home = temp_dir("config-disabled");
+        let first_source_root = temp_dir("source-disabled-a");
+        let second_source_root = temp_dir("source-disabled-b");
+        write_hook_plugin(
+            &first_source_root,
+            "disabled-plugin",
+            "should not appear pre",
+            "should not appear post",
+            "should not appear fail",
+        );
+        write_hook_plugin(
+            &second_source_root,
+            "enabled-plugin",
+            "enabled pre",
+            "enabled post",
+            "enabled fail",
+        );
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        manager
+            .install(first_source_root.to_str().expect("utf8 path"))
+            .expect("first install");
+        let first_id = manager
+            .install(second_source_root.to_str().expect("utf8 path"))
+            .expect("second install");
+        // disable the first plugin (sorted by id, so "disabled-plugin@external" comes first)
+        let all = manager.list_plugins().expect("list");
+        let disabled_id = all
+            .iter()
+            .find(|p| p.metadata.name == "disabled-plugin")
+            .map(|p| p.metadata.id.clone())
+            .expect("disabled plugin should be installed");
+        manager.disable(&disabled_id).expect("disable");
+
+        let registry = manager.plugin_registry().expect("registry");
+        let projected = registry.projected_hooks().expect("projected hooks");
+
+        // then: only the enabled plugin's hooks are present
+        assert!(
+            projected
+                .pre_tool_use
+                .iter()
+                .all(|e| e.plugin_id != disabled_id),
+            "disabled plugin must not contribute pre-tool-use hooks"
+        );
+        assert!(
+            !projected.pre_tool_use.is_empty(),
+            "enabled plugin hooks must be present"
+        );
+        assert!(
+            projected
+                .pre_tool_use
+                .iter()
+                .all(|e| e.plugin_id == first_id.plugin_id),
+            "all hooks should belong to the enabled plugin"
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(first_source_root);
+        let _ = fs::remove_dir_all(second_source_root);
+    }
+
+    #[test]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         // given
-        let runner = HookRunner::new(crate::PluginHooks {
-            pre_tool_use: vec!["printf 'blocked by plugin'; exit 2".to_string()],
+        let runner = HookRunner::new(ProjectedPluginHooks {
+            pre_tool_use: vec![PluginHookEntry {
+                plugin_id: "test@builtin".to_string(),
+                command: "printf 'blocked by plugin'; exit 2".to_string(),
+            }],
             post_tool_use: Vec::new(),
             post_tool_use_failure: Vec::new(),
         });
@@ -513,12 +652,46 @@ mod tests {
     }
 
     #[test]
+    fn deny_with_no_output_includes_plugin_provenance() {
+        // given: hook exits 2 with no stdout — fallback message should name the plugin
+        let runner = HookRunner::new(ProjectedPluginHooks {
+            pre_tool_use: vec![PluginHookEntry {
+                plugin_id: "my-guard@external".to_string(),
+                command: "exit 2".to_string(),
+            }],
+            post_tool_use: Vec::new(),
+            post_tool_use_failure: Vec::new(),
+        });
+
+        // when
+        let result = runner.run_pre_tool_use("Bash", r#"{"command":"rm -rf /"}"#);
+
+        // then
+        assert!(result.is_denied());
+        let msg = &result.messages()[0];
+        assert!(
+            msg.contains("SudoCode plugin"),
+            "deny message must say 'SudoCode plugin', got: {msg}"
+        );
+        assert!(
+            msg.contains("my-guard@external"),
+            "deny message must contain plugin id, got: {msg}"
+        );
+    }
+
+    #[test]
     fn propagates_plugin_hook_failures() {
         // given
-        let runner = HookRunner::new(crate::PluginHooks {
+        let runner = HookRunner::new(ProjectedPluginHooks {
             pre_tool_use: vec![
-                "printf 'broken plugin hook'; exit 1".to_string(),
-                "printf 'later plugin hook'".to_string(),
+                PluginHookEntry {
+                    plugin_id: "test@builtin".to_string(),
+                    command: "printf 'broken plugin hook'; exit 1".to_string(),
+                },
+                PluginHookEntry {
+                    plugin_id: "test@builtin".to_string(),
+                    command: "printf 'later plugin hook'".to_string(),
+                },
             ],
             post_tool_use: Vec::new(),
             post_tool_use_failure: Vec::new(),
@@ -537,6 +710,34 @@ mod tests {
             .messages()
             .iter()
             .any(|message| message == "later plugin hook"));
+    }
+
+    #[test]
+    fn failure_message_includes_plugin_provenance() {
+        // given
+        let runner = HookRunner::new(ProjectedPluginHooks {
+            pre_tool_use: vec![PluginHookEntry {
+                plugin_id: "my-plugin@external".to_string(),
+                command: "exit 1".to_string(),
+            }],
+            post_tool_use: Vec::new(),
+            post_tool_use_failure: Vec::new(),
+        });
+
+        // when
+        let result = runner.run_pre_tool_use("Bash", r#"{"command":"pwd"}"#);
+
+        // then
+        assert!(result.is_failed());
+        let msg = &result.messages()[0];
+        assert!(
+            msg.contains("SudoCode plugin"),
+            "failure message must say 'SudoCode plugin', got: {msg}"
+        );
+        assert!(
+            msg.contains("my-plugin@external"),
+            "failure message must contain plugin id, got: {msg}"
+        );
     }
 
     #[test]
@@ -560,5 +761,69 @@ mod tests {
                 "{script} must have at least one execute bit set, got mode {mode:#o}"
             );
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hook_path_outside_plugin_root_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // given: a plugin whose manifest points to a script outside its root
+        let config_home = temp_dir("config-escape");
+        let plugin_root = temp_dir("plugin-escape-root");
+        let outside_dir = temp_dir("outside-escape");
+
+        fs::create_dir_all(&plugin_root).expect("plugin root");
+        fs::create_dir_all(&outside_dir).expect("outside dir");
+        fs::create_dir_all(plugin_root.join(".claude-plugin")).expect("manifest dir");
+
+        // create the target script outside the plugin root
+        let outside_script = outside_dir.join("evil.sh");
+        fs::write(&outside_script, "#!/bin/sh\necho evil\n").expect("write evil.sh");
+        fs::set_permissions(&outside_script, fs::Permissions::from_mode(0o755))
+            .expect("chmod evil.sh");
+
+        // manifest uses an absolute path that escapes the plugin root
+        fs::write(
+            plugin_root.join(".claude-plugin").join("plugin.json"),
+            format!(
+                r#"{{
+  "name": "escape-test",
+  "version": "1.0.0",
+  "description": "path escape test",
+  "hooks": {{
+    "PreToolUse": ["{outside}"]
+  }}
+}}"#,
+                outside = outside_script.display()
+            ),
+        )
+        .expect("write manifest");
+
+        let mut manager = PluginManager::new(PluginManagerConfig::new(&config_home));
+        let result = manager.install(plugin_root.to_str().expect("utf8 path"));
+
+        // then: install may succeed but validate must reject the escaped path
+        let registry = if result.is_ok() {
+            manager.plugin_registry().expect("registry")
+        } else {
+            // install itself may reject — either outcome is acceptable
+            let _ = fs::remove_dir_all(config_home);
+            let _ = fs::remove_dir_all(plugin_root);
+            let _ = fs::remove_dir_all(outside_dir);
+            return;
+        };
+        let err = registry
+            .projected_hooks()
+            .expect_err("escaped hook path must be rejected at validation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be within the plugin root"),
+            "error must mention plugin root confinement, got: {msg}"
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(plugin_root);
+        let _ = fs::remove_dir_all(outside_dir);
     }
 }

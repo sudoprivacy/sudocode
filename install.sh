@@ -6,6 +6,11 @@
 # Environment overrides:
 #   SCODE_VERSION       Release tag to install (e.g. v0.1.5). Default: latest.
 #   SCODE_INSTALL_DIR   Directory to install into. Overrides default resolution.
+#   SCODE_MIRROR        Base URL for archive downloads (no trailing slash).
+#                       Use this to point at a mirror (e.g. Tencent COS) for
+#                       faster downloads in China. The checksum file is always
+#                       fetched from GitHub Releases for security.
+#                       Example: https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
 #   NO_COLOR            Disable ANSI color output when set.
 #
 # Flags:
@@ -74,6 +79,8 @@ ${C_BOLD}FLAGS${C_RESET}
 ${C_BOLD}ENVIRONMENT${C_RESET}
     SCODE_VERSION       Pin a release tag (default: latest).
     SCODE_INSTALL_DIR   Override install dir (same as --prefix). No sudo.
+    SCODE_MIRROR        Mirror base URL for archive downloads (no trailing slash).
+                        Checksums are still fetched from GitHub for security.
     NO_COLOR            Disable colored output.
 
 ${C_BOLD}EXAMPLES${C_RESET}
@@ -81,6 +88,9 @@ ${C_BOLD}EXAMPLES${C_RESET}
     SCODE_VERSION=v0.1.5 sh install.sh
     sh install.sh --prefix /usr/local
     sh install.sh --no-sudo
+    # China mirror (faster in mainland China):
+    SCODE_MIRROR=https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \\
+      curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
 EOF
 }
 
@@ -259,10 +269,17 @@ fi
 # ----- artifact selection ----------------------------------------------------
 TARGET=$(detect_target)
 ARCHIVE="scode-${TARGET}.tar.gz"
-ARCHIVE_URL="${DOWNLOAD_BASE}/${VERSION}/${ARCHIVE}"
+# Checksums always come from GitHub Releases (authoritative source).
 CHECKSUM_URL="${DOWNLOAD_BASE}/${VERSION}/${CHECKSUM_FILE}"
+# Archive may come from a mirror when SCODE_MIRROR is set.
+if [ -n "${SCODE_MIRROR:-}" ]; then
+    ARCHIVE_URL="${SCODE_MIRROR%/}/${ARCHIVE}"
+else
+    ARCHIVE_URL="${DOWNLOAD_BASE}/${VERSION}/${ARCHIVE}"
+fi
 
 info "target: ${C_BOLD}${TARGET}${C_RESET}"
+[ -n "${SCODE_MIRROR:-}" ] && info "mirror: ${C_BOLD}${SCODE_MIRROR%/}${C_RESET}"
 if [ "$INSTALL_DIR_FORCED" -eq 1 ]; then
     info "install dir: ${INSTALL_DIR}"
 else

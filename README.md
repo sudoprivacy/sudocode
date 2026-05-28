@@ -102,6 +102,13 @@ Overrides:
 - `SCODE_INSTALL_DIR=$HOME/.local/bin sh install.sh` — explicit per-user install (no `sudo`).
 - `sh install.sh --prefix /usr/local` — explicit prefix (no `sudo`).
 
+**China mirror** — faster downloads for mainland China users (checksums still verified against GitHub):
+
+```bash
+SCODE_MIRROR=https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \
+  curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
+```
+
 Already built from source? Skip to [Quick Start](#quick-start).
 
 ## Quick Start
@@ -285,6 +292,7 @@ scode doctor
 
 - [Usage Guide](./rust/USAGE.md) — commands, integration, local models
 - [Rust Workspace](./rust/README.md) — crate architecture, mock parity harness, internals
+- [Plugins](./docs/plugins.md) — authoring and using `scode` plugins
 - [Model Compatibility](./docs/MODEL_COMPATIBILITY.md) — provider/model support matrix
 - [Container build](./docs/container.md) — `Containerfile` usage
 

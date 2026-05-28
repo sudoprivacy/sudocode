@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crate::config::{McpOAuthConfig, McpServerConfig, ScopedMcpServerConfig};
 use crate::mcp::{mcp_server_signature, mcp_tool_prefix, normalize_name_for_mcp};
@@ -20,6 +21,7 @@ pub struct McpStdioTransport {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub current_dir: Option<PathBuf>,
     pub tool_call_timeout_ms: Option<u64>,
 }
 
@@ -78,6 +80,7 @@ impl McpClientTransport {
                 command: config.command.clone(),
                 args: config.args.clone(),
                 env: config.env.clone(),
+                current_dir: config.current_dir.clone(),
                 tool_call_timeout_ms: config.tool_call_timeout_ms,
             }),
             McpServerConfig::Sse(config) => Self::Sse(McpRemoteTransport {
@@ -148,6 +151,7 @@ mod tests {
                 command: "uvx".to_string(),
                 args: vec!["mcp-server".to_string()],
                 env: BTreeMap::from([("TOKEN".to_string(), "secret".to_string())]),
+                current_dir: None,
                 tool_call_timeout_ms: Some(15_000),
             }),
         };
@@ -167,6 +171,7 @@ mod tests {
                     transport.env.get("TOKEN").map(String::as_str),
                     Some("secret")
                 );
+                assert_eq!(transport.current_dir, None);
                 assert_eq!(transport.tool_call_timeout_ms, Some(15_000));
             }
             other => panic!("expected stdio transport, got {other:?}"),

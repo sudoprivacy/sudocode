@@ -12,11 +12,11 @@ use api::{
     OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
-use plugins::PluginTool;
+use plugins::{PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginTool};
 use reqwest::blocking::Client;
 use runtime::{
-    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
-    grep_search, load_system_prompt,
+    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
+    glob_search, grep_search, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -27,10 +27,10 @@ use runtime::{
     worker_boot::{WorkerReadySnapshot, WorkerRegistry, WorkerTaskReceipt},
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker,
-    LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole,
-    PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError,
-    Session, StdFsBackend, SystemPrompt, TaskPacket, ToolError, ToolExecutor,
+    ConversationRuntime, GrepSearchInput, HookAbortSignal, LaneCommitProvenance, LaneEvent,
+    LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport,
+    MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig,
+    RuntimeError, Session, StdFsBackend, SystemPrompt, TaskPacket, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -451,8 +451,17 @@ impl GlobalToolRegistry {
     }
 
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
+        self.execute_with_abort(name, input, None)
+    }
+
+    pub fn execute_with_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        abort_signal: Option<&HookAbortSignal>,
+    ) -> Result<String, String> {
         if mvp_tool_specs().iter().any(|spec| spec.name == name) {
-            return execute_tool_with_enforcer(self.enforcer.as_ref(), name, input);
+            return execute_tool_with_enforcer(self.enforcer.as_ref(), name, input, abort_signal);
         }
         self.plugin_tools
             .iter()
@@ -505,7 +514,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting the command (default 120000)." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
                     "dangerouslyDisableSandbox": { "type": "boolean" },
@@ -819,7 +828,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "code": { "type": "string" },
                     "language": { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 1 }
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting execution (default 120000)." }
                 },
                 "required": ["code", "language"],
                 "additionalProperties": false
@@ -833,7 +842,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1 },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting the command (default 120000)." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" }
                 },
@@ -1338,13 +1347,22 @@ pub fn enforce_permission_check(
 }
 
 pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input)
+    execute_tool_with_abort(name, input, None)
+}
+
+pub fn execute_tool_with_abort(
+    name: &str,
+    input: &Value,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<String, String> {
+    execute_tool_with_enforcer(None, name, input, abort_signal)
 }
 
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
     input: &Value,
+    abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
     match name {
         "bash" => {
@@ -1352,7 +1370,7 @@ fn execute_tool_with_enforcer(
             let bash_input: BashCommandInput = from_value(input)?;
             let classified_mode = classify_bash_permission(&bash_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_bash(bash_input)
+            run_bash(bash_input, abort_signal)
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -1381,7 +1399,7 @@ fn execute_tool_with_enforcer(
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
-        "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
+        "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
@@ -1389,13 +1407,13 @@ fn execute_tool_with_enforcer(
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input).and_then(run_repl),
+        "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, abort_signal)),
         "PowerShell" => {
             // Parse input to get the command for permission classification
             let ps_input: PowerShellInput = from_value(input)?;
             let classified_mode = classify_powershell_permission(&ps_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_powershell(ps_input)
+            run_powershell(ps_input, abort_signal)
         }
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
@@ -2165,12 +2183,17 @@ fn has_dangerous_paths(command: &str) -> bool {
     false
 }
 
-fn run_bash(input: BashCommandInput) -> Result<String, String> {
+fn run_bash(
+    input: BashCommandInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<String, String> {
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
         return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
     }
-    serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    serde_json::to_string_pretty(
+        &execute_bash_with_abort(input, abort_signal).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn workspace_test_branch_preflight(command: &str) -> Option<BashCommandOutput> {
@@ -2428,8 +2451,8 @@ fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
     to_pretty_json(execute_notebook_edit(input)?)
 }
 
-fn run_sleep(input: SleepInput) -> Result<String, String> {
-    to_pretty_json(execute_sleep(input)?)
+fn run_sleep(input: SleepInput, abort_signal: Option<&HookAbortSignal>) -> Result<String, String> {
+    to_pretty_json(execute_sleep(input, abort_signal)?)
 }
 
 fn run_brief(input: BriefInput) -> Result<String, String> {
@@ -2452,8 +2475,8 @@ fn run_structured_output(input: StructuredOutputInput) -> Result<String, String>
     to_pretty_json(execute_structured_output(input)?)
 }
 
-fn run_repl(input: ReplInput) -> Result<String, String> {
-    to_pretty_json(execute_repl(input)?)
+fn run_repl(input: ReplInput, abort_signal: Option<&HookAbortSignal>) -> Result<String, String> {
+    to_pretty_json(execute_repl(input, abort_signal)?)
 }
 
 /// Classify `PowerShell` command permission based on command type and path.
@@ -2528,8 +2551,11 @@ fn is_within_workspace(path: &str) -> bool {
     !path.starts_with("/") && !path.starts_with("\\") && !path.starts_with("..")
 }
 
-fn run_powershell(input: PowerShellInput) -> Result<String, String> {
-    to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
+fn run_powershell(
+    input: PowerShellInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<String, String> {
+    to_pretty_json(execute_powershell(input, abort_signal).map_err(|error| error.to_string())?)
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
@@ -3757,9 +3783,48 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    match commands::resolve_skill_path(&cwd, skill) {
+    let plugin_load_outcome = load_plugin_outcome_for_cwd(&cwd);
+    match commands::resolve_skill_path_with_plugins(&cwd, skill, plugin_load_outcome.as_ref()) {
         Ok(path) => Ok(path),
         Err(_) => resolve_skill_path_from_compat_roots(skill),
+    }
+}
+
+fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
+    let loader = ConfigLoader::default_for(cwd);
+    let runtime_config = loader.load().ok()?;
+    let plugin_settings = runtime_config.plugins();
+    let mut plugin_config = PluginManagerConfig::new(loader.config_home().to_path_buf());
+    plugin_config.enabled_plugins = plugin_settings.enabled_plugins().clone();
+    plugin_config.external_dirs = plugin_settings
+        .external_directories()
+        .iter()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path))
+        .collect();
+    plugin_config.install_root = plugin_settings
+        .install_root()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+    plugin_config.registry_path = plugin_settings
+        .registry_path()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+    plugin_config.bundled_root = plugin_settings
+        .bundled_root()
+        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+
+    PluginManager::new(plugin_config)
+        .plugin_registry_report()
+        .ok()
+        .map(|report| report.load_outcome())
+}
+
+fn resolve_plugin_config_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else if value.starts_with('.') {
+        cwd.join(path)
+    } else {
+        config_home.join(path)
     }
 }
 
@@ -5455,7 +5520,7 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value)
+        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value, None)
             .map_err(ToolError::new)
     }
 }
@@ -5999,14 +6064,25 @@ fn cell_kind(cell: &serde_json::Value) -> Option<NotebookCellType> {
 const MAX_SLEEP_DURATION_MS: u64 = 300_000;
 
 #[allow(clippy::needless_pass_by_value)]
-fn execute_sleep(input: SleepInput) -> Result<SleepOutput, String> {
+fn execute_sleep(
+    input: SleepInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<SleepOutput, String> {
     if input.duration_ms > MAX_SLEEP_DURATION_MS {
         return Err(format!(
             "duration_ms {} exceeds maximum allowed sleep of {MAX_SLEEP_DURATION_MS}ms",
             input.duration_ms,
         ));
     }
-    std::thread::sleep(Duration::from_millis(input.duration_ms));
+    let started = Instant::now();
+    let duration = Duration::from_millis(input.duration_ms);
+    while started.elapsed() < duration {
+        if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
+            return Err(String::from("Sleep interrupted by user"));
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
     Ok(SleepOutput {
         duration_ms: input.duration_ms,
         message: format!("Slept for {}ms", input.duration_ms),
@@ -6261,7 +6337,10 @@ fn execute_structured_output(
     })
 }
 
-fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
+fn execute_repl(
+    input: ReplInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<ReplOutput, String> {
     if input.code.trim().is_empty() {
         return Err(String::from("code must not be empty"));
     }
@@ -6275,35 +6354,37 @@ fn execute_repl(input: ReplInput) -> Result<ReplOutput, String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let output = if let Some(timeout_ms) = input.timeout_ms {
-        let mut child = process.spawn().map_err(|error| error.to_string())?;
-        loop {
-            if child
-                .try_wait()
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                break child
-                    .wait_with_output()
-                    .map_err(|error| error.to_string())?;
-            }
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                child.kill().map_err(|error| error.to_string())?;
-                child
-                    .wait_with_output()
-                    .map_err(|error| error.to_string())?;
-                return Err(format!(
-                    "REPL execution exceeded timeout of {timeout_ms} ms"
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    let timeout_ms = input
+        .timeout_ms
+        .unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
+    let mut child = process.spawn().map_err(|error| error.to_string())?;
+    let output = loop {
+        if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
+            child.kill().map_err(|error| error.to_string())?;
+            child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+            return Err(String::from("REPL execution interrupted by user"));
         }
-    } else {
-        process
-            .spawn()
+        if child
+            .try_wait()
             .map_err(|error| error.to_string())?
-            .wait_with_output()
-            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            break child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+        }
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            child.kill().map_err(|error| error.to_string())?;
+            child
+                .wait_with_output()
+                .map_err(|error| error.to_string())?;
+            return Err(format!(
+                "REPL execution exceeded timeout of {timeout_ms} ms"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     };
 
     Ok(ReplOutput {
@@ -6665,7 +6746,10 @@ fn iso8601_timestamp() -> String {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCommandOutput> {
+fn execute_powershell(
+    input: PowerShellInput,
+    abort_signal: Option<&HookAbortSignal>,
+) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
         return Ok(output);
@@ -6676,6 +6760,7 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
         &input.command,
         input.timeout,
         input.run_in_background,
+        abort_signal,
     )
 }
 
@@ -6710,6 +6795,7 @@ fn execute_shell_command(
     command: &str,
     timeout: Option<u64>,
     run_in_background: Option<bool>,
+    abort_signal: Option<&HookAbortSignal>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
         let child = std::process::Command::new(shell)
@@ -6750,90 +6836,93 @@ fn execute_shell_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if let Some(timeout_ms) = timeout {
-        let mut child = process.spawn()?;
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let output = child.wait_with_output()?;
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    raw_output_path: None,
-                    interrupted: false,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: status
-                        .code()
-                        .filter(|code| *code != 0)
-                        .map(|code| format!("exit_code:{code}")),
-                    no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                let _ = child.kill();
-                let output = child.wait_with_output()?;
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let stderr = if stderr.trim().is_empty() {
-                    format!("Command exceeded timeout of {timeout_ms} ms")
-                } else {
-                    format!(
-                        "{}
-Command exceeded timeout of {timeout_ms} ms",
-                        stderr.trim_end()
-                    )
-                };
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr,
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(false),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    let timeout_ms = timeout.unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
+    let mut child = process.spawn()?;
+    let started = Instant::now();
+    loop {
+        if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            let stderr = append_status_line(
+                &String::from_utf8_lossy(&output.stderr),
+                "Command interrupted by user",
+            );
+            return Ok(runtime::BashCommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr,
+                raw_output_path: None,
+                interrupted: true,
+                is_image: None,
+                background_task_id: None,
+                backgrounded_by_user: None,
+                assistant_auto_backgrounded: None,
+                dangerously_disable_sandbox: None,
+                return_code_interpretation: Some(String::from("interrupted")),
+                no_output_expected: Some(false),
+                structured_content: None,
+                persisted_output_path: None,
+                persisted_output_size: None,
+                sandbox_status: None,
+            });
         }
+        if let Some(status) = child.try_wait()? {
+            let output = child.wait_with_output()?;
+            return Ok(runtime::BashCommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                raw_output_path: None,
+                interrupted: false,
+                is_image: None,
+                background_task_id: None,
+                backgrounded_by_user: None,
+                assistant_auto_backgrounded: None,
+                dangerously_disable_sandbox: None,
+                return_code_interpretation: status
+                    .code()
+                    .filter(|code| *code != 0)
+                    .map(|code| format!("exit_code:{code}")),
+                no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
+                structured_content: None,
+                persisted_output_path: None,
+                persisted_output_size: None,
+                sandbox_status: None,
+            });
+        }
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            let stderr = append_status_line(
+                &String::from_utf8_lossy(&output.stderr),
+                &format!("Command exceeded timeout of {timeout_ms} ms"),
+            );
+            return Ok(runtime::BashCommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr,
+                raw_output_path: None,
+                interrupted: true,
+                is_image: None,
+                background_task_id: None,
+                backgrounded_by_user: None,
+                assistant_auto_backgrounded: None,
+                dangerously_disable_sandbox: None,
+                return_code_interpretation: Some(String::from("timeout")),
+                no_output_expected: Some(false),
+                structured_content: None,
+                persisted_output_path: None,
+                persisted_output_size: None,
+                sandbox_status: None,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
 
-    let output = process.output()?;
-    Ok(runtime::BashCommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
-        return_code_interpretation: output
-            .status
-            .code()
-            .filter(|code| *code != 0)
-            .map(|code| format!("exit_code:{code}")),
-        no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-        structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
-        sandbox_status: None,
-    })
+fn append_status_line(stderr: &str, status_line: &str) -> String {
+    if stderr.trim().is_empty() {
+        status_line.to_string()
+    } else {
+        format!("{}\n{status_line}", stderr.trim_end())
+    }
 }
 
 fn resolve_cell_index(
@@ -8178,7 +8267,7 @@ mod tests {
         fs::create_dir_all(&skill_dir).expect("skill dir should exist");
         fs::write(
             skill_dir.join("SKILL.md"),
-            "# help\n\nGuide on using oh-my-codex plugin\n",
+            "# help\n\nGuide on using SudoCode plugin\n",
         )
         .expect("skill file should exist");
         let original_home = std::env::var("HOME").ok();
@@ -8202,7 +8291,7 @@ mod tests {
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
-            .contains("Guide on using oh-my-codex plugin"));
+            .contains("Guide on using SudoCode plugin"));
 
         let dollar_result = execute_tool(
             "Skill",
@@ -8273,6 +8362,86 @@ mod tests {
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
+    }
+
+    #[test]
+    fn skill_tool_resolves_enabled_plugin_skills() {
+        let _guard = env_guard();
+        let root = temp_path("plugin-skill-tool");
+        let home = root.join("home");
+        let config_home = root.join("config");
+        let workspace = root.join("workspace");
+        let plugin_root = config_home
+            .join("plugins")
+            .join("installed")
+            .join("skill-plugin");
+        let skill_dir = plugin_root.join("skills").join("plugin-plan");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(plugin_root.join(".sudocode-plugin"))
+            .expect("manifest dir should exist");
+        fs::write(
+            plugin_root.join(".sudocode-plugin").join("plugin.json"),
+            r#"{
+  "name": "skill-plugin",
+  "version": "1.0.0",
+  "description": "Plugin skill fixture",
+  "skills": "./skills"
+}"#,
+        )
+        .expect("manifest should exist");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: plugin-plan\ndescription: Plugin planning guidance\n---\n# plugin-plan\n",
+        )
+        .expect("skill file should exist");
+        fs::create_dir_all(&config_home).expect("config home should exist");
+        fs::write(
+            config_home.join("settings.json"),
+            r#"{"plugins":{"enabled":{"skill-plugin@external":true}}}"#,
+        )
+        .expect("settings should exist");
+
+        let original_home = std::env::var("HOME").ok();
+        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
+        let original_codex_home = std::env::var("CODEX_HOME").ok();
+        let original_claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &config_home);
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::set_current_dir(&workspace).expect("set cwd");
+
+        let result = execute_tool("Skill", &json!({ "skill": "$plugin-plan" }))
+            .expect("plugin skill should resolve");
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let path = output["path"].as_str().expect("path");
+        assert_eq!(
+            fs::canonicalize(path).expect("resolved skill path should exist"),
+            fs::canonicalize(skill_dir.join("SKILL.md")).expect("expected skill path should exist")
+        );
+        assert_eq!(output["description"], "Plugin planning guidance");
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_config_home {
+            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
+            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
+        }
+        match original_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match original_claude_config_dir {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        fs::remove_dir_all(root).expect("temp tree should clean up");
     }
 
     #[test]

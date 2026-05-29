@@ -1032,9 +1032,19 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
         if text.is_empty() && tool_calls.is_empty() && !include_reasoning {
             Vec::new()
         } else {
+            // When tool_calls are present, use empty string instead of None for content.
+            // Some providers (e.g., Gemini via OpenAI-compatible endpoint) fail to handle
+            // content: null properly, resulting in empty SSE stream responses.
+            let content = if !text.is_empty() {
+                Some(text)
+            } else if !tool_calls.is_empty() {
+                Some(String::new())
+            } else {
+                None
+            };
             let mut msg = serde_json::json!({
                 "role": "assistant",
-                "content": (!text.is_empty()).then_some(text),
+                "content": content,
             });
             if include_reasoning {
                 msg["reasoning_content"] = json!(reasoning);

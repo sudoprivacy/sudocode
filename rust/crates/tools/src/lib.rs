@@ -6833,6 +6833,13 @@ fn execute_shell_command(
         .arg("-Command")
         .arg(command);
     process
+        // Detach stdin so the child never inherits the parent's stdin. In ACP
+        // stdio mode the parent's stdin is the JSON-RPC protocol stream; a child
+        // (or grandchild such as `python` spawned by `py`) that inherits it can
+        // block reading input that never arrives — and the post-kill
+        // `wait_with_output()` then hangs forever waiting on the still-open pipe,
+        // making the timeout appear ineffective.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 

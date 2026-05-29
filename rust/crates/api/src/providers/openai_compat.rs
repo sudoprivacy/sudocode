@@ -2514,6 +2514,63 @@ mod tests {
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k1.5"), "kimi-k1.5");
     }
 
+    #[test]
+    fn translate_message_assistant_with_tool_calls_uses_empty_string_for_content() {
+        // When assistant message has tool_calls but no text, content should be ""
+        // not null, for compatibility with providers like Gemini that fail on content: null
+        use crate::types::InputContentBlock;
+
+        let message = InputMessage {
+            role: "assistant".to_string(),
+            content: vec![InputContentBlock::ToolUse {
+                id: "call_123".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "/tmp/test"}),
+                thought_signature: None,
+            }],
+        };
+
+        let translated = super::translate_message(&message, "gpt-4o");
+        assert_eq!(translated.len(), 1);
+        let msg = &translated[0];
+        assert_eq!(msg["role"], json!("assistant"));
+        // Content should be empty string, not null
+        assert_eq!(msg["content"], json!(""), "content should be empty string when tool_calls present");
+        assert!(msg.get("tool_calls").is_some());
+        let tool_calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], json!("call_123"));
+        assert_eq!(tool_calls[0]["function"]["name"], json!("read_file"));
+    }
+
+    #[test]
+    fn translate_message_assistant_with_text_and_tool_calls_preserves_text() {
+        // When assistant message has both text and tool_calls, content should be the text
+        use crate::types::InputContentBlock;
+
+        let message = InputMessage {
+            role: "assistant".to_string(),
+            content: vec![
+                InputContentBlock::Text {
+                    text: "Let me read that file".to_string(),
+                },
+                InputContentBlock::ToolUse {
+                    id: "call_456".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "/tmp/test"}),
+                    thought_signature: None,
+                },
+            ],
+        };
+
+        let translated = super::translate_message(&message, "gemini-2.0-flash");
+        assert_eq!(translated.len(), 1);
+        let msg = &translated[0];
+        assert_eq!(msg["role"], json!("assistant"));
+        assert_eq!(msg["content"], json!("Let me read that file"));
+        assert!(msg.get("tool_calls").is_some());
+    }
+
     fn assistant_history_with_thinking_request(model: &str) -> MessageRequest {
         MessageRequest {
             model: model.to_string(),

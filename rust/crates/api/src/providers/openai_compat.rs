@@ -2535,7 +2535,11 @@ mod tests {
         let msg = &translated[0];
         assert_eq!(msg["role"], json!("assistant"));
         // Content should be empty string, not null
-        assert_eq!(msg["content"], json!(""), "content should be empty string when tool_calls present");
+        assert_eq!(
+            msg["content"],
+            json!(""),
+            "content should be empty string when tool_calls present"
+        );
         assert!(msg.get("tool_calls").is_some());
         let tool_calls = msg["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);

@@ -348,13 +348,18 @@ fn resolve_model_for_mode<'a>(
     auth_mode: Option<&str>,
 ) -> Option<&'a ModelConfigEntry> {
     let key = alias.trim().to_ascii_lowercase();
+    let mut fallback: Option<&'a ModelConfigEntry> = None;
+
     // Direct alias lookup first.
     if let Some(entry) = config.models.get(&key) {
-        return Some(entry);
+        if auth_mode.map_or(true, |mode| entry.providers.contains_key(mode)) {
+            return Some(entry);
+        }
+        fallback = Some(entry);
     }
+
     // Fall back: match by wire model ID in any provider mapping.
     // When an auth mode is specified, prefer entries that support it.
-    let mut fallback: Option<&'a ModelConfigEntry> = None;
     for entry in config.models.values() {
         let has_wire_match = entry
             .providers
@@ -405,13 +410,15 @@ pub fn resolve_provider_from_config(
     config: &SudoCodeConfig,
 ) -> Result<ResolvedProvider, ApiError> {
     let alias_lower = model_alias.trim().to_ascii_lowercase();
+    let explicit_auth_str = explicit_auth.map(AuthMode::as_str);
 
     // 1. Look up the model in config.
-    let model_config = resolve_model(config, &alias_lower).ok_or_else(|| {
-        ApiError::Configuration(format!(
-            "model alias '{model_alias}' not found in sudocode.json"
-        ))
-    })?;
+    let model_config =
+        resolve_model_for_mode(config, &alias_lower, explicit_auth_str).ok_or_else(|| {
+            ApiError::Configuration(format!(
+                "model alias '{model_alias}' not found in sudocode.json"
+            ))
+        })?;
 
     // 2. Determine the auth mode to use.
     let auth_mode_str = if let Some(mode) = explicit_auth {
@@ -856,6 +863,74 @@ mod tests {
             Credential::ApiKey("sk-test-key".to_string())
         );
         assert_eq!(resolved.model_id, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn explicit_auth_prefers_matching_wire_model_entry_when_direct_alias_lacks_mode() {
+        let mut config = sample_config();
+
+        config.auth_modes.get_mut("api-key").unwrap().insert(
+            "custom-openai".to_string(),
+            ProviderConnectionConfig {
+                base_url: "https://model.sudorouter.ai/v1".to_string(),
+                api_key: Some("sk-custom-key".to_string()),
+                api_key_env: None,
+                token: None,
+                token_env: None,
+                auth_file: None,
+            },
+        );
+
+        let mut proxy_only_providers = BTreeMap::new();
+        proxy_only_providers.insert(
+            "proxy".to_string(),
+            ModelProviderMapping {
+                provider: "sudorouter".to_string(),
+                model: "gpt-5.4".to_string(),
+                api: Some("openai-completions".to_string()),
+            },
+        );
+        config.models.insert(
+            "gpt-5.4".to_string(),
+            ModelConfigEntry {
+                alias: "gpt-5.4".to_string(),
+                name: "GPT 5.4".to_string(),
+                input: vec!["text".to_string()],
+                providers: proxy_only_providers,
+            },
+        );
+
+        let mut custom_providers = BTreeMap::new();
+        custom_providers.insert(
+            "api-key".to_string(),
+            ModelProviderMapping {
+                provider: "custom-openai".to_string(),
+                model: "gpt-5.4".to_string(),
+                api: Some("openai-completions".to_string()),
+            },
+        );
+        config.models.insert(
+            "custom-openai/gpt-5.4".to_string(),
+            ModelConfigEntry {
+                alias: "custom-openai/gpt-5.4".to_string(),
+                name: "Custom GPT 5.4".to_string(),
+                input: vec!["text".to_string()],
+                providers: custom_providers,
+            },
+        );
+
+        let resolved = resolve_provider_from_config("gpt-5.4", Some(AuthMode::ApiKey), &config)
+            .expect("api-key wire-model fallback should resolve custom provider");
+        assert_eq!(resolved.base_url, "https://model.sudorouter.ai/v1");
+        assert_eq!(resolved.model_id, "gpt-5.4");
+        assert_eq!(
+            resolved.credential,
+            Credential::ApiKey("sk-custom-key".to_string())
+        );
+
+        let direct = resolve_provider_from_config("gpt-5.4", None, &config)
+            .expect("default lookup should still prefer the direct alias");
+        assert_eq!(direct.base_url, "https://hk.sudorouter.ai/v1");
     }
 
     #[test]

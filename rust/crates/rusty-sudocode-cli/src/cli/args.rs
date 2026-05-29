@@ -986,15 +986,23 @@ pub(crate) fn resolve_model_alias(model: &str) -> &str {
 pub(crate) fn resolve_model_alias_with_config(model: &str) -> String {
     let trimmed = model.trim();
     let config = load_sudocode_config_for_current_dir();
-    if let Some(entry) = config.models.get(&trimmed.to_ascii_lowercase()) {
-        if let Some(mapping) = entry.providers.values().next() {
-            return mapping.model.clone();
-        }
+    if let Some(alias) = resolve_config_model_alias(trimmed, &config) {
+        return alias;
     }
     if let Some(resolved) = config_alias_for_current_dir(trimmed) {
         return resolve_model_alias(&resolved).to_string();
     }
     resolve_model_alias(trimmed).to_string()
+}
+
+fn resolve_config_model_alias(model: &str, config: &api::SudoCodeConfig) -> Option<String> {
+    let trimmed = model.trim();
+    let entry = config.models.get(&trimmed.to_ascii_lowercase())?;
+    if entry.alias.trim().is_empty() {
+        Some(trimmed.to_string())
+    } else {
+        Some(entry.alias.clone())
+    }
 }
 
 pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
@@ -1167,6 +1175,7 @@ pub(crate) fn resolve_repl_model(cli_model: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn parse_words(words: &[&str]) -> CliAction {
         let args = words
@@ -1174,6 +1183,41 @@ mod tests {
             .map(|word| (*word).to_string())
             .collect::<Vec<_>>();
         parse_args(&args).expect("parse cli args")
+    }
+
+    #[test]
+    fn config_model_alias_is_preserved_instead_of_expanding_to_wire_model() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "api-key".to_string(),
+            api::ModelProviderMapping {
+                provider: "custom-openai".to_string(),
+                model: "gpt-5.4".to_string(),
+                api: Some("openai-completions".to_string()),
+            },
+        );
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "custom-openai/gpt-5.4".to_string(),
+            api::ModelConfigEntry {
+                alias: "custom-openai/gpt-5.4".to_string(),
+                name: "custom-openai/gpt-5.4".to_string(),
+                input: vec!["text".to_string()],
+                providers,
+            },
+        );
+
+        let config = api::SudoCodeConfig {
+            auth_modes: BTreeMap::new(),
+            models,
+            web_search: Default::default(),
+        };
+
+        assert_eq!(
+            resolve_config_model_alias("custom-openai/gpt-5.4", &config).as_deref(),
+            Some("custom-openai/gpt-5.4")
+        );
     }
 
     #[test]

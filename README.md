@@ -105,7 +105,7 @@ Overrides:
 **China mirror** — faster downloads for mainland China users (checksums still verified against GitHub):
 
 ```bash
-SCODE_MIRROR=https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \
+SCODE_MIRROR=https://sudowork-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \
   curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
 ```
 

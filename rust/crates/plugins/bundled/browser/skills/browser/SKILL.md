@@ -21,15 +21,15 @@ An AI-native browser for web exploration and automation. **Use this skill instea
 Discover all available tools:
 
 ```bash
-browser --list
+python3 -m ai_dev_browser.tools.page_goto --help
 ```
 
 Common workflow — navigate to a page and read its content:
 
 ```bash
-browser page_goto --url "https://example.com"
-browser page_discover
-browser page_screenshot --path /tmp/page.png
+python3 -m ai_dev_browser.tools.page_goto --url "https://example.com"
+python3 -m ai_dev_browser.tools.page_discover
+python3 -m ai_dev_browser.tools.page_screenshot --path /tmp/page.png
 ```
 
 ## Two interaction modes
@@ -41,15 +41,15 @@ browser page_screenshot --path /tmp/page.png
 
 | Tool | Purpose |
 |------|---------|
-| `browser page_goto --url URL` | Navigate to a URL |
-| `browser page_discover` | List all interactable elements on the page |
-| `browser page_screenshot --path FILE` | Take a screenshot |
-| `browser page_html` | Get the full HTML content |
-| `browser click_by_text --text TEXT` | Click an element by its visible text |
-| `browser click_by_ref --ref REF` | Click an element by its ref (from page_discover) |
-| `browser type_by_text --text LABEL --value INPUT` | Type into an input field |
-| `browser page_scroll --direction down` | Scroll the page |
-| `browser js_evaluate --expression "..."` | Execute JavaScript |
+| `python3 -m ai_dev_browser.tools.page_goto --url URL` | Navigate to a URL |
+| `python3 -m ai_dev_browser.tools.page_discover` | List all interactable elements on the page |
+| `python3 -m ai_dev_browser.tools.page_screenshot --path FILE` | Take a screenshot |
+| `python3 -m ai_dev_browser.tools.page_html` | Get the full HTML content |
+| `python3 -m ai_dev_browser.tools.click_by_text --text TEXT` | Click an element by its visible text |
+| `python3 -m ai_dev_browser.tools.click_by_ref --ref REF` | Click by ref (from page_discover) |
+| `python3 -m ai_dev_browser.tools.type_by_text --text LABEL --value INPUT` | Type into an input field |
+| `python3 -m ai_dev_browser.tools.page_scroll --direction down` | Scroll the page |
+| `python3 -m ai_dev_browser.tools.js_evaluate --expression "..."` | Execute JavaScript |
 
 Every CLI tool has an identical Python function in `ai_dev_browser.core`:
 
@@ -57,4 +57,4 @@ Every CLI tool has an identical Python function in `ai_dev_browser.core`:
 from ai_dev_browser.core import page_goto, click_by_text, page_screenshot
 ```
 
-Run `browser --list` for the full tool catalog with descriptions.
+To see the full tool catalog: `ls $(python3 -c "import ai_dev_browser.tools; import os; print(os.path.dirname(ai_dev_browser.tools.__file__))")/*.py`

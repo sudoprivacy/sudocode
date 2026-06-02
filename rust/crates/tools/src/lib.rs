@@ -999,14 +999,14 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TaskOutput",
-            description: "Retrieve output from a background task or agent. Use task_id for TaskRegistry tasks. Use agent_id to retrieve (and optionally await) a background agent launched with Agent(run_in_background=true). Set block=true to wait until the agent finishes.",
+            description: "Retrieve output from a background task or agent. Use task_id for TaskRegistry tasks. Use agent_id to retrieve (and optionally await) a background agent launched with Agent(run_in_background=true). Set block=true to wait until the agent finishes. A single blocking call waits at most 60000 ms (clamped); if the agent is still running it returns retrieval_status=\"timeout\" — call TaskOutput again to keep waiting.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "ID of a TaskRegistry task to retrieve output from" },
                     "agent_id": { "type": "string", "description": "ID of a background agent launched with Agent(run_in_background=true)" },
                     "block": { "type": "boolean", "description": "When true (default), wait until the agent finishes before returning" },
-                    "timeout_ms": { "type": "integer", "minimum": 0, "description": "Maximum milliseconds to wait when block=true (default 30000)" }
+                    "timeout_ms": { "type": "integer", "minimum": 0, "description": "Maximum milliseconds to wait when block=true (default 30000, capped at 60000). On timeout the response has retrieval_status=\"timeout\" — re-call to keep waiting." }
                 },
                 "additionalProperties": false
             }),
@@ -1713,6 +1713,18 @@ fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
+// Cap a single blocking TaskOutput call so ACP/upper-layer transports don't
+// drop the connection while we wait. Callers can re-issue TaskOutput to keep
+// polling — see retrieval_status="timeout" in the returned JSON.
+const MAX_AGENT_AWAIT_TIMEOUT_MS: u64 = 60_000;
+
+fn agent_await_timeout_cap_ms() -> u64 {
+    std::env::var("SUDOCODE_TASKOUTPUT_MAX_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(MAX_AGENT_AWAIT_TIMEOUT_MS)
+}
 
 fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<String, String> {
     let agent_id = agent_id.trim();
@@ -1742,7 +1754,7 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
     }
 
     // Blocking: use condvar registry for instant wake.
-    let timeout = Duration::from_millis(timeout_ms);
+    let timeout = Duration::from_millis(timeout_ms.min(agent_await_timeout_cap_ms()));
     match global_agent_registry().await_agent(agent_id, timeout) {
         Ok(manifest) => to_pretty_json(agent_output_json(&manifest, "success")),
         Err(e) if e.contains("timed out") => to_pretty_json(json!({
@@ -9769,6 +9781,48 @@ mod tests {
         assert_eq!(value["retrieval_status"], "timeout");
         assert_eq!(value["status"], "running");
 
+        std::env::remove_var("SUDOCODE_AGENT_STORE");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn task_output_clamps_oversized_timeout_to_cap() {
+        let _guard = env_guard();
+        let dir = temp_path("agent-taskoutput-clamp");
+        std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
+        // Shrink the cap so the test is fast; the production cap is 60_000 ms.
+        std::env::set_var("SUDOCODE_TASKOUTPUT_MAX_TIMEOUT_MS", "200");
+
+        let manifest = execute_agent_with_spawn(
+            AgentInput {
+                description: "Never completes".to_string(),
+                prompt: "Spin forever".to_string(),
+                subagent_type: None,
+                name: None,
+                model: None,
+                run_in_background: None,
+                auth_mode: None,
+            },
+            |_job| Ok(()),
+        )
+        .expect("spawn should succeed");
+
+        // Request an absurdly long timeout — the cap must clamp it so ACP-style
+        // upper-layer callers don't get cut off waiting for taskoutput.
+        let start = std::time::Instant::now();
+        let result = await_agent_output(&manifest.agent_id, true, 10 * 60 * 1000)
+            .expect("clamped timeout path should return Ok");
+        let elapsed = start.elapsed();
+
+        let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(value["retrieval_status"], "timeout");
+        assert_eq!(value["status"], "running");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "await should return within the cap, took {elapsed:?}"
+        );
+
+        std::env::remove_var("SUDOCODE_TASKOUTPUT_MAX_TIMEOUT_MS");
         std::env::remove_var("SUDOCODE_AGENT_STORE");
         let _ = std::fs::remove_dir_all(dir);
     }

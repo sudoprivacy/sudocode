@@ -216,7 +216,7 @@ impl FsBackend for StdFsBackend {
 ///
 /// Forwards every operation through the [`KernelAbi`] trait so managed
 /// agents read/write the VFS trie via `sys_read` / `sys_write` /
-/// `sys_stat` / `sys_readdir_backend` instead of touching the host
+/// `sys_stat` / `sys_readdir` instead of touching the host
 /// filesystem.
 pub struct KernelFsBackend<K: KernelAbi> {
     kernel: Arc<K>,
@@ -287,20 +287,13 @@ impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
         let zone = &self.ctx.zone_id;
-        let entries = self.kernel.sys_readdir_backend(path, zone);
+        // sys_readdir returns Vec<(child_name, entry_type)>; DT_DIR == 1.
+        let entries = self.kernel.sys_readdir(path, zone, false);
         Ok(entries
             .into_iter()
-            .map(|child_path| {
-                let is_dir = self
-                    .kernel
-                    .sys_stat(&child_path, zone)
-                    .map_or(false, |s| s.is_directory);
-                let name = child_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&child_path)
-                    .to_string();
-                FsDirEntry { name, is_dir }
+            .map(|(name, entry_type)| FsDirEntry {
+                name,
+                is_dir: entry_type == 1, // DT_DIR
             })
             .collect())
     }

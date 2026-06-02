@@ -76,6 +76,8 @@ impl NexusVfsClient {
                                         path,
                                         auth_token,
                                         content_id: String::new(),
+                                        timeout_ms: 0,
+                                        offset: 0,
                                     })
                                     .await;
                                 let _ = resp.send(grpc_result(r, |r| {
@@ -97,7 +99,7 @@ impl NexusVfsClient {
                                         path,
                                         content,
                                         auth_token,
-                                        etag: String::new(),
+                                        content_id: String::new(),
                                     })
                                     .await;
                                 let _ = resp.send(grpc_result(r, |r| {

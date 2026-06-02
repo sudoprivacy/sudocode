@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
-use kernel::kernel::{Kernel, OperationContext};
+use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
 use runtime::spawn_task::spawn_task_echo;
 
 const DT_STREAM: i32 = 4;
@@ -42,6 +42,10 @@ fn plant_chat_stream(kernel: &Kernel, pid: &str) {
             /* write_fd */ None,
             /* mime_type */ None,
             /* modified_at_ms */ None,
+            /* content_id */ None,
+            /* size */ None,
+            /* version */ None,
+            /* created_at_ms */ None,
             /* link_target */ None,
             /* source */ None,
             /* remote_metastore */ None,
@@ -79,8 +83,15 @@ fn read_envelopes(
     let mut offset = from_offset;
     let mut out = Vec::new();
     loop {
-        match kernel.sys_read(path, ctx, 0, offset) {
-            Ok(result) => {
+        let reqs = [ReadRequest {
+            path: path.to_string(),
+            offset,
+            len: None,
+            timeout_ms: 0,
+        }];
+        let mut results = kernel.sys_read(&reqs, ctx);
+        match results.pop() {
+            Some(Ok(result)) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
@@ -94,7 +105,7 @@ fn read_envelopes(
                 }
                 offset = next;
             }
-            Err(_) => break,
+            _ => break,
         }
     }
     (out, offset)
@@ -137,8 +148,15 @@ fn echo_round_trip_through_proc_pid_chat_with_me() {
         "to": "agent-v0",
         "body": "hello",
     });
+    let write_reqs = [WriteRequest {
+        path: cwm_path.to_string(),
+        content: serde_json::to_vec(&prompt).unwrap(),
+        offset: 0,
+    }];
     kernel
-        .sys_write(cwm_path, &ctx, &serde_json::to_vec(&prompt).unwrap(), 0)
+        .sys_write(&write_reqs, &ctx)
+        .pop()
+        .expect("sys_write returned empty vec")
         .expect("user write to chat-with-me");
 
     let echo = wait_for_envelope_with_body(
@@ -201,8 +219,15 @@ fn skips_own_writes_to_avoid_echo_loop() {
         "to": "agent-loop",
         "body": "ping",
     });
+    let write_reqs = [WriteRequest {
+        path: cwm_path.to_string(),
+        content: serde_json::to_vec(&prompt).unwrap(),
+        offset: 0,
+    }];
     kernel
-        .sys_write(cwm_path, &ctx, &serde_json::to_vec(&prompt).unwrap(), 0)
+        .sys_write(&write_reqs, &ctx)
+        .pop()
+        .expect("sys_write returned empty vec")
         .unwrap();
 
     let _ = wait_for_envelope_with_body(

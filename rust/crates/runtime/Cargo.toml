@@ -21,13 +21,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # stack, py-hook adapters) off in the sudocode build — sudocode does
 # not need them and they would bloat the standalone CLI.
 #
-# Cross-repo git-dep pinned to the nexus PR branch that introduced
-# the trait (PR #4026, `feat/kernel-abi-trait`). Bump the rev when
-# nexus pushes new commits to the branch; the lockstep merge order
-# is "nexus PR #4026 lands → bump rev to merged commit on develop →
-# this sudocode PR lands". Until the nexus PR lands, this pin is
-# the one stable rev both repos see.
-kernel = { git = "https://github.com/nexi-lab/nexus", rev = "b3a0bdb9d", default-features = false }
+# Points at nexus-vfs main (the kernel crate's canonical home after
+# the DRY repo extraction, #4259).
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", default-features = false }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

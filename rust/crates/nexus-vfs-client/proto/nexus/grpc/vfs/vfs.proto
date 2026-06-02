@@ -1,11 +1,14 @@
 // VFS gRPC transport for REMOTE profile and federation peers.
 //
-// Phase 1 (PR #2667): Generic Call RPC — method name + JSON payload.
-// Phase 2: Typed RPCs for content ops (native bytes, no base64 overhead)
-//          + Ping health check.
+// Every syscall is a typed RPC. The generic `Call` RPC is retained only
+// for the non-syscall in-process control plane — service_* lifecycle
+// no-ops, trie_* / agent_* registry ops, and the `get_mount_points`
+// operational query. Every other method now errors with "unknown Call
+// method". Native bytes on the content / stream ops kill the prior
+// base64-in-JSON tax.
 //
-// Generic Call stays for 25+ service proxy methods and metadata ops.
-// Typed RPCs only for content-heavy operations (Read/Write/Delete).
+// Issue #1133: Unified gRPC transport.
+// Issue #1202: gRPC for REMOTE profile.
 
 syntax = "proto3";
 
@@ -13,6 +16,7 @@ package nexus.grpc.vfs;
 
 service NexusVFSService {
   // Generic dispatch RPC — method name + JSON-encoded params.
+  // Server routes to the same dispatch_method() as the HTTP endpoint.
   rpc Call(CallRequest) returns (CallResponse);
 
   // Typed RPCs for content operations — native bytes, no JSON/base64.
@@ -22,58 +26,153 @@ service NexusVFSService {
 
   // Health check with server metadata.
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // Vectored batch read (Issue #4058). Per-request errors are reported
+  // per-item; outer Status is reserved for transport-level failures.
+  rpc BatchRead(BatchReadRequest) returns (BatchReadResponse);
+
+  // Vectored batch write — native bytes (no base64 tax) + per-item
+  // error isolation. Replaces the generic `write_batch` Call.
+  rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
+
+  // Typed metadata stat — the hottest metadata op.
+  rpc Stat(StatRequest) returns (StatResponse);
+
+  // Typed directory listing — metastore + backend merge, procfs intercepts.
+  rpc Readdir(ReaddirRequest) returns (ReaddirResponse);
+
+  // Vectored stat — single redb txn on the optimized KernelConvenience
+  // override. Per-path not-found is in-band (`found = false`).
+  rpc BatchStat(BatchStatRequest) returns (BatchStatResponse);
+
+  // Typed attribute set / inode create. Exposes the subset of the
+  // 21-param inherent sys_setattr that crosses the JSON wire today —
+  // Arc<ObjectStore>, metastore, raft_backend, read_fd/write_fd, source,
+  // and remote_metastore stay off this RPC (they need in-process refs).
+  rpc Setattr(SetattrRequest) returns (SetattrResponse);
+
+  // Typed rename / server-side copy.
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc Copy(CopyRequest) returns (CopyResponse);
+
+  // Typed advisory-lock acquire / release.
+  rpc Lock(LockRequest) returns (LockResponse);
+  rpc Unlock(UnlockRequest) returns (UnlockResponse);
+
+  // Typed file-event watch (blocking, inotify-shaped).
+  rpc Watch(WatchRequest) returns (WatchResponse);
+
+  // Typed xattr (extended-attribute) ops — Tier 2 KernelConvenience.
+  // Direct-metastore path, no hooks / no permission gate.
+  rpc GetXattr(GetXattrRequest) returns (GetXattrResponse);
+  rpc SetXattr(SetXattrRequest) returns (SetXattrResponse);
+  rpc GetXattrBulk(GetXattrBulkRequest) returns (GetXattrBulkResponse);
+
+  // Typed mkdir — the prior generic `sys_mkdir` Call retired.
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+
+  // Typed IPC pipe / stream ops. Creation goes through `Setattr` with
+  // entry_type=DT_PIPE / DT_STREAM (no separate Create*Ipc RPC needed).
+  rpc ClosePipe(IpcPathRequest) returns (IpcAck);
+  rpc HasPipe(IpcPathRequest) returns (IpcHasResponse);
+  rpc CloseAllPipes(IpcEmpty) returns (IpcAck);
+
+  rpc CloseStream(IpcPathRequest) returns (IpcAck);
+  rpc HasStream(IpcPathRequest) returns (IpcHasResponse);
+  rpc StreamWriteNowait(StreamWriteRequest) returns (StreamWriteResponse);
+  rpc StreamReadAt(StreamReadAtRequest) returns (StreamReadAtResponse);
+  rpc StreamCollectAll(IpcPathRequest) returns (StreamCollectAllResponse);
 }
 
+// --- Generic dispatch messages (Phase 1, unchanged) ---
+
 message CallRequest {
-  string method = 1;
-  bytes payload = 2;
-  string auth_token = 3;
+  string method = 1;      // "sys_read", "sys_write", "workspace_snapshot", ...
+  bytes payload = 2;      // JSON-encoded params dict (rpc_codec)
+  string auth_token = 3;  // Bearer token (same as HTTP Authorization header)
 }
 
 message CallResponse {
-  bytes payload = 1;
-  bool is_error = 2;
+  bytes payload = 1;      // JSON-encoded result or error dict
+  bool is_error = 2;      // If true, payload is JSON-RPC error dict
 }
+
+// --- Typed content messages (Phase 2) ---
 
 message ReadRequest {
   string path = 1;
   string auth_token = 2;
-  string content_id = 3;
+  string content_id = 3;   // Opaque content identifier (hash for CAS, path for PAS) — when set, server reads content directly (no metastore lookup)
+  // Pipe-/stream-read knobs — full-fidelity sys_read on the wire.
+  // Defaults give plain file-read semantics: blocking ≤5s, from offset 0.
+  uint64 timeout_ms = 4;   // 0 → non-blocking; otherwise pipe/stream block budget
+  uint64 offset = 5;       // byte offset within content (streams + range reads)
 }
 
 message ReadResponse {
-  bytes content = 1;
-  string etag = 2;
+  bytes content = 1;       // Raw file bytes — no base64
+  string content_id = 2;
   int64 size = 3;
   bool is_error = 4;
-  bytes error_payload = 5;
+  bytes error_payload = 5; // JSON error dict (same format as CallResponse)
+  uint64 gen = 6;
+  // Stream / typed-entry fields — let Python sys_read drop its Call
+  // fallback (timeout_ms/offset on the wire + these fields out).
+  int32 entry_type = 7;             // DT_* of the resolved entry
+  optional uint64 stream_next_offset = 8;  // streams: where the next read picks up
+  bool post_hook_needed = 9;        // OBSERVE chain trigger
 }
 
 message WriteRequest {
   string path = 1;
-  bytes content = 2;
+  bytes content = 2;       // Raw file bytes — no base64
   string auth_token = 3;
-  string etag = 4;
+  string content_id = 4;   // Optional: opaque content identifier for conditional write (If-Match)
 }
 
 message WriteResponse {
-  string etag = 1;
+  string content_id = 1;
   int64 size = 2;
   bool is_error = 3;
   bytes error_payload = 4;
+  uint64 gen = 5;
 }
 
 message DeleteRequest {
   string path = 1;
   string auth_token = 2;
-  bool recursive = 3;
+  bool recursive = 3;      // For rmdir
 }
 
 message DeleteResponse {
   bool success = 1;
   bool is_error = 2;
   bytes error_payload = 3;
+  // Richer per-result fields — added so the typed Delete subsumes the
+  // prior `sys_unlink` Call (callers read entry_type for the audit
+  // trail, content_id / size for metrics). Zero / empty when success=false.
+  uint32 entry_type = 4;
+  string path = 5;
+  string content_id = 6;
+  uint64 size = 7;
 }
+
+// --- Typed mkdir (replaces the `sys_mkdir` Call) ---
+
+message MkdirRequest {
+  string path = 1;
+  string auth_token = 2;
+  bool parents = 3;
+  bool exist_ok = 4;
+}
+
+message MkdirResponse {
+  bool hit = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+// --- Health check messages ---
 
 message PingRequest {
   string auth_token = 1;
@@ -83,4 +182,370 @@ message PingResponse {
   string version = 1;
   string zone_id = 2;
   int64 uptime_seconds = 3;
+}
+
+// --- Batch read (Issue #4058) ---
+
+message BatchReadRequest {
+  string auth_token = 1;
+  repeated BatchReadItemRequest items = 2;
+}
+
+message BatchReadItemRequest {
+  string path = 1;
+  uint64 offset = 2;
+  // proto3 `optional` so callers can distinguish "no length set"
+  // (read to EOF from offset) from `length = 0` (legitimate zero-byte
+  // EOF probe). Old clients that omitted `length` continue to read
+  // whole files; new clients can explicitly set 0 for an empty slice.
+  // (Named `length` rather than `len` so the generated Rust struct
+  // doesn't trip `clippy::len_without_is_empty`.)
+  optional uint64 length = 3;
+}
+
+message BatchReadResponse {
+  repeated BatchReadItemResponse results = 1;  // input order
+}
+
+message BatchReadItemResponse {
+  bytes content = 1;        // empty when is_error
+  bool is_error = 2;
+  bytes error_payload = 3;  // JSON RPC error dict (same as CallResponse)
+  string content_id = 4;
+  uint64 gen = 5;
+}
+
+// --- Batch write (typed — replaces the base64 `write_batch` Call) ---
+
+message BatchWriteRequest {
+  string auth_token = 1;
+  repeated BatchWriteItemRequest items = 2;
+}
+
+message BatchWriteItemRequest {
+  string path = 1;
+  bytes content = 2;        // Raw file bytes — no base64
+}
+
+message BatchWriteResponse {
+  repeated BatchWriteItemResponse results = 1;  // input order
+}
+
+message BatchWriteItemResponse {
+  string content_id = 1;
+  int64 size = 2;
+  uint64 gen = 3;
+  uint32 version = 4;
+  bool is_error = 5;
+  bytes error_payload = 6;  // JSON RPC error dict (same as CallResponse)
+}
+
+// --- Typed metadata stat (replaces the `sys_stat` Call) ---
+
+message StatRequest {
+  string path = 1;
+  string auth_token = 2;
+  string zone_id = 3;       // empty → caller's context zone
+}
+
+message StatResponse {
+  bool found = 1;           // false → path does not exist (not an error)
+  // Stat fields — valid only when found == true. Mirrors StatResult /
+  // the `stat_to_json` shape; the `lock` field is intentionally omitted
+  // (matches the generic Call path — include_lock is a separate query).
+  string path = 2;
+  int64 size = 3;
+  string content_id = 4;            // "" when unset
+  string mime_type = 5;
+  bool is_directory = 6;
+  int32 entry_type = 7;
+  uint32 mode = 8;
+  uint32 version = 9;
+  uint64 gen = 10;
+  string zone_id = 11;              // "" when unset
+  optional int64 created_at_ms = 12;
+  optional int64 modified_at_ms = 13;
+  string last_writer_address = 14;  // "" when unset
+  string link_target = 15;          // "" when unset
+  string owner_id = 16;             // "" when unset
+  bool is_error = 17;
+  bytes error_payload = 18;         // JSON error dict — auth failures only
+}
+
+// --- Typed directory listing (replaces the `sys_readdir` Call) ---
+
+message ReaddirRequest {
+  string path = 1;
+  string auth_token = 2;
+  string zone_id = 3;        // empty → caller's context zone
+  // `is_admin` is intentionally NOT a request field — the handler reads
+  // it from the auth-resolved OperationContext so a client can't spoof.
+}
+
+message ReaddirEntry {
+  string name = 1;           // child path (matches the inherent Vec<(String, u8)>)
+  uint32 entry_type = 2;     // DT_* code (u8 widened)
+}
+
+message ReaddirResponse {
+  repeated ReaddirEntry entries = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;   // JSON error dict — auth failures only
+}
+
+// --- Vectored stat (replaces the `stat_batch` Call) ---
+
+message BatchStatRequest {
+  string auth_token = 1;
+  string zone_id = 2;        // empty → caller's context zone
+  repeated string paths = 3;
+}
+
+// Mirrors `StatResponse`'s stat fields but without `is_error` — auth
+// failures surface as an outer tonic Status (matching BatchRead /
+// BatchWrite), and per-path not-found is in-band via `found = false`.
+message BatchStatItem {
+  bool found = 1;
+  string path = 2;
+  int64 size = 3;
+  string content_id = 4;
+  string mime_type = 5;
+  bool is_directory = 6;
+  int32 entry_type = 7;
+  uint32 mode = 8;
+  uint32 version = 9;
+  uint64 gen = 10;
+  string zone_id = 11;
+  optional int64 created_at_ms = 12;
+  optional int64 modified_at_ms = 13;
+  string last_writer_address = 14;
+  string link_target = 15;
+  string owner_id = 16;
+}
+
+message BatchStatResponse {
+  repeated BatchStatItem results = 1;  // positional — same length/order as request.paths
+}
+
+// --- Typed setattr (replaces the `sys_setattr` Call) ---
+
+message SetattrRequest {
+  string path = 1;
+  string auth_token = 2;
+  int32 entry_type = 3;             // DT_* code
+  string zone_id = 4;                // empty → ROOT_ZONE_ID
+
+  // Optional metadata fields (presence-tracked — None survives the wire).
+  optional string mime_type = 5;
+  optional string content_id = 6;
+  optional int64 modified_at_ms = 7;
+  optional int64 created_at_ms = 8;
+  optional uint64 size = 9;
+  optional uint32 version = 10;
+
+  // DT_PIPE / DT_STREAM container fields. Default-zero / empty when unused.
+  string backend_name = 11;
+  string io_profile = 12;
+  bool is_external = 13;
+  uint64 capacity = 14;
+}
+
+message SetattrResponse {
+  // Mirrors the Call response shape consumed by _SysSetAttrResult.
+  string path = 1;
+  bool created = 2;
+  int32 entry_type = 3;
+  bool is_error = 4;
+  bytes error_payload = 5;
+}
+
+// --- Typed rename (replaces the `sys_rename` Call) ---
+
+message RenameRequest {
+  string path = 1;          // old path
+  string new_path = 2;
+  string auth_token = 3;
+}
+
+message RenameResponse {
+  bool hit = 1;
+  bool success = 2;
+  bool is_directory = 3;
+  // Old metadata — surfaced for audit / post-hook context.
+  optional string old_content_id = 4;
+  optional uint64 old_size = 5;
+  optional uint32 old_version = 6;
+  optional int64 old_modified_at_ms = 7;
+  bool is_error = 8;
+  bytes error_payload = 9;
+  // post_hook_needed is omitted — always false on the gRPC architecture
+  // (no Python post-hook dispatch); _SysRenameResult defaults it.
+}
+
+// --- Typed server-side copy (replaces the `sys_copy` Call) ---
+
+message CopyRequest {
+  string src = 1;
+  string dst = 2;
+  string auth_token = 3;
+}
+
+message CopyResponse {
+  bool hit = 1;
+  string dst_path = 2;
+  optional string content_id = 3;
+  uint64 size = 4;
+  uint32 version = 5;
+  uint64 gen = 6;
+  bool is_error = 7;
+  bytes error_payload = 8;
+}
+
+// --- Typed advisory locks (replace the `sys_lock` / `sys_unlock` Calls) ---
+
+// Matches the Call wire surface: the kernel `sys_lock` hardcodes
+// Exclusive + max_holders=1 + ttl_secs=timeout_ms/1000+1 on this path,
+// so we don't expose mode / max_holders / ttl_secs on the RPC yet.
+message LockRequest {
+  string path = 1;
+  string auth_token = 2;
+  string lock_id = 3;      // empty → server generates
+  uint64 timeout_ms = 4;
+}
+
+message LockResponse {
+  bool acquired = 1;       // false → lock contention, no other error
+  string lock_id = 2;      // set when acquired
+  bool is_error = 3;
+  bytes error_payload = 4;
+}
+
+message UnlockRequest {
+  string path = 1;
+  string auth_token = 2;
+  string lock_id = 3;
+  bool force = 4;
+}
+
+message UnlockResponse {
+  bool released = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+// --- Typed file-event watch (replaces the `sys_watch` Call) ---
+
+message WatchRequest {
+  string path = 1;
+  string auth_token = 2;
+  uint64 timeout_ms = 3;
+}
+
+message WatchResponse {
+  bool matched = 1;        // false → timed out, no event
+  string path = 2;         // event path when matched
+  string event_type = 3;   // FileEventType Debug string (e.g. "FileWrite")
+  bool is_error = 4;
+  bytes error_payload = 5;
+}
+
+// --- Typed xattr ops (replace get_xattr / set_xattr / get_xattr_bulk Calls) ---
+
+message GetXattrRequest {
+  string path = 1;
+  string key = 2;
+  string auth_token = 3;
+}
+
+message GetXattrResponse {
+  bool found = 1;        // false → key not set; not an error
+  string value = 2;
+  bool is_error = 3;
+  bytes error_payload = 4;
+}
+
+message SetXattrRequest {
+  string path = 1;
+  string key = 2;
+  string value = 3;
+  string auth_token = 4;
+}
+
+message SetXattrResponse {
+  bool is_error = 1;
+  bytes error_payload = 2;
+}
+
+message GetXattrBulkRequest {
+  repeated string paths = 1;
+  string key = 2;
+  string auth_token = 3;
+}
+
+message GetXattrBulkItem {
+  string path = 1;
+  bool found = 2;        // false → key not set on this path
+  string value = 3;
+}
+
+message GetXattrBulkResponse {
+  repeated GetXattrBulkItem items = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+// --- IPC pipe / stream ops (replace the IPC Call arms) ---
+
+message IpcPathRequest {
+  string path = 1;
+  string auth_token = 2;
+}
+
+message IpcAck {
+  bool is_error = 1;
+  bytes error_payload = 2;
+}
+
+message IpcHasResponse {
+  bool present = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+message IpcEmpty {
+  string auth_token = 1;
+}
+
+message StreamWriteRequest {
+  string path = 1;
+  bytes data = 2;             // native bytes — no base64 tax
+  string auth_token = 3;
+}
+
+message StreamWriteResponse {
+  uint64 offset = 1;          // offset where the data landed
+  bool is_error = 2;
+  bytes error_payload = 3;
+}
+
+message StreamReadAtRequest {
+  string path = 1;
+  uint64 offset = 2;
+  bool blocking = 3;          // true → server blocks up to timeout_ms
+  uint64 timeout_ms = 4;      // only honoured when blocking == true
+  string auth_token = 5;
+}
+
+message StreamReadAtResponse {
+  bytes data = 1;
+  uint64 next_offset = 2;
+  bool eof = 3;               // non-blocking: true → no data available
+  bool is_error = 4;
+  bytes error_payload = 5;
+}
+
+message StreamCollectAllResponse {
+  bytes data = 1;
+  bool is_error = 2;
+  bytes error_payload = 3;
 }

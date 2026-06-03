@@ -428,7 +428,7 @@ impl StreamState {
             self.usage = Some(Usage {
                 input_tokens: usage.prompt_tokens,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+                cache_read_input_tokens: usage.prompt_tokens_details.cached_tokens,
                 output_tokens: usage.completion_tokens,
             });
         }
@@ -753,12 +753,22 @@ struct ResponseToolFunction {
     arguments: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct OpenAiUsage {
     #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    /// OpenAI returns cached token counts inside `prompt_tokens_details`.
+    /// Example: `{"prompt_tokens_details": {"cached_tokens": 1234}}`
+    #[serde(default)]
+    prompt_tokens_details: PromptTokensDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1333,7 +1343,10 @@ fn normalize_response(
                 .as_ref()
                 .map_or(0, |usage| usage.prompt_tokens),
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+            cache_read_input_tokens: response
+                .usage
+                .as_ref()
+                .map_or(0, |usage| usage.prompt_tokens_details.cached_tokens),
             output_tokens: response
                 .usage
                 .as_ref()
@@ -1749,6 +1762,7 @@ mod tests {
                     usage: Some(super::OpenAiUsage {
                         prompt_tokens: 9,
                         completion_tokens: 0,
+                        ..Default::default()
                     }),
                 })
                 .expect("usage-only chunk"),

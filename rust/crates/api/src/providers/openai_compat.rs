@@ -1762,6 +1762,7 @@ mod tests {
                     usage: Some(super::OpenAiUsage {
                         prompt_tokens: 9,
                         completion_tokens: 0,
+                        ..Default::default()
                     }),
                 })
                 .expect("usage-only chunk"),

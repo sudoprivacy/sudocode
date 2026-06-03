@@ -681,6 +681,50 @@ impl RuntimePluginConfig {
             .copied()
             .unwrap_or(default_enabled)
     }
+
+    /// Builds a [`plugins::PluginManagerConfig`] from these settings, resolving
+    /// any relative directory/path overrides against `cwd` (for `.`-prefixed
+    /// values) or `config_home` (for bare names).
+    #[must_use]
+    pub fn to_plugin_manager_config(
+        &self,
+        cwd: &Path,
+        config_home: &Path,
+    ) -> plugins::PluginManagerConfig {
+        let mut config = plugins::PluginManagerConfig::new(config_home.to_path_buf());
+        config.enabled_plugins = self.enabled_plugins.clone();
+        config.external_dirs = self
+            .external_directories
+            .iter()
+            .map(|path| resolve_plugin_path(cwd, config_home, path))
+            .collect();
+        config.install_root = self
+            .install_root
+            .as_deref()
+            .map(|path| resolve_plugin_path(cwd, config_home, path));
+        config.registry_path = self
+            .registry_path
+            .as_deref()
+            .map(|path| resolve_plugin_path(cwd, config_home, path));
+        config.bundled_root = self
+            .bundled_root
+            .as_deref()
+            .map(|path| resolve_plugin_path(cwd, config_home, path));
+        config
+    }
+}
+
+/// Resolves a plugin directory/path override: absolute paths pass through,
+/// `.`-prefixed values resolve against `cwd`, and bare names against `config_home`.
+fn resolve_plugin_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else if value.starts_with('.') {
+        cwd.join(path)
+    } else {
+        config_home.join(path)
+    }
 }
 
 #[must_use]

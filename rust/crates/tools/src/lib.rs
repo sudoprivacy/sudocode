@@ -12,7 +12,7 @@ use api::{
     OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
-use plugins::{PluginLoadOutcome, PluginManager, PluginManagerConfig, PluginTool};
+use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use reqwest::blocking::Client;
 use runtime::{
     check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
@@ -3805,39 +3805,14 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
 fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
     let loader = ConfigLoader::default_for(cwd);
     let runtime_config = loader.load().ok()?;
-    let plugin_settings = runtime_config.plugins();
-    let mut plugin_config = PluginManagerConfig::new(loader.config_home().to_path_buf());
-    plugin_config.enabled_plugins = plugin_settings.enabled_plugins().clone();
-    plugin_config.external_dirs = plugin_settings
-        .external_directories()
-        .iter()
-        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path))
-        .collect();
-    plugin_config.install_root = plugin_settings
-        .install_root()
-        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
-    plugin_config.registry_path = plugin_settings
-        .registry_path()
-        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
-    plugin_config.bundled_root = plugin_settings
-        .bundled_root()
-        .map(|path| resolve_plugin_config_path(cwd, loader.config_home(), path));
+    let plugin_config = runtime_config
+        .plugins()
+        .to_plugin_manager_config(cwd, loader.config_home());
 
     PluginManager::new(plugin_config)
         .plugin_registry_report()
         .ok()
         .map(|report| report.load_outcome())
-}
-
-fn resolve_plugin_config_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else if value.starts_with('.') {
-        cwd.join(path)
-    } else {
-        config_home.join(path)
-    }
 }
 
 fn resolve_skill_path_from_compat_roots(skill: &str) -> Result<std::path::PathBuf, String> {

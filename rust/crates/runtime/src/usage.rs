@@ -203,6 +203,18 @@ impl UsageTracker {
         self.latest_turn
     }
 
+    /// Returns the usage for the turn that just completed, if any was recorded.
+    /// Pass the turn count before the operation to detect if new usage was recorded.
+    /// This prevents returning stale usage from previous turns.
+    #[must_use]
+    pub fn turn_usage_if_recorded(&self, turns_before: u32) -> Option<TokenUsage> {
+        if self.turns > turns_before {
+            Some(self.latest_turn)
+        } else {
+            None
+        }
+    }
+
     #[must_use]
     pub fn cumulative_usage(&self) -> TokenUsage {
         self.cumulative

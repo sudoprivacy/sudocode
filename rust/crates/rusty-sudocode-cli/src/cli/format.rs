@@ -16,8 +16,11 @@ pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str =
     "\x1b[2m… output truncated for display; full result preserved in session.\x1b[0m";
 pub(crate) const READ_DISPLAY_MAX_LINES: usize = 10;
 pub(crate) const READ_DISPLAY_MAX_CHARS: usize = 2_000;
-pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 3;
-pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 1_500;
+/// Default upper bound on lines shown inline when summarizing tool results.
+/// Anything beyond this is replaced with a "+N more lines" notice; the full
+/// result is still preserved in the session file.
+pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 15;
+pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
 
 pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
     match kind {
@@ -813,7 +816,12 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 
     if all_output.len() > preview_count {
         let remaining = all_output.len() - preview_count;
-        write!(&mut result, "\n  \x1b[2m… +{remaining} lines\x1b[0m").expect("write to string");
+        let line_or_lines = if remaining == 1 { "line" } else { "lines" };
+        write!(
+            &mut result,
+            "\n  \x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m"
+        )
+        .expect("write to string");
     }
 
     result
@@ -1148,6 +1156,7 @@ pub(crate) fn truncate_output_for_display(
         return String::new();
     }
 
+    let total_lines = original.lines().count();
     let mut preview_lines = Vec::new();
     let mut used_chars = 0usize;
     let mut truncated = false;
@@ -1181,7 +1190,20 @@ pub(crate) fn truncate_output_for_display(
         if !preview.is_empty() {
             preview.push('\n');
         }
-        preview.push_str(DISPLAY_TRUNCATION_NOTICE);
+        // Prefer a counted notice when we know how many lines were dropped;
+        // fall back to the static notice when the cap was character-based
+        // rather than line-based (mid-line truncation).
+        let shown_lines = preview_lines.len();
+        if total_lines > shown_lines {
+            let remaining = total_lines - shown_lines;
+            let _ = write!(
+                preview,
+                "\x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m",
+                line_or_lines = if remaining == 1 { "line" } else { "lines" },
+            );
+        } else {
+            preview.push_str(DISPLAY_TRUNCATION_NOTICE);
+        }
     }
     preview
 }
@@ -1398,6 +1420,55 @@ mod tests {
         let plain = strip_ansi(&rendered);
         // Trailing segment should be the duration, not an empty " · ".
         assert!(plain.ends_with("0.8s"), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_emits_counted_line_notice() {
+        let input = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = truncate_output_for_display(&input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        // First 15 shown.
+        assert!(plain.contains("line 1\n"), "{plain}");
+        assert!(plain.contains("line 15"), "{plain}");
+        assert!(!plain.contains("line 16"), "{plain}");
+        // Counted notice.
+        assert!(
+            plain.contains("+5 more lines · full output preserved in session"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn truncate_output_singular_line_form() {
+        let input = (1..=16)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = truncate_output_for_display(&input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        assert!(plain.contains("+1 more line"), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_falls_back_to_static_notice_on_char_truncation() {
+        // One single very long line — exceeds char cap before line cap.
+        let input = "x".repeat(10_000);
+        let preview = truncate_output_for_display(&input, 15, 200);
+        let plain = strip_ansi(&preview);
+        // Static notice retained for mid-line truncation; the counted
+        // notice would lie because total_lines == shown_lines == 1.
+        assert!(plain.contains("output truncated for display"), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_no_truncation_returns_input_clean() {
+        let input = "line 1\nline 2\nline 3";
+        let preview = truncate_output_for_display(input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        assert_eq!(plain, input);
     }
 
     #[test]

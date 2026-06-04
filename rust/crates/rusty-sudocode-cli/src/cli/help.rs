@@ -464,13 +464,64 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 
     let mut sections = Vec::new();
     if !staged.trim().is_empty() {
-        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
+        sections.push(format!(
+            "\x1b[1mStaged changes:\x1b[0m\n{}",
+            colorize_unified_diff(staged.trim_end())
+        ));
     }
     if !unstaged.trim().is_empty() {
-        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
+        sections.push(format!(
+            "\x1b[1mUnstaged changes:\x1b[0m\n{}",
+            colorize_unified_diff(unstaged.trim_end())
+        ));
     }
 
-    Ok(format!("Diff\n\n{}", sections.join("\n\n")))
+    Ok(format!("\x1b[1mDiff\x1b[0m\n\n{}", sections.join("\n\n")))
+}
+
+/// Apply per-line color to a unified-diff string.
+///
+/// - `+++` / `---` file headers and `diff --git` lines: bold.
+/// - `@@` hunk headers: cyan.
+/// - Lines starting with a lone `+`: green (added).
+/// - Lines starting with a lone `-`: red (removed).
+/// - Everything else: unchanged.
+///
+/// Preserves the original line endings so `colorize_unified_diff(s) ==
+/// s` modulo escape sequences for terminal-emulator behavior.
+pub(crate) fn colorize_unified_diff(diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
+    for line in diff.split_inclusive('\n') {
+        let trailing_newline = line.ends_with('\n');
+        let body = line.trim_end_matches('\n');
+        let color = if body.starts_with("+++")
+            || body.starts_with("---")
+            || body.starts_with("diff --git ")
+            || body.starts_with("index ")
+        {
+            Some("\x1b[1m")
+        } else if body.starts_with("@@") {
+            Some("\x1b[36m")
+        } else if body.starts_with('+') {
+            Some("\x1b[32m")
+        } else if body.starts_with('-') {
+            Some("\x1b[31m")
+        } else {
+            None
+        };
+        match color {
+            Some(prefix) => {
+                out.push_str(prefix);
+                out.push_str(body);
+                out.push_str("\x1b[0m");
+            }
+            None => out.push_str(body),
+        }
+        if trailing_newline {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 pub(crate) fn render_diff_json_for(
@@ -856,5 +907,57 @@ mod tests {
         }
 
         assert!(resume_roots.contains(&"status"));
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn colorize_diff_paints_added_and_removed_lines() {
+        let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
+        let painted = colorize_unified_diff(diff);
+        // Plain text content is preserved exactly when ANSI escapes are stripped.
+        assert_eq!(strip_ansi(&painted), diff);
+        // The added line gets the green escape, the removed line the red one.
+        assert!(painted.contains("\u{1b}[32m+new\u{1b}[0m"));
+        assert!(painted.contains("\u{1b}[31m-old\u{1b}[0m"));
+        // Hunk header is cyan.
+        assert!(painted.contains("\u{1b}[36m@@ -1,1 +1,1 @@\u{1b}[0m"));
+        // File header line `diff --git` is bold.
+        assert!(painted.contains("\u{1b}[1mdiff --git a/foo b/foo\u{1b}[0m"));
+    }
+
+    #[test]
+    fn colorize_diff_leaves_context_lines_unstyled() {
+        let diff = " context line\n";
+        let painted = colorize_unified_diff(diff);
+        assert_eq!(painted, diff);
+    }
+
+    #[test]
+    fn colorize_diff_does_not_repaint_plus_plus_plus() {
+        // The `+++ b/file` and `--- a/file` headers should be bold (file
+        // header style), not green/red (added/removed line style).
+        let diff = "+++ b/foo\n--- a/foo\n";
+        let painted = colorize_unified_diff(diff);
+        assert!(painted.contains("\u{1b}[1m+++ b/foo\u{1b}[0m"));
+        assert!(painted.contains("\u{1b}[1m--- a/foo\u{1b}[0m"));
+        assert!(!painted.contains("\u{1b}[32m+++"));
+        assert!(!painted.contains("\u{1b}[31m---"));
     }
 }

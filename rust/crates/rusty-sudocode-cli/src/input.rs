@@ -110,6 +110,19 @@ impl ConditionalEventHandler for ImagePasteHandler {
 /// literal slash-command name list.
 const FILE_ARG_PREFIXES: &[&str] = &["/export ", "/plugin install "];
 
+/// Returns `true` when the cursor in `line` sits inside the argument of a
+/// path-taking slash command and tab completion should produce filesystem
+/// paths instead of slash-command names.
+fn is_file_arg_position(line: &str, pos: usize) -> bool {
+    if pos > line.len() {
+        return false;
+    }
+    let prefix_before_cursor = &line[..pos];
+    FILE_ARG_PREFIXES
+        .iter()
+        .any(|cmd_prefix| prefix_before_cursor.starts_with(cmd_prefix))
+}
+
 struct SlashCommandHelper {
     /// Each entry is (command, description). Description may be empty.
     completions: Vec<(String, String)>,
@@ -158,11 +171,7 @@ impl Completer for SlashCommandHelper {
         // command (`/export <path>`, `/plugin install <path>`), delegate to
         // `FilenameCompleter` so users get real directory listings on <Tab>
         // instead of the literal slash-command suggestions.
-        let prefix_before_cursor = &line[..pos];
-        if FILE_ARG_PREFIXES
-            .iter()
-            .any(|cmd_prefix| prefix_before_cursor.starts_with(cmd_prefix))
-        {
+        if is_file_arg_position(line, pos) {
             return self.filename_completer.complete_path(line, pos);
         }
 
@@ -394,4 +403,122 @@ fn normalize_completions(completions: Vec<(String, String)>) -> Vec<(String, Str
         .filter(|(cmd, _)| cmd.starts_with('/'))
         .filter(|(cmd, _)| seen.insert(cmd.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------- is_file_arg_position --------
+
+    #[test]
+    fn file_arg_position_triggers_after_export_space() {
+        // Cursor at end of "/export " — no path yet, but the slash command
+        // is committed and tab should list files.
+        assert!(is_file_arg_position("/export ", "/export ".len()));
+    }
+
+    #[test]
+    fn file_arg_position_triggers_with_partial_path() {
+        let line = "/export src/main";
+        assert!(is_file_arg_position(line, line.len()));
+    }
+
+    #[test]
+    fn file_arg_position_triggers_for_plugin_install() {
+        let line = "/plugin install ./my-";
+        assert!(is_file_arg_position(line, line.len()));
+    }
+
+    #[test]
+    fn file_arg_position_does_not_trigger_without_trailing_space() {
+        // No space after `/export` means the user is still typing the
+        // command name — slash-name completion should run, not filename.
+        let line = "/export";
+        assert!(!is_file_arg_position(line, line.len()));
+    }
+
+    #[test]
+    fn file_arg_position_does_not_trigger_on_partial_command() {
+        // `/expor` is a typo on the way to `/export`; treat it as a
+        // slash-name completion target.
+        let line = "/expor";
+        assert!(!is_file_arg_position(line, line.len()));
+    }
+
+    #[test]
+    fn file_arg_position_does_not_trigger_for_non_file_command() {
+        // `/model ` takes a model alias, not a path — slash-name completion
+        // (which includes the model-alias entries from the prepared list)
+        // is the right behavior.
+        let line = "/model opus";
+        assert!(!is_file_arg_position(line, line.len()));
+    }
+
+    #[test]
+    fn file_arg_position_respects_cursor_before_space() {
+        // Cursor *before* the space — user is still inside the command
+        // name, even if a space comes later.
+        let line = "/export foo";
+        let pos_inside_command_name = "/expor".len();
+        assert!(!is_file_arg_position(line, pos_inside_command_name));
+    }
+
+    #[test]
+    fn file_arg_position_handles_empty_line() {
+        assert!(!is_file_arg_position("", 0));
+    }
+
+    #[test]
+    fn file_arg_position_handles_oob_cursor_safely() {
+        // Defensive — `pos > line.len()` should not panic, just decline.
+        assert!(!is_file_arg_position("/export ", 100));
+    }
+
+    // -------- slash_command_prefix --------
+
+    #[test]
+    fn slash_prefix_requires_cursor_at_end() {
+        // Cursor not at end → None (no completion).
+        let line = "/foo bar";
+        assert!(slash_command_prefix(line, 3).is_none());
+    }
+
+    #[test]
+    fn slash_prefix_requires_leading_slash() {
+        // No leading slash → None.
+        let line = "foo";
+        assert!(slash_command_prefix(line, line.len()).is_none());
+    }
+
+    #[test]
+    fn slash_prefix_returns_full_prefix_at_end() {
+        let line = "/sess";
+        assert_eq!(slash_command_prefix(line, line.len()), Some("/sess"));
+    }
+
+    // -------- normalize_completions --------
+
+    #[test]
+    fn normalize_drops_entries_without_leading_slash() {
+        let input = vec![
+            ("/foo".to_string(), "desc".to_string()),
+            ("bar".to_string(), "desc".to_string()),
+        ];
+        let out = normalize_completions(input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "/foo");
+    }
+
+    #[test]
+    fn normalize_dedupes_keeping_first() {
+        let input = vec![
+            ("/foo".to_string(), "first".to_string()),
+            ("/foo".to_string(), "second".to_string()),
+        ];
+        let out = normalize_completions(input);
+        assert_eq!(out.len(), 1);
+        // First insertion wins.
+        assert_eq!(out[0].1, "first");
+    }
 }

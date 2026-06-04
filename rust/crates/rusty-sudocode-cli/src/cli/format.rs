@@ -979,6 +979,58 @@ pub(crate) fn format_turn_status_line(
     format!("\x1b[2m[{model}] · turn {turn} · {tokens_display} tokens · {secs:.1}s\x1b[0m")
 }
 
+/// Compact one-line summary of all tool calls that ran in a turn.
+///
+/// Returns `None` when no tool calls happened (silent for plain
+/// text-only turns). Each entry shows the tool name followed by a status
+/// glyph (`✓` for success, `✗` for error). The line ends with the total
+/// count and turn duration so users can read it as `"3 tools, 1.2s"`.
+///
+/// Example output:
+/// ```text
+/// 🔧 bash ✓  read_file ✓  edit_file ✗ (3 tools, 4.7s)
+/// ```
+pub(crate) fn format_tool_timeline(
+    tool_results: &[runtime::ConversationMessage],
+    elapsed: Duration,
+) -> Option<String> {
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    for message in tool_results {
+        for block in &message.blocks {
+            if let runtime::ContentBlock::ToolResult {
+                tool_name,
+                is_error,
+                ..
+            } = block
+            {
+                entries.push((tool_name.clone(), !*is_error));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let count = entries.len();
+    let parts: Vec<String> = entries
+        .into_iter()
+        .map(|(name, ok)| {
+            // Bold tool name; green check or red cross.
+            let glyph = if ok {
+                "\x1b[32m✓\x1b[0m"
+            } else {
+                "\x1b[31m✗\x1b[0m"
+            };
+            format!("\x1b[1m{name}\x1b[0m {glyph}")
+        })
+        .collect();
+    let body = parts.join("  ");
+    let plural = if count == 1 { "tool" } else { "tools" };
+    let secs = elapsed.as_secs_f64();
+    Some(format!(
+        "🔧 {body} \x1b[2m({count} {plural}, {secs:.1}s)\x1b[0m"
+    ))
+}
+
 pub(crate) fn truncate_output_for_display(
     content: &str,
     max_lines: usize,
@@ -1065,5 +1117,84 @@ mod tests {
             rendered.contains("Fresh session    /clear --confirm"),
             "{rendered}"
         );
+    }
+
+    fn user_message_with_results(results: Vec<(&str, bool)>) -> runtime::ConversationMessage {
+        runtime::ConversationMessage {
+            role: runtime::MessageRole::User,
+            blocks: results
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, is_error))| runtime::ContentBlock::ToolResult {
+                    tool_use_id: format!("tool_{i}"),
+                    tool_name: name.to_string(),
+                    output: String::new(),
+                    is_error,
+                })
+                .collect(),
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tool_timeline_is_silent_when_no_tools_ran() {
+        let messages = vec![user_message_with_results(vec![])];
+        assert!(format_tool_timeline(&messages, Duration::from_millis(500)).is_none());
+        assert!(format_tool_timeline(&[], Duration::from_millis(500)).is_none());
+    }
+
+    #[test]
+    fn tool_timeline_singular_form_for_one_tool() {
+        let messages = vec![user_message_with_results(vec![("bash", false)])];
+        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(1.2)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("bash"), "{plain}");
+        assert!(plain.contains("✓"), "{plain}");
+        assert!(plain.contains("(1 tool, 1.2s)"), "{plain}");
+    }
+
+    #[test]
+    fn tool_timeline_lists_each_tool_with_status_glyph() {
+        let messages = vec![user_message_with_results(vec![
+            ("bash", false),
+            ("read_file", false),
+            ("edit_file", true),
+        ])];
+        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(4.7)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("bash ✓"), "{plain}");
+        assert!(plain.contains("read_file ✓"), "{plain}");
+        assert!(plain.contains("edit_file ✗"), "{plain}");
+        assert!(plain.contains("(3 tools, 4.7s)"), "{plain}");
+    }
+
+    #[test]
+    fn tool_timeline_walks_multiple_messages() {
+        let messages = vec![
+            user_message_with_results(vec![("bash", false)]),
+            user_message_with_results(vec![("read_file", false)]),
+        ];
+        let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
     }
 }

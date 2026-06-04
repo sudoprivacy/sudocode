@@ -61,8 +61,9 @@ use cli::format::{
     format_commit_skipped_report, format_compact_report, format_cost_report,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permissions_report, format_permissions_switch_report,
-    format_pr_report, format_resume_report, format_sandbox_report, format_turn_status_line,
-    format_ultraplan_report, render_resume_usage, render_version_report, truncate_for_summary,
+    format_pr_report, format_resume_report, format_sandbox_report, format_tool_timeline,
+    format_turn_status_line, format_ultraplan_report, render_resume_usage, render_version_report,
+    truncate_for_summary,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -2752,6 +2753,9 @@ impl LiveCli {
                         );
                     }
                     let elapsed = turn_start.elapsed();
+                    if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
+                        println!("{timeline}");
+                    }
                     let usage = self.runtime.usage().current_turn_usage();
                     let turns = self.runtime.usage().turns();
                     println!(

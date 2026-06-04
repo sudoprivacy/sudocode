@@ -969,14 +969,49 @@ pub(crate) fn format_turn_status_line(
     usage: &TokenUsage,
     elapsed: Duration,
 ) -> String {
+    format_turn_status_line_with_branch(model, turn, usage, elapsed, None)
+}
+
+/// Render the dim per-turn status line shown after each interactive turn.
+///
+/// Contains, in order: model name, turn number, cumulative token count,
+/// estimated cost (when pricing for the model is known), elapsed wall-clock
+/// time for the turn, and the current git branch (when one is available).
+/// All fields are dimmed; turn and tokens are kept compact (`turn 3`,
+/// `3.2k tokens`) so the line stays single-row even at narrow widths.
+pub(crate) fn format_turn_status_line_with_branch(
+    model: &str,
+    turn: u32,
+    usage: &TokenUsage,
+    elapsed: Duration,
+    branch: Option<&str>,
+) -> String {
     let total = usage.total_tokens();
     let tokens_display = if total >= 1000 {
         format!("{:.1}k", f64::from(total) / 1000.0)
     } else {
         total.to_string()
     };
+    let cost = usage.estimate_cost_usd().total_cost_usd();
+    let cost_display = if cost > 0.0 {
+        Some(format!("${cost:.2}"))
+    } else {
+        None
+    };
     let secs = elapsed.as_secs_f64();
-    format!("\x1b[2m[{model}] · turn {turn} · {tokens_display} tokens · {secs:.1}s\x1b[0m")
+
+    let mut segments: Vec<String> = Vec::with_capacity(6);
+    segments.push(format!("[{model}]"));
+    segments.push(format!("turn {turn}"));
+    segments.push(format!("{tokens_display} tokens"));
+    if let Some(cost) = cost_display {
+        segments.push(cost);
+    }
+    segments.push(format!("{secs:.1}s"));
+    if let Some(branch) = branch.filter(|b| !b.is_empty()) {
+        segments.push(branch.to_string());
+    }
+    format!("\x1b[2m{}\x1b[0m", segments.join(" · "))
 }
 
 /// Render the box that frames an interactive permission-approval prompt.
@@ -1295,6 +1330,74 @@ mod tests {
         );
         assert!(plain.starts_with("  ╭─"), "{plain}");
         assert!(plain.trim_end().ends_with('╯'), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_includes_cost_when_nonzero() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            3,
+            &usage,
+            Duration::from_secs_f64(1.2),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
+        assert!(plain.contains("turn 3"), "{plain}");
+        assert!(plain.contains("1.5k tokens"), "{plain}");
+        assert!(plain.contains("$"), "expected cost segment in {plain}");
+        assert!(plain.contains("1.2s"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_omits_cost_when_zero() {
+        // With no tokens recorded the estimated cost is 0.0 and the cost
+        // segment is omitted entirely rather than printing "$0.00".
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_secs_f64(0.3),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(!plain.contains("$"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_appends_branch_when_present() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_millis(800),
+            Some("feat/tui-backlog-179"),
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.ends_with("feat/tui-backlog-179"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_omits_branch_when_empty() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_millis(800),
+            Some(""),
+        );
+        let plain = strip_ansi(&rendered);
+        // Trailing segment should be the duration, not an empty " · ".
+        assert!(plain.ends_with("0.8s"), "{plain}");
     }
 
     #[test]

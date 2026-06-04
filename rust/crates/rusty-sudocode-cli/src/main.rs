@@ -62,8 +62,8 @@ use cli::format::{
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_timeline, format_turn_status_line, format_ultraplan_report,
-    render_resume_usage, render_version_report, truncate_for_summary,
+    format_sandbox_report, format_tool_timeline, format_turn_status_line_with_branch,
+    format_ultraplan_report, render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -2758,9 +2758,18 @@ impl LiveCli {
                     }
                     let usage = self.runtime.usage().current_turn_usage();
                     let turns = self.runtime.usage().turns();
+                    let branch = env::current_dir()
+                        .ok()
+                        .and_then(|cwd| resolve_git_branch_for(&cwd));
                     println!(
                         "{}",
-                        format_turn_status_line(&self.config.model, turns, &usage, elapsed)
+                        format_turn_status_line_with_branch(
+                            &self.config.model,
+                            turns,
+                            &usage,
+                            elapsed,
+                            branch.as_deref(),
+                        )
                     );
                 }
                 self.persist_session()?;

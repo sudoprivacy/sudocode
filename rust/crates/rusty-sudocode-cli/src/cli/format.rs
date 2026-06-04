@@ -979,6 +979,78 @@ pub(crate) fn format_turn_status_line(
     format!("\x1b[2m[{model}] · turn {turn} · {tokens_display} tokens · {secs:.1}s\x1b[0m")
 }
 
+/// Render the box that frames an interactive permission-approval prompt.
+///
+/// Output shape (newlines preserved verbatim):
+/// ```text
+///   ╭─ ⚠ Permission required ─╮
+///   │ Tool      bash
+///   │ Action    command "cargo test"
+///   │ Mode      workspace-write → danger-full-access
+///   │ Reason    requires unrestricted access
+///   ╰──────────────────────────╯
+/// ```
+///
+/// `Action` is derived from [`describe_tool_progress`] so it stays consistent
+/// with the spinner phase label the user already sees. `Reason` is shown only
+/// when the runtime supplied one.
+pub(crate) fn format_permission_prompt_box(
+    tool_name: &str,
+    input: &str,
+    current_mode: &str,
+    required_mode: &str,
+    reason: Option<&str>,
+) -> String {
+    let action = describe_tool_progress(tool_name, input);
+    let mode_transition = format!("{current_mode} → {required_mode}");
+    let title = "⚠ Permission required";
+    // Header width: " ─ {title} ─ " inside the corners. Compute the floor of
+    // the body box from the widest visible row.
+    let visible_widths: Vec<usize> = [
+        format!("Tool      {tool_name}"),
+        format!("Action    {action}"),
+        format!("Mode      {mode_transition}"),
+    ]
+    .into_iter()
+    .chain(reason.map(|r| format!("Reason    {r}")))
+    .map(|line| line.chars().count())
+    .collect();
+    let inner_width = visible_widths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 4);
+    let border = "─".repeat(inner_width + 2);
+
+    let grey = "\x1b[38;5;245m";
+    let reset = "\x1b[0m";
+    let bold_yellow = "\x1b[1;33m";
+    let bold_cyan = "\x1b[1;36m";
+    let dim = "\x1b[2m";
+
+    let mut out = String::new();
+    let title_dashes = "─".repeat(inner_width.saturating_sub(title.chars().count() + 2));
+    let _ = writeln!(
+        out,
+        "  {grey}╭─ {bold_yellow}{title}{reset}{grey} {title_dashes}─╮{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "  {grey}│{reset} Tool      {bold_cyan}{tool_name}{reset}"
+    );
+    let _ = writeln!(out, "  {grey}│{reset} Action    {dim}{action}{reset}");
+    let _ = writeln!(
+        out,
+        "  {grey}│{reset} Mode      {dim}{mode_transition}{reset}"
+    );
+    if let Some(reason) = reason {
+        let _ = writeln!(out, "  {grey}│{reset} Reason    {dim}{reason}{reset}");
+    }
+    let _ = write!(out, "  {grey}╰{border}╯{reset}");
+    out
+}
+
 /// Compact one-line summary of all tool calls that ran in a turn.
 ///
 /// Returns `None` when no tool calls happened (silent for plain
@@ -1196,5 +1268,46 @@ mod tests {
         let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
+    }
+
+    #[test]
+    fn permission_prompt_box_renders_all_fields() {
+        let rendered = format_permission_prompt_box(
+            "bash",
+            "{\"command\":\"cargo test\"}",
+            "workspace-write",
+            "danger-full-access",
+            Some("requires unrestricted access"),
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Permission required"), "{plain}");
+        assert!(plain.contains("Tool      bash"), "{plain}");
+        // Action is derived via describe_tool_progress — for bash it shows the
+        // command. We just assert the prefix matches the schema.
+        assert!(plain.contains("Action    command"), "{plain}");
+        assert!(
+            plain.contains("Mode      workspace-write → danger-full-access"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Reason    requires unrestricted access"),
+            "{plain}"
+        );
+        assert!(plain.starts_with("  ╭─"), "{plain}");
+        assert!(plain.trim_end().ends_with('╯'), "{plain}");
+    }
+
+    #[test]
+    fn permission_prompt_box_omits_reason_when_none() {
+        let rendered = format_permission_prompt_box(
+            "read_file",
+            "{\"path\":\"src/main.rs\"}",
+            "read-only",
+            "workspace-write",
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(!plain.contains("Reason"), "{plain}");
+        assert!(plain.contains("Tool      read_file"), "{plain}");
     }
 }

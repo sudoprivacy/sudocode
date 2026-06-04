@@ -60,10 +60,10 @@ use cli::format::{
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
     format_commit_skipped_report, format_compact_report, format_cost_report,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
-    format_model_switch_report, format_permissions_report, format_permissions_switch_report,
-    format_pr_report, format_resume_report, format_sandbox_report, format_tool_timeline,
-    format_turn_status_line, format_ultraplan_report, render_resume_usage, render_version_report,
-    truncate_for_summary,
+    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
+    format_permissions_switch_report, format_pr_report, format_resume_report,
+    format_sandbox_report, format_tool_timeline, format_turn_status_line, format_ultraplan_report,
+    render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -4358,11 +4358,16 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
         println!();
-        println!("Permission approval required");
-        println!("  Tool             \x1b[36m{}\x1b[0m", request.tool_name);
-        if let Some(reason) = &request.reason {
-            println!("  Reason           \x1b[2m{reason}\x1b[0m");
-        }
+        println!(
+            "{}",
+            format_permission_prompt_box(
+                &request.tool_name,
+                &request.input,
+                request.current_mode.as_str(),
+                request.required_mode.as_str(),
+                request.reason.as_deref(),
+            )
+        );
 
         if !io::stdin().is_terminal() {
             // Non-interactive fallback: read a line from stdin.

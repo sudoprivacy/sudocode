@@ -7112,9 +7112,7 @@ mod shell_group_tests {
 
     fn bash_available() -> bool {
         std::env::var_os("PATH")
-            .map(|paths| {
-                std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file())
-            })
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
             .unwrap_or(false)
     }
 
@@ -7126,8 +7124,8 @@ mod shell_group_tests {
         }
         let mut process = std::process::Command::new("bash");
         process.arg("-c").arg("printf 'hello-shell-group'");
-        let result = run_in_process_group(&mut process, 5_000, None)
-            .expect("group spawn should succeed");
+        let result =
+            run_in_process_group(&mut process, 5_000, None).expect("group spawn should succeed");
         assert!(matches!(
             result.outcome,
             ShellOutcome::Completed(status) if status.success()
@@ -7147,8 +7145,8 @@ mod shell_group_tests {
         let mut process = std::process::Command::new("bash");
         process.arg("-c").arg("sleep 30");
         let started = Instant::now();
-        let result = run_in_process_group(&mut process, 200, None)
-            .expect("group spawn should succeed");
+        let result =
+            run_in_process_group(&mut process, 200, None).expect("group spawn should succeed");
         let elapsed = started.elapsed();
         assert!(matches!(result.outcome, ShellOutcome::TimedOut));
         // Generous ceiling: poll loop is 10ms granularity + drain budget floor (2s).
@@ -7201,8 +7199,8 @@ mod shell_group_tests {
             "sleep 30 & disown; sleep 30",
         );
         let started = Instant::now();
-        let result = run_in_process_group(&mut process, 200, None)
-            .expect("group spawn should succeed");
+        let result =
+            run_in_process_group(&mut process, 200, None).expect("group spawn should succeed");
         let elapsed = started.elapsed();
         assert!(matches!(result.outcome, ShellOutcome::TimedOut));
         assert!(

@@ -830,8 +830,51 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let file = parsed.get("file").unwrap_or(parsed);
     let path = extract_tool_path(file);
+    let content = file
+        .get("content")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let total_lines = file
+        .get("total_lines")
+        .and_then(serde_json::Value::as_u64);
+    let header = format!("{icon} \x1b[2mRead {path}\x1b[0m");
+    if content.is_empty() {
+        return header;
+    }
+    // Cap to READ_DISPLAY_* — read_file results are commonly multi-hundred
+    // lines and would overwhelm the terminal without a hard cap.
+    let preview =
+        truncate_output_for_display(content, READ_DISPLAY_MAX_LINES, READ_DISPLAY_MAX_CHARS);
+    if preview.is_empty() {
+        return header;
+    }
+    let language = language_token_from_path(&path);
+    let renderer = crate::render::TerminalRenderer::new();
+    let highlighted = renderer.highlight_code(&preview, language);
+    let indented = highlighted
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = String::with_capacity(header.len() + indented.len() + 8);
+    out.push_str(&header);
+    if let Some(total) = total_lines {
+        let _ = write!(out, " \x1b[2m({total} lines)\x1b[0m");
+    }
+    out.push('\n');
+    out.push_str(&indented);
+    out
+}
 
-    format!("{icon} \x1b[2mRead {path}\x1b[0m")
+/// Derive a syntect-friendly language token from a filename.
+///
+/// `find_syntax_by_token` matches both extensions (e.g. `"rs"`) and language
+/// names; an empty string makes it fall back to plain text.
+pub(crate) fn language_token_from_path(path: &str) -> &str {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
 }
 
 pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
@@ -1461,6 +1504,55 @@ mod tests {
         // Static notice retained for mid-line truncation; the counted
         // notice would lie because total_lines == shown_lines == 1.
         assert!(plain.contains("output truncated for display"), "{plain}");
+    }
+
+    #[test]
+    fn language_token_for_common_paths() {
+        assert_eq!(language_token_from_path("src/main.rs"), "rs");
+        assert_eq!(language_token_from_path("foo/bar.py"), "py");
+        assert_eq!(language_token_from_path("README"), "");
+        assert_eq!(language_token_from_path(".gitignore"), "");
+    }
+
+    #[test]
+    fn format_read_result_includes_highlighted_content() {
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "file_path": "src/main.rs",
+                "content": "fn main() {\n    println!(\"hi\");\n}\n",
+                "num_lines": 3,
+                "start_line": 1,
+                "total_lines": 3
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        // Header still present with line count.
+        assert!(plain.contains("Read src/main.rs"), "{plain}");
+        assert!(plain.contains("(3 lines)"), "{plain}");
+        // Content shows up indented under the header.
+        assert!(plain.contains("fn main()"), "{plain}");
+        assert!(plain.contains("println!"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_renders_header_only_for_empty_content() {
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "file_path": "empty.txt",
+                "content": "",
+                "num_lines": 0,
+                "start_line": 1,
+                "total_lines": 0
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Read empty.txt"), "{plain}");
+        // No content body indented underneath.
+        assert!(!plain.contains("\n  "), "{plain}");
     }
 
     #[test]

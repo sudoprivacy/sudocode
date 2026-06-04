@@ -77,9 +77,9 @@ use cli::help::{
 use cli::mcp::{build_runtime_mcp_state, RuntimeMcpState};
 use cli::session::{
     confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
-    delete_managed_session, list_managed_sessions, load_session_reference, new_cli_session,
-    new_cli_session_for, render_session_list, resolve_session_reference,
-    write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
+    delete_managed_session, format_session_picker_entry, list_managed_sessions,
+    load_session_reference, new_cli_session, new_cli_session_for, render_session_list,
+    resolve_session_reference, write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
 };
 use cli::status::{
     format_status_report, normalize_permission_mode, print_sandbox_status_snapshot,
@@ -3550,6 +3550,39 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match action {
             None | Some("list") => {
+                // On a TTY, present a fuzzy picker that switches on Enter and
+                // is silent on Esc. Non-interactive callers (CI, scripted
+                // pipes, `--output-format json` paths) keep the original
+                // text-table listing.
+                if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                    let sessions = list_managed_sessions()?;
+                    if sessions.is_empty() {
+                        println!("{}", render_session_list(&self.session.id)?);
+                        return Ok(false);
+                    }
+                    let default_idx = sessions
+                        .iter()
+                        .position(|session| session.id == self.session.id)
+                        .unwrap_or(0);
+                    let items: Vec<String> = sessions
+                        .iter()
+                        .map(|session| format_session_picker_entry(session, &self.session.id))
+                        .collect();
+                    let selection = FuzzySelect::new()
+                        .with_prompt("Select a session (type to filter, Esc to cancel)")
+                        .items(&items)
+                        .default(default_idx)
+                        .interact_opt()?;
+                    let Some(idx) = selection else {
+                        return Ok(false);
+                    };
+                    let target = sessions[idx].id.clone();
+                    if target == self.session.id {
+                        println!("Session unchanged (already active: {target}).");
+                        return Ok(false);
+                    }
+                    return self.handle_session_command(Some("switch"), Some(&target));
+                }
                 println!("{}", render_session_list(&self.session.id)?);
                 Ok(false)
             }

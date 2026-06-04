@@ -201,6 +201,39 @@ pub(crate) fn render_session_list(
     Ok(lines.join("\n"))
 }
 
+/// Compact one-line description of a session for the interactive picker.
+///
+/// Excludes ANSI styling because `dialoguer::FuzzySelect` matches against the
+/// raw string, and escape characters would be visible in the fuzzy filter.
+pub(crate) fn format_session_picker_entry(
+    session: &ManagedSessionSummary,
+    active_session_id: &str,
+) -> String {
+    let marker = if session.id == active_session_id {
+        "●"
+    } else {
+        "○"
+    };
+    let lineage = match (
+        session.branch_name.as_deref(),
+        session.parent_session_id.as_deref(),
+    ) {
+        (Some(branch_name), Some(parent_session_id)) => {
+            format!(" branch={branch_name} from={parent_session_id}")
+        }
+        (None, Some(parent_session_id)) => format!(" from={parent_session_id}"),
+        (Some(branch_name), None) => format!(" branch={branch_name}"),
+        (None, None) => String::new(),
+    };
+    format!(
+        "{marker} {id:<20}  msgs={msgs:<4}  modified={modified}  lifecycle={lifecycle}{lineage}",
+        id = session.id,
+        msgs = session.message_count,
+        modified = format_session_modified_age(session.modified_epoch_millis),
+        lifecycle = session.lifecycle.signal(),
+    )
+}
+
 pub(crate) fn format_session_modified_age(modified_epoch_millis: u128) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)

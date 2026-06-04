@@ -2359,36 +2359,47 @@ impl AcpSdkDelegate {
                 return Err(runtime::AcpError::internal(user_message));
             }
         }
+        // Track turn count before run_turn to detect if usage was recorded
+        let turns_before = session.runtime.usage().turns();
         self.inner
             .tokio_runtime
             .block_on(session.runtime.run_turn(prompt, prompter, Some(observer)))
             .map_err(|e| {
-                // Record error to telemetry log if available
                 if let Some(tracer) = session.runtime.session_tracer() {
                     tracer.record_prompt_error("runtime_error", e.to_string());
                 }
                 runtime::AcpError::internal(e.to_string())
             })?;
-        let usage = UsageTracker::from_session(session.runtime.session()).cumulative_usage();
-        let prompt_usage = runtime::acp_sdk_server::PromptUsage {
-            input_tokens: u64::from(usage.input_tokens),
-            output_tokens: u64::from(usage.output_tokens),
-            total_tokens: u64::from(usage.total_tokens()),
-            cache_read_tokens: Some(u64::from(usage.cache_read_input_tokens)),
-            cache_write_tokens: Some(u64::from(usage.cache_creation_input_tokens)),
+        // Get per-turn usage (only if this turn actually recorded usage)
+        let per_turn_usage = session.runtime.usage().turn_usage_if_recorded(turns_before);
+        let cumulative_usage = session.runtime.usage().cumulative_usage();
+        // Build PromptUsage if we have per-turn data, otherwise return None for usage
+        let prompt_usage = per_turn_usage.map(|u| runtime::acp_sdk_server::PromptUsage {
+            input_tokens: u64::from(u.input_tokens),
+            output_tokens: u64::from(u.output_tokens),
+            total_tokens: u64::from(u.total_tokens()),
+            cache_read_tokens: Some(u64::from(u.cache_read_input_tokens)),
+            cache_write_tokens: Some(u64::from(u.cache_creation_input_tokens)),
             context_window_tokens: Some(context_limit as u64),
             estimated_session_tokens: Some(
                 estimate_session_tokens(session.runtime.session()) as u64
             ),
-        };
-        // Record token usage to telemetry log
+            cumulative_usage: Some(runtime::acp_sdk_server::CumulativeUsage {
+                input_tokens: u64::from(cumulative_usage.input_tokens),
+                output_tokens: u64::from(cumulative_usage.output_tokens),
+                total_tokens: u64::from(cumulative_usage.total_tokens()),
+                cached_read_tokens: Some(u64::from(cumulative_usage.cache_read_input_tokens)),
+                cached_write_tokens: Some(u64::from(cumulative_usage.cache_creation_input_tokens)),
+            }),
+        });
+        // Record cumulative token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
             tracer.record_usage(
                 "session_summary".to_string(),
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
+                cumulative_usage.input_tokens,
+                cumulative_usage.output_tokens,
+                cumulative_usage.cache_creation_input_tokens,
+                cumulative_usage.cache_read_input_tokens,
             );
         }
         session
@@ -2398,7 +2409,7 @@ impl AcpSdkDelegate {
             .map_err(|e| runtime::AcpError::internal(format!("failed to persist session: {e}")))?;
         Ok((
             runtime::acp_sdk_server::AcpStopReason::EndTurn,
-            Some(prompt_usage),
+            prompt_usage,
         ))
     }
 }

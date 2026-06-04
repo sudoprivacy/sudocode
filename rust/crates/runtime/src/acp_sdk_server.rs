@@ -371,6 +371,18 @@ pub struct PromptUsage {
     pub cache_write_tokens: Option<u64>,
     pub context_window_tokens: Option<u64>,
     pub estimated_session_tokens: Option<u64>,
+    /// Cumulative usage for the entire session, exposed via _meta.sudocode.cumulativeUsage
+    pub cumulative_usage: Option<CumulativeUsage>,
+}
+
+/// Cumulative token usage for the entire session.
+#[derive(Debug, Clone, Default)]
+pub struct CumulativeUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_read_tokens: Option<u64>,
+    pub cached_write_tokens: Option<u64>,
 }
 
 /// Thread-safe handle to a delegate, shared across async handlers.
@@ -948,14 +960,30 @@ pub(crate) async fn run_acp_on_transport(
                             Ok((stop_reason, prompt_usage)) => {
                                 let mut response = PromptResponse::new(stop_reason);
                                 if let Some(u) = prompt_usage {
-                                    let mut meta = Map::new();
-                                    meta.insert(
-                                        "sudocode".to_string(),
-                                        json!({
-                                            "contextWindowTokens": u.context_window_tokens,
-                                            "estimatedSessionTokens": u.estimated_session_tokens,
-                                        }),
+                                    let mut sudocode_meta = Map::new();
+                                    sudocode_meta.insert(
+                                        "contextWindowTokens".to_string(),
+                                        json!(u.context_window_tokens),
                                     );
+                                    sudocode_meta.insert(
+                                        "estimatedSessionTokens".to_string(),
+                                        json!(u.estimated_session_tokens),
+                                    );
+                                    // Add cumulativeUsage for clients that need session totals
+                                    if let Some(cumulative) = &u.cumulative_usage {
+                                        sudocode_meta.insert(
+                                            "cumulativeUsage".to_string(),
+                                            json!({
+                                                "inputTokens": cumulative.input_tokens,
+                                                "outputTokens": cumulative.output_tokens,
+                                                "totalTokens": cumulative.total_tokens,
+                                                "cachedReadTokens": cumulative.cached_read_tokens,
+                                                "cachedWriteTokens": cumulative.cached_write_tokens,
+                                            }),
+                                        );
+                                    }
+                                    let mut meta = Map::new();
+                                    meta.insert("sudocode".to_string(), json!(sudocode_meta));
                                     response = response.usage(
                                         Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
                                             .cached_read_tokens(u.cache_read_tokens)

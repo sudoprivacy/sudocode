@@ -503,6 +503,116 @@ async fn scenario_slash_command_model(client: &mut AcpTestClient, session_id: &s
     );
 }
 
+/// Test that prompt usage returns per-turn (not cumulative) values.
+/// Uses a fresh session to avoid interference from other scenarios.
+async fn scenario_session_prompt_per_turn_usage(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+) {
+    // Create a fresh session for this test to avoid accumulated usage from other scenarios
+    let session_id = scenario_session_new(client, &workspace.root).await;
+
+    // First prompt
+    let prompt_text1 = format!("{SCENARIO_PREFIX}streaming_text");
+    let (_notifs1, resp1) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": prompt_text1 }]
+            }),
+        )
+        .await;
+
+    let result1 = &resp1["result"];
+    let usage1 = result1
+        .get("usage")
+        .expect("first prompt should have usage");
+    let first_turn_total = usage1["totalTokens"]
+        .as_u64()
+        .expect("first turn should have totalTokens");
+    assert!(first_turn_total > 0, "first turn totalTokens should be > 0");
+
+    // Check _meta.sudocode.cumulativeUsage exists for first prompt
+    let meta1 = result1
+        .get("_meta")
+        .expect("first prompt should have _meta");
+    let sudocode1 = meta1.get("sudocode").expect("_meta should have sudocode");
+    assert!(
+        sudocode1.get("cumulativeUsage").is_some(),
+        "_meta.sudocode should have cumulativeUsage"
+    );
+    let cumulative1 = &sudocode1["cumulativeUsage"];
+    let cumulative_total1 = cumulative1["totalTokens"]
+        .as_u64()
+        .expect("cumulativeUsage should have totalTokens");
+
+    // Second prompt in the same session
+    let prompt_text2 = format!("{SCENARIO_PREFIX}streaming_text");
+    let (_notifs2, resp2) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": prompt_text2 }]
+            }),
+        )
+        .await;
+
+    let result2 = &resp2["result"];
+    let usage2 = result2
+        .get("usage")
+        .expect("second prompt should have usage");
+    let second_turn_total = usage2["totalTokens"]
+        .as_u64()
+        .expect("second turn should have totalTokens");
+    assert!(
+        second_turn_total > 0,
+        "second turn totalTokens should be > 0"
+    );
+
+    // Check _meta.sudocode.cumulativeUsage for second prompt
+    let meta2 = result2
+        .get("_meta")
+        .expect("second prompt should have _meta");
+    let sudocode2 = meta2.get("sudocode").expect("_meta should have sudocode");
+    let cumulative2 = sudocode2
+        .get("cumulativeUsage")
+        .expect("should have cumulativeUsage");
+    let cumulative_total2 = cumulative2["totalTokens"]
+        .as_u64()
+        .expect("cumulativeUsage should have totalTokens");
+
+    // Key assertions:
+    // 1. usage.totalTokens should be per-turn (NOT cumulative)
+    //    So second_turn_total should NOT be the sum of both turns
+    assert!(
+        second_turn_total < cumulative_total2,
+        "second turn usage ({}) should be per-turn (less than cumulative {})",
+        second_turn_total,
+        cumulative_total2
+    );
+
+    // 2. cumulative total should be greater than first turn (because it includes both turns)
+    assert!(
+        cumulative_total2 > cumulative_total1,
+        "cumulative total after second turn ({}) should be greater than after first turn ({})",
+        cumulative_total2,
+        cumulative_total1
+    );
+
+    // 3. cumulative should be at least the sum of per-turn values
+    let sum_of_turns = first_turn_total + second_turn_total;
+    assert!(
+        cumulative_total2 >= sum_of_turns,
+        "cumulative ({}) should be at least the sum of per-turn values ({} + {} = {})",
+        cumulative_total2,
+        first_turn_total,
+        second_turn_total,
+        sum_of_turns
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario runner
 // ---------------------------------------------------------------------------
@@ -515,6 +625,8 @@ async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace
     scenario_session_load_not_supported(client).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
+    // Run per-turn usage test last with a fresh session
+    scenario_session_prompt_per_turn_usage(client, workspace).await;
 }
 
 // ---------------------------------------------------------------------------

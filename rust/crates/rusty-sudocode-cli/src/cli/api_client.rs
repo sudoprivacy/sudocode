@@ -162,7 +162,12 @@ impl ApiClient for AnthropicRuntimeClient {
 
         for attempt in 1..=max_attempts {
             let result = self
-                .try_start_stream(&message_request, is_post_tool && attempt == 1, trace_id)
+                .try_start_stream(
+                    &message_request,
+                    is_post_tool && attempt == 1,
+                    is_post_tool,
+                    trace_id,
+                )
                 .await;
             match result {
                 Ok(stream) => return Ok(stream),
@@ -347,6 +352,7 @@ impl AnthropicRuntimeClient {
         &mut self,
         message_request: &MessageRequest,
         apply_stall_timeout: bool,
+        is_post_tool: bool,
         trace_id: Option<&str>,
     ) -> Result<AssistantEventStream, RuntimeError> {
         let provider_stream = self
@@ -375,10 +381,10 @@ impl AnthropicRuntimeClient {
             apply_stall_timeout,
             done: false,
             client: self.client.clone(),
-            fallback_request: Some(MessageRequest {
-                stream: false,
-                ..message_request.clone()
-            }),
+            fallback_request: Some(build_non_streaming_fallback_request(
+                message_request,
+                is_post_tool,
+            )),
         };
 
         Ok(Box::pin(futures::stream::try_unfold(
@@ -495,6 +501,28 @@ pub(crate) fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
         .messages
         .last()
         .is_some_and(|message| message.role == MessageRole::Tool)
+}
+
+const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is complete. Send a final ordinary assistant message to the user in the user's language. Summarize the result and list generated or updated files if any are known. Do not call tools.";
+
+pub(crate) fn build_non_streaming_fallback_request(
+    request: &MessageRequest,
+    is_post_tool: bool,
+) -> MessageRequest {
+    let mut fallback = MessageRequest {
+        stream: false,
+        ..request.clone()
+    };
+
+    if is_post_tool {
+        fallback.tools = None;
+        fallback.tool_choice = None;
+        fallback
+            .messages
+            .push(InputMessage::user_text(POST_TOOL_FINAL_SYNTHESIS_PROMPT));
+    }
+
+    fallback
 }
 
 pub(crate) fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
@@ -971,5 +999,61 @@ mod tests {
             converted[2].content[0],
             InputContentBlock::ToolResult { .. }
         ));
+    }
+
+    #[test]
+    fn post_tool_non_streaming_fallback_disables_tools_and_requests_final_text() {
+        let request = MessageRequest {
+            model: "gemini-3.5-flash".to_string(),
+            max_tokens: 64000,
+            messages: vec![InputMessage::user_tool_result(
+                "call_a",
+                "created file",
+                false,
+            )],
+            tools: Some(vec![ToolDefinition {
+                name: "write_file".to_string(),
+                description: None,
+                input_schema: serde_json::json!({ "type": "object" }),
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            stream: true,
+            ..Default::default()
+        };
+
+        let fallback = build_non_streaming_fallback_request(&request, true);
+
+        assert!(!fallback.stream);
+        assert!(fallback.tools.is_none());
+        assert!(fallback.tool_choice.is_none());
+        assert_eq!(fallback.messages.len(), 2);
+        assert!(matches!(
+            fallback.messages[1].content[0],
+            InputContentBlock::Text { ref text } if text.contains("Do not call tools")
+        ));
+    }
+
+    #[test]
+    fn regular_non_streaming_fallback_preserves_tool_configuration() {
+        let request = MessageRequest {
+            model: "gpt-5.5".to_string(),
+            max_tokens: 64000,
+            messages: vec![InputMessage::user_text("hello")],
+            tools: Some(vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: None,
+                input_schema: serde_json::json!({ "type": "object" }),
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            stream: true,
+            ..Default::default()
+        };
+
+        let fallback = build_non_streaming_fallback_request(&request, false);
+
+        assert!(!fallback.stream);
+        assert!(fallback.tools.is_some());
+        assert_eq!(fallback.tool_choice, Some(ToolChoice::Auto));
+        assert_eq!(fallback.messages.len(), 1);
     }
 }

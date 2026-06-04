@@ -75,6 +75,7 @@ use cli::help::{
     render_memory_report, render_repl_help, render_teleport_report, validate_no_args,
 };
 use cli::mcp::{build_runtime_mcp_state, RuntimeMcpState};
+use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
     delete_managed_session, format_session_picker_entry, list_managed_sessions,
@@ -3079,22 +3080,20 @@ impl LiveCli {
     fn print_status(&self) {
         let cumulative = self.runtime.usage().cumulative_usage();
         let latest = self.runtime.usage().current_turn_usage();
-        println!(
-            "{}",
-            format_status_report(
-                &self.config.model,
-                StatusUsage {
-                    message_count: self.runtime.session().messages.len(),
-                    turns: self.runtime.usage().turns(),
-                    latest,
-                    cumulative,
-                    estimated_tokens: self.runtime.estimated_tokens(),
-                },
-                self.config.permission_mode.as_str(),
-                &status_context(Some(&self.session.path)).expect("status context should load"),
-                None, // #148: REPL /status doesn't carry flag provenance
-            )
+        let report = format_status_report(
+            &self.config.model,
+            StatusUsage {
+                message_count: self.runtime.session().messages.len(),
+                turns: self.runtime.usage().turns(),
+                latest,
+                cumulative,
+                estimated_tokens: self.runtime.estimated_tokens(),
+            },
+            self.config.permission_mode.as_str(),
+            &status_context(Some(&self.session.path)).expect("status context should load"),
+            None, // #148: REPL /status doesn't carry flag provenance
         );
+        print_with_pager(&report);
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
@@ -3356,12 +3355,12 @@ impl LiveCli {
     }
 
     fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_config_report(section)?);
+        print_with_pager(&render_config_report(section)?);
         Ok(())
     }
 
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_memory_report()?);
+        print_with_pager(&render_memory_report()?);
         Ok(())
     }
 
@@ -3529,7 +3528,7 @@ impl LiveCli {
     }
 
     fn print_diff() -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_diff_report()?);
+        print_with_pager(&render_diff_report()?);
         Ok(())
     }
 

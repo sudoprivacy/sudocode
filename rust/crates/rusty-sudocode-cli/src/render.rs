@@ -10,9 +10,100 @@ use crossterm::terminal::{Clear, ClearType};
 use crossterm::{execute, queue};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+
+/// Terminal color capability tier, detected from environment variables.
+///
+/// `syntect` emits 24-bit truecolor escapes unconditionally; on terminals that
+/// only advertise 256-color or 16-color these can render as garbage or as the
+/// wrong colors. Detect once at renderer construction and route the highlight
+/// path accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorSupport {
+    /// No ANSI color (`NO_COLOR` set, `TERM=dumb`, or `TERM` unset).
+    NoColor,
+    /// 4-bit ANSI (8 named colors + 8 bright).
+    Ansi16,
+    /// 8-bit (256-color palette).
+    Ansi256,
+    /// 24-bit RGB.
+    TrueColor,
+}
+
+impl ColorSupport {
+    /// Detect the color tier from the process environment.
+    ///
+    /// Detection precedence:
+    /// 1. `NO_COLOR` set to any non-empty value → `NoColor` (https://no-color.org).
+    /// 2. `TERM=dumb` or unset → `NoColor`.
+    /// 3. `COLORTERM=truecolor` / `24bit`, or `TERM` ending in `-direct` → `TrueColor`.
+    /// 4. `TERM` ending in `-256color` → `Ansi256`.
+    /// 5. Default → `Ansi256` (assumed by virtually every modern emulator even
+    ///    when `TERM=xterm` lacks the suffix; emitting 256-color escapes on a
+    ///    16-color terminal degrades gracefully whereas truecolor does not).
+    #[must_use]
+    pub fn detect() -> Self {
+        Self::detect_from_env(|key| std::env::var(key).ok())
+    }
+
+    fn detect_from_env(get: impl Fn(&str) -> Option<String>) -> Self {
+        if get("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+            return Self::NoColor;
+        }
+        let term = get("TERM").unwrap_or_default();
+        if term.is_empty() || term == "dumb" {
+            return Self::NoColor;
+        }
+        let colorterm = get("COLORTERM").unwrap_or_default();
+        if matches!(colorterm.as_str(), "truecolor" | "24bit") || term.ends_with("-direct") {
+            return Self::TrueColor;
+        }
+        if term.ends_with("-256color") {
+            return Self::Ansi256;
+        }
+        Self::Ansi256
+    }
+}
+
+/// Approximate an RGB triple to the nearest 256-color palette index.
+///
+/// Uses the standard 6×6×6 RGB cube (indices 16–231) plus the 24-step
+/// grayscale ramp (232–255) for near-gray inputs.
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    if r == g && g == b {
+        if r < 8 {
+            return 16;
+        }
+        let idx: u16 = 232 + (u16::from(r) - 8) / 10;
+        return u8::try_from(idx.min(255)).expect("idx clamped to <=255");
+    }
+    let to_cube = |v: u8| -> u16 { u16::from(v) * 5 / 255 };
+    let r5 = to_cube(r);
+    let g5 = to_cube(g);
+    let b5 = to_cube(b);
+    u8::try_from(16 + 36 * r5 + 6 * g5 + b5).expect("cube index fits in u8")
+}
+
+/// Render syntect ranges as 256-color escape sequences.
+fn ranges_to_256_color_escaped(ranges: &[(SyntectStyle, &str)]) -> String {
+    let mut out = String::new();
+    for (style, text) in ranges {
+        let fg = rgb_to_ansi256(style.foreground.r, style.foreground.g, style.foreground.b);
+        let _ = write!(out, "\u{1b}[38;5;{fg}m{text}\u{1b}[0m");
+    }
+    out
+}
+
+/// Strip styling from syntect ranges and concatenate the text.
+fn ranges_to_plain(ranges: &[(SyntectStyle, &str)]) -> String {
+    let mut out = String::with_capacity(ranges.iter().map(|(_, s)| s.len()).sum());
+    for (_, text) in ranges {
+        out.push_str(text);
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
@@ -269,6 +360,7 @@ pub struct TerminalRenderer {
     syntax_set: SyntaxSet,
     syntax_theme: Theme,
     color_theme: ColorTheme,
+    color_support: ColorSupport,
 }
 
 impl Default for TerminalRenderer {
@@ -282,6 +374,7 @@ impl Default for TerminalRenderer {
             syntax_set,
             syntax_theme,
             color_theme: ColorTheme::default(),
+            color_support: ColorSupport::detect(),
         }
     }
 }
@@ -295,6 +388,17 @@ impl TerminalRenderer {
     #[must_use]
     pub fn color_theme(&self) -> &ColorTheme {
         &self.color_theme
+    }
+
+    #[must_use]
+    pub fn color_support(&self) -> ColorSupport {
+        self.color_support
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_color_support(mut self, support: ColorSupport) -> Self {
+        self.color_support = support;
+        self
     }
 
     #[must_use]
@@ -622,6 +726,10 @@ impl TerminalRenderer {
 
     #[must_use]
     pub fn highlight_code(&self, code: &str, language: &str) -> String {
+        if self.color_support == ColorSupport::NoColor {
+            return code.to_string();
+        }
+
         let syntax = self
             .syntax_set
             .find_syntax_by_token(language)
@@ -632,14 +740,32 @@ impl TerminalRenderer {
         for line in LinesWithEndings::from(code) {
             match syntax_highlighter.highlight_line(line, &self.syntax_set) {
                 Ok(ranges) => {
-                    let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                    colored_output.push_str(&apply_code_block_background(&escaped));
+                    let escaped = match self.color_support {
+                        ColorSupport::TrueColor => as_24_bit_terminal_escaped(&ranges[..], false),
+                        ColorSupport::Ansi256 => ranges_to_256_color_escaped(&ranges[..]),
+                        ColorSupport::Ansi16 | ColorSupport::NoColor => {
+                            ranges_to_plain(&ranges[..])
+                        }
+                    };
+                    colored_output.push_str(&self.apply_code_block_background(&escaped));
                 }
-                Err(_) => colored_output.push_str(&apply_code_block_background(line)),
+                Err(_) => colored_output.push_str(&self.apply_code_block_background(line)),
             }
         }
 
         colored_output
+    }
+
+    fn apply_code_block_background(&self, line: &str) -> String {
+        // Background tint relies on 256-color escapes; skip when the terminal
+        // can't render them cleanly.
+        if matches!(
+            self.color_support,
+            ColorSupport::NoColor | ColorSupport::Ansi16
+        ) {
+            return line.to_string();
+        }
+        apply_code_block_background(line)
     }
 
     pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
@@ -963,4 +1089,150 @@ fn strip_ansi(input: &str) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |key| map.get(key).cloned()
+    }
+
+    #[test]
+    fn detects_no_color_when_no_color_env_set() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("NO_COLOR", "1"), ("TERM", "xterm-256color")])),
+            ColorSupport::NoColor
+        );
+    }
+
+    #[test]
+    fn empty_no_color_does_not_disable() {
+        // The NO_COLOR convention treats an empty value as "not set".
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("NO_COLOR", ""), ("TERM", "xterm-256color")])),
+            ColorSupport::Ansi256
+        );
+    }
+
+    #[test]
+    fn detects_no_color_when_term_dumb_or_unset() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "dumb")])),
+            ColorSupport::NoColor
+        );
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[])),
+            ColorSupport::NoColor
+        );
+    }
+
+    #[test]
+    fn detects_truecolor_from_colorterm() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "xterm"), ("COLORTERM", "truecolor")])),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "xterm"), ("COLORTERM", "24bit")])),
+            ColorSupport::TrueColor
+        );
+    }
+
+    #[test]
+    fn detects_truecolor_from_direct_term_suffix() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "xterm-direct")])),
+            ColorSupport::TrueColor
+        );
+    }
+
+    #[test]
+    fn detects_256_from_term_suffix() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "xterm-256color")])),
+            ColorSupport::Ansi256
+        );
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "screen-256color")])),
+            ColorSupport::Ansi256
+        );
+    }
+
+    #[test]
+    fn defaults_to_256_for_unspecified_modern_term() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[("TERM", "xterm")])),
+            ColorSupport::Ansi256
+        );
+    }
+
+    #[test]
+    fn no_color_overrides_truecolor_hint() {
+        assert_eq!(
+            ColorSupport::detect_from_env(env(&[
+                ("NO_COLOR", "1"),
+                ("COLORTERM", "truecolor"),
+                ("TERM", "xterm-256color"),
+            ])),
+            ColorSupport::NoColor
+        );
+    }
+
+    #[test]
+    fn rgb_to_ansi256_maps_cube_corners() {
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16); // black grayscale shortcut
+        // Pure white maps through the grayscale ramp; clamps to the top.
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 255);
+        assert_eq!(rgb_to_ansi256(255, 0, 0), 16 + 36 * 5); // pure red
+        assert_eq!(rgb_to_ansi256(0, 255, 0), 16 + 6 * 5); // pure green
+        assert_eq!(rgb_to_ansi256(0, 0, 255), 16 + 5); // pure blue
+    }
+
+    #[test]
+    fn rgb_to_ansi256_uses_grayscale_ramp_for_mid_gray() {
+        // r==g==b in [9, 248] should land in 232..=255.
+        let idx = rgb_to_ansi256(128, 128, 128);
+        assert!((232..=255).contains(&idx), "got {idx}");
+    }
+
+    #[test]
+    fn highlight_code_strips_escapes_when_no_color() {
+        let renderer = TerminalRenderer::new().with_color_support(ColorSupport::NoColor);
+        let code = "fn main() {}\n";
+        let out = renderer.highlight_code(code, "rust");
+        assert_eq!(out, code);
+    }
+
+    #[test]
+    fn highlight_code_emits_only_256_color_when_ansi256() {
+        let renderer = TerminalRenderer::new().with_color_support(ColorSupport::Ansi256);
+        let out = renderer.highlight_code("fn main() {}\n", "rust");
+        // No 24-bit truecolor escape sequence.
+        assert!(
+            !out.contains("\u{1b}[38;2;"),
+            "found truecolor escape in: {out:?}"
+        );
+        // Does contain 256-color escapes.
+        assert!(
+            out.contains("\u{1b}[38;5;"),
+            "missing 256-color escape in: {out:?}"
+        );
+    }
+
+    #[test]
+    fn highlight_code_emits_truecolor_when_truecolor() {
+        let renderer = TerminalRenderer::new().with_color_support(ColorSupport::TrueColor);
+        let out = renderer.highlight_code("fn main() {}\n", "rust");
+        assert!(
+            out.contains("\u{1b}[38;2;"),
+            "missing truecolor escape in: {out:?}"
+        );
+    }
 }

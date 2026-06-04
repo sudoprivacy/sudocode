@@ -25,6 +25,10 @@ const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_
 
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
+const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
+<system-reminder>
+The previous model response was empty after a tool completed. The user requested a file deliverable, but the current turn has not produced a matching final file yet. Continue the same task now: create or execute whatever is needed to produce the requested file, then verify it exists before ending the turn.
+</system-reminder>";
 
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,6 +697,7 @@ where
         let mut tool_results = Vec::new();
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
+        let mut retried_empty_post_tool_deliverable = false;
 
         loop {
             if self.hook_abort_signal.is_aborted() {
@@ -792,6 +797,25 @@ where
                             && error.message == "assistant stream produced no content" =>
                     {
                         self.record_empty_post_tool_completion(iterations);
+                        let has_unfinished_deliverable = self
+                            .has_unfinished_requested_deliverable_after_tool_empty(
+                                &assistant_messages,
+                                &tool_results,
+                            );
+                        if has_unfinished_deliverable && !retried_empty_post_tool_deliverable {
+                            retried_empty_post_tool_deliverable = true;
+                            self.session
+                                .push_user_text(EMPTY_POST_TOOL_DELIVERABLE_REMINDER)
+                                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            continue;
+                        }
+                        if has_unfinished_deliverable {
+                            let error = RuntimeError::new(
+                                "model returned an empty response after tool use before producing the requested file deliverable",
+                            );
+                            self.record_turn_failed(iterations, &error);
+                            return Err(error);
+                        }
                         let auto_compaction = self.maybe_auto_compact();
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
@@ -1115,6 +1139,25 @@ where
         }
     }
 
+    fn has_unfinished_requested_deliverable_after_tool_empty(
+        &self,
+        assistant_messages: &[ConversationMessage],
+        tool_results: &[ConversationMessage],
+    ) -> bool {
+        let Some(intent) = self.user_request_intent.as_ref() else {
+            return false;
+        };
+        if !intent.expects_deliverable() {
+            return false;
+        }
+        if tool_results_include_requested_deliverable(tool_results, intent) {
+            return false;
+        }
+        assistant_messages
+            .last()
+            .is_some_and(message_has_generation_tool_use)
+    }
+
     #[must_use]
     pub fn fork_session(&self, branch_name: Option<String>) -> Session {
         self.session.fork(branch_name)
@@ -1362,6 +1405,82 @@ fn has_pending_tool_uses(message: &ConversationMessage) -> bool {
         .blocks
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
+
+fn message_has_generation_tool_use(message: &ConversationMessage) -> bool {
+    message.blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { name, .. } if is_generation_tool_name(name)
+        )
+    })
+}
+
+fn is_generation_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "bash" | "REPL" | "PowerShell" | "NotebookEdit"
+    )
+}
+
+fn tool_results_include_requested_deliverable(
+    tool_results: &[ConversationMessage],
+    intent: &crate::file_intent::UserRequestIntent,
+) -> bool {
+    tool_results.iter().any(|message| {
+        message.blocks.iter().any(|block| {
+            let ContentBlock::ToolResult {
+                output, is_error, ..
+            } = block
+            else {
+                return false;
+            };
+            if *is_error {
+                return false;
+            }
+            serde_json::from_str::<Value>(output)
+                .ok()
+                .is_some_and(|value| json_contains_requested_deliverable_path(&value, intent))
+        })
+    })
+}
+
+fn json_contains_requested_deliverable_path(
+    value: &Value,
+    intent: &crate::file_intent::UserRequestIntent,
+) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            let is_path_key = key.contains("path") || key == "filename" || key == "file";
+            if is_path_key
+                && value
+                    .as_str()
+                    .is_some_and(|path| is_final_requested_deliverable_path(path, intent))
+            {
+                return true;
+            }
+            if key == "content" || key == "stdout" || key == "stderr" {
+                return false;
+            }
+            json_contains_requested_deliverable_path(value, intent)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_requested_deliverable_path(value, intent)),
+        _ => false,
+    }
+}
+
+fn is_final_requested_deliverable_path(
+    path: &str,
+    intent: &crate::file_intent::UserRequestIntent,
+) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with(".drafts/") || normalized.contains("/.drafts/") {
+        return false;
+    }
+    intent.is_requested_deliverable_path(&normalized)
 }
 
 fn notify_tool_result(
@@ -1825,6 +1944,143 @@ mod tests {
         assert_eq!(summary.iterations, 2);
         assert_eq!(summary.usage.output_tokens, 0);
         assert_eq!(runtime.session().messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_post_tool_completion_retries_when_requested_deliverable_is_missing() {
+        struct EmptyThenContinueApiClient {
+            call_count: usize,
+        }
+
+        #[async_trait]
+        impl ApiClient for EmptyThenContinueApiClient {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "write_file".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ])),
+                    2 => Ok(events_to_stream(vec![AssistantEvent::MessageStop])),
+                    3 => {
+                        assert!(request.messages.iter().any(|message| {
+                            message.role == MessageRole::User
+                                && message.blocks.iter().any(|block| {
+                                    matches!(
+                                        block,
+                                        ContentBlock::Text { text }
+                                            if text.contains("previous model response was empty")
+                                    )
+                                })
+                        }));
+                        Ok(events_to_stream(vec![
+                            AssistantEvent::ToolUse {
+                                id: "tool-2".to_string(),
+                                name: "bash".to_string(),
+                                input: r#"{"command":"python3 .drafts/generate_pdf.py"}"#
+                                    .to_string(),
+                                thought_signature: None,
+                            },
+                            AssistantEvent::MessageStop,
+                        ]))
+                    }
+                    4 => Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("Generated report.pdf.".to_string()),
+                        AssistantEvent::MessageStop,
+                    ])),
+                    _ => unreachable!("extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyThenContinueApiClient { call_count: 0 },
+            StaticToolExecutor::new()
+                .register("write_file", |_input| {
+                    Ok(r#"{"filePath":".drafts/generate_pdf.py"}"#.to_string())
+                })
+                .register("bash", |_input| {
+                    Ok(r#"{"stdout":"created report.pdf","filePath":"report.pdf"}"#.to_string())
+                }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+
+        let summary = runtime
+            .run_turn("生成一个 PDF 文件", None, None)
+            .await
+            .expect("missing deliverable should get one continuation retry");
+
+        assert_eq!(summary.iterations, 4);
+        assert_eq!(summary.tool_results.len(), 2);
+        assert!(runtime.session().messages.iter().any(|message| {
+            message.role == MessageRole::User
+                && message.blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Text { text }
+                            if text.contains("previous model response was empty")
+                    )
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_post_tool_completion_fails_when_deliverable_is_missing() {
+        struct AlwaysEmptyAfterToolApiClient {
+            call_count: usize,
+        }
+
+        #[async_trait]
+        impl ApiClient for AlwaysEmptyAfterToolApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "write_file".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ])),
+                    2 | 3 => Ok(events_to_stream(vec![AssistantEvent::MessageStop])),
+                    _ => unreachable!("extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            AlwaysEmptyAfterToolApiClient { call_count: 0 },
+            StaticToolExecutor::new().register("write_file", |_input| {
+                Ok(r#"{"filePath":".drafts/generate_pdf.py"}"#.to_string())
+            }),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+
+        let error = runtime
+            .run_turn("生成一个 PDF 文件", None, None)
+            .await
+            .expect_err("second empty response should fail while deliverable is missing");
+
+        assert!(error
+            .to_string()
+            .contains("before producing the requested file deliverable"));
     }
 
     #[tokio::test]

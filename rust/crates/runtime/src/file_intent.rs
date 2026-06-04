@@ -45,6 +45,9 @@ pub struct UserRequestIntent {
 
     /// File type keywords requested by user.
     pub requested_types: HashSet<String>,
+
+    /// File extensions for user-facing deliverables requested by user.
+    pub requested_deliverable_extensions: HashSet<String>,
 }
 
 impl UserRequestIntent {
@@ -103,6 +106,39 @@ impl UserRequestIntent {
             }
         }
 
+        let deliverable_keywords = [
+            (".pdf", vec!["pdf"]),
+            (".docx", vec!["docx", "word"]),
+            (
+                ".pptx",
+                vec!["pptx", "powerpoint", "slides", "deck", "幻灯片", "演示文稿"],
+            ),
+            (
+                ".xlsx",
+                vec!["xlsx", "excel", "execl", "spreadsheet", "表格"],
+            ),
+            (".csv", vec!["csv"]),
+            (".json", vec!["json"]),
+            (".html", vec!["html", "webpage", "website", "网页"]),
+            (".md", vec!["markdown", "md"]),
+            (
+                ".png",
+                vec!["png", "image", "picture", "photo", "图片", "图像"],
+            ),
+            (".jpg", vec!["jpg", "jpeg"]),
+        ];
+
+        for (extension, keywords) in &deliverable_keywords {
+            for keyword in keywords {
+                if lower.contains(keyword) {
+                    result
+                        .requested_deliverable_extensions
+                        .insert((*extension).to_string());
+                    break;
+                }
+            }
+        }
+
         result
     }
 
@@ -150,6 +186,28 @@ impl UserRequestIntent {
         }
 
         false
+    }
+
+    /// Returns true when the user requested a user-facing file deliverable.
+    #[must_use]
+    pub fn expects_deliverable(&self) -> bool {
+        !self.requested_files.is_empty() || !self.requested_deliverable_extensions.is_empty()
+    }
+
+    /// Check if a path matches a requested user-facing deliverable.
+    #[must_use]
+    pub fn is_requested_deliverable_path(&self, file_path: &str) -> bool {
+        if self.is_requested_file(file_path) {
+            return true;
+        }
+
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default();
+
+        self.requested_deliverable_extensions.contains(&ext)
     }
 }
 
@@ -412,6 +470,14 @@ mod tests {
         let intent = UserRequestIntent::analyze("写一个 Python 脚本处理数据");
         assert!(intent.requested_types.contains("python"));
         assert!(intent.requested_types.contains("script"));
+    }
+
+    #[test]
+    fn test_user_request_intent_pdf_deliverable() {
+        let intent = UserRequestIntent::analyze("生成一个 PDF 文件");
+        assert!(intent.expects_deliverable());
+        assert!(intent.is_requested_deliverable_path("report.pdf"));
+        assert!(!intent.is_requested_deliverable_path(".drafts/generate_report.py"));
     }
 
     #[test]

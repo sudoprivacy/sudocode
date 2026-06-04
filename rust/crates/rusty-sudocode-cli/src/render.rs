@@ -141,17 +141,23 @@ impl Default for ColorTheme {
 pub struct Spinner {
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
+    thinking: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Spinner {
-    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const FRAMES_DEFAULT: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    /// Half-circle rotation; visually distinct from braille and recognizable
+    /// as "deliberation".
+    const FRAMES_THINKING: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    const LABEL_THINKING: &'static str = "🧠 Reasoning...";
 
     #[must_use]
     pub fn new() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
+            thinking: Arc::new(AtomicBool::new(false)),
             handle: None,
         }
     }
@@ -164,13 +170,24 @@ impl Spinner {
         Arc::clone(&self.pause)
     }
 
+    /// Returns a shared thinking flag. While set to `true` the spinner
+    /// displays a distinct frame set and "Reasoning..." label, signalling
+    /// that the model is in an extended-thinking phase rather than emitting
+    /// regular content.
+    #[must_use]
+    pub fn thinking_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.thinking)
+    }
+
     /// Start the spinner animation in a background thread.
     pub fn start(&mut self, label: &str, model: Option<&str>, theme: &ColorTheme) {
         self.stop.store(false, Ordering::SeqCst);
         self.pause.store(false, Ordering::SeqCst);
+        self.thinking.store(false, Ordering::SeqCst);
         let stop = Arc::clone(&self.stop);
         let pause = Arc::clone(&self.pause);
-        let label = label.to_string();
+        let thinking = Arc::clone(&self.thinking);
+        let default_label = label.to_string();
         let model = model.map(ToString::to_string);
         let theme = *theme;
         let start_time = Instant::now();
@@ -180,7 +197,12 @@ impl Spinner {
             let mut stdout = io::stdout();
             while !stop.load(Ordering::SeqCst) {
                 if !pause.load(Ordering::SeqCst) {
-                    let frame = Self::FRAMES[frame_index % Self::FRAMES.len()];
+                    let (frames, label): (&[&str], &str) = if thinking.load(Ordering::SeqCst) {
+                        (&Self::FRAMES_THINKING[..], Self::LABEL_THINKING)
+                    } else {
+                        (&Self::FRAMES_DEFAULT[..], default_label.as_str())
+                    };
+                    let frame = frames[frame_index % frames.len()];
                     frame_index += 1;
                     let elapsed = start_time.elapsed().as_secs_f64();
                     let mut line = format!("{frame} {label}");
@@ -1188,7 +1210,7 @@ mod tests {
     #[test]
     fn rgb_to_ansi256_maps_cube_corners() {
         assert_eq!(rgb_to_ansi256(0, 0, 0), 16); // black grayscale shortcut
-        // Pure white maps through the grayscale ramp; clamps to the top.
+                                                 // Pure white maps through the grayscale ramp; clamps to the top.
         assert_eq!(rgb_to_ansi256(255, 255, 255), 255);
         assert_eq!(rgb_to_ansi256(255, 0, 0), 16 + 36 * 5); // pure red
         assert_eq!(rgb_to_ansi256(0, 255, 0), 16 + 6 * 5); // pure green
@@ -1234,5 +1256,30 @@ mod tests {
             out.contains("\u{1b}[38;2;"),
             "missing truecolor escape in: {out:?}"
         );
+    }
+
+    #[test]
+    fn spinner_thinking_flag_round_trips() {
+        let spinner = Spinner::new();
+        let flag = spinner.thinking_flag();
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "default thinking flag should be off"
+        );
+        flag.store(true, Ordering::SeqCst);
+        // The handle returned by `thinking_flag()` is shared, so consumers
+        // toggle the same atomic the spinner thread reads from.
+        assert!(spinner.thinking_flag().load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn spinner_thinking_and_pause_flags_are_independent() {
+        let spinner = Spinner::new();
+        let pause = spinner.pause_flag();
+        let thinking = spinner.thinking_flag();
+        pause.store(true, Ordering::SeqCst);
+        assert!(!thinking.load(Ordering::SeqCst));
+        thinking.store(true, Ordering::SeqCst);
+        assert!(pause.load(Ordering::SeqCst));
     }
 }

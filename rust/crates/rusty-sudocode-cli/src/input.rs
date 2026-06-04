@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 
-use rustyline::completion::{Completer, Pair};
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
@@ -104,9 +104,16 @@ impl ConditionalEventHandler for ImagePasteHandler {
     }
 }
 
+/// Slash-command prefixes whose argument is a filesystem path. When the
+/// cursor sits after one of these, fall through to `FilenameCompleter` so
+/// `<Tab>` lists files in the working directory instead of matching the
+/// literal slash-command name list.
+const FILE_ARG_PREFIXES: &[&str] = &["/export ", "/plugin install "];
+
 struct SlashCommandHelper {
     /// Each entry is (command, description). Description may be empty.
     completions: Vec<(String, String)>,
+    filename_completer: FilenameCompleter,
     current_line: RefCell<String>,
 }
 
@@ -114,6 +121,7 @@ impl SlashCommandHelper {
     fn new(completions: Vec<(String, String)>) -> Self {
         Self {
             completions: normalize_completions(completions),
+            filename_completer: FilenameCompleter::new(),
             current_line: RefCell::new(String::new()),
         }
     }
@@ -146,6 +154,18 @@ impl Completer for SlashCommandHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        // When the cursor sits inside the argument of a path-taking slash
+        // command (`/export <path>`, `/plugin install <path>`), delegate to
+        // `FilenameCompleter` so users get real directory listings on <Tab>
+        // instead of the literal slash-command suggestions.
+        let prefix_before_cursor = &line[..pos];
+        if FILE_ARG_PREFIXES
+            .iter()
+            .any(|cmd_prefix| prefix_before_cursor.starts_with(cmd_prefix))
+        {
+            return self.filename_completer.complete_path(line, pos);
+        }
+
         let Some(prefix) = slash_command_prefix(line, pos) else {
             return Ok((0, Vec::new()));
         };

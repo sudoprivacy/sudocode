@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use command_group::CommandGroup;
+
 use api::{
     max_tokens_for_model, model_family_identity_for, resolve_provider_from_config, ApiError,
     ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
@@ -6776,7 +6778,6 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(clippy::too_many_lines)]
 fn execute_shell_command(
     shell: &str,
     command: &str,
@@ -6785,22 +6786,27 @@ fn execute_shell_command(
     abort_signal: Option<&HookAbortSignal>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        let child = std::process::Command::new(shell)
+        // Spawn detached but still inside a fresh process group / Job so anyone signalling
+        // the leader later reaps the entire descendant tree together.
+        let mut process = std::process::Command::new(shell);
+        process
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+        let child = process.group_spawn()?;
+        let pid = child.id();
+        drop(child);
         return Ok(runtime::BashCommandOutput {
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(pid.to_string()),
             backgrounded_by_user: Some(true),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: None,
@@ -6819,96 +6825,198 @@ fn execute_shell_command(
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(command);
+
+    let timeout_ms = timeout.unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
+    let result = run_in_process_group(&mut process, timeout_ms, abort_signal)?;
+    Ok(shell_run_to_bash_output(result, timeout_ms))
+}
+
+/// Outcome of polling a `GroupChild` to completion / abort / timeout.
+enum ShellOutcome {
+    Completed(std::process::ExitStatus),
+    Interrupted,
+    TimedOut,
+}
+
+/// Result of running a command inside a managed process group.
+struct ShellRunResult {
+    outcome: ShellOutcome,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Spawn `process` inside a fresh process group (Unix) / Job Object (Windows), poll until
+/// it completes, the abort signal fires, or `timeout_ms` elapses, then kill the entire
+/// group on interrupt/timeout and drain stdio under a hard watchdog.
+///
+/// `process` must have its stdio configured by the caller; `stdin` is forced to `null`
+/// here so a descendant never blocks reading from the parent's protocol pipe (which is
+/// what made the old single-process `wait_with_output()` hang on Windows when a
+/// grandchild — e.g. `python` spawned by `py` — inherited the inherited handle).
+fn run_in_process_group(
+    process: &mut std::process::Command,
+    timeout_ms: u64,
+    abort_signal: Option<&HookAbortSignal>,
+) -> std::io::Result<ShellRunResult> {
     process
-        // Detach stdin so the child never inherits the parent's stdin. In ACP
-        // stdio mode the parent's stdin is the JSON-RPC protocol stream; a child
-        // (or grandchild such as `python` spawned by `py`) that inherits it can
-        // block reading input that never arrives — and the post-kill
-        // `wait_with_output()` then hangs forever waiting on the still-open pipe,
-        // making the timeout appear ineffective.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let timeout_ms = timeout.unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = process.spawn()?;
+    // group_spawn places the leader in a new process group / Job Object. A subsequent
+    // `kill()` then takes down the entire descendant tree in one shot — the old
+    // single-process kill could leave grandchildren running that kept inherited stdout
+    // pipes open, hanging the drain forever.
+    let mut child = process.group_spawn()?;
+
     let started = Instant::now();
-    loop {
+    let outcome = loop {
         if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
             let _ = child.kill();
-            let output = child.wait_with_output()?;
-            let stderr = append_status_line(
-                &String::from_utf8_lossy(&output.stderr),
-                "Command interrupted by user",
-            );
-            return Ok(runtime::BashCommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr,
-                raw_output_path: None,
-                interrupted: true,
-                is_image: None,
-                background_task_id: None,
-                backgrounded_by_user: None,
-                assistant_auto_backgrounded: None,
-                dangerously_disable_sandbox: None,
-                return_code_interpretation: Some(String::from("interrupted")),
-                no_output_expected: Some(false),
-                structured_content: None,
-                persisted_output_path: None,
-                persisted_output_size: None,
-                sandbox_status: None,
-            });
+            break ShellOutcome::Interrupted;
         }
         if let Some(status) = child.try_wait()? {
-            let output = child.wait_with_output()?;
-            return Ok(runtime::BashCommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                raw_output_path: None,
-                interrupted: false,
-                is_image: None,
-                background_task_id: None,
-                backgrounded_by_user: None,
-                assistant_auto_backgrounded: None,
-                dangerously_disable_sandbox: None,
-                return_code_interpretation: status
-                    .code()
-                    .filter(|code| *code != 0)
-                    .map(|code| format!("exit_code:{code}")),
-                no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-                structured_content: None,
-                persisted_output_path: None,
-                persisted_output_size: None,
-                sandbox_status: None,
-            });
+            break ShellOutcome::Completed(status);
         }
         if started.elapsed() >= Duration::from_millis(timeout_ms) {
             let _ = child.kill();
-            let output = child.wait_with_output()?;
-            let stderr = append_status_line(
-                &String::from_utf8_lossy(&output.stderr),
-                &format!("Command exceeded timeout of {timeout_ms} ms"),
-            );
-            return Ok(runtime::BashCommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr,
-                raw_output_path: None,
-                interrupted: true,
-                is_image: None,
-                background_task_id: None,
-                backgrounded_by_user: None,
-                assistant_auto_backgrounded: None,
-                dangerously_disable_sandbox: None,
-                return_code_interpretation: Some(String::from("timeout")),
-                no_output_expected: Some(false),
-                structured_content: None,
-                persisted_output_path: None,
-                persisted_output_size: None,
-                sandbox_status: None,
-            });
+            break ShellOutcome::TimedOut;
         }
         std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let drained = drain_group_child(child, drain_budget_for(timeout_ms));
+    Ok(ShellRunResult {
+        outcome,
+        stdout: drained.stdout,
+        stderr: drained.stderr,
+    })
+}
+
+fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime::BashCommandOutput {
+    let stdout_text = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr_text = String::from_utf8_lossy(&result.stderr).into_owned();
+    let stdio_empty = result.stdout.is_empty() && result.stderr.is_empty();
+
+    match result.outcome {
+        ShellOutcome::Completed(status) => runtime::BashCommandOutput {
+            stdout: stdout_text,
+            stderr: stderr_text,
+            raw_output_path: None,
+            interrupted: false,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: status
+                .code()
+                .filter(|code| *code != 0)
+                .map(|code| format!("exit_code:{code}")),
+            no_output_expected: Some(stdio_empty),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        },
+        ShellOutcome::Interrupted => runtime::BashCommandOutput {
+            stdout: stdout_text,
+            stderr: append_status_line(&stderr_text, "Command interrupted by user"),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("interrupted")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        },
+        ShellOutcome::TimedOut => runtime::BashCommandOutput {
+            stdout: stdout_text,
+            stderr: append_status_line(
+                &stderr_text,
+                &format!("Command exceeded timeout of {timeout_ms} ms"),
+            ),
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(String::from("timeout")),
+            no_output_expected: Some(false),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+            sandbox_status: None,
+        },
     }
+}
+
+struct DrainedShellOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Drain stdout/stderr from a killed-or-exited `GroupChild` with a hard wall-clock cap.
+///
+/// The reader threads run on a detached worker so a stuck pipe (e.g. a descendant we did
+/// not manage to kill that still holds the write end) cannot pin the calling thread
+/// past `budget`. If the watchdog fires, callers get empty stdio rather than a hang.
+fn drain_group_child(child: command_group::GroupChild, budget: Duration) -> DrainedShellOutput {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut child = child;
+        let stdout_pipe = child.inner().stdout.take();
+        let stderr_pipe = child.inner().stderr.take();
+
+        let stdout_handle = stdout_pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
+        let stderr_handle = stderr_pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
+
+        // Reap the leader; the polling loop already decided the outcome.
+        let _ = child.wait();
+
+        let stdout = stdout_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let _ = tx.send(DrainedShellOutput { stdout, stderr });
+    });
+
+    rx.recv_timeout(budget).unwrap_or(DrainedShellOutput {
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
+/// Drain budget for the post-kill stdio cleanup. Capped so even a misbehaved descendant
+/// cannot push the total runtime far beyond the requested timeout, but generous enough
+/// to absorb normal flush latency on slow platforms.
+fn drain_budget_for(timeout_ms: u64) -> Duration {
+    const MIN_DRAIN_MS: u64 = 2_000;
+    const MAX_DRAIN_MS: u64 = 10_000;
+    let derived = timeout_ms / 4;
+    Duration::from_millis(derived.clamp(MIN_DRAIN_MS, MAX_DRAIN_MS))
 }
 
 fn append_status_line(stderr: &str, status_line: &str) -> String {
@@ -6974,6 +7082,132 @@ fn parse_skill_description(contents: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod shell_group_tests {
+    use super::{drain_budget_for, run_in_process_group, ShellOutcome};
+    use runtime::HookAbortSignal;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn drain_budget_clamps_to_floor_for_tiny_timeouts() {
+        // A 100ms timeout still gets at least 2s drain budget so a flushing pipe
+        // is not artificially truncated.
+        assert_eq!(drain_budget_for(100), Duration::from_millis(2_000));
+    }
+
+    #[test]
+    fn drain_budget_scales_with_timeout() {
+        // 16s timeout -> 4s drain (= timeout / 4).
+        assert_eq!(drain_budget_for(16_000), Duration::from_millis(4_000));
+    }
+
+    #[test]
+    fn drain_budget_caps_at_ceiling() {
+        // Very long timeouts cap the drain at 10s — the polling loop already
+        // enforced the real deadline; this is just cleanup.
+        assert_eq!(drain_budget_for(600_000), Duration::from_millis(10_000));
+    }
+
+    fn bash_available() -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_stdout_and_zero_exit() {
+        if !bash_available() {
+            return;
+        }
+        let mut process = std::process::Command::new("bash");
+        process.arg("-c").arg("printf 'hello-shell-group'");
+        let result =
+            run_in_process_group(&mut process, 5_000, None).expect("group spawn should succeed");
+        assert!(matches!(
+            result.outcome,
+            ShellOutcome::Completed(status) if status.success()
+        ));
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).trim(),
+            "hello-shell-group"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_command_within_budget() {
+        if !bash_available() {
+            return;
+        }
+        let mut process = std::process::Command::new("bash");
+        process.arg("-c").arg("sleep 30");
+        let started = Instant::now();
+        let result =
+            run_in_process_group(&mut process, 200, None).expect("group spawn should succeed");
+        let elapsed = started.elapsed();
+        assert!(matches!(result.outcome, ShellOutcome::TimedOut));
+        // Generous ceiling: poll loop is 10ms granularity + drain budget floor (2s).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout took {elapsed:?}; must respect budget"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_signal_interrupts_in_flight_command() {
+        if !bash_available() {
+            return;
+        }
+        let signal = HookAbortSignal::new();
+        let trigger = signal.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            trigger.abort();
+        });
+        let mut process = std::process::Command::new("bash");
+        process.arg("-c").arg("sleep 30");
+        let started = Instant::now();
+        let result = run_in_process_group(&mut process, 30_000, Some(&signal))
+            .expect("group spawn should succeed");
+        let elapsed = started.elapsed();
+        assert!(matches!(result.outcome, ShellOutcome::Interrupted));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "abort took {elapsed:?}; should fire quickly"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_grandchildren_holding_stdio() {
+        // This is the regression the command-group adoption is meant to fix:
+        // a grandchild (background sleep) inherits stdout. Under the old
+        // single-process kill it would survive and keep the pipe open,
+        // hanging the drain. With group_spawn the entire tree dies and the
+        // drain completes.
+        if !bash_available() {
+            return;
+        }
+        let mut process = std::process::Command::new("bash");
+        process.arg("-c").arg(
+            // Start a backgrounded sleep that survives the shell, then block
+            // ourselves so the timeout path is exercised.
+            "sleep 30 & disown; sleep 30",
+        );
+        let started = Instant::now();
+        let result =
+            run_in_process_group(&mut process, 200, None).expect("group spawn should succeed");
+        let elapsed = started.elapsed();
+        assert!(matches!(result.outcome, ShellOutcome::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "grandchild kept us alive for {elapsed:?}; group kill should have reaped it"
+        );
+    }
 }
 
 pub mod lane_completion;

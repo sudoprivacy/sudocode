@@ -834,28 +834,71 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .get("content")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let total_lines = file
-        .get("total_lines")
-        .and_then(serde_json::Value::as_u64);
+    let total_lines = file.get("total_lines").and_then(serde_json::Value::as_u64);
     let header = format!("{icon} \x1b[2mRead {path}\x1b[0m");
     if content.is_empty() {
         return header;
     }
-    // Cap to READ_DISPLAY_* — read_file results are commonly multi-hundred
-    // lines and would overwhelm the terminal without a hard cap.
-    let preview =
-        truncate_output_for_display(content, READ_DISPLAY_MAX_LINES, READ_DISPLAY_MAX_CHARS);
-    if preview.is_empty() {
+
+    // Cap to READ_DISPLAY_* lines; read_file results commonly run hundreds of
+    // lines and overwhelm the terminal otherwise.
+    //
+    // CRITICAL: do not pre-format a notice into the body before highlighting.
+    // syntect treats `\x1b` as a literal codepoint, splits it from the
+    // following `[2m`, and wraps each side with its own escape — the terminal
+    // then consumes the loose `\x1b` and renders `[2m` as plain text. Compute
+    // truncation against the raw body, highlight the visible-only slice, and
+    // append the (already-styled) notice afterwards.
+    let lines_with_endings: Vec<&str> = content.split_inclusive('\n').collect();
+    let total_input_lines = if content.is_empty() {
+        0
+    } else if content.ends_with('\n') {
+        lines_with_endings.len()
+    } else {
+        // `split_inclusive` keeps the final partial line; it still counts.
+        lines_with_endings.len()
+    };
+    let visible_count = total_input_lines.min(READ_DISPLAY_MAX_LINES);
+    let mut visible_body = String::new();
+    let mut char_budget = READ_DISPLAY_MAX_CHARS;
+    let mut char_truncated = false;
+    for line in lines_with_endings.iter().take(visible_count) {
+        let line_chars = line.chars().count();
+        if line_chars > char_budget {
+            visible_body.extend(line.chars().take(char_budget));
+            char_truncated = true;
+            break;
+        }
+        visible_body.push_str(line);
+        char_budget = char_budget.saturating_sub(line_chars);
+    }
+    if visible_body.is_empty() {
         return header;
     }
     let language = language_token_from_path(&path);
     let renderer = crate::render::TerminalRenderer::new();
-    let highlighted = renderer.highlight_code(&preview, language);
-    let indented = highlighted
+    let highlighted = renderer.highlight_code(&visible_body, language);
+    let mut indented = highlighted
         .lines()
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let remaining_lines = total_input_lines.saturating_sub(visible_count);
+    if remaining_lines > 0 {
+        let line_or_lines = if remaining_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        let _ = write!(
+            indented,
+            "\n  \x1b[2m… +{remaining_lines} more {line_or_lines} · full output preserved in session\x1b[0m"
+        );
+    } else if char_truncated {
+        let _ = write!(indented, "\n  {DISPLAY_TRUNCATION_NOTICE}");
+    }
+
     let mut out = String::with_capacity(header.len() + indented.len() + 8);
     out.push_str(&header);
     if let Some(total) = total_lines {
@@ -1534,6 +1577,57 @@ mod tests {
         // Content shows up indented under the header.
         assert!(plain.contains("fn main()"), "{plain}");
         assert!(plain.contains("println!"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_truncation_notice_survives_syntect_highlighting() {
+        // Regression: when content exceeds READ_DISPLAY_MAX_LINES (10), the
+        // body and the truncation notice both used to flow through syntect
+        // together. syntect split the leading `\x1b` from the trailing `[2m`
+        // and the terminal rendered `[2m… +N more lines …[0m` as literal
+        // text. Compute truncation before highlighting and append the notice
+        // afterwards so the escape stays intact.
+        let big_content = (1..=30)
+            .map(|n| format!("fn line_{n}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "file_path": "src/main.rs",
+                "content": big_content,
+                "num_lines": 30,
+                "start_line": 1,
+                "total_lines": 30
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+
+        // The literal text `[2m` and `[0m` must NOT appear without their
+        // leading ESC byte — that's the visible-corruption signature.
+        let unescaped_text = strip_ansi(&rendered);
+        assert!(
+            !unescaped_text.contains("[2m"),
+            "found literal `[2m` (the ESC got stripped): {unescaped_text}"
+        );
+        assert!(
+            !unescaped_text.contains("[0m"),
+            "found literal `[0m` (the ESC got stripped): {unescaped_text}"
+        );
+
+        // The intact escape sequence must be present in the raw rendered
+        // string and adjacent to the notice text — syntect must not have
+        // split them.
+        let needle = "\u{1b}[2m… +20 more lines · full output preserved in session\u{1b}[0m";
+        assert!(
+            rendered.contains(needle),
+            "intact dim-styled notice missing; rendered:\n{rendered}"
+        );
+
+        // Sanity: the first ten body lines are present, the eleventh is not.
+        assert!(unescaped_text.contains("fn line_1()"));
+        assert!(unescaped_text.contains("fn line_10()"));
+        assert!(!unescaped_text.contains("fn line_11()"));
     }
 
     #[test]

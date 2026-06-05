@@ -834,7 +834,13 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .get("content")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let total_lines = file.get("total_lines").and_then(serde_json::Value::as_u64);
+    // runtime `TextFilePayload` serializes as camelCase via `#[serde(rename
+    // = "totalLines")]`. Snake_case kept as a defensive fallback in case the
+    // wire format is normalized later.
+    let total_lines = file
+        .get("totalLines")
+        .or_else(|| file.get("total_lines"))
+        .and_then(serde_json::Value::as_u64);
     let header = format!("{icon} \x1b[2mRead {path}\x1b[0m");
     if content.is_empty() {
         return header;
@@ -1559,14 +1565,16 @@ mod tests {
 
     #[test]
     fn format_read_result_includes_highlighted_content() {
+        // Wire format matches runtime's TextFilePayload, which uses
+        // `#[serde(rename = "filePath")]` etc. — i.e. camelCase.
         let json = serde_json::json!({
             "kind": "text",
             "file": {
-                "file_path": "src/main.rs",
+                "filePath": "src/main.rs",
                 "content": "fn main() {\n    println!(\"hi\");\n}\n",
-                "num_lines": 3,
-                "start_line": 1,
-                "total_lines": 3
+                "numLines": 3,
+                "startLine": 1,
+                "totalLines": 3
             }
         });
         let rendered = format_read_result("⏺", &json);
@@ -1577,6 +1585,39 @@ mod tests {
         // Content shows up indented under the header.
         assert!(plain.contains("fn main()"), "{plain}");
         assert!(plain.contains("println!"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_reads_camel_case_total_lines() {
+        // Regression: real scode wire format uses `totalLines` (camelCase).
+        // Code previously looked up only `total_lines`, so the `(N lines)`
+        // count silently never appeared.
+        let json = serde_json::json!({
+            "file": {
+                "filePath": "src/main.rs",
+                "content": "fn main() {}\n",
+                "totalLines": 137
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(137 lines)"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_snake_case_total_lines_still_works() {
+        // Defensive fallback for tools that emit snake_case (e.g. external
+        // MCP servers that don't follow the camelCase convention).
+        let json = serde_json::json!({
+            "file": {
+                "filePath": "x.txt",
+                "content": "x\n",
+                "total_lines": 42
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(42 lines)"), "{plain}");
     }
 
     #[test]
@@ -1594,11 +1635,11 @@ mod tests {
         let json = serde_json::json!({
             "kind": "text",
             "file": {
-                "file_path": "src/main.rs",
+                "filePath": "src/main.rs",
                 "content": big_content,
-                "num_lines": 30,
-                "start_line": 1,
-                "total_lines": 30
+                "numLines": 30,
+                "startLine": 1,
+                "totalLines": 30
             }
         });
         let rendered = format_read_result("⏺", &json);
@@ -1635,11 +1676,11 @@ mod tests {
         let json = serde_json::json!({
             "kind": "text",
             "file": {
-                "file_path": "empty.txt",
+                "filePath": "empty.txt",
                 "content": "",
-                "num_lines": 0,
-                "start_line": 1,
-                "total_lines": 0
+                "numLines": 0,
+                "startLine": 1,
+                "totalLines": 0
             }
         });
         let rendered = format_read_result("⏺", &json);

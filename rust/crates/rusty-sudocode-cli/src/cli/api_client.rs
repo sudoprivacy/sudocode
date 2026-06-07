@@ -45,6 +45,10 @@ pub(crate) struct AnthropicRuntimeClient {
     /// Shared flag from the Spinner. Set to `true` before writing output to
     /// pause the spinner animation, `false` after to let it resume.
     pub(crate) spinner_pause: Option<Arc<AtomicBool>>,
+    /// Shared flag from the Spinner. While `true`, the spinner displays a
+    /// distinct "Reasoning..." indicator instead of the default "Thinking..."
+    /// state.
+    pub(crate) spinner_thinking: Option<Arc<AtomicBool>>,
 }
 
 impl AnthropicRuntimeClient {
@@ -81,11 +85,16 @@ impl AnthropicRuntimeClient {
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
             spinner_pause: None,
+            spinner_thinking: None,
         })
     }
 
     pub(crate) fn set_spinner_pause(&mut self, flag: Arc<AtomicBool>) {
         self.spinner_pause = Some(flag);
+    }
+
+    pub(crate) fn set_spinner_thinking(&mut self, flag: Arc<AtomicBool>) {
+        self.spinner_thinking = Some(flag);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -194,6 +203,7 @@ struct CliStreamState {
     emit_output: bool,
     progress_reporter: Option<InternalPromptProgressReporter>,
     spinner_pause: Option<Arc<AtomicBool>>,
+    spinner_thinking: Option<Arc<AtomicBool>>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
     markdown_stream: MarkdownStreamState,
@@ -224,6 +234,12 @@ impl CliStreamState {
     fn resume_spinner(&self) {
         if let Some(flag) = &self.spinner_pause {
             flag.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn set_thinking_indicator(&self, on: bool) {
+        if let Some(flag) = &self.spinner_thinking {
+            flag.store(on, Ordering::SeqCst);
         }
     }
 
@@ -293,11 +309,22 @@ impl CliStreamState {
                         render_thinking_block_summary(out, None, false)?;
                         self.block_has_thinking_summary = true;
                         self.glyph_state.visible_col = 0;
+                        // Switch the spinner to its "Reasoning..." mode for
+                        // the remainder of this thinking block and let it
+                        // run, so the user sees a live indicator instead of
+                        // a silent stall.
+                        self.set_thinking_indicator(true);
+                        self.resume_spinner();
                     }
                 }
                 ContentBlockDelta::SignatureDelta { .. } => {}
             },
             ApiStreamEvent::ContentBlockStop(_) => {
+                if self.block_has_thinking_summary {
+                    // Coming out of a thinking block — restore the default
+                    // spinner state for whatever comes next.
+                    self.set_thinking_indicator(false);
+                }
                 self.block_has_thinking_summary = false;
                 if let Some(rendered) = self.markdown_stream.flush(&self.renderer) {
                     let prefixed = self.glyph_state.apply(&rendered);
@@ -369,6 +396,7 @@ impl AnthropicRuntimeClient {
             emit_output: self.emit_output,
             progress_reporter: self.progress_reporter.clone(),
             spinner_pause: self.spinner_pause.clone(),
+            spinner_thinking: self.spinner_thinking.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
             markdown_stream: MarkdownStreamState::default(),

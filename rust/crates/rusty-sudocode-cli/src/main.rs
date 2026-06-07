@@ -60,8 +60,9 @@ use cli::format::{
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
     format_commit_skipped_report, format_compact_report, format_cost_report,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
-    format_model_switch_report, format_permissions_report, format_permissions_switch_report,
-    format_pr_report, format_resume_report, format_sandbox_report, format_turn_status_line,
+    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
+    format_permissions_switch_report, format_pr_report, format_resume_report,
+    format_sandbox_report, format_tool_timeline, format_turn_status_line_with_branch,
     format_ultraplan_report, render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
@@ -74,11 +75,12 @@ use cli::help::{
     render_memory_report, render_repl_help, render_teleport_report, validate_no_args,
 };
 use cli::mcp::{build_runtime_mcp_state, RuntimeMcpState};
+use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
-    delete_managed_session, list_managed_sessions, load_session_reference, new_cli_session,
-    new_cli_session_for, render_session_list, resolve_session_reference,
-    write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
+    delete_managed_session, format_session_picker_entry, list_managed_sessions,
+    load_session_reference, new_cli_session, new_cli_session_for, render_session_list,
+    resolve_session_reference, write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
 };
 use cli::status::{
     format_status_report, normalize_permission_mode, print_sandbox_status_snapshot,
@@ -2721,9 +2723,11 @@ impl LiveCli {
             TerminalRenderer::new().color_theme(),
         );
         let pause_flag = spinner.pause_flag();
+        let thinking_flag = spinner.thinking_flag();
         runtime
             .api_client_mut()
             .set_spinner_pause(pause_flag.clone());
+        runtime.api_client_mut().set_spinner_thinking(thinking_flag);
         runtime.tool_executor_mut().set_spinner_pause(pause_flag);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -2750,11 +2754,23 @@ impl LiveCli {
                         );
                     }
                     let elapsed = turn_start.elapsed();
+                    if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
+                        println!("{timeline}");
+                    }
                     let usage = self.runtime.usage().current_turn_usage();
                     let turns = self.runtime.usage().turns();
+                    let branch = env::current_dir()
+                        .ok()
+                        .and_then(|cwd| resolve_git_branch_for(&cwd));
                     println!(
                         "{}",
-                        format_turn_status_line(&self.config.model, turns, &usage, elapsed)
+                        format_turn_status_line_with_branch(
+                            &self.config.model,
+                            turns,
+                            &usage,
+                            elapsed,
+                            branch.as_deref(),
+                        )
                     );
                 }
                 self.persist_session()?;
@@ -3064,22 +3080,20 @@ impl LiveCli {
     fn print_status(&self) {
         let cumulative = self.runtime.usage().cumulative_usage();
         let latest = self.runtime.usage().current_turn_usage();
-        println!(
-            "{}",
-            format_status_report(
-                &self.config.model,
-                StatusUsage {
-                    message_count: self.runtime.session().messages.len(),
-                    turns: self.runtime.usage().turns(),
-                    latest,
-                    cumulative,
-                    estimated_tokens: self.runtime.estimated_tokens(),
-                },
-                self.config.permission_mode.as_str(),
-                &status_context(Some(&self.session.path)).expect("status context should load"),
-                None, // #148: REPL /status doesn't carry flag provenance
-            )
+        let report = format_status_report(
+            &self.config.model,
+            StatusUsage {
+                message_count: self.runtime.session().messages.len(),
+                turns: self.runtime.usage().turns(),
+                latest,
+                cumulative,
+                estimated_tokens: self.runtime.estimated_tokens(),
+            },
+            self.config.permission_mode.as_str(),
+            &status_context(Some(&self.session.path)).expect("status context should load"),
+            None, // #148: REPL /status doesn't carry flag provenance
         );
+        print_with_pager(&report);
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
@@ -3341,12 +3355,12 @@ impl LiveCli {
     }
 
     fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_config_report(section)?);
+        print_with_pager(&render_config_report(section)?);
         Ok(())
     }
 
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_memory_report()?);
+        print_with_pager(&render_memory_report()?);
         Ok(())
     }
 
@@ -3514,7 +3528,7 @@ impl LiveCli {
     }
 
     fn print_diff() -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", render_diff_report()?);
+        print_with_pager(&render_diff_report()?);
         Ok(())
     }
 
@@ -3544,6 +3558,39 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match action {
             None | Some("list") => {
+                // On a TTY, present a fuzzy picker that switches on Enter and
+                // is silent on Esc. Non-interactive callers (CI, scripted
+                // pipes, `--output-format json` paths) keep the original
+                // text-table listing.
+                if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                    let sessions = list_managed_sessions()?;
+                    if sessions.is_empty() {
+                        println!("{}", render_session_list(&self.session.id)?);
+                        return Ok(false);
+                    }
+                    let default_idx = sessions
+                        .iter()
+                        .position(|session| session.id == self.session.id)
+                        .unwrap_or(0);
+                    let items: Vec<String> = sessions
+                        .iter()
+                        .map(|session| format_session_picker_entry(session, &self.session.id))
+                        .collect();
+                    let selection = FuzzySelect::new()
+                        .with_prompt("Select a session (type to filter, Esc to cancel)")
+                        .items(&items)
+                        .default(default_idx)
+                        .interact_opt()?;
+                    let Some(idx) = selection else {
+                        return Ok(false);
+                    };
+                    let target = sessions[idx].id.clone();
+                    if target == self.session.id {
+                        println!("Session unchanged (already active: {target}).");
+                        return Ok(false);
+                    }
+                    return self.handle_session_command(Some("switch"), Some(&target));
+                }
                 println!("{}", render_session_list(&self.session.id)?);
                 Ok(false)
             }
@@ -4352,11 +4399,16 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
         println!();
-        println!("Permission approval required");
-        println!("  Tool             \x1b[36m{}\x1b[0m", request.tool_name);
-        if let Some(reason) = &request.reason {
-            println!("  Reason           \x1b[2m{reason}\x1b[0m");
-        }
+        println!(
+            "{}",
+            format_permission_prompt_box(
+                &request.tool_name,
+                &request.input,
+                request.current_mode.as_str(),
+                request.required_mode.as_str(),
+                request.reason.as_deref(),
+            )
+        );
 
         if !io::stdin().is_terminal() {
             // Non-interactive fallback: read a line from stdin.

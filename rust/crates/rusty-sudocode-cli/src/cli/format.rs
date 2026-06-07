@@ -16,8 +16,11 @@ pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str =
     "\x1b[2m… output truncated for display; full result preserved in session.\x1b[0m";
 pub(crate) const READ_DISPLAY_MAX_LINES: usize = 10;
 pub(crate) const READ_DISPLAY_MAX_CHARS: usize = 2_000;
-pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 3;
-pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 1_500;
+/// Default upper bound on lines shown inline when summarizing tool results.
+/// Anything beyond this is replaced with a "+N more lines" notice; the full
+/// result is still preserved in the session file.
+pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 15;
+pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
 
 pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
     match kind {
@@ -813,7 +816,12 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 
     if all_output.len() > preview_count {
         let remaining = all_output.len() - preview_count;
-        write!(&mut result, "\n  \x1b[2m… +{remaining} lines\x1b[0m").expect("write to string");
+        let line_or_lines = if remaining == 1 { "line" } else { "lines" };
+        write!(
+            &mut result,
+            "\n  \x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m"
+        )
+        .expect("write to string");
     }
 
     result
@@ -822,8 +830,100 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let file = parsed.get("file").unwrap_or(parsed);
     let path = extract_tool_path(file);
+    let content = file
+        .get("content")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    // runtime `TextFilePayload` serializes as camelCase via `#[serde(rename
+    // = "totalLines")]`. Snake_case kept as a defensive fallback in case the
+    // wire format is normalized later.
+    let total_lines = file
+        .get("totalLines")
+        .or_else(|| file.get("total_lines"))
+        .and_then(serde_json::Value::as_u64);
+    let header = format!("{icon} \x1b[2mRead {path}\x1b[0m");
+    if content.is_empty() {
+        return header;
+    }
 
-    format!("{icon} \x1b[2mRead {path}\x1b[0m")
+    // Cap to READ_DISPLAY_* lines; read_file results commonly run hundreds of
+    // lines and overwhelm the terminal otherwise.
+    //
+    // CRITICAL: do not pre-format a notice into the body before highlighting.
+    // syntect treats `\x1b` as a literal codepoint, splits it from the
+    // following `[2m`, and wraps each side with its own escape — the terminal
+    // then consumes the loose `\x1b` and renders `[2m` as plain text. Compute
+    // truncation against the raw body, highlight the visible-only slice, and
+    // append the (already-styled) notice afterwards.
+    let lines_with_endings: Vec<&str> = content.split_inclusive('\n').collect();
+    let total_input_lines = if content.is_empty() {
+        0
+    } else if content.ends_with('\n') {
+        lines_with_endings.len()
+    } else {
+        // `split_inclusive` keeps the final partial line; it still counts.
+        lines_with_endings.len()
+    };
+    let visible_count = total_input_lines.min(READ_DISPLAY_MAX_LINES);
+    let mut visible_body = String::new();
+    let mut char_budget = READ_DISPLAY_MAX_CHARS;
+    let mut char_truncated = false;
+    for line in lines_with_endings.iter().take(visible_count) {
+        let line_chars = line.chars().count();
+        if line_chars > char_budget {
+            visible_body.extend(line.chars().take(char_budget));
+            char_truncated = true;
+            break;
+        }
+        visible_body.push_str(line);
+        char_budget = char_budget.saturating_sub(line_chars);
+    }
+    if visible_body.is_empty() {
+        return header;
+    }
+    let language = language_token_from_path(&path);
+    let renderer = crate::render::TerminalRenderer::new();
+    let highlighted = renderer.highlight_code(&visible_body, language);
+    let mut indented = highlighted
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let remaining_lines = total_input_lines.saturating_sub(visible_count);
+    if remaining_lines > 0 {
+        let line_or_lines = if remaining_lines == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        let _ = write!(
+            indented,
+            "\n  \x1b[2m… +{remaining_lines} more {line_or_lines} · full output preserved in session\x1b[0m"
+        );
+    } else if char_truncated {
+        let _ = write!(indented, "\n  {DISPLAY_TRUNCATION_NOTICE}");
+    }
+
+    let mut out = String::with_capacity(header.len() + indented.len() + 8);
+    out.push_str(&header);
+    if let Some(total) = total_lines {
+        let _ = write!(out, " \x1b[2m({total} lines)\x1b[0m");
+    }
+    out.push('\n');
+    out.push_str(&indented);
+    out
+}
+
+/// Derive a syntect-friendly language token from a filename.
+///
+/// `find_syntax_by_token` matches both extensions (e.g. `"rs"`) and language
+/// names; an empty string makes it fall back to plain text.
+pub(crate) fn language_token_from_path(path: &str) -> &str {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
 }
 
 pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
@@ -969,14 +1069,173 @@ pub(crate) fn format_turn_status_line(
     usage: &TokenUsage,
     elapsed: Duration,
 ) -> String {
+    format_turn_status_line_with_branch(model, turn, usage, elapsed, None)
+}
+
+/// Render the dim per-turn status line shown after each interactive turn.
+///
+/// Contains, in order: model name, turn number, cumulative token count,
+/// estimated cost (when pricing for the model is known), elapsed wall-clock
+/// time for the turn, and the current git branch (when one is available).
+/// All fields are dimmed; turn and tokens are kept compact (`turn 3`,
+/// `3.2k tokens`) so the line stays single-row even at narrow widths.
+pub(crate) fn format_turn_status_line_with_branch(
+    model: &str,
+    turn: u32,
+    usage: &TokenUsage,
+    elapsed: Duration,
+    branch: Option<&str>,
+) -> String {
     let total = usage.total_tokens();
     let tokens_display = if total >= 1000 {
         format!("{:.1}k", f64::from(total) / 1000.0)
     } else {
         total.to_string()
     };
+    let cost = usage.estimate_cost_usd().total_cost_usd();
+    let cost_display = if cost > 0.0 {
+        Some(format!("${cost:.2}"))
+    } else {
+        None
+    };
     let secs = elapsed.as_secs_f64();
-    format!("\x1b[2m[{model}] · turn {turn} · {tokens_display} tokens · {secs:.1}s\x1b[0m")
+
+    let mut segments: Vec<String> = Vec::with_capacity(6);
+    segments.push(format!("[{model}]"));
+    segments.push(format!("turn {turn}"));
+    segments.push(format!("{tokens_display} tokens"));
+    if let Some(cost) = cost_display {
+        segments.push(cost);
+    }
+    segments.push(format!("{secs:.1}s"));
+    if let Some(branch) = branch.filter(|b| !b.is_empty()) {
+        segments.push(branch.to_string());
+    }
+    format!("\x1b[2m{}\x1b[0m", segments.join(" · "))
+}
+
+/// Render the box that frames an interactive permission-approval prompt.
+///
+/// Output shape (newlines preserved verbatim):
+/// ```text
+///   ╭─ ⚠ Permission required ─╮
+///   │ Tool      bash
+///   │ Action    command "cargo test"
+///   │ Mode      workspace-write → danger-full-access
+///   │ Reason    requires unrestricted access
+///   ╰──────────────────────────╯
+/// ```
+///
+/// `Action` is derived from [`describe_tool_progress`] so it stays consistent
+/// with the spinner phase label the user already sees. `Reason` is shown only
+/// when the runtime supplied one.
+pub(crate) fn format_permission_prompt_box(
+    tool_name: &str,
+    input: &str,
+    current_mode: &str,
+    required_mode: &str,
+    reason: Option<&str>,
+) -> String {
+    let action = describe_tool_progress(tool_name, input);
+    let mode_transition = format!("{current_mode} → {required_mode}");
+    let title = "⚠ Permission required";
+    // Header width: " ─ {title} ─ " inside the corners. Compute the floor of
+    // the body box from the widest visible row.
+    let visible_widths: Vec<usize> = [
+        format!("Tool      {tool_name}"),
+        format!("Action    {action}"),
+        format!("Mode      {mode_transition}"),
+    ]
+    .into_iter()
+    .chain(reason.map(|r| format!("Reason    {r}")))
+    .map(|line| line.chars().count())
+    .collect();
+    let inner_width = visible_widths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count() + 4);
+    let border = "─".repeat(inner_width + 2);
+
+    let grey = "\x1b[38;5;245m";
+    let reset = "\x1b[0m";
+    let bold_yellow = "\x1b[1;33m";
+    let bold_cyan = "\x1b[1;36m";
+    let dim = "\x1b[2m";
+
+    let mut out = String::new();
+    let title_dashes = "─".repeat(inner_width.saturating_sub(title.chars().count() + 2));
+    let _ = writeln!(
+        out,
+        "  {grey}╭─ {bold_yellow}{title}{reset}{grey} {title_dashes}─╮{reset}"
+    );
+    let _ = writeln!(
+        out,
+        "  {grey}│{reset} Tool      {bold_cyan}{tool_name}{reset}"
+    );
+    let _ = writeln!(out, "  {grey}│{reset} Action    {dim}{action}{reset}");
+    let _ = writeln!(
+        out,
+        "  {grey}│{reset} Mode      {dim}{mode_transition}{reset}"
+    );
+    if let Some(reason) = reason {
+        let _ = writeln!(out, "  {grey}│{reset} Reason    {dim}{reason}{reset}");
+    }
+    let _ = write!(out, "  {grey}╰{border}╯{reset}");
+    out
+}
+
+/// Compact one-line summary of all tool calls that ran in a turn.
+///
+/// Returns `None` when no tool calls happened (silent for plain
+/// text-only turns). Each entry shows the tool name followed by a status
+/// glyph (`✓` for success, `✗` for error). The line ends with the total
+/// count and turn duration so users can read it as `"3 tools, 1.2s"`.
+///
+/// Example output:
+/// ```text
+/// 🔧 bash ✓  read_file ✓  edit_file ✗ (3 tools, 4.7s)
+/// ```
+pub(crate) fn format_tool_timeline(
+    tool_results: &[runtime::ConversationMessage],
+    elapsed: Duration,
+) -> Option<String> {
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    for message in tool_results {
+        for block in &message.blocks {
+            if let runtime::ContentBlock::ToolResult {
+                tool_name,
+                is_error,
+                ..
+            } = block
+            {
+                entries.push((tool_name.clone(), !*is_error));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let count = entries.len();
+    let parts: Vec<String> = entries
+        .into_iter()
+        .map(|(name, ok)| {
+            // Bold tool name; green check or red cross.
+            let glyph = if ok {
+                "\x1b[32m✓\x1b[0m"
+            } else {
+                "\x1b[31m✗\x1b[0m"
+            };
+            format!("\x1b[1m{name}\x1b[0m {glyph}")
+        })
+        .collect();
+    let body = parts.join("  ");
+    let plural = if count == 1 { "tool" } else { "tools" };
+    let secs = elapsed.as_secs_f64();
+    Some(format!(
+        "🔧 {body} \x1b[2m({count} {plural}, {secs:.1}s)\x1b[0m"
+    ))
 }
 
 pub(crate) fn truncate_output_for_display(
@@ -989,6 +1248,7 @@ pub(crate) fn truncate_output_for_display(
         return String::new();
     }
 
+    let total_lines = original.lines().count();
     let mut preview_lines = Vec::new();
     let mut used_chars = 0usize;
     let mut truncated = false;
@@ -1022,7 +1282,20 @@ pub(crate) fn truncate_output_for_display(
         if !preview.is_empty() {
             preview.push('\n');
         }
-        preview.push_str(DISPLAY_TRUNCATION_NOTICE);
+        // Prefer a counted notice when we know how many lines were dropped;
+        // fall back to the static notice when the cap was character-based
+        // rather than line-based (mid-line truncation).
+        let shown_lines = preview_lines.len();
+        if total_lines > shown_lines {
+            let remaining = total_lines - shown_lines;
+            let _ = write!(
+                preview,
+                "\x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m",
+                line_or_lines = if remaining == 1 { "line" } else { "lines" },
+            );
+        } else {
+            preview.push_str(DISPLAY_TRUNCATION_NOTICE);
+        }
     }
     preview
 }
@@ -1065,5 +1338,377 @@ mod tests {
             rendered.contains("Fresh session    /clear --confirm"),
             "{rendered}"
         );
+    }
+
+    fn user_message_with_results(results: Vec<(&str, bool)>) -> runtime::ConversationMessage {
+        runtime::ConversationMessage {
+            role: runtime::MessageRole::User,
+            blocks: results
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, is_error))| runtime::ContentBlock::ToolResult {
+                    tool_use_id: format!("tool_{i}"),
+                    tool_name: name.to_string(),
+                    output: String::new(),
+                    is_error,
+                })
+                .collect(),
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tool_timeline_is_silent_when_no_tools_ran() {
+        let messages = vec![user_message_with_results(vec![])];
+        assert!(format_tool_timeline(&messages, Duration::from_millis(500)).is_none());
+        assert!(format_tool_timeline(&[], Duration::from_millis(500)).is_none());
+    }
+
+    #[test]
+    fn tool_timeline_singular_form_for_one_tool() {
+        let messages = vec![user_message_with_results(vec![("bash", false)])];
+        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(1.2)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("bash"), "{plain}");
+        assert!(plain.contains("✓"), "{plain}");
+        assert!(plain.contains("(1 tool, 1.2s)"), "{plain}");
+    }
+
+    #[test]
+    fn tool_timeline_lists_each_tool_with_status_glyph() {
+        let messages = vec![user_message_with_results(vec![
+            ("bash", false),
+            ("read_file", false),
+            ("edit_file", true),
+        ])];
+        let rendered = format_tool_timeline(&messages, Duration::from_secs_f64(4.7)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("bash ✓"), "{plain}");
+        assert!(plain.contains("read_file ✓"), "{plain}");
+        assert!(plain.contains("edit_file ✗"), "{plain}");
+        assert!(plain.contains("(3 tools, 4.7s)"), "{plain}");
+    }
+
+    #[test]
+    fn tool_timeline_walks_multiple_messages() {
+        let messages = vec![
+            user_message_with_results(vec![("bash", false)]),
+            user_message_with_results(vec![("read_file", false)]),
+        ];
+        let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
+    }
+
+    #[test]
+    fn permission_prompt_box_renders_all_fields() {
+        let rendered = format_permission_prompt_box(
+            "bash",
+            "{\"command\":\"cargo test\"}",
+            "workspace-write",
+            "danger-full-access",
+            Some("requires unrestricted access"),
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Permission required"), "{plain}");
+        assert!(plain.contains("Tool      bash"), "{plain}");
+        // Action is derived via describe_tool_progress — for bash it shows the
+        // command. We just assert the prefix matches the schema.
+        assert!(plain.contains("Action    command"), "{plain}");
+        assert!(
+            plain.contains("Mode      workspace-write → danger-full-access"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Reason    requires unrestricted access"),
+            "{plain}"
+        );
+        assert!(plain.starts_with("  ╭─"), "{plain}");
+        assert!(plain.trim_end().ends_with('╯'), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_includes_cost_when_nonzero() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            3,
+            &usage,
+            Duration::from_secs_f64(1.2),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
+        assert!(plain.contains("turn 3"), "{plain}");
+        assert!(plain.contains("1.5k tokens"), "{plain}");
+        assert!(plain.contains("$"), "expected cost segment in {plain}");
+        assert!(plain.contains("1.2s"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_omits_cost_when_zero() {
+        // With no tokens recorded the estimated cost is 0.0 and the cost
+        // segment is omitted entirely rather than printing "$0.00".
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_secs_f64(0.3),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(!plain.contains("$"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_appends_branch_when_present() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_millis(800),
+            Some("feat/tui-backlog-179"),
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.ends_with("feat/tui-backlog-179"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_omits_branch_when_empty() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-opus-4-6",
+            1,
+            &usage,
+            Duration::from_millis(800),
+            Some(""),
+        );
+        let plain = strip_ansi(&rendered);
+        // Trailing segment should be the duration, not an empty " · ".
+        assert!(plain.ends_with("0.8s"), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_emits_counted_line_notice() {
+        let input = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = truncate_output_for_display(&input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        // First 15 shown.
+        assert!(plain.contains("line 1\n"), "{plain}");
+        assert!(plain.contains("line 15"), "{plain}");
+        assert!(!plain.contains("line 16"), "{plain}");
+        // Counted notice.
+        assert!(
+            plain.contains("+5 more lines · full output preserved in session"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn truncate_output_singular_line_form() {
+        let input = (1..=16)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = truncate_output_for_display(&input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        assert!(plain.contains("+1 more line"), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_falls_back_to_static_notice_on_char_truncation() {
+        // One single very long line — exceeds char cap before line cap.
+        let input = "x".repeat(10_000);
+        let preview = truncate_output_for_display(&input, 15, 200);
+        let plain = strip_ansi(&preview);
+        // Static notice retained for mid-line truncation; the counted
+        // notice would lie because total_lines == shown_lines == 1.
+        assert!(plain.contains("output truncated for display"), "{plain}");
+    }
+
+    #[test]
+    fn language_token_for_common_paths() {
+        assert_eq!(language_token_from_path("src/main.rs"), "rs");
+        assert_eq!(language_token_from_path("foo/bar.py"), "py");
+        assert_eq!(language_token_from_path("README"), "");
+        assert_eq!(language_token_from_path(".gitignore"), "");
+    }
+
+    #[test]
+    fn format_read_result_includes_highlighted_content() {
+        // Wire format matches runtime's TextFilePayload, which uses
+        // `#[serde(rename = "filePath")]` etc. — i.e. camelCase.
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "filePath": "src/main.rs",
+                "content": "fn main() {\n    println!(\"hi\");\n}\n",
+                "numLines": 3,
+                "startLine": 1,
+                "totalLines": 3
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        // Header still present with line count.
+        assert!(plain.contains("Read src/main.rs"), "{plain}");
+        assert!(plain.contains("(3 lines)"), "{plain}");
+        // Content shows up indented under the header.
+        assert!(plain.contains("fn main()"), "{plain}");
+        assert!(plain.contains("println!"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_reads_camel_case_total_lines() {
+        // Regression: real scode wire format uses `totalLines` (camelCase).
+        // Code previously looked up only `total_lines`, so the `(N lines)`
+        // count silently never appeared.
+        let json = serde_json::json!({
+            "file": {
+                "filePath": "src/main.rs",
+                "content": "fn main() {}\n",
+                "totalLines": 137
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(137 lines)"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_snake_case_total_lines_still_works() {
+        // Defensive fallback for tools that emit snake_case (e.g. external
+        // MCP servers that don't follow the camelCase convention).
+        let json = serde_json::json!({
+            "file": {
+                "filePath": "x.txt",
+                "content": "x\n",
+                "total_lines": 42
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(42 lines)"), "{plain}");
+    }
+
+    #[test]
+    fn format_read_result_truncation_notice_survives_syntect_highlighting() {
+        // Regression: when content exceeds READ_DISPLAY_MAX_LINES (10), the
+        // body and the truncation notice both used to flow through syntect
+        // together. syntect split the leading `\x1b` from the trailing `[2m`
+        // and the terminal rendered `[2m… +N more lines …[0m` as literal
+        // text. Compute truncation before highlighting and append the notice
+        // afterwards so the escape stays intact.
+        let big_content = (1..=30)
+            .map(|n| format!("fn line_{n}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "filePath": "src/main.rs",
+                "content": big_content,
+                "numLines": 30,
+                "startLine": 1,
+                "totalLines": 30
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+
+        // The literal text `[2m` and `[0m` must NOT appear without their
+        // leading ESC byte — that's the visible-corruption signature.
+        let unescaped_text = strip_ansi(&rendered);
+        assert!(
+            !unescaped_text.contains("[2m"),
+            "found literal `[2m` (the ESC got stripped): {unescaped_text}"
+        );
+        assert!(
+            !unescaped_text.contains("[0m"),
+            "found literal `[0m` (the ESC got stripped): {unescaped_text}"
+        );
+
+        // The intact escape sequence must be present in the raw rendered
+        // string and adjacent to the notice text — syntect must not have
+        // split them.
+        let needle = "\u{1b}[2m… +20 more lines · full output preserved in session\u{1b}[0m";
+        assert!(
+            rendered.contains(needle),
+            "intact dim-styled notice missing; rendered:\n{rendered}"
+        );
+
+        // Sanity: the first ten body lines are present, the eleventh is not.
+        assert!(unescaped_text.contains("fn line_1()"));
+        assert!(unescaped_text.contains("fn line_10()"));
+        assert!(!unescaped_text.contains("fn line_11()"));
+    }
+
+    #[test]
+    fn format_read_result_renders_header_only_for_empty_content() {
+        let json = serde_json::json!({
+            "kind": "text",
+            "file": {
+                "filePath": "empty.txt",
+                "content": "",
+                "numLines": 0,
+                "startLine": 1,
+                "totalLines": 0
+            }
+        });
+        let rendered = format_read_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Read empty.txt"), "{plain}");
+        // No content body indented underneath.
+        assert!(!plain.contains("\n  "), "{plain}");
+    }
+
+    #[test]
+    fn truncate_output_no_truncation_returns_input_clean() {
+        let input = "line 1\nline 2\nline 3";
+        let preview = truncate_output_for_display(input, 15, 4_000);
+        let plain = strip_ansi(&preview);
+        assert_eq!(plain, input);
+    }
+
+    #[test]
+    fn permission_prompt_box_omits_reason_when_none() {
+        let rendered = format_permission_prompt_box(
+            "read_file",
+            "{\"path\":\"src/main.rs\"}",
+            "read-only",
+            "workspace-write",
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(!plain.contains("Reason"), "{plain}");
+        assert!(plain.contains("Tool      read_file"), "{plain}");
     }
 }

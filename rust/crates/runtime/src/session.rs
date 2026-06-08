@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::json::{JsonError, JsonValue};
-use crate::usage::TokenUsage;
+use crate::usage::{parse_usage_cost_currency, TokenUsage};
 
 const SESSION_VERSION: u32 = 1;
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
@@ -1077,6 +1077,15 @@ fn usage_to_json(usage: TokenUsage) -> JsonValue {
         "cache_read_input_tokens".to_string(),
         JsonValue::Number(i64::from(usage.cache_read_input_tokens)),
     );
+    if let Some(cost_units) = usage.cost_units.and_then(|value| i64::try_from(value).ok()) {
+        object.insert("cost_units".to_string(), JsonValue::Number(cost_units));
+    }
+    if let Some(cost_currency) = usage.cost_currency {
+        object.insert(
+            "cost_currency".to_string(),
+            JsonValue::String(cost_currency.as_str().to_string()),
+        );
+    }
     JsonValue::Object(object)
 }
 
@@ -1089,7 +1098,26 @@ fn usage_from_json(value: &JsonValue) -> Result<TokenUsage, SessionError> {
         output_tokens: required_u32(object, "output_tokens")?,
         cache_creation_input_tokens: required_u32(object, "cache_creation_input_tokens")?,
         cache_read_input_tokens: required_u32(object, "cache_read_input_tokens")?,
+        cost_units: optional_u64(object, "cost_units")?,
+        cost_currency: parse_usage_cost_currency(
+            optional_string(object, "cost_currency")?.as_deref(),
+        ),
     })
+}
+
+fn optional_string(
+    object: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<String>, SessionError> {
+    object
+        .get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| SessionError::Format(format!("{key} must be a string")))
+        })
+        .transpose()
 }
 
 fn required_string(
@@ -1116,6 +1144,16 @@ fn required_u64(object: &BTreeMap<String, JsonValue>, key: &str) -> Result<u64, 
         .get(key)
         .ok_or_else(|| SessionError::Format(format!("missing {key}")))?;
     required_u64_from_value(value, key)
+}
+
+fn optional_u64(
+    object: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<u64>, SessionError> {
+    object
+        .get(key)
+        .map(|value| required_u64_from_value(value, key))
+        .transpose()
 }
 
 fn required_u64_from_value(value: &JsonValue, key: &str) -> Result<u64, SessionError> {
@@ -1306,7 +1344,7 @@ mod tests {
         ConversationMessage, MessageRole, Session, SessionFork,
     };
     use crate::json::JsonValue;
-    use crate::usage::TokenUsage;
+    use crate::usage::{TokenUsage, UsageCostCurrency, UsageTracker};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1345,6 +1383,8 @@ mod tests {
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
                     cache_read_input_tokens: 2,
+                    cost_units: Some(43_700),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
                 }),
             ))
             .expect("assistant message should append");
@@ -1365,7 +1405,40 @@ mod tests {
             restored.messages[1].usage.expect("usage").total_tokens(),
             17
         );
+        assert_eq!(
+            restored.messages[1].usage.expect("usage").cost_units,
+            Some(43_700)
+        );
+        assert_eq!(
+            restored.messages[1].usage.expect("usage").cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
+        assert_eq!(
+            UsageTracker::from_session(&restored)
+                .cumulative_usage()
+                .cost_units,
+            Some(43_700)
+        );
         assert_eq!(restored.session_id, session.session_id);
+    }
+
+    #[test]
+    fn loads_jsonl_usage_without_cost_fields() {
+        let path = write_temp_session_file(
+            "legacy-usage",
+            concat!(
+                "{\"type\":\"session_meta\",\"version\":1,\"session_id\":\"legacy-usage\",\"created_at_ms\":1,\"updated_at_ms\":1}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"blocks\":[{\"type\":\"text\",\"text\":\"old\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"cache_creation_input_tokens\":1,\"cache_read_input_tokens\":2}}}\n"
+            ),
+        );
+
+        let restored = Session::load_from_path(&path).expect("legacy usage session should load");
+        fs::remove_file(&path).expect("temp file should be removable");
+        let usage = restored.messages[0].usage.expect("usage");
+
+        assert_eq!(usage.total_tokens(), 17);
+        assert_eq!(usage.cost_units, None);
+        assert_eq!(usage.cost_currency, None);
     }
 
     #[test]

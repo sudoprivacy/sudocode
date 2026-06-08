@@ -198,7 +198,8 @@ pub use time::today_local;
 #[cfg(test)]
 pub use trust_resolver::{TrustConfig, TrustDecision, TrustEvent, TrustPolicy, TrustResolver};
 pub use usage::{
-    format_usd, pricing_for_model, ModelPricing, TokenUsage, UsageCostEstimate, UsageTracker,
+    format_usd, parse_usage_cost_currency, pricing_for_model, ModelPricing, TokenUsage,
+    UsageCostCurrency, UsageCostEstimate, UsageTracker,
 };
 pub use worker_boot::{
     Worker, WorkerEvent, WorkerEventKind, WorkerEventPayload, WorkerFailure, WorkerFailureKind,

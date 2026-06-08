@@ -103,6 +103,8 @@ fn multiple_events_in_sequence() {
         output_tokens: 200,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 100,
+        cost_units: Some(43_700),
+        cost_currency: Some("sudo_point".to_string()),
     });
 
     sink.record(TelemetryEvent::SessionEnded {
@@ -145,6 +147,15 @@ fn multiple_events_in_sequence() {
             "response_usage",
             "session_ended"
         ]
+    );
+    let response_usage: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    assert_eq!(
+        response_usage["attributes"]["cost_units"],
+        serde_json::json!(43_700)
+    );
+    assert_eq!(
+        response_usage["attributes"]["cost_currency"],
+        serde_json::json!("sudo_point")
     );
 
     let _ = std::fs::remove_file(path);

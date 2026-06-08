@@ -904,12 +904,14 @@ impl MessageStream {
                                 .client_request_id
                                 .clone()
                                 .unwrap_or_else(|| "unknown".to_string());
-                            tracer.record_usage(
+                            tracer.record_usage_with_cost(
                                 request_id,
                                 usage.input_tokens,
                                 usage.output_tokens,
                                 usage.cache_creation_input_tokens,
                                 usage.cache_read_input_tokens,
+                                usage.cost_units,
+                                usage.cost_currency.as_deref(),
                             );
                         }
                     }

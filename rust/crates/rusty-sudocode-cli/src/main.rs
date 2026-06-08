@@ -179,17 +179,30 @@ impl ModelProvenance {
 
     /// Look up the default model from env, then cwd config, then the compiled-in
     /// fallback. Called when no `--model` flag was passed. Shares its primitive
-    /// with [`resolve_default_model`] so the splash and prompt agree on the
-    /// active model.
+    /// (`lookup_default_model`) with `resolve_repl_model`, so the splash, the
+    /// one-shot Prompt action, and the status banner all agree on the active
+    /// model.
     fn from_default_lookup() -> Self {
-        lookup_default_model()
-            .map(|(resolved, raw, source)| Self {
-                resolved,
-                raw: Some(raw),
-                source,
-            })
-            .unwrap_or_else(Self::default_fallback)
+        lookup_default_model().map_or_else(Self::default_fallback, |(resolved, raw, source)| Self {
+            resolved,
+            raw: Some(raw),
+            source,
+        })
     }
+}
+
+/// Test-only process-wide lock that serializes env-var mutation across
+/// modules. The doctor, args, and any other unit tests that read env state
+/// or set `SUDO_CODE_CONFIG_HOME` should acquire this guard before touching
+/// the environment so cargo's parallel test runner can't interleave their
+/// setup/teardown.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Single source of truth for the env-or-config default model lookup. Returns
@@ -215,19 +228,6 @@ pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
         ));
     }
     None
-}
-
-/// Resolve the model when the caller has the post-arg-parse string in hand.
-/// Honors a `--model` flag (anything other than [`DEFAULT_MODEL`]) and falls
-/// through to [`lookup_default_model`] otherwise. Shared by the REPL splash
-/// and the one-shot `Prompt` action so they cannot disagree.
-pub(crate) fn resolve_default_model(cli_model: String) -> String {
-    if cli_model != DEFAULT_MODEL {
-        return cli_model;
-    }
-    lookup_default_model()
-        .map(|(resolved, _, _)| resolved)
-        .unwrap_or(cli_model)
 }
 
 // Build-time constants injected by build.rs (fall back to static values when

@@ -1049,7 +1049,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         aliases: &[],
         summary: "Revert the most recent edit_file or write_file in this session",
         argument_hint: None,
-        resume_supported: false,
+        resume_supported: true,
     },
 ];
 

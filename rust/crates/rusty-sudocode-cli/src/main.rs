@@ -1150,6 +1150,37 @@ fn run_resume_command(
                 json: Some(json),
             })
         }
+        SlashCommand::Undo => {
+            let already_undone = std::collections::HashSet::new();
+            match crate::cli::undo::find_last_undoable_edit(&session.messages, &already_undone) {
+                None => Ok(ResumeCommandOutcome {
+                    session: session.clone(),
+                    message: Some(
+                        "Nothing to undo in this session. /undo only restores edit_file and write_file results recorded in the loaded session.".to_string(),
+                    ),
+                    json: Some(serde_json::json!({
+                        "kind": "undo",
+                        "applied": false,
+                        "reason": "no eligible tool result",
+                    })),
+                }),
+                Some(edit) => {
+                    let summary = crate::cli::undo::apply_undo(&edit)?;
+                    Ok(ResumeCommandOutcome {
+                        session: session.clone(),
+                        message: Some(summary),
+                        json: Some(serde_json::json!({
+                            "kind": "undo",
+                            "applied": true,
+                            "tool_name": edit.tool_name,
+                            "tool_use_id": edit.tool_use_id,
+                            "file_path": edit.file_path,
+                            "deleted": edit.original_file.is_none(),
+                        })),
+                    })
+                }
+            }
+        }
         SlashCommand::Version => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_version_report()),
@@ -1331,8 +1362,7 @@ fn run_resume_command(
         | SlashCommand::Ide { .. }
         | SlashCommand::Tag { .. }
         | SlashCommand::OutputStyle { .. }
-        | SlashCommand::AddDir { .. }
-        | SlashCommand::Undo => Err("unsupported resumed slash command".into()),
+        | SlashCommand::AddDir { .. } => Err("unsupported resumed slash command".into()),
     }
 }
 
@@ -4559,7 +4589,6 @@ pub(crate) const STUB_COMMANDS: &[&str] = &[
     "terminal-setup",
     "api-key",
     "reset",
-    "undo",
     "stop",
     "retry",
     "paste",

@@ -464,6 +464,44 @@ pub(crate) fn format_internal_prompt_progress_line(
     }
 }
 
+/// Render the REPL echo for a submitted user input. Each line is on its own
+/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
+/// the REPL uses for echoed input.
+///
+/// `lines_consumed` is the number of `\n`-delimited input lines so callers
+/// know how many rows of rustyline output to clear before printing the echo.
+///
+/// #182 item 3: multi-line input used to collapse to a single line because
+/// the call site did `replace('\n', " ")`. We now preserve every line so the
+/// echo matches what the user actually typed.
+pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+    let trimmed = input.trim();
+    // `split('\n')` (not `lines()`) so an input that ends with `\n` still
+    // contributes a trailing empty echo row — rustyline drew one for it.
+    let raw_lines: Vec<&str> = if trimmed.is_empty() {
+        vec![""]
+    } else {
+        trimmed.split('\n').collect()
+    };
+    let mut rendered = String::new();
+    for (idx, line) in raw_lines.iter().enumerate() {
+        let prefix = if idx == 0 { " › " } else { "   " };
+        let body = format!("{prefix}{line}");
+        let visible = body.chars().count();
+        let pad = term_width.saturating_sub(visible);
+        if idx > 0 {
+            rendered.push('\n');
+        }
+        rendered.push_str("\x1b[48;5;236m");
+        rendered.push_str(&body);
+        if pad > 0 {
+            rendered.push_str(&" ".repeat(pad));
+        }
+        rendered.push_str("\x1b[0m");
+    }
+    (rendered, raw_lines.len())
+}
+
 pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -1303,6 +1341,58 @@ pub(crate) fn truncate_output_for_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #182 item 3: multi-line input echo must preserve every line.  The
+    /// previous implementation called `replace('\n', " ")` and collapsed
+    /// everything onto one row.
+    #[test]
+    fn format_input_echo_preserves_multi_line_input() {
+        let (rendered, lines) = format_input_echo("hello\nworld\nthird", 80);
+        assert_eq!(lines, 3, "echo should report one row per input line");
+        let row_count = rendered.matches('\n').count() + 1;
+        assert_eq!(row_count, 3, "rendered echo should span three rows");
+        assert!(
+            rendered.contains(" › hello"),
+            "first row should carry the prompt arrow: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("   world"),
+            "continuation rows should be indented to align under the arrow: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("   third"),
+            "every continuation row should appear: {rendered:?}"
+        );
+        // Every rendered row should be wrapped in the gray-background SGR pair.
+        let bg_open_count = rendered.matches("\x1b[48;5;236m").count();
+        let reset_count = rendered.matches("\x1b[0m").count();
+        assert_eq!(bg_open_count, 3);
+        assert_eq!(reset_count, 3);
+    }
+
+    #[test]
+    fn format_input_echo_single_line_matches_previous_behavior() {
+        let (rendered, lines) = format_input_echo("hello", 40);
+        assert_eq!(lines, 1);
+        assert!(rendered.starts_with("\x1b[48;5;236m › hello"));
+        assert!(rendered.ends_with("\x1b[0m"));
+        // No embedded newlines for single-line input.
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn format_input_echo_pads_each_row_to_terminal_width() {
+        let (rendered, _) = format_input_echo("hi\nbye", 20);
+        for row in rendered.split('\n') {
+            // Strip the SGR codes to measure visible width.
+            let visible = row.replace("\x1b[48;5;236m", "").replace("\x1b[0m", "");
+            assert_eq!(
+                visible.chars().count(),
+                20,
+                "row {row:?} should be padded to the terminal width"
+            );
+        }
+    }
 
     #[test]
     fn openai_configured_limit_errors_are_rendered_as_context_window_guidance() {

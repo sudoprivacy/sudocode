@@ -1082,6 +1082,13 @@ pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> Stri
 /// Render a context-windowed diff for the first occurrence of `old_string`
 /// inside `original`. Returns `None` when we cannot locate the match (e.g.
 /// `original` was not captured, or the JSON was malformed).
+///
+/// `old_string` is treated as a substring of `original`, not necessarily
+/// line-aligned. The "affected block" is widened out to whole-line
+/// boundaries on both ends so the rendered `-`/`+` lines reflect the
+/// actual lines that changed — not just the literal `old_string` /
+/// `new_string` fragments (which would mislead the user when an edit
+/// happens mid-line).
 pub(crate) fn format_edit_diff_preview(
     original: &str,
     old_string: &str,
@@ -1090,19 +1097,35 @@ pub(crate) fn format_edit_diff_preview(
     if original.is_empty() || old_string.is_empty() {
         return None;
     }
-    let byte_offset = original.find(old_string)?;
-    let lines_before = original[..byte_offset].lines().count();
-    let pre_context_start = lines_before.saturating_sub(DIFF_PREVIEW_CONTEXT_LINES);
+    let match_start = original.find(old_string)?;
+    let match_end = match_start + old_string.len();
+
+    // Widen to whole-line boundaries.
+    let line_start = original[..match_start].rfind('\n').map_or(0, |idx| idx + 1);
+    let line_end = original[match_end..]
+        .find('\n')
+        .map_or(original.len(), |idx| match_end + idx);
+
+    let affected_old = &original[line_start..line_end];
+    let new_region = format!(
+        "{}{}{}",
+        &original[line_start..match_start],
+        new_string,
+        &original[match_end..line_end],
+    );
+
+    let old_lines: Vec<&str> = affected_old.lines().collect();
+    let new_lines: Vec<&str> = new_region.lines().collect();
+    let edit_start_line = original[..line_start].matches('\n').count() + 1;
+    let pre_context_start = edit_start_line.saturating_sub(1 + DIFF_PREVIEW_CONTEXT_LINES);
     let original_lines: Vec<&str> = original.lines().collect();
 
-    let old_lines: Vec<&str> = old_string.lines().collect();
-    let new_lines: Vec<&str> = new_string.lines().collect();
     Some(render_diff_window(
         &old_lines,
         &new_lines,
         &original_lines,
         pre_context_start,
-        lines_before + 1,
+        edit_start_line,
     ))
 }
 
@@ -1999,6 +2022,36 @@ mod tests {
     }
 
     #[test]
+    fn format_edit_diff_preview_widens_substring_match_to_whole_lines() {
+        // Regression caught during manual inspection: when `old_string` is
+        // a mid-line substring (very common — replacing a function name
+        // inside `    foo();`), the body must show the WHOLE affected line
+        // with the replacement applied in place, not just the literal
+        // fragment. Otherwise the rendered diff lies about which line is
+        // changing and the line number is off-by-one.
+        let original =
+            "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n";
+        let preview =
+            format_edit_diff_preview(original, "old_function()", "new_function()").unwrap();
+        let plain = strip_ansi(&preview);
+        // Hunk header points at line 5 (the line containing the match),
+        // not line 6.
+        assert!(plain.contains("@@ -5,1 +5,1 @@"), "{plain}");
+        // The `-`/`+` rows show the full affected line with indentation,
+        // not the bare fragment.
+        assert!(plain.contains("-     old_function();"), "{plain}");
+        assert!(plain.contains("+     new_function();"), "{plain}");
+        // The full line must NOT also appear as a dim context row above
+        // the change.
+        let context_dup = "  \x1b[0m";
+        let _ = context_dup; // anchor for the reader; assertion below
+        assert!(
+            !plain.contains("    old_function();\n-"),
+            "affected line leaked into pre-context: {plain}"
+        );
+    }
+
+    #[test]
     fn format_edit_result_renders_replace_all_count() {
         let json = serde_json::json!({
             "filePath": "src/main.rs",
@@ -2044,5 +2097,67 @@ mod tests {
         assert!(plain.contains("(2 lines)"), "{plain}");
         assert!(!plain.contains("was"), "{plain}");
         assert!(!plain.contains("@@"), "{plain}");
+    }
+
+    /// Visual-inspection-only: print four representative tool results so the
+    /// rendered ANSI output can be eyeballed during manual verification. Run
+    /// with `cargo test -p rusty-sudocode-cli --bin scode -- \
+    /// cli::format::tests::PREVIEW_render_samples_for_manual_inspection \
+    /// --nocapture --include-ignored`. Marked `#[ignore]` so it never runs
+    /// in the default suite.
+    #[test]
+    #[ignore = "visual-inspection only; run with --include-ignored --nocapture"]
+    #[allow(non_snake_case)]
+    fn PREVIEW_render_samples_for_manual_inspection() {
+        let edit_with_context = serde_json::json!({
+            "filePath": "src/main.rs",
+            "oldString": "old_function()",
+            "newString": "new_function()",
+            "originalFile": "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n\nfn footer() {}\n",
+            "userModified": false,
+            "replaceAll": false,
+        })
+        .to_string();
+        println!("\n=== SAMPLE 1: edit_file with surrounding context ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &edit_with_context, false)
+        );
+
+        let edit_replace_all = serde_json::json!({
+            "filePath": "src/lib.rs",
+            "oldString": "foo",
+            "newString": "bar",
+            "originalFile": "foo one\nfoo two\nfoo three\n",
+            "userModified": false,
+            "replaceAll": true,
+        })
+        .to_string();
+        println!("\n=== SAMPLE 2: edit_file with replaceAll + occurrence count ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &edit_replace_all, false)
+        );
+
+        let write_update = serde_json::json!({
+            "type": "update",
+            "filePath": "config.toml",
+            "content": "[server]\nport = 8080\nhost = \"0.0.0.0\"\nmax_connections = 100\n",
+            "originalFile": "[server]\nport = 3000\nhost = \"127.0.0.1\"\n",
+        })
+        .to_string();
+        println!("\n=== SAMPLE 3: write_file update with line-count delta ===");
+        println!("{}", format_tool_result("write_file", &write_update, false));
+
+        let with_hook_feedback = format!(
+            "{}\n\nHook feedback:\nrustfmt clean\nclippy clean",
+            edit_with_context
+        );
+        println!("\n=== SAMPLE 4: edit_file with hook feedback suffix (regression #1) ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &with_hook_feedback, false)
+        );
+        println!();
     }
 }

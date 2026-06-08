@@ -177,38 +177,57 @@ impl ModelProvenance {
         }
     }
 
-    fn from_env_or_config_or_default(cli_model: &str) -> Self {
-        // Only called when no --model flag was passed. Probe env first,
-        // then config, else fall back to default. Mirrors the logic in
-        // resolve_repl_model() but captures the source.
-        if cli_model != DEFAULT_MODEL {
-            // Already resolved from some prior path; treat as flag.
-            return Self {
-                resolved: cli_model.to_string(),
-                raw: Some(cli_model.to_string()),
-                source: ModelSource::Flag,
-            };
-        }
-        if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Self {
-                resolved: resolve_model_alias_with_config(&env_model),
-                raw: Some(env_model),
-                source: ModelSource::Env,
-            };
-        }
-        if let Some(config_model) = config_model_for_current_dir() {
-            return Self {
-                resolved: resolve_model_alias_with_config(&config_model),
-                raw: Some(config_model),
-                source: ModelSource::Config,
-            };
-        }
-        Self::default_fallback()
+    /// Look up the default model from env, then cwd config, then the compiled-in
+    /// fallback. Called when no `--model` flag was passed. Shares its primitive
+    /// with [`resolve_default_model`] so the splash and prompt agree on the
+    /// active model.
+    fn from_default_lookup() -> Self {
+        lookup_default_model()
+            .map(|(resolved, raw, source)| Self {
+                resolved,
+                raw: Some(raw),
+                source,
+            })
+            .unwrap_or_else(Self::default_fallback)
     }
+}
+
+/// Single source of truth for the env-or-config default model lookup. Returns
+/// `(resolved, raw, source)` when env or config wins, `None` to defer to the
+/// compiled-in default.
+pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
+    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some((
+            resolve_model_alias_with_config(&env_model),
+            env_model,
+            ModelSource::Env,
+        ));
+    }
+    if let Some(config_model) = config_model_for_current_dir() {
+        return Some((
+            resolve_model_alias_with_config(&config_model),
+            config_model,
+            ModelSource::Config,
+        ));
+    }
+    None
+}
+
+/// Resolve the model when the caller has the post-arg-parse string in hand.
+/// Honors a `--model` flag (anything other than [`DEFAULT_MODEL`]) and falls
+/// through to [`lookup_default_model`] otherwise. Shared by the REPL splash
+/// and the one-shot `Prompt` action so they cannot disagree.
+pub(crate) fn resolve_default_model(cli_model: String) -> String {
+    if cli_model != DEFAULT_MODEL {
+        return cli_model;
+    }
+    lookup_default_model()
+        .map(|(resolved, _, _)| resolved)
+        .unwrap_or(cli_model)
 }
 
 // Build-time constants injected by build.rs (fall back to static values when
@@ -477,6 +496,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let session_start = Instant::now();
+            // Share the splash's env/config resolution so the one-shot prompt
+            // can't disagree with the REPL banner.
             let resolved_model = resolve_repl_model(model);
             let mut cli = LiveCli::new(
                 resolved_model,

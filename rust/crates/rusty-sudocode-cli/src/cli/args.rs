@@ -17,7 +17,7 @@ use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 use tools::GlobalToolRegistry;
 
 use super::session::LATEST_SESSION_REFERENCE;
-use crate::{normalize_permission_mode, DEFAULT_MODEL};
+use crate::{lookup_default_model, normalize_permission_mode, DEFAULT_MODEL};
 
 pub(crate) type AllowedToolSet = BTreeSet<String>;
 
@@ -1193,22 +1193,15 @@ pub(crate) fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;
     }
-    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    {
-        return resolve_model_alias_with_config(&env_model);
-    }
-    if let Some(config_model) = config_model_for_current_dir() {
-        return resolve_model_alias_with_config(&config_model);
-    }
-    cli_model
+    lookup_default_model()
+        .map(|(resolved, _, _)| resolved)
+        .unwrap_or(cli_model)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModelProvenance;
     use std::collections::BTreeMap;
 
     fn parse_words(words: &[&str]) -> CliAction {
@@ -1217,6 +1210,19 @@ mod tests {
             .map(|word| (*word).to_string())
             .collect::<Vec<_>>();
         parse_args(&args).expect("parse cli args")
+    }
+
+    /// #182 item 1: the REPL splash and the one-shot `Prompt` path must agree
+    /// on the active model when no `--model` flag is passed. They share
+    /// `lookup_default_model` through `resolve_repl_model` (used by both
+    /// `run_repl` and the `Prompt` handler) and `ModelProvenance::from_default_lookup`
+    /// (used by `scode status`). This test pins the invariant so a future
+    /// drive-by edit can't reintroduce a divergent fallback path.
+    #[test]
+    fn splash_and_prompt_share_default_model_lookup() {
+        let from_lookup = ModelProvenance::from_default_lookup().resolved;
+        let repl_resolved = resolve_repl_model(DEFAULT_MODEL.to_string());
+        assert_eq!(from_lookup, repl_resolved);
     }
 
     #[test]

@@ -2361,9 +2361,8 @@ impl AcpSdkDelegate {
                 return Err(runtime::AcpError::internal(user_message));
             }
         }
-        // Track turn count before run_turn to detect if usage was recorded
-        let turns_before = session.runtime.usage().turns();
-        self.inner
+        // Run the turn and get the TurnSummary directly
+        let turn_summary = self.inner
             .tokio_runtime
             .block_on(session.runtime.run_turn(prompt, prompter, Some(observer)))
             .map_err(|e| {
@@ -2372,9 +2371,10 @@ impl AcpSdkDelegate {
                 }
                 runtime::AcpError::internal(e.to_string())
             })?;
-        // Get per-turn usage (only if this turn actually recorded usage)
-        let per_turn_usage = session.runtime.usage().turn_usage_if_recorded(turns_before);
-        let cumulative_usage = session.runtime.usage().cumulative_usage();
+        // Use turn_usage for PromptUsage, session_usage for cumulative
+        let per_turn_usage = (turn_summary.turn_usage.total_tokens() > 0)
+            .then_some(turn_summary.turn_usage);
+        let cumulative_usage = turn_summary.session_usage;
         // Build PromptUsage if we have per-turn data, otherwise return None for usage
         let prompt_usage = per_turn_usage.map(|u| runtime::acp_sdk_server::PromptUsage {
             input_tokens: u64::from(u.input_tokens),
@@ -2394,8 +2394,17 @@ impl AcpSdkDelegate {
                 cached_write_tokens: Some(u64::from(cumulative_usage.cache_creation_input_tokens)),
             }),
         });
-        // Record cumulative token usage to telemetry log
+        // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
+            // Record turn-level usage for this prompt
+            tracer.record_usage(
+                "prompt_turn".to_string(),
+                turn_summary.turn_usage.input_tokens,
+                turn_summary.turn_usage.output_tokens,
+                turn_summary.turn_usage.cache_creation_input_tokens,
+                turn_summary.turn_usage.cache_read_input_tokens,
+            );
+            // Record cumulative session usage
             tracer.record_usage(
                 "session_summary".to_string(),
                 cumulative_usage.input_tokens,
@@ -2839,10 +2848,10 @@ impl LiveCli {
                 "compact": true,
                 "model": self.config.model,
                 "usage": {
-                    "input_tokens": summary.usage.input_tokens,
-                    "output_tokens": summary.usage.output_tokens,
-                    "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
+                    "input_tokens": summary.turn_usage.input_tokens,
+                    "output_tokens": summary.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
                 },
             })
         );
@@ -2875,13 +2884,13 @@ impl LiveCli {
                 "tool_results": collect_tool_results(&summary),
                 "prompt_cache_events": collect_prompt_cache_events(&summary),
                 "usage": {
-                    "input_tokens": summary.usage.input_tokens,
-                    "output_tokens": summary.usage.output_tokens,
-                    "cache_creation_input_tokens": summary.usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.usage.cache_read_input_tokens,
+                    "input_tokens": summary.turn_usage.input_tokens,
+                    "output_tokens": summary.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
                 },
                 "estimated_cost": format_usd(
-                    summary.usage.estimate_cost_usd_with_pricing(
+                    summary.turn_usage.estimate_cost_usd_with_pricing(
                         pricing_for_model(&self.config.model)
                             .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
                     ).total_cost_usd()

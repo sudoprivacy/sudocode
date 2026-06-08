@@ -3499,23 +3499,19 @@ mod tests {
         // Verify turn_usage aggregates both requests
         assert_eq!(summary.assistant_messages.len(), 2);
         assert_eq!(
-            summary.turn_usage.input_tokens,
-            300,
+            summary.turn_usage.input_tokens, 300,
             "input_tokens should be 100 + 200"
         );
         assert_eq!(
-            summary.turn_usage.output_tokens,
-            80,
+            summary.turn_usage.output_tokens, 80,
             "output_tokens should be 50 + 30"
         );
         assert_eq!(
-            summary.turn_usage.cache_creation_input_tokens,
-            15,
+            summary.turn_usage.cache_creation_input_tokens, 15,
             "cache_creation should be 10 + 5"
         );
         assert_eq!(
-            summary.turn_usage.cache_read_input_tokens,
-            35,
+            summary.turn_usage.cache_read_input_tokens, 35,
             "cache_read should be 20 + 15"
         );
         assert_eq!(summary.turn_usage.total_tokens(), 430);

@@ -2362,7 +2362,8 @@ impl AcpSdkDelegate {
             }
         }
         // Run the turn and get the TurnSummary directly
-        let turn_summary = self.inner
+        let turn_summary = self
+            .inner
             .tokio_runtime
             .block_on(session.runtime.run_turn(prompt, prompter, Some(observer)))
             .map_err(|e| {
@@ -2372,8 +2373,8 @@ impl AcpSdkDelegate {
                 runtime::AcpError::internal(e.to_string())
             })?;
         // Use turn_usage for PromptUsage, session_usage for cumulative
-        let per_turn_usage = (turn_summary.turn_usage.total_tokens() > 0)
-            .then_some(turn_summary.turn_usage);
+        let per_turn_usage =
+            (turn_summary.turn_usage.total_tokens() > 0).then_some(turn_summary.turn_usage);
         let cumulative_usage = turn_summary.session_usage;
         // Build PromptUsage if we have per-turn data, otherwise return None for usage
         let prompt_usage = per_turn_usage.map(|u| runtime::acp_sdk_server::PromptUsage {

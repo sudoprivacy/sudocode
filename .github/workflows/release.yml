@@ -140,7 +140,7 @@ jobs:
           coscmd config \
             -a "$TENCENT_SECRET_ID" \
             -s "$TENCENT_SECRET_KEY" \
-            -b sudowork-download-1309794936 \
+            -b sudowork-release-1309794936 \
             -e cos.accelerate.myqcloud.com
           for file in dist/scode-*.tar.gz dist/scode-*.zip; do
             [ -f "$file" ] || continue
@@ -149,4 +149,4 @@ jobs:
             coscmd upload "$file" "sudocode/release/latest/$filename"
           done
           coscmd upload dist/SHA256SUMS.txt "sudocode/release/latest/SHA256SUMS.txt"
-          echo "Done: https://sudowork-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/"
+          echo "Done: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/"

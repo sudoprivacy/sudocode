@@ -1331,7 +1331,8 @@ fn run_resume_command(
         | SlashCommand::Ide { .. }
         | SlashCommand::Tag { .. }
         | SlashCommand::OutputStyle { .. }
-        | SlashCommand::AddDir { .. } => Err("unsupported resumed slash command".into()),
+        | SlashCommand::AddDir { .. }
+        | SlashCommand::Undo => Err("unsupported resumed slash command".into()),
     }
 }
 
@@ -1486,6 +1487,9 @@ struct LiveCli {
     runtime: BuiltRuntime,
     session: SessionHandle,
     prompt_history: Vec<PromptHistoryEntry>,
+    /// Tool-use ids already restored by `/undo`. Used to make repeated
+    /// `/undo` calls step further back rather than re-undoing the same edit.
+    undone_tool_use_ids: std::collections::HashSet<String>,
     /// Shared tokio runtime used to drive async `run_turn` calls.
     tokio_runtime: tokio::runtime::Runtime,
 }
@@ -2526,6 +2530,7 @@ impl LiveCli {
             runtime,
             session,
             prompt_history: Vec::new(),
+            undone_tool_use_ids: std::collections::HashSet::new(),
             tokio_runtime: tokio::runtime::Runtime::new()?,
         };
         cli.persist_session()?;
@@ -2709,6 +2714,7 @@ impl LiveCli {
     fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
         self.shutdown_runtime_resources()?;
         self.runtime = runtime;
+        self.undone_tool_use_ids.clear();
         Ok(())
     }
 
@@ -2974,6 +2980,10 @@ impl LiveCli {
             }
             SlashCommand::Diff => {
                 Self::print_diff()?;
+                false
+            }
+            SlashCommand::Undo => {
+                self.handle_undo();
                 false
             }
             SlashCommand::Version => {
@@ -3530,6 +3540,26 @@ impl LiveCli {
     fn print_diff() -> Result<(), Box<dyn std::error::Error>> {
         print_with_pager(&render_diff_report()?);
         Ok(())
+    }
+
+    fn handle_undo(&mut self) {
+        let messages = &self.runtime.session().messages;
+        match crate::cli::undo::find_last_undoable_edit(messages, &self.undone_tool_use_ids) {
+            None => {
+                println!(
+                    "Nothing to undo in this session. /undo only restores edit_file and write_file results recorded in the live session."
+                );
+            }
+            Some(edit) => match crate::cli::undo::apply_undo(&edit) {
+                Ok(message) => {
+                    self.undone_tool_use_ids.insert(edit.tool_use_id.clone());
+                    println!("{message}");
+                }
+                Err(error) => {
+                    eprintln!("undo failed for {}: {error}", edit.file_path);
+                }
+            },
+        }
     }
 
     fn print_version(output_format: CliOutputFormat) {

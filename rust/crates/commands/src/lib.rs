@@ -1044,6 +1044,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: None,
         resume_supported: true,
     },
+    SlashCommandSpec {
+        name: "undo",
+        aliases: &[],
+        summary: "Revert the most recent edit_file or write_file in this session",
+        argument_hint: None,
+        resume_supported: false,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1192,6 +1199,7 @@ pub enum SlashCommand {
     History {
         count: Option<String>,
     },
+    Undo,
     Unknown(String),
 }
 
@@ -1293,6 +1301,7 @@ impl SlashCommand {
             Self::Sandbox => "/sandbox",
             Self::Mcp { .. } => "/mcp",
             Self::Export { .. } => "/export",
+            Self::Undo => "/undo",
             #[allow(unreachable_patterns)]
             _ => "/unknown",
         }
@@ -1385,6 +1394,10 @@ pub fn validate_slash_command_input(
         "diff" => {
             validate_no_args(command, &args)?;
             SlashCommand::Diff
+        }
+        "undo" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Undo
         }
         "version" => {
             validate_no_args(command, &args)?;
@@ -4468,6 +4481,7 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
+        | SlashCommand::Undo
         | SlashCommand::Unknown(_) => None,
     }
 }
@@ -5051,7 +5065,7 @@ mod tests {
         assert!(help.contains("aliases: /skill"));
         assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 140);
+        assert_eq!(slash_command_specs().len(), 141);
         assert!(resume_supported_slash_commands().len() >= 39);
     }
 

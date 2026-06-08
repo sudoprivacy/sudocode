@@ -3036,6 +3036,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "telemetry",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tools",

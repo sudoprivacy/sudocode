@@ -11,3 +11,4 @@ pub(crate) mod pager;
 pub(crate) mod session;
 pub(crate) mod status;
 pub(crate) mod tool_executor;
+pub(crate) mod undo;

@@ -58,7 +58,7 @@ use cli::export::{
 use cli::format::{
     describe_tool_progress, first_visible_line, format_auth_report, format_auth_switch_report,
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
-    format_commit_skipped_report, format_compact_report, format_cost_report,
+    format_commit_skipped_report, format_compact_report, format_cost_report, format_input_echo,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
@@ -1479,14 +1479,18 @@ fn run_repl(
             input::ReadOutcome::Submit(input) => {
                 // Clear pre-printed bottom sep + footer
                 print!("\x1b[J");
-                // Replace prompt line with gray-background echo of user input
+                // Replace prompt line with a gray-background echo of the user
+                // input.  Multi-line input renders one styled row per line so
+                // the echo matches what the user actually typed (#182 item 3).
                 let trimmed = input.trim().to_string();
-                let echo_display = format!(" › {}", trimmed.replace('\n', " "));
-                let pad = term_width.saturating_sub(echo_display.chars().count());
-                print!(
-                    "\x1b[1F\x1b[2K\x1b[48;5;236m{echo_display}{}\x1b[0m",
-                    " ".repeat(pad)
-                );
+                let (echo_block, line_count) = format_input_echo(&trimmed, term_width);
+                // Move the cursor up past every row rustyline rendered for the
+                // input and clear each one, then write the echo block in their
+                // place.
+                for _ in 0..line_count {
+                    print!("\x1b[1F\x1b[2K");
+                }
+                print!("{echo_block}");
                 println!();
                 println!("{separator}");
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {

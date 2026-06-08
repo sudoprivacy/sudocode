@@ -163,7 +163,11 @@ pub struct TurnSummary {
     pub tool_results: Vec<ConversationMessage>,
     pub prompt_cache_events: Vec<PromptCacheEvent>,
     pub iterations: usize,
-    pub usage: TokenUsage,
+    /// Total token usage for all assistant messages in this turn.
+    /// This is the sum of usage from each model request triggered by the user message.
+    pub turn_usage: TokenUsage,
+    /// Cumulative token usage for the entire session from start to now.
+    pub session_usage: TokenUsage,
     pub auto_compaction: Option<AutoCompactionEvent>,
     /// `true` when the turn was interrupted by the abort signal.  Partial
     /// progress (user message, streamed assistant text, synthetic tool
@@ -616,12 +620,15 @@ where
             // Note: This is silent cleanup, no token consumption
         }
         self.finish_current_turn_tracking();
+        let turn_usage = sum_assistant_message_usage(&assistant_messages);
+        let session_usage = self.usage_tracker.cumulative_usage();
         TurnSummary {
             assistant_messages,
             tool_results,
             prompt_cache_events,
             iterations,
-            usage: self.usage_tracker.cumulative_usage(),
+            turn_usage,
+            session_usage,
             auto_compaction: None,
             cancelled: true,
         }
@@ -702,12 +709,15 @@ where
         loop {
             if self.hook_abort_signal.is_aborted() {
                 self.finalize_cancelled_turn(Vec::new());
+                let turn_usage = sum_assistant_message_usage(&assistant_messages);
+                let session_usage = self.usage_tracker.cumulative_usage();
                 return Ok(TurnSummary {
-                    assistant_messages: Vec::new(),
-                    tool_results: Vec::new(),
-                    prompt_cache_events: Vec::new(),
+                    assistant_messages,
+                    tool_results,
+                    prompt_cache_events,
                     iterations,
-                    usage: self.usage_tracker.cumulative_usage(),
+                    turn_usage,
+                    session_usage,
                     auto_compaction: None,
                     cancelled: true,
                 });
@@ -748,12 +758,15 @@ where
                             // and stop token consumption.
                             drop(stream);
                             self.finalize_cancelled_turn(collected);
+                            let turn_usage = sum_assistant_message_usage(&assistant_messages);
+                            let session_usage = self.usage_tracker.cumulative_usage();
                             return Ok(TurnSummary {
-                                assistant_messages: Vec::new(),
-                                tool_results: Vec::new(),
-                                prompt_cache_events: Vec::new(),
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
                                 iterations,
-                                usage: self.usage_tracker.cumulative_usage(),
+                                turn_usage,
+                                session_usage,
                                 auto_compaction: None,
                                 cancelled: true,
                             });
@@ -820,12 +833,15 @@ where
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
                         self.user_request_intent = None;
+                        let turn_usage = sum_assistant_message_usage(&assistant_messages);
+                        let session_usage = self.usage_tracker.cumulative_usage();
                         let summary = TurnSummary {
                             assistant_messages,
                             tool_results,
                             prompt_cache_events,
                             iterations,
-                            usage: self.usage_tracker.cumulative_usage(),
+                            turn_usage,
+                            session_usage,
                             auto_compaction,
                             cancelled: false,
                         };
@@ -1035,12 +1051,15 @@ where
 
         self.finish_current_turn_tracking();
 
+        let turn_usage = sum_assistant_message_usage(&assistant_messages);
+        let session_usage = self.usage_tracker.cumulative_usage();
         let summary = TurnSummary {
             assistant_messages,
             tool_results,
             prompt_cache_events,
             iterations,
-            usage: self.usage_tracker.cumulative_usage(),
+            turn_usage,
+            session_usage,
             auto_compaction,
             cancelled: false,
         };
@@ -1279,6 +1298,11 @@ where
             return;
         };
 
+        let model_request_count = summary
+            .assistant_messages
+            .iter()
+            .filter(|m| m.usage.is_some())
+            .count() as u64;
         let mut attributes = Map::new();
         attributes.insert(
             "iterations".to_string(),
@@ -1295,6 +1319,18 @@ where
         attributes.insert(
             "prompt_cache_events".to_string(),
             Value::from(summary.prompt_cache_events.len() as u64),
+        );
+        attributes.insert(
+            "model_request_count".to_string(),
+            Value::from(model_request_count),
+        );
+        attributes.insert(
+            "turn_total_tokens".to_string(),
+            Value::from(summary.turn_usage.total_tokens() as u64),
+        );
+        attributes.insert(
+            "session_total_tokens".to_string(),
+            Value::from(summary.session_usage.total_tokens() as u64),
         );
         session_tracer.record("turn_completed", attributes);
     }
@@ -1398,6 +1434,18 @@ fn build_assistant_message(
         usage,
         prompt_cache_events,
     ))
+}
+
+/// Sums the token usage from all assistant messages in a turn.
+/// Each assistant message carries the usage from one model request.
+fn sum_assistant_message_usage(messages: &[ConversationMessage]) -> TokenUsage {
+    let mut total = TokenUsage::default();
+    for message in messages {
+        if let Some(usage) = message.usage {
+            total.add_assign_usage(usage);
+        }
+    }
+    total
 }
 
 fn has_pending_tool_uses(message: &ConversationMessage) -> bool {
@@ -1773,7 +1821,14 @@ mod tests {
         assert_eq!(summary.tool_results.len(), 1);
         assert_eq!(summary.prompt_cache_events.len(), 1);
         assert_eq!(runtime.session().messages.len(), 4);
-        assert_eq!(summary.usage.output_tokens, 10);
+        // turn_usage should aggregate both model request usages
+        assert_eq!(summary.turn_usage.input_tokens, 44); // 20 + 24
+        assert_eq!(summary.turn_usage.output_tokens, 10); // 6 + 4
+        assert_eq!(summary.turn_usage.cache_creation_input_tokens, 2); // 1 + 1
+        assert_eq!(summary.turn_usage.cache_read_input_tokens, 5); // 2 + 3
+        assert_eq!(summary.turn_usage.total_tokens(), 61);
+        // session_usage should equal turn_usage for first turn
+        assert_eq!(summary.session_usage, summary.turn_usage);
         assert_eq!(summary.auto_compaction, None);
         assert!(matches!(
             runtime.session().messages[1].blocks[1],
@@ -1942,7 +1997,8 @@ mod tests {
         assert_eq!(summary.assistant_messages.len(), 1);
         assert_eq!(summary.tool_results.len(), 1);
         assert_eq!(summary.iterations, 2);
-        assert_eq!(summary.usage.output_tokens, 0);
+        assert_eq!(summary.turn_usage.output_tokens, 0);
+        assert_eq!(summary.session_usage.output_tokens, 0);
         assert_eq!(runtime.session().messages.len(), 3);
     }
 
@@ -3361,6 +3417,116 @@ mod tests {
             requests[0].messages[0].blocks.len(),
             1,
             "no reminder should fire without a known date"
+        );
+    }
+
+    /// Test that turn_usage correctly aggregates usage across multiple model requests
+    /// within a single turn (e.g., tool_use followed by final response).
+    #[tokio::test]
+    async fn aggregates_turn_usage_across_multiple_model_requests() {
+        // This client simulates: tool_use -> tool_result -> final text
+        // with different usages for each model request
+        struct MultiRequestApiClient {
+            call_count: usize,
+        }
+
+        #[async_trait]
+        impl ApiClient for MultiRequestApiClient {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                self.call_count += 1;
+                match self.call_count {
+                    1 => {
+                        // First request: tool_use with usage_a
+                        assert!(request
+                            .messages
+                            .iter()
+                            .any(|message| message.role == MessageRole::User));
+                        Ok(events_to_stream(vec![
+                            AssistantEvent::ToolUse {
+                                id: "tool-1".to_string(),
+                                name: "test_tool".to_string(),
+                                input: "{}".to_string(),
+                                thought_signature: None,
+                            },
+                            AssistantEvent::Usage(TokenUsage {
+                                input_tokens: 100,
+                                output_tokens: 50,
+                                cache_creation_input_tokens: 10,
+                                cache_read_input_tokens: 20,
+                            }),
+                            AssistantEvent::MessageStop,
+                        ]))
+                    }
+                    2 => {
+                        // Second request: final text with usage_b
+                        let last_message = request
+                            .messages
+                            .last()
+                            .expect("tool result should be present");
+                        assert_eq!(last_message.role, MessageRole::Tool);
+                        Ok(events_to_stream(vec![
+                            AssistantEvent::TextDelta("Done!".to_string()),
+                            AssistantEvent::Usage(TokenUsage {
+                                input_tokens: 200,
+                                output_tokens: 30,
+                                cache_creation_input_tokens: 5,
+                                cache_read_input_tokens: 15,
+                            }),
+                            AssistantEvent::MessageStop,
+                        ]))
+                    }
+                    _ => unreachable!("unexpected extra API call"),
+                }
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            MultiRequestApiClient { call_count: 0 },
+            StaticToolExecutor::new().register("test_tool", |_input| Ok("result".to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+
+        let summary = runtime
+            .run_turn("test", None, None)
+            .await
+            .expect("turn should succeed");
+
+        // Verify turn_usage aggregates both requests
+        assert_eq!(summary.assistant_messages.len(), 2);
+        assert_eq!(
+            summary.turn_usage.input_tokens, 300,
+            "input_tokens should be 100 + 200"
+        );
+        assert_eq!(
+            summary.turn_usage.output_tokens, 80,
+            "output_tokens should be 50 + 30"
+        );
+        assert_eq!(
+            summary.turn_usage.cache_creation_input_tokens, 15,
+            "cache_creation should be 10 + 5"
+        );
+        assert_eq!(
+            summary.turn_usage.cache_read_input_tokens, 35,
+            "cache_read should be 20 + 15"
+        );
+        assert_eq!(summary.turn_usage.total_tokens(), 430);
+
+        // For first turn, session_usage should equal turn_usage
+        assert_eq!(
+            summary.session_usage, summary.turn_usage,
+            "first turn: session_usage should equal turn_usage"
+        );
+
+        // Verify runtime.usage().cumulative_usage() matches session_usage
+        assert_eq!(
+            runtime.usage().cumulative_usage(),
+            summary.session_usage,
+            "runtime cumulative usage should match session_usage"
         );
     }
 }

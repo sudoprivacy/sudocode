@@ -81,6 +81,18 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
 }
 
 impl TokenUsage {
+    /// Aggregates another TokenUsage into this one using saturating_add.
+    pub fn add_assign_usage(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+    }
+
     #[must_use]
     pub fn total_tokens(self) -> u32 {
         self.input_tokens
@@ -230,6 +242,50 @@ impl UsageTracker {
 mod tests {
     use super::{format_usd, pricing_for_model, TokenUsage, UsageTracker};
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+
+    #[test]
+    fn adds_token_usage_fields() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 3,
+        };
+        total.add_assign_usage(TokenUsage {
+            input_tokens: 20,
+            output_tokens: 4,
+            cache_creation_input_tokens: 2,
+            cache_read_input_tokens: 6,
+        });
+
+        assert_eq!(total.input_tokens, 30);
+        assert_eq!(total.output_tokens, 6);
+        assert_eq!(total.cache_creation_input_tokens, 3);
+        assert_eq!(total.cache_read_input_tokens, 9);
+        assert_eq!(total.total_tokens(), 48);
+    }
+
+    #[test]
+    fn saturating_add_prevents_overflow() {
+        let mut total = TokenUsage {
+            input_tokens: u32::MAX - 1,
+            output_tokens: u32::MAX - 1,
+            cache_creation_input_tokens: u32::MAX - 1,
+            cache_read_input_tokens: u32::MAX - 1,
+        };
+        total.add_assign_usage(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 10,
+        });
+
+        // Should saturate at u32::MAX instead of wrapping
+        assert_eq!(total.input_tokens, u32::MAX);
+        assert_eq!(total.output_tokens, u32::MAX);
+        assert_eq!(total.cache_creation_input_tokens, u32::MAX);
+        assert_eq!(total.cache_read_input_tokens, u32::MAX);
+    }
 
     #[test]
     fn tracks_true_cumulative_usage() {

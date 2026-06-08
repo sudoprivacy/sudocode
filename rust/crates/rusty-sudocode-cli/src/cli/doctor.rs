@@ -661,18 +661,46 @@ pub(crate) fn check_sandbox_health(status: &runtime::SandboxStatus) -> Diagnosti
     ]))
 }
 
+pub(crate) fn check_system_health(
+    cwd: &Path,
+    config: Option<&runtime::RuntimeConfig>,
+) -> DiagnosticCheck {
+    let default_model = config.and_then(runtime::RuntimeConfig::model);
+    let mut details = vec![
+        format!("OS               {} {}", env::consts::OS, env::consts::ARCH),
+        format!("Working dir      {}", cwd.display()),
+        format!("Version          {}", VERSION),
+        format!("Build target     {}", BUILD_TARGET.unwrap_or("<unknown>")),
+        format!("Git SHA          {}", GIT_SHA.unwrap_or("<unknown>")),
+    ];
+    if let Some(model) = default_model {
+        details.push(format!("Default model    {model}"));
+    }
+    DiagnosticCheck::new(
+        "System",
+        DiagnosticLevel::Ok,
+        "captured local runtime metadata",
+    )
+    .with_details(details)
+    .with_data(Map::from_iter([
+        ("os".to_string(), json!(env::consts::OS)),
+        ("arch".to_string(), json!(env::consts::ARCH)),
+        ("working_dir".to_string(), json!(cwd.display().to_string())),
+        ("version".to_string(), json!(VERSION)),
+        ("build_target".to_string(), json!(BUILD_TARGET)),
+        ("git_sha".to_string(), json!(GIT_SHA)),
+        ("default_model".to_string(), json!(default_model)),
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    /// Serialize env-var manipulation within this module's tests so parallel
+    /// Serialize env-var manipulation across the crate's tests so parallel
     /// cargo-test workers can't trample each other's setup.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::env_test_lock()
     }
 
     fn clear_auth_env() {
@@ -776,36 +804,4 @@ mod tests {
         std::env::remove_var("SUDO_CODE_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&config_home);
     }
-}
-
-pub(crate) fn check_system_health(
-    cwd: &Path,
-    config: Option<&runtime::RuntimeConfig>,
-) -> DiagnosticCheck {
-    let default_model = config.and_then(runtime::RuntimeConfig::model);
-    let mut details = vec![
-        format!("OS               {} {}", env::consts::OS, env::consts::ARCH),
-        format!("Working dir      {}", cwd.display()),
-        format!("Version          {}", VERSION),
-        format!("Build target     {}", BUILD_TARGET.unwrap_or("<unknown>")),
-        format!("Git SHA          {}", GIT_SHA.unwrap_or("<unknown>")),
-    ];
-    if let Some(model) = default_model {
-        details.push(format!("Default model    {model}"));
-    }
-    DiagnosticCheck::new(
-        "System",
-        DiagnosticLevel::Ok,
-        "captured local runtime metadata",
-    )
-    .with_details(details)
-    .with_data(Map::from_iter([
-        ("os".to_string(), json!(env::consts::OS)),
-        ("arch".to_string(), json!(env::consts::ARCH)),
-        ("working_dir".to_string(), json!(cwd.display().to_string())),
-        ("version".to_string(), json!(VERSION)),
-        ("build_target".to_string(), json!(BUILD_TARGET)),
-        ("git_sha".to_string(), json!(GIT_SHA)),
-        ("default_model".to_string(), json!(default_model)),
-    ]))
 }

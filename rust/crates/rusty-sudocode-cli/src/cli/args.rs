@@ -1186,6 +1186,10 @@ mod tests {
     /// drive-by edit can't reintroduce a divergent fallback path.
     #[test]
     fn splash_and_prompt_share_default_model_lookup() {
+        // Hold the crate-wide env lock so the two helper reads can't be
+        // interleaved with a parallel test that's mutating
+        // `SUDO_CODE_CONFIG_HOME` or `ANTHROPIC_MODEL`.
+        let _guard = crate::env_test_lock();
         let from_lookup = ModelProvenance::from_default_lookup().resolved;
         let repl_resolved = resolve_repl_model(DEFAULT_MODEL.to_string());
         assert_eq!(from_lookup, repl_resolved);

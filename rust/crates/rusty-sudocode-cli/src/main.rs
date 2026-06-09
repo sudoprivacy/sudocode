@@ -451,7 +451,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let session_start = Instant::now();
-            let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode, auth_mode)?;
+            let resolved_model = resolve_repl_model(model);
+            let mut cli = LiveCli::new(
+                resolved_model,
+                true,
+                allowed_tools,
+                permission_mode,
+                auth_mode,
+            )?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 

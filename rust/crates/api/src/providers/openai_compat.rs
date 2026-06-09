@@ -471,14 +471,7 @@ impl StreamState {
         }
 
         if let Some(usage) = chunk.usage {
-            self.usage = Some(Usage {
-                input_tokens: usage.prompt_tokens,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: usage.prompt_tokens_details.cached_tokens,
-                output_tokens: usage.completion_tokens,
-                cost_units: usage.cost_units,
-                cost_currency: usage.cost_currency,
-            });
+            self.usage = Some(usage.to_api_usage());
         }
 
         for choice in chunk.choices {
@@ -819,6 +812,37 @@ struct OpenAiUsage {
     cost_units: Option<u64>,
     #[serde(default)]
     cost_currency: Option<String>,
+    #[serde(default)]
+    quota: Option<u64>,
+}
+
+impl OpenAiUsage {
+    const INFERRED_QUOTA_CURRENCY: &'static str = "sudo_point";
+
+    fn effective_cost_units(&self) -> Option<u64> {
+        self.cost_units.or(self.quota)
+    }
+
+    fn effective_cost_currency(&self) -> Option<String> {
+        self.cost_currency.clone().or_else(|| {
+            if self.cost_units.is_none() && self.quota.is_some() {
+                Some(Self::INFERRED_QUOTA_CURRENCY.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn to_api_usage(&self) -> Usage {
+        Usage {
+            input_tokens: self.prompt_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: self.prompt_tokens_details.cached_tokens,
+            output_tokens: self.completion_tokens,
+            cost_units: self.effective_cost_units(),
+            cost_currency: self.effective_cost_currency(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1393,26 +1417,17 @@ fn normalize_response(
             .finish_reason
             .map(|value| normalize_finish_reason(&value)),
         stop_sequence: None,
-        usage: Usage {
-            input_tokens: response
-                .usage
-                .as_ref()
-                .map_or(0, |usage| usage.prompt_tokens),
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: response
-                .usage
-                .as_ref()
-                .map_or(0, |usage| usage.prompt_tokens_details.cached_tokens),
-            output_tokens: response
-                .usage
-                .as_ref()
-                .map_or(0, |usage| usage.completion_tokens),
-            cost_units: response.usage.as_ref().and_then(|usage| usage.cost_units),
-            cost_currency: response
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.cost_currency.clone()),
-        },
+        usage: response.usage.as_ref().map_or(
+            Usage {
+                input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 0,
+                cost_units: None,
+                cost_currency: None,
+            },
+            OpenAiUsage::to_api_usage,
+        ),
         request_id: None,
     })
 }
@@ -1725,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn non_streaming_response_preserves_cost_usage_fields() {
+    fn non_streaming_usage_quota_maps_to_sudo_point_cost() {
         let response = super::ChatCompletionResponse {
             id: "chatcmpl_cost".to_string(),
             model: "sudorouter-model".to_string(),
@@ -1742,8 +1757,9 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 4,
                 prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
-                cost_units: Some(43_700),
-                cost_currency: Some("sudo_point".to_string()),
+                cost_units: None,
+                cost_currency: None,
+                quota: Some(698),
             }),
         };
 
@@ -1752,7 +1768,7 @@ mod tests {
         assert_eq!(normalized.usage.input_tokens, 10);
         assert_eq!(normalized.usage.output_tokens, 4);
         assert_eq!(normalized.usage.cache_read_input_tokens, 3);
-        assert_eq!(normalized.usage.cost_units, Some(43_700));
+        assert_eq!(normalized.usage.cost_units, Some(698));
         assert_eq!(
             normalized.usage.cost_currency.as_deref(),
             Some("sudo_point")
@@ -1760,7 +1776,39 @@ mod tests {
     }
 
     #[test]
-    fn streaming_usage_chunk_preserves_cost_usage_fields() {
+    fn usage_cost_units_take_precedence_over_quota() {
+        let usage = super::OpenAiUsage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            cost_units: Some(43_700),
+            cost_currency: None,
+            quota: Some(698),
+        }
+        .to_api_usage();
+
+        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_currency, None);
+    }
+
+    #[test]
+    fn usage_explicit_cost_currency_takes_precedence_over_inferred_sudo_point() {
+        let usage = super::OpenAiUsage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            cost_units: None,
+            cost_currency: Some("custom_point".to_string()),
+            quota: Some(698),
+        }
+        .to_api_usage();
+
+        assert_eq!(usage.cost_units, Some(698));
+        assert_eq!(usage.cost_currency.as_deref(), Some("custom_point"));
+    }
+
+    #[test]
+    fn streaming_usage_chunk_maps_quota_to_sudo_point_cost() {
         let mut state = StreamState::new("sudorouter-model".to_string());
         let _ = state
             .ingest_chunk(super::ChatCompletionChunk {
@@ -1786,8 +1834,9 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 4,
                     prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
-                    cost_units: Some(43_700),
-                    cost_currency: Some("sudo_point".to_string()),
+                    cost_units: None,
+                    cost_currency: None,
+                    quota: Some(698),
                 }),
             })
             .expect("usage chunk");
@@ -1800,7 +1849,7 @@ mod tests {
                 _ => None,
             })
             .expect("message delta usage");
-        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_units, Some(698));
         assert_eq!(usage.cost_currency.as_deref(), Some("sudo_point"));
     }
 

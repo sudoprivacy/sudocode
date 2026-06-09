@@ -1683,6 +1683,7 @@ mod tests {
             output_tokens: 500,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            ..TokenUsage::default()
         };
         let rendered = format_turn_status_line_with_branch(
             "claude-opus-4-6",

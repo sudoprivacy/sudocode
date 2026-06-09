@@ -2419,6 +2419,8 @@ impl AcpSdkDelegate {
             estimated_session_tokens: Some(
                 estimate_session_tokens(session.runtime.session()) as u64
             ),
+            cost_units: u.cost_units,
+            cost_currency: u.cost_currency,
             cumulative_usage: Some(runtime::acp_sdk_server::CumulativeUsage {
                 input_tokens: u64::from(cumulative_usage.input_tokens),
                 output_tokens: u64::from(cumulative_usage.output_tokens),
@@ -2430,20 +2432,29 @@ impl AcpSdkDelegate {
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
             // Record turn-level usage for this prompt
-            tracer.record_usage(
+            tracer.record_usage_with_cost(
                 "prompt_turn".to_string(),
                 turn_summary.turn_usage.input_tokens,
                 turn_summary.turn_usage.output_tokens,
                 turn_summary.turn_usage.cache_creation_input_tokens,
                 turn_summary.turn_usage.cache_read_input_tokens,
+                turn_summary.turn_usage.cost_units,
+                turn_summary
+                    .turn_usage
+                    .cost_currency
+                    .map(runtime::UsageCostCurrency::as_str),
             );
             // Record cumulative session usage
-            tracer.record_usage(
+            tracer.record_usage_with_cost(
                 "session_summary".to_string(),
                 cumulative_usage.input_tokens,
                 cumulative_usage.output_tokens,
                 cumulative_usage.cache_creation_input_tokens,
                 cumulative_usage.cache_read_input_tokens,
+                cumulative_usage.cost_units,
+                cumulative_usage
+                    .cost_currency
+                    .map(runtime::UsageCostCurrency::as_str),
             );
         }
         session

@@ -38,6 +38,7 @@ workspace = true
 futures-util = "0.3"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 serde_json.workspace = true
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-tungstenite = "0.29"
 

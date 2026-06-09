@@ -464,6 +464,44 @@ pub(crate) fn format_internal_prompt_progress_line(
     }
 }
 
+/// Render the REPL echo for a submitted user input. Each line is on its own
+/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
+/// the REPL uses for echoed input.
+///
+/// `lines_consumed` is the number of `\n`-delimited input lines so callers
+/// know how many rows of rustyline output to clear before printing the echo.
+///
+/// #182 item 3: multi-line input used to collapse to a single line because
+/// the call site did `replace('\n', " ")`. We now preserve every line so the
+/// echo matches what the user actually typed.
+pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+    let trimmed = input.trim();
+    // `split('\n')` (not `lines()`) so an input that ends with `\n` still
+    // contributes a trailing empty echo row — rustyline drew one for it.
+    let raw_lines: Vec<&str> = if trimmed.is_empty() {
+        vec![""]
+    } else {
+        trimmed.split('\n').collect()
+    };
+    let mut rendered = String::new();
+    for (idx, line) in raw_lines.iter().enumerate() {
+        let prefix = if idx == 0 { " › " } else { "   " };
+        let body = format!("{prefix}{line}");
+        let visible = body.chars().count();
+        let pad = term_width.saturating_sub(visible);
+        if idx > 0 {
+            rendered.push('\n');
+        }
+        rendered.push_str("\x1b[48;5;236m");
+        rendered.push_str(&body);
+        if pad > 0 {
+            rendered.push_str(&" ".repeat(pad));
+        }
+        rendered.push_str("\x1b[0m");
+    }
+    (rendered, raw_lines.len())
+}
+
 pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -704,6 +742,7 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
             "bash" | "Bash" => format_bash_result(icon, &parsed),
+            "repl" | "REPL" => format_repl_result(icon, &parsed),
             "read_file" | "Read" => format_read_result(icon, &parsed),
             "write_file" | "Write" => format_write_result(icon, &parsed),
             "edit_file" | "Edit" => format_edit_result(icon, &parsed),
@@ -815,10 +854,60 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(|value| value.as_str())
         .unwrap_or_default();
 
-    // Collect all output lines.
-    let all_output: Vec<&str> = stdout_text
+    render_stdout_stderr_block(header, stdout_text, stderr_text)
+}
+
+/// #182 item 4: the REPL tool returns `{language, stdout, stderr, exitCode,
+/// durationMs}`. Going through `format_generic_tool_result` would
+/// pretty-print the whole object as JSON, embedding stdout as a single
+/// string with literal `\n` escapes — the per-tool truncation cap added in
+/// #179 §2 #7 never triggered for it. Mirror `format_bash_result`'s
+/// stdout/stderr unwrap so the line cap applies and the output looks like
+/// the other shell-style tools.
+pub(crate) fn format_repl_result(icon: &str, parsed: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
+    let language = parsed
+        .get("language")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let mut header = if language.is_empty() {
+        format!("{icon} \x1b[38;5;245mREPL\x1b[0m")
+    } else {
+        format!("{icon} \x1b[38;5;245mREPL\x1b[0m({language})")
+    };
+
+    if let Some(exit_code) = parsed
+        .get("exitCode")
+        .or_else(|| parsed.get("exit_code"))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|code| *code != 0)
+    {
+        write!(&mut header, " exit {exit_code}").expect("write to string");
+    }
+
+    let stdout_text = parsed
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let stderr_text = parsed
+        .get("stderr")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    render_stdout_stderr_block(header, stdout_text, stderr_text)
+}
+
+/// Shared stdout/stderr rendering used by `format_bash_result` and
+/// `format_repl_result`. Combines the two streams, drops blank lines, and
+/// applies the per-tool line cap from `TOOL_OUTPUT_DISPLAY_MAX_LINES`.
+fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> String {
+    use std::fmt::Write as _;
+
+    let all_output: Vec<&str> = stdout
         .lines()
-        .chain(stderr_text.lines())
+        .chain(stderr.lines())
         .filter(|line| !line.trim().is_empty())
         .collect();
 
@@ -1510,6 +1599,147 @@ pub(crate) fn truncate_output_for_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #182 item 3: multi-line input echo must preserve every line.  The
+    /// previous implementation called `replace('\n', " ")` and collapsed
+    /// everything onto one row.
+    #[test]
+    fn format_input_echo_preserves_multi_line_input() {
+        let (rendered, lines) = format_input_echo("hello\nworld\nthird", 80);
+        assert_eq!(lines, 3, "echo should report one row per input line");
+        let row_count = rendered.matches('\n').count() + 1;
+        assert_eq!(row_count, 3, "rendered echo should span three rows");
+        assert!(
+            rendered.contains(" › hello"),
+            "first row should carry the prompt arrow: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("   world"),
+            "continuation rows should be indented to align under the arrow: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("   third"),
+            "every continuation row should appear: {rendered:?}"
+        );
+        // Every rendered row should be wrapped in the gray-background SGR pair.
+        let bg_open_count = rendered.matches("\x1b[48;5;236m").count();
+        let reset_count = rendered.matches("\x1b[0m").count();
+        assert_eq!(bg_open_count, 3);
+        assert_eq!(reset_count, 3);
+    }
+
+    #[test]
+    fn format_input_echo_single_line_matches_previous_behavior() {
+        let (rendered, lines) = format_input_echo("hello", 40);
+        assert_eq!(lines, 1);
+        assert!(rendered.starts_with("\x1b[48;5;236m › hello"));
+        assert!(rendered.ends_with("\x1b[0m"));
+        // No embedded newlines for single-line input.
+        assert!(!rendered.contains('\n'));
+    }
+
+    /// #182 item 4: a REPL result with stdout containing many newlines must
+    /// surface the per-tool truncation cap. Routing through the
+    /// `format_generic_tool_result` path pretty-prints the whole object as
+    /// JSON, which embeds stdout as one literal `\n`-escaped string and
+    /// defeats the cap.
+    #[test]
+    fn format_repl_result_unwraps_stdout_and_applies_line_cap() {
+        let line_count = TOOL_OUTPUT_DISPLAY_MAX_LINES + 5;
+        let stdout = (1..=line_count)
+            .map(|i| format!("repl line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = serde_json::json!({
+            "language": "python",
+            "stdout": stdout,
+            "stderr": "",
+            "exitCode": 0,
+            "durationMs": 12_u64,
+        });
+
+        let rendered = format_tool_result("REPL", &parsed.to_string(), false);
+
+        assert!(
+            rendered.contains("REPL"),
+            "header should label the tool: {rendered}"
+        );
+        assert!(
+            rendered.contains("python"),
+            "header should include the language: {rendered}"
+        );
+        // The first preview row uses the └ bullet.
+        assert!(
+            rendered.contains("└ repl line 1"),
+            "first stdout line should be unwrapped as a real row: {rendered}"
+        );
+        // The cap triggers — overflow lines collapse to the "+N more lines" notice.
+        let overflow = line_count - TOOL_OUTPUT_DISPLAY_MAX_LINES;
+        let needle = format!("+{overflow} more lines");
+        assert!(
+            rendered.contains(&needle),
+            "rendered output should mention '{needle}' overflow notice: {rendered}"
+        );
+        // Bug regression guard: the stdout content must not be embedded as a
+        // single literal `\n`-escaped JSON string.
+        assert!(
+            !rendered.contains("\\n"),
+            "stdout must not be left as a JSON-escaped string: {rendered}"
+        );
+    }
+
+    /// Short REPL output should render every line without an overflow notice.
+    #[test]
+    fn format_repl_result_renders_short_stdout_inline() {
+        let parsed = serde_json::json!({
+            "language": "python",
+            "stdout": "hi\nbye",
+            "stderr": "",
+            "exitCode": 0,
+            "durationMs": 1_u64,
+        });
+
+        let rendered = format_tool_result("REPL", &parsed.to_string(), false);
+        assert!(rendered.contains("└ hi"));
+        assert!(rendered.contains("    bye"));
+        assert!(
+            !rendered.contains("more lines"),
+            "no overflow notice expected for short output: {rendered}"
+        );
+    }
+
+    /// Non-zero exit codes should be surfaced in the REPL header so the
+    /// reader can tell the snippet failed without scanning stderr first.
+    #[test]
+    fn format_repl_result_surfaces_non_zero_exit_code() {
+        let parsed = serde_json::json!({
+            "language": "python",
+            "stdout": "",
+            "stderr": "Traceback: ...",
+            "exitCode": 1,
+            "durationMs": 7_u64,
+        });
+
+        let rendered = format_tool_result("REPL", &parsed.to_string(), false);
+        assert!(
+            rendered.contains("exit 1"),
+            "non-zero exit code should appear in the header: {rendered}"
+        );
+    }
+
+    #[test]
+    fn format_input_echo_pads_each_row_to_terminal_width() {
+        let (rendered, _) = format_input_echo("hi\nbye", 20);
+        for row in rendered.split('\n') {
+            // Strip the SGR codes to measure visible width.
+            let visible = row.replace("\x1b[48;5;236m", "").replace("\x1b[0m", "");
+            assert_eq!(
+                visible.chars().count(),
+                20,
+                "row {row:?} should be padded to the terminal width"
+            );
+        }
+    }
 
     #[test]
     fn openai_configured_limit_errors_are_rendered_as_context_window_guidance() {

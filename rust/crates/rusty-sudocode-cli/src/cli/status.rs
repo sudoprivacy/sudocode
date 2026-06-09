@@ -66,7 +66,7 @@ pub(crate) fn print_status_snapshot(
             raw: Some(raw.to_string()),
             source: ModelSource::Flag,
         },
-        None => ModelProvenance::from_env_or_config_or_default(model),
+        None => ModelProvenance::from_default_lookup(),
     };
     match output_format {
         CliOutputFormat::Text => println!(

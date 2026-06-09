@@ -58,7 +58,7 @@ use cli::export::{
 use cli::format::{
     describe_tool_progress, first_visible_line, format_auth_report, format_auth_switch_report,
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
-    format_commit_skipped_report, format_compact_report, format_cost_report,
+    format_commit_skipped_report, format_compact_report, format_cost_report, format_input_echo,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
@@ -177,38 +177,57 @@ impl ModelProvenance {
         }
     }
 
-    fn from_env_or_config_or_default(cli_model: &str) -> Self {
-        // Only called when no --model flag was passed. Probe env first,
-        // then config, else fall back to default. Mirrors the logic in
-        // resolve_repl_model() but captures the source.
-        if cli_model != DEFAULT_MODEL {
-            // Already resolved from some prior path; treat as flag.
-            return Self {
-                resolved: cli_model.to_string(),
-                raw: Some(cli_model.to_string()),
-                source: ModelSource::Flag,
-            };
-        }
-        if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Self {
-                resolved: resolve_model_alias_with_config(&env_model),
-                raw: Some(env_model),
-                source: ModelSource::Env,
-            };
-        }
-        if let Some(config_model) = config_model_for_current_dir() {
-            return Self {
-                resolved: resolve_model_alias_with_config(&config_model),
-                raw: Some(config_model),
-                source: ModelSource::Config,
-            };
-        }
-        Self::default_fallback()
+    /// Look up the default model from env, then cwd config, then the compiled-in
+    /// fallback. Called when no `--model` flag was passed. Shares its primitive
+    /// (`lookup_default_model`) with `resolve_repl_model`, so the splash, the
+    /// one-shot Prompt action, and the status banner all agree on the active
+    /// model.
+    fn from_default_lookup() -> Self {
+        lookup_default_model().map_or_else(Self::default_fallback, |(resolved, raw, source)| Self {
+            resolved,
+            raw: Some(raw),
+            source,
+        })
     }
+}
+
+/// Test-only process-wide lock that serializes env-var mutation across
+/// modules. The doctor, args, and any other unit tests that read env state
+/// or set `SUDO_CODE_CONFIG_HOME` should acquire this guard before touching
+/// the environment so cargo's parallel test runner can't interleave their
+/// setup/teardown.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Single source of truth for the env-or-config default model lookup. Returns
+/// `(resolved, raw, source)` when env or config wins, `None` to defer to the
+/// compiled-in default.
+pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
+    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some((
+            resolve_model_alias_with_config(&env_model),
+            env_model,
+            ModelSource::Env,
+        ));
+    }
+    if let Some(config_model) = config_model_for_current_dir() {
+        return Some((
+            resolve_model_alias_with_config(&config_model),
+            config_model,
+            ModelSource::Config,
+        ));
+    }
+    None
 }
 
 // Build-time constants injected by build.rs (fall back to static values when
@@ -451,7 +470,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let session_start = Instant::now();
-            let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode, auth_mode)?;
+            // Share the splash's env/config resolution so the one-shot prompt
+            // can't disagree with the REPL banner.
+            let resolved_model = resolve_repl_model(model);
+            let mut cli = LiveCli::new(
+                resolved_model,
+                true,
+                allowed_tools,
+                permission_mode,
+                auth_mode,
+            )?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 
@@ -1425,14 +1453,18 @@ fn run_repl(
             input::ReadOutcome::Submit(input) => {
                 // Clear pre-printed bottom sep + footer
                 print!("\x1b[J");
-                // Replace prompt line with gray-background echo of user input
+                // Replace prompt line with a gray-background echo of the user
+                // input.  Multi-line input renders one styled row per line so
+                // the echo matches what the user actually typed (#182 item 3).
                 let trimmed = input.trim().to_string();
-                let echo_display = format!(" › {}", trimmed.replace('\n', " "));
-                let pad = term_width.saturating_sub(echo_display.chars().count());
-                print!(
-                    "\x1b[1F\x1b[2K\x1b[48;5;236m{echo_display}{}\x1b[0m",
-                    " ".repeat(pad)
-                );
+                let (echo_block, line_count) = format_input_echo(&trimmed, term_width);
+                // Move the cursor up past every row rustyline rendered for the
+                // input and clear each one, then write the echo block in their
+                // place.
+                for _ in 0..line_count {
+                    print!("\x1b[1F\x1b[2K");
+                }
+                print!("{echo_block}");
                 println!();
                 println!("{separator}");
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {

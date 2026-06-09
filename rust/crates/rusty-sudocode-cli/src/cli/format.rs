@@ -708,13 +708,29 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     )
 }
 
+/// Split a `ToolResult.output` string into its JSON-payload prefix and any
+/// trailing hook-feedback section that `runtime::conversation::merge_hook_feedback`
+/// may have appended. Returns `(payload, Some(feedback))` when a marker is
+/// found, or `(output, None)` otherwise.
+pub(crate) fn split_hook_feedback(output: &str) -> (&str, Option<&str>) {
+    const MARKERS: &[&str] = &["\n\nHook feedback:\n", "\n\nHook feedback (error):\n"];
+    for marker in MARKERS {
+        if let Some(idx) = output.find(marker) {
+            let (head, tail) = output.split_at(idx);
+            return (head, Some(tail.trim_start_matches('\n')));
+        }
+    }
+    (output, None)
+}
+
 pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
     let icon = if is_error {
         "\x1b[1;31m⏺\x1b[0m"
     } else {
         "\x1b[1;32m⏺\x1b[0m"
     };
-    if is_error {
+    let (payload, hook_feedback) = split_hook_feedback(output);
+    let base = if is_error {
         let summary = truncate_for_summary(output.trim(), 160);
         if summary.is_empty() {
             format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
@@ -723,7 +739,7 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
         }
     } else {
         let parsed: serde_json::Value =
-            serde_json::from_str(output).unwrap_or(serde_json::Value::String(output.to_string()));
+            serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
             "bash" | "Bash" => format_bash_result(icon, &parsed),
             "repl" | "REPL" => format_repl_result(icon, &parsed),
@@ -734,6 +750,13 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             "grep_search" | "Grep" => format_grep_result(icon, &parsed),
             _ => format_generic_tool_result(icon, name, &parsed),
         }
+    };
+    match hook_feedback {
+        Some(feedback) if !is_error => {
+            let indented = feedback.replace('\n', "\n  ");
+            format!("{base}\n  \x1b[38;5;214m{indented}\x1b[0m")
+        }
+        _ => base,
     }
 }
 
@@ -1015,64 +1038,126 @@ pub(crate) fn language_token_from_path(path: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Max number of `-`/`+` lines shown per side before the body is collapsed.
+pub(crate) const DIFF_PREVIEW_MAX_BODY_LINES: usize = 8;
+/// Lines of unchanged context shown above and below the edit window.
+pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
+
 pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
     let kind = parsed
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("write");
-    let line_count = parsed
+    let new_content = parsed
         .get("content")
         .and_then(|value| value.as_str())
-        .map_or(0, |content| content.lines().count());
-    format!(
-        "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lines)\x1b[0m",
-        if kind == "create" { "Wrote" } else { "Updated" },
-    )
+        .unwrap_or_default();
+    let new_line_count = new_content.lines().count();
+    let original = parsed.get("originalFile").and_then(|value| value.as_str());
+    let verb = if kind == "create" { "Wrote" } else { "Updated" };
+    let header = match original {
+        Some(prev) if kind != "create" => {
+            let prev_lines = prev.lines().count();
+            let delta = new_line_count.cast_signed() - prev_lines.cast_signed();
+            let delta_str = match delta.cmp(&0) {
+                std::cmp::Ordering::Greater => format!(" +{delta}"),
+                std::cmp::Ordering::Less => format!(" {delta}"),
+                std::cmp::Ordering::Equal => String::new(),
+            };
+            format!(
+                "{icon} \x1b[1;32m✏️ {verb} {path}\x1b[0m \x1b[2m({new_line_count} lines, was {prev_lines}{delta_str})\x1b[0m",
+            )
+        }
+        _ => format!(
+            "{icon} \x1b[1;32m✏️ {verb} {path}\x1b[0m \x1b[2m({new_line_count} lines)\x1b[0m",
+        ),
+    };
+    match original {
+        Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)
+        {
+            Some(preview) => {
+                let indented = preview.replace('\n', "\n  ");
+                format!("{header}\n  {indented}")
+            }
+            None => header,
+        },
+        _ => header,
+    }
 }
 
-pub(crate) fn format_structured_patch_preview(parsed: &serde_json::Value) -> Option<String> {
-    let hunks = parsed.get("structuredPatch")?.as_array()?;
-    let mut preview = Vec::new();
-    for hunk in hunks.iter().take(2) {
-        let lines = hunk.get("lines")?.as_array()?;
-        for line in lines.iter().filter_map(|value| value.as_str()).take(6) {
-            match line.chars().next() {
-                Some('+') => preview.push(format!("\x1b[38;5;70m{line}\x1b[0m")),
-                Some('-') => preview.push(format!("\x1b[38;5;203m{line}\x1b[0m")),
-                _ => preview.push(line.to_string()),
-            }
-        }
+/// Build a small context-windowed diff preview for a write_file that
+/// fully replaces an existing file. Walks the line lists from both ends
+/// to skip identical head/tail, then prints up to
+/// `DIFF_PREVIEW_MAX_BODY_LINES` of removed and added lines with a hunk
+/// header. Returns `None` when the contents are byte-identical.
+pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) -> Option<String> {
+    if original == updated {
+        return None;
     }
-    if preview.is_empty() {
-        None
-    } else {
-        Some(preview.join("\n"))
+    let old_lines: Vec<&str> = original.lines().collect();
+    let new_lines: Vec<&str> = updated.lines().collect();
+
+    let mut head = 0;
+    while head < old_lines.len() && head < new_lines.len() && old_lines[head] == new_lines[head] {
+        head += 1;
     }
+    let mut tail = 0;
+    while tail < old_lines.len() - head
+        && tail < new_lines.len() - head
+        && old_lines[old_lines.len() - 1 - tail] == new_lines[new_lines.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+
+    let old_changed = &old_lines[head..old_lines.len() - tail];
+    let new_changed = &new_lines[head..new_lines.len() - tail];
+    let edit_start_line = head + 1;
+    Some(render_diff_window(
+        old_changed,
+        new_changed,
+        &old_lines,
+        head,
+        edit_start_line,
+    ))
 }
 
 pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
-    let suffix = if parsed
+    let replace_all = parsed
         .get("replaceAll")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        " (replace all)"
+        .unwrap_or(false);
+    let original = parsed
+        .get("originalFile")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let old_value = parsed
+        .get("oldString")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let new_value = parsed
+        .get("newString")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let occurrences = if replace_all && !old_value.is_empty() {
+        count_non_overlapping(original, old_value)
     } else {
-        ""
+        usize::from(!old_value.is_empty() && original.contains(old_value))
     };
-    let preview = format_structured_patch_preview(parsed).or_else(|| {
-        let old_value = parsed
-            .get("oldString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let new_value = parsed
-            .get("newString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        format_patch_preview(old_value, new_value)
-    });
+    let suffix = if replace_all {
+        if occurrences > 1 {
+            format!(" (replace all, {occurrences} occurrences)")
+        } else {
+            " (replace all)".to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    let preview = format_edit_diff_preview(original, old_value, new_value)
+        .or_else(|| format_patch_preview(old_value, new_value));
 
     match preview {
         Some(preview) => {
@@ -1081,6 +1166,128 @@ pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> Stri
         }
         None => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m"),
     }
+}
+
+/// Render a context-windowed diff for the first occurrence of `old_string`
+/// inside `original`. Returns `None` when we cannot locate the match (e.g.
+/// `original` was not captured, or the JSON was malformed).
+///
+/// `old_string` is treated as a substring of `original`, not necessarily
+/// line-aligned. The "affected block" is widened out to whole-line
+/// boundaries on both ends so the rendered `-`/`+` lines reflect the
+/// actual lines that changed — not just the literal `old_string` /
+/// `new_string` fragments (which would mislead the user when an edit
+/// happens mid-line).
+pub(crate) fn format_edit_diff_preview(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Option<String> {
+    if original.is_empty() || old_string.is_empty() {
+        return None;
+    }
+    let match_start = original.find(old_string)?;
+    let match_end = match_start + old_string.len();
+
+    // Widen to whole-line boundaries.
+    let line_start = original[..match_start].rfind('\n').map_or(0, |idx| idx + 1);
+    let line_end = original[match_end..]
+        .find('\n')
+        .map_or(original.len(), |idx| match_end + idx);
+
+    let affected_old = &original[line_start..line_end];
+    let new_region = format!(
+        "{}{}{}",
+        &original[line_start..match_start],
+        new_string,
+        &original[match_end..line_end],
+    );
+
+    let old_lines: Vec<&str> = affected_old.lines().collect();
+    let new_lines: Vec<&str> = new_region.lines().collect();
+    let edit_start_line = original[..line_start].matches('\n').count() + 1;
+    let pre_context_start = edit_start_line.saturating_sub(1 + DIFF_PREVIEW_CONTEXT_LINES);
+    let original_lines: Vec<&str> = original.lines().collect();
+
+    Some(render_diff_window(
+        &old_lines,
+        &new_lines,
+        &original_lines,
+        pre_context_start,
+        edit_start_line,
+    ))
+}
+
+/// Render a single diff hunk: pre-context, `-` body, `+` body, post-context.
+/// Body lines beyond `DIFF_PREVIEW_MAX_BODY_LINES` per side are collapsed
+/// with a "…" summary line.
+fn render_diff_window(
+    old_body: &[&str],
+    new_body: &[&str],
+    original_lines: &[&str],
+    pre_context_start: usize,
+    edit_start_line_1based: usize,
+) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let pre_context = &original_lines
+        [pre_context_start..pre_context_start + (edit_start_line_1based - 1 - pre_context_start)];
+    let post_context_start = pre_context_start + pre_context.len() + old_body.len();
+    let post_context_end = post_context_start
+        .saturating_add(DIFF_PREVIEW_CONTEXT_LINES)
+        .min(original_lines.len());
+    let post_context = if post_context_start <= original_lines.len() {
+        &original_lines[post_context_start..post_context_end]
+    } else {
+        &[][..]
+    };
+
+    out.push(format!(
+        "\x1b[38;5;245m@@ -{},{} +{},{} @@\x1b[0m",
+        edit_start_line_1based,
+        old_body.len(),
+        edit_start_line_1based,
+        new_body.len(),
+    ));
+    for line in pre_context {
+        out.push(format!("\x1b[2m  {line}\x1b[0m"));
+    }
+    push_body_lines(&mut out, old_body, '-', "\x1b[38;5;203m");
+    push_body_lines(&mut out, new_body, '+', "\x1b[38;5;70m");
+    for line in post_context {
+        out.push(format!("\x1b[2m  {line}\x1b[0m"));
+    }
+    out.join("\n")
+}
+
+fn push_body_lines(out: &mut Vec<String>, body: &[&str], sign: char, color: &str) {
+    let limit = DIFF_PREVIEW_MAX_BODY_LINES;
+    if body.len() <= limit {
+        for line in body {
+            out.push(format!("{color}{sign} {line}\x1b[0m"));
+        }
+    } else {
+        let head = limit.saturating_sub(1);
+        for line in &body[..head] {
+            out.push(format!("{color}{sign} {line}\x1b[0m"));
+        }
+        out.push(format!(
+            "\x1b[2m{sign} … +{} more lines\x1b[0m",
+            body.len() - head,
+        ));
+    }
+}
+
+fn count_non_overlapping(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(idx) = haystack[start..].find(needle) {
+        count += 1;
+        start += idx + needle.len();
+    }
+    count
 }
 
 pub(crate) fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
@@ -1941,5 +2148,247 @@ mod tests {
         let plain = strip_ansi(&rendered);
         assert!(!plain.contains("Reason"), "{plain}");
         assert!(plain.contains("Tool      read_file"), "{plain}");
+    }
+
+    #[test]
+    fn split_hook_feedback_no_marker_returns_original() {
+        let s = "{\"filePath\":\"foo\"}";
+        let (head, tail) = split_hook_feedback(s);
+        assert_eq!(head, s);
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn split_hook_feedback_strips_normal_marker() {
+        let s = "{\"filePath\":\"foo\"}\n\nHook feedback:\nlinted";
+        let (head, tail) = split_hook_feedback(s);
+        assert_eq!(head, "{\"filePath\":\"foo\"}");
+        assert_eq!(tail, Some("Hook feedback:\nlinted"));
+    }
+
+    #[test]
+    fn split_hook_feedback_strips_error_marker() {
+        let s = "{\"filePath\":\"foo\"}\n\nHook feedback (error):\ndenied";
+        let (head, tail) = split_hook_feedback(s);
+        assert_eq!(head, "{\"filePath\":\"foo\"}");
+        assert_eq!(tail, Some("Hook feedback (error):\ndenied"));
+    }
+
+    #[test]
+    fn format_tool_result_recovers_edit_preview_when_hook_appends_feedback() {
+        // Regression: merge_hook_feedback wraps the JSON output with
+        // "\n\nHook feedback:\n...", which used to break serde_json::from_str
+        // and silently disable the structured edit preview.
+        let edit_json = serde_json::json!({
+            "filePath": "src/main.rs",
+            "oldString": "alpha",
+            "newString": "omega",
+            "originalFile": "alpha beta\n",
+            "userModified": false,
+            "replaceAll": false,
+        })
+        .to_string();
+        let polluted = format!("{edit_json}\n\nHook feedback:\nformatter clean");
+        let rendered = format_tool_result("edit_file", &polluted, false);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Edited src/main.rs"), "{plain}");
+        // Diff preview survives — the +/- lines come from oldString/newString
+        // against originalFile, which only parse if we stripped the suffix.
+        assert!(plain.contains("- alpha"), "{plain}");
+        assert!(plain.contains("+ omega"), "{plain}");
+        // Hook feedback should still be rendered, but as a separate line.
+        assert!(plain.contains("Hook feedback:"), "{plain}");
+        assert!(plain.contains("formatter clean"), "{plain}");
+    }
+
+    #[test]
+    fn format_edit_diff_preview_shows_context_around_change() {
+        let original = "line 1\nline 2\nline 3\nold line\nline 5\nline 6\nline 7\n";
+        let preview = format_edit_diff_preview(original, "old line", "new line").unwrap();
+        let plain = strip_ansi(&preview);
+        // Hunk header pointing at line 4.
+        assert!(plain.contains("@@ -4,1 +4,1 @@"), "{plain}");
+        // Three lines of pre-context.
+        assert!(plain.contains("  line 1"), "{plain}");
+        assert!(plain.contains("  line 2"), "{plain}");
+        assert!(plain.contains("  line 3"), "{plain}");
+        // The change itself.
+        assert!(plain.contains("- old line"), "{plain}");
+        assert!(plain.contains("+ new line"), "{plain}");
+        // Three lines of post-context.
+        assert!(plain.contains("  line 5"), "{plain}");
+        assert!(plain.contains("  line 6"), "{plain}");
+        assert!(plain.contains("  line 7"), "{plain}");
+    }
+
+    #[test]
+    fn format_edit_diff_preview_collapses_oversized_bodies() {
+        let original = (1..=20)
+            .map(|n| format!("old{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let old_str = original.clone();
+        let new_str = (1..=20)
+            .map(|n| format!("new{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = format_edit_diff_preview(&original, &old_str, &new_str).unwrap();
+        let plain = strip_ansi(&preview);
+        // Body collapses at DIFF_PREVIEW_MAX_BODY_LINES (8) per side.
+        assert!(plain.contains("- old1"), "{plain}");
+        assert!(plain.contains("- old7"), "{plain}");
+        assert!(!plain.contains("- old8"), "{plain}");
+        assert!(plain.contains("- … +13 more lines"), "{plain}");
+        assert!(plain.contains("+ new1"), "{plain}");
+        assert!(plain.contains("+ … +13 more lines"), "{plain}");
+    }
+
+    #[test]
+    fn format_edit_diff_preview_returns_none_without_anchor() {
+        // Empty original / old_string means we cannot anchor the window —
+        // caller falls back to single-line summary.
+        assert!(format_edit_diff_preview("", "x", "y").is_none());
+        assert!(format_edit_diff_preview("foo", "", "y").is_none());
+        assert!(format_edit_diff_preview("foo", "not present", "y").is_none());
+    }
+
+    #[test]
+    fn format_edit_diff_preview_widens_substring_match_to_whole_lines() {
+        // Regression caught during manual inspection: when `old_string` is
+        // a mid-line substring (very common — replacing a function name
+        // inside `    foo();`), the body must show the WHOLE affected line
+        // with the replacement applied in place, not just the literal
+        // fragment. Otherwise the rendered diff lies about which line is
+        // changing and the line number is off-by-one.
+        let original =
+            "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n";
+        let preview =
+            format_edit_diff_preview(original, "old_function()", "new_function()").unwrap();
+        let plain = strip_ansi(&preview);
+        // Hunk header points at line 5 (the line containing the match),
+        // not line 6.
+        assert!(plain.contains("@@ -5,1 +5,1 @@"), "{plain}");
+        // The `-`/`+` rows show the full affected line with indentation,
+        // not the bare fragment.
+        assert!(plain.contains("-     old_function();"), "{plain}");
+        assert!(plain.contains("+     new_function();"), "{plain}");
+        // The full line must NOT also appear as a dim context row above
+        // the change.
+        let context_dup = "  \x1b[0m";
+        let _ = context_dup; // anchor for the reader; assertion below
+        assert!(
+            !plain.contains("    old_function();\n-"),
+            "affected line leaked into pre-context: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_edit_result_renders_replace_all_count() {
+        let json = serde_json::json!({
+            "filePath": "src/main.rs",
+            "oldString": "foo",
+            "newString": "bar",
+            "originalFile": "foo a\nfoo b\nfoo c\n",
+            "replaceAll": true,
+            "userModified": false,
+        });
+        let rendered = format_edit_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("(replace all, 3 occurrences)"), "{plain}");
+    }
+
+    #[test]
+    fn format_write_result_shows_line_delta_on_update() {
+        let json = serde_json::json!({
+            "type": "update",
+            "filePath": "src/main.rs",
+            "content": "a\nb\nc\nd\n",
+            "originalFile": "a\nx\nc\n",
+        });
+        let rendered = format_write_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Updated src/main.rs"), "{plain}");
+        // 4 new lines, was 3, delta +1.
+        assert!(plain.contains("(4 lines, was 3 +1)"), "{plain}");
+        // Diff body should show the changed middle line.
+        assert!(plain.contains("- x"), "{plain}");
+        assert!(plain.contains("+ b"), "{plain}");
+    }
+
+    #[test]
+    fn format_write_result_create_skips_delta_and_diff() {
+        let json = serde_json::json!({
+            "type": "create",
+            "filePath": "new.txt",
+            "content": "hello\nworld\n",
+        });
+        let rendered = format_write_result("⏺", &json);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("Wrote new.txt"), "{plain}");
+        assert!(plain.contains("(2 lines)"), "{plain}");
+        assert!(!plain.contains("was"), "{plain}");
+        assert!(!plain.contains("@@"), "{plain}");
+    }
+
+    /// Visual-inspection-only: print four representative tool results so the
+    /// rendered ANSI output can be eyeballed during manual verification. Run
+    /// with `cargo test -p rusty-sudocode-cli --bin scode -- \
+    /// cli::format::tests::PREVIEW_render_samples_for_manual_inspection \
+    /// --nocapture --include-ignored`. Marked `#[ignore]` so it never runs
+    /// in the default suite.
+    #[test]
+    #[ignore = "visual-inspection only; run with --include-ignored --nocapture"]
+    #[allow(non_snake_case)]
+    fn PREVIEW_render_samples_for_manual_inspection() {
+        let edit_with_context = serde_json::json!({
+            "filePath": "src/main.rs",
+            "oldString": "old_function()",
+            "newString": "new_function()",
+            "originalFile": "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n\nfn footer() {}\n",
+            "userModified": false,
+            "replaceAll": false,
+        })
+        .to_string();
+        println!("\n=== SAMPLE 1: edit_file with surrounding context ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &edit_with_context, false)
+        );
+
+        let edit_replace_all = serde_json::json!({
+            "filePath": "src/lib.rs",
+            "oldString": "foo",
+            "newString": "bar",
+            "originalFile": "foo one\nfoo two\nfoo three\n",
+            "userModified": false,
+            "replaceAll": true,
+        })
+        .to_string();
+        println!("\n=== SAMPLE 2: edit_file with replaceAll + occurrence count ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &edit_replace_all, false)
+        );
+
+        let write_update = serde_json::json!({
+            "type": "update",
+            "filePath": "config.toml",
+            "content": "[server]\nport = 8080\nhost = \"0.0.0.0\"\nmax_connections = 100\n",
+            "originalFile": "[server]\nport = 3000\nhost = \"127.0.0.1\"\n",
+        })
+        .to_string();
+        println!("\n=== SAMPLE 3: write_file update with line-count delta ===");
+        println!("{}", format_tool_result("write_file", &write_update, false));
+
+        let with_hook_feedback = format!(
+            "{}\n\nHook feedback:\nrustfmt clean\nclippy clean",
+            edit_with_context
+        );
+        println!("\n=== SAMPLE 4: edit_file with hook feedback suffix (regression #1) ===");
+        println!(
+            "{}",
+            format_tool_result("edit_file", &with_hook_feedback, false)
+        );
+        println!();
     }
 }

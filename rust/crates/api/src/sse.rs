@@ -208,6 +208,7 @@ mod tests {
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
                         output_tokens: 2,
+                        ..Usage::default()
                     },
                 }),
                 StreamEvent::MessageStop(crate::types::MessageStopEvent {}),

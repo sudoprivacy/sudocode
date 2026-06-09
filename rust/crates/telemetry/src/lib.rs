@@ -262,6 +262,10 @@ pub enum TelemetryEvent {
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_units: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_currency: Option<String>,
     },
     Analytics(AnalyticsEvent),
     SessionTrace(SessionTraceRecord),
@@ -675,6 +679,8 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cost_units,
+            cost_currency,
         } => {
             let mut attrs = Map::new();
             attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
@@ -689,6 +695,15 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
                 "cache_read_input_tokens".to_string(),
                 Value::from(*cache_read_input_tokens),
             );
+            if let Some(cost_units) = cost_units {
+                attrs.insert("cost_units".to_string(), Value::from(*cost_units));
+            }
+            if let Some(cost_currency) = cost_currency {
+                attrs.insert(
+                    "cost_currency".to_string(),
+                    Value::String(cost_currency.clone()),
+                );
+            }
             (session_id.clone(), "response_usage".to_string(), attrs)
         }
         TelemetryEvent::Analytics(event) => {
@@ -916,6 +931,27 @@ impl SessionTracer {
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
     ) {
+        self.record_usage_with_cost(
+            request_id,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            None,
+            None,
+        );
+    }
+
+    pub fn record_usage_with_cost(
+        &self,
+        request_id: impl Into<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        cost_units: Option<u64>,
+        cost_currency: Option<&str>,
+    ) {
         self.sink.record(TelemetryEvent::HttpResponseUsage {
             session_id: self.session_id.clone(),
             request_id: request_id.into(),
@@ -924,6 +960,8 @@ impl SessionTracer {
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cost_units,
+            cost_currency: cost_currency.map(ToOwned::to_owned),
         });
     }
 
@@ -1107,6 +1145,42 @@ mod tests {
         assert!(contents.contains("\"action\":\"turn_completed\""));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn usage_log_entry_includes_cost_fields() {
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("session-123", sink);
+
+        tracer.record_usage_with_cost(
+            "req-usage",
+            500,
+            200,
+            0,
+            100,
+            Some(43_700),
+            Some("sudo_point"),
+        );
+
+        let event = TelemetryEvent::HttpResponseUsage {
+            session_id: "session-123".to_string(),
+            request_id: "req-usage".to_string(),
+            timestamp_ms: 2000,
+            input_tokens: 500,
+            output_tokens: 200,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 100,
+            cost_units: Some(43_700),
+            cost_currency: Some("sudo_point".to_string()),
+        };
+        let entry = format_log_entry(&event);
+
+        assert_eq!(entry["event"], Value::String("response_usage".to_string()));
+        assert_eq!(entry["attributes"]["cost_units"], Value::from(43_700));
+        assert_eq!(
+            entry["attributes"]["cost_currency"],
+            Value::String("sudo_point".to_string())
+        );
     }
 
     #[test]

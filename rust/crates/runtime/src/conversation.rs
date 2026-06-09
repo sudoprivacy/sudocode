@@ -18,7 +18,7 @@ use crate::permissions::{
 };
 use crate::prompt::SystemPrompt;
 use crate::session::{ContentBlock, ConversationMessage, Session};
-use crate::usage::{TokenUsage, UsageTracker};
+use crate::usage::{TokenUsage, UsageAggregation, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
@@ -1439,13 +1439,13 @@ fn build_assistant_message(
 /// Sums the token usage from all assistant messages in a turn.
 /// Each assistant message carries the usage from one model request.
 fn sum_assistant_message_usage(messages: &[ConversationMessage]) -> TokenUsage {
-    let mut total = TokenUsage::default();
+    let mut total = UsageAggregation::default();
     for message in messages {
         if let Some(usage) = message.usage {
-            total.add_assign_usage(usage);
+            total.push(usage);
         }
     }
-    total
+    total.finish()
 }
 
 fn has_pending_tool_uses(message: &ConversationMessage) -> bool {
@@ -1642,7 +1642,7 @@ mod tests {
     };
     use crate::prompt::{ProjectContext, SystemPrompt, SystemPromptBuilder};
     use crate::session::{ContentBlock, MessageRole, Session};
-    use crate::usage::TokenUsage;
+    use crate::usage::{TokenUsage, UsageCostCurrency};
     use crate::ToolError;
     use async_trait::async_trait;
     use std::fs;
@@ -1686,6 +1686,7 @@ mod tests {
                             output_tokens: 6,
                             cache_creation_input_tokens: 1,
                             cache_read_input_tokens: 2,
+                            ..TokenUsage::default()
                         }),
                         AssistantEvent::MessageStop,
                     ]))
@@ -1703,6 +1704,7 @@ mod tests {
                             output_tokens: 4,
                             cache_creation_input_tokens: 1,
                             cache_read_input_tokens: 3,
+                            ..TokenUsage::default()
                         }),
                         AssistantEvent::PromptCache(PromptCacheEvent {
                             unexpected: true,
@@ -1972,6 +1974,7 @@ mod tests {
                                 output_tokens: 0,
                                 cache_creation_input_tokens: 0,
                                 cache_read_input_tokens: 0,
+                                ..TokenUsage::default()
                             }),
                             AssistantEvent::MessageStop,
                         ]))
@@ -2706,6 +2709,7 @@ mod tests {
                     output_tokens: 7,
                     cache_creation_input_tokens: 2,
                     cache_read_input_tokens: 1,
+                    ..TokenUsage::default()
                 }),
             ));
 
@@ -2867,6 +2871,7 @@ mod tests {
                         output_tokens: 4,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        ..TokenUsage::default()
                     }),
                     AssistantEvent::MessageStop,
                 ]))
@@ -2924,6 +2929,7 @@ mod tests {
                         output_tokens: 4,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        ..TokenUsage::default()
                     }),
                     AssistantEvent::MessageStop,
                 ]))
@@ -3456,6 +3462,8 @@ mod tests {
                                 output_tokens: 50,
                                 cache_creation_input_tokens: 10,
                                 cache_read_input_tokens: 20,
+                                cost_units: Some(1_000),
+                                cost_currency: Some(UsageCostCurrency::SudoPoint),
                             }),
                             AssistantEvent::MessageStop,
                         ]))
@@ -3474,6 +3482,8 @@ mod tests {
                                 output_tokens: 30,
                                 cache_creation_input_tokens: 5,
                                 cache_read_input_tokens: 15,
+                                cost_units: Some(2_000),
+                                cost_currency: Some(UsageCostCurrency::SudoPoint),
                             }),
                             AssistantEvent::MessageStop,
                         ]))
@@ -3515,6 +3525,11 @@ mod tests {
             "cache_read should be 20 + 15"
         );
         assert_eq!(summary.turn_usage.total_tokens(), 430);
+        assert_eq!(summary.turn_usage.cost_units, Some(3_000));
+        assert_eq!(
+            summary.turn_usage.cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
 
         // For first turn, session_usage should equal turn_usage
         assert_eq!(
@@ -3528,5 +3543,65 @@ mod tests {
             summary.session_usage,
             "runtime cumulative usage should match session_usage"
         );
+    }
+
+    #[test]
+    fn turn_usage_omits_cost_when_any_usage_lacks_cost() {
+        let messages = vec![
+            crate::session::ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "first".to_string(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cache_creation_input_tokens: 10,
+                    cache_read_input_tokens: 20,
+                    cost_units: Some(1_000),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
+            crate::session::ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "second".to_string(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 200,
+                    output_tokens: 30,
+                    cache_creation_input_tokens: 5,
+                    cache_read_input_tokens: 15,
+                    ..TokenUsage::default()
+                }),
+            ),
+        ];
+
+        let usage = super::sum_assistant_message_usage(&messages);
+
+        assert_eq!(usage.total_tokens(), 430);
+        assert_eq!(usage.cost_units, None);
+        assert_eq!(usage.cost_currency, None);
+    }
+
+    #[test]
+    fn turn_usage_preserves_zero_cost() {
+        let messages = vec![crate::session::ConversationMessage::assistant_with_usage(
+            vec![ContentBlock::Text {
+                text: "free".to_string(),
+            }],
+            Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: 10,
+                cache_read_input_tokens: 20,
+                cost_units: Some(0),
+                cost_currency: Some(UsageCostCurrency::SudoPoint),
+            }),
+        )];
+
+        let usage = super::sum_assistant_message_usage(&messages);
+
+        assert_eq!(usage.total_tokens(), 180);
+        assert_eq!(usage.cost_units, Some(0));
+        assert_eq!(usage.cost_currency, Some(UsageCostCurrency::SudoPoint));
     }
 }

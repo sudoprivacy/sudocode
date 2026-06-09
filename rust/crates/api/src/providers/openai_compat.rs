@@ -214,9 +214,26 @@ impl OpenAiCompatClient {
         let payload = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|error| {
             ApiError::json_deserialize(self.config.provider_name, &request.model, &body, error)
         })?;
+        let has_usage = payload.usage.is_some();
         let mut normalized = normalize_response(&request.model, payload)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
+        }
+        if has_usage {
+            if let Some(tracer) = self.session_tracer() {
+                tracer.record_usage_with_cost(
+                    normalized
+                        .request_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    normalized.usage.input_tokens,
+                    normalized.usage.output_tokens,
+                    normalized.usage.cache_creation_input_tokens,
+                    normalized.usage.cache_read_input_tokens,
+                    normalized.usage.cost_units,
+                    normalized.usage.cost_currency.as_deref(),
+                );
+            }
         }
         Ok(normalized)
     }
@@ -236,6 +253,8 @@ impl OpenAiCompatClient {
             parser: OpenAiSseParser::with_context(self.config.provider_name, request.model.clone()),
             pending: VecDeque::new(),
             done: false,
+            usage_recorded: false,
+            session_tracer: self.session_tracer().cloned(),
             state: StreamState::new(request.model.clone()),
         })
     }
@@ -313,6 +332,8 @@ pub struct MessageStream {
     parser: OpenAiSseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
+    usage_recorded: bool,
+    session_tracer: Option<telemetry::SessionTracer>,
     state: StreamState,
 }
 
@@ -330,6 +351,7 @@ impl MessageStream {
 
             if self.done {
                 self.pending.extend(self.state.finish()?);
+                self.record_usage_once();
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
                 }
@@ -347,6 +369,30 @@ impl MessageStream {
                 }
             }
         }
+    }
+
+    fn record_usage_once(&mut self) {
+        if self.usage_recorded {
+            return;
+        }
+        self.usage_recorded = true;
+        let Some(usage) = self.state.usage.as_ref() else {
+            return;
+        };
+        let Some(tracer) = &self.session_tracer else {
+            return;
+        };
+        tracer.record_usage_with_cost(
+            self.request_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.cost_units,
+            usage.cost_currency.as_deref(),
+        );
     }
 }
 
@@ -430,6 +476,8 @@ impl StreamState {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: usage.prompt_tokens_details.cached_tokens,
                 output_tokens: usage.completion_tokens,
+                cost_units: usage.cost_units,
+                cost_currency: usage.cost_currency,
             });
         }
 
@@ -589,6 +637,8 @@ impl StreamState {
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                     output_tokens: 0,
+                    cost_units: None,
+                    cost_currency: None,
                 }),
             }));
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
@@ -618,6 +668,8 @@ impl StreamState {
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                     output_tokens: 0,
+                    cost_units: None,
+                    cost_currency: None,
                 },
                 request_id: None,
             },
@@ -763,6 +815,10 @@ struct OpenAiUsage {
     /// Example: `{"prompt_tokens_details": {"cached_tokens": 1234}}`
     #[serde(default)]
     prompt_tokens_details: PromptTokensDetails,
+    #[serde(default)]
+    cost_units: Option<u64>,
+    #[serde(default)]
+    cost_currency: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1351,6 +1407,11 @@ fn normalize_response(
                 .usage
                 .as_ref()
                 .map_or(0, |usage| usage.completion_tokens),
+            cost_units: response.usage.as_ref().and_then(|usage| usage.cost_units),
+            cost_currency: response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.cost_currency.clone()),
         },
         request_id: None,
     })
@@ -1661,6 +1722,86 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn non_streaming_response_preserves_cost_usage_fields() {
+        let response = super::ChatCompletionResponse {
+            id: "chatcmpl_cost".to_string(),
+            model: "sudorouter-model".to_string(),
+            choices: vec![super::ChatChoice {
+                message: super::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some("final answer".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(super::OpenAiUsage {
+                prompt_tokens: 10,
+                completion_tokens: 4,
+                prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                cost_units: Some(43_700),
+                cost_currency: Some("sudo_point".to_string()),
+            }),
+        };
+
+        let normalized = normalize_response("sudorouter-model", response).expect("normalized");
+
+        assert_eq!(normalized.usage.input_tokens, 10);
+        assert_eq!(normalized.usage.output_tokens, 4);
+        assert_eq!(normalized.usage.cache_read_input_tokens, 3);
+        assert_eq!(normalized.usage.cost_units, Some(43_700));
+        assert_eq!(
+            normalized.usage.cost_currency.as_deref(),
+            Some("sudo_point")
+        );
+    }
+
+    #[test]
+    fn streaming_usage_chunk_preserves_cost_usage_fields() {
+        let mut state = StreamState::new("sudorouter-model".to_string());
+        let _ = state
+            .ingest_chunk(super::ChatCompletionChunk {
+                id: "chatcmpl_stream_cost".to_string(),
+                model: Some("sudorouter-model".to_string()),
+                choices: vec![super::ChunkChoice {
+                    delta: super::ChunkDelta {
+                        content: Some("answer".to_string()),
+                        reasoning_content: None,
+                        tool_calls: Vec::new(),
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            })
+            .expect("text chunk");
+        let _ = state
+            .ingest_chunk(super::ChatCompletionChunk {
+                id: "chatcmpl_stream_cost".to_string(),
+                model: None,
+                choices: Vec::new(),
+                usage: Some(super::OpenAiUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 4,
+                    prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                    cost_units: Some(43_700),
+                    cost_currency: Some("sudo_point".to_string()),
+                }),
+            })
+            .expect("usage chunk");
+        let events = state.finish().expect("finish");
+
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::MessageDelta(delta) => Some(&delta.usage),
+                _ => None,
+            })
+            .expect("message delta usage");
+        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_currency.as_deref(), Some("sudo_point"));
     }
 
     #[test]

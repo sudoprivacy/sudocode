@@ -33,6 +33,87 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
+    pub cost_units: Option<u64>,
+    pub cost_currency: Option<UsageCostCurrency>,
+}
+
+/// Controlled set of cost currencies accepted from provider usage payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageCostCurrency {
+    SudoPoint,
+}
+
+impl UsageCostCurrency {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SudoPoint => "sudo_point",
+        }
+    }
+}
+
+#[must_use]
+pub fn parse_usage_cost_currency(value: Option<&str>) -> Option<UsageCostCurrency> {
+    match value {
+        Some("sudo_point") => Some(UsageCostCurrency::SudoPoint),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UsageCostAggregation {
+    usage_count: usize,
+    cost_count: usize,
+    invalid_cost_count: usize,
+    cost_units_sum: u64,
+}
+
+impl UsageCostAggregation {
+    fn push(&mut self, usage: TokenUsage) {
+        self.usage_count += 1;
+        match (usage.cost_units, usage.cost_currency) {
+            (Some(units), Some(UsageCostCurrency::SudoPoint)) => {
+                self.cost_count += 1;
+                self.cost_units_sum = self.cost_units_sum.saturating_add(units);
+            }
+            (None, None) => {}
+            _ => {
+                self.invalid_cost_count += 1;
+            }
+        }
+    }
+
+    fn apply_to(self, usage: &mut TokenUsage) {
+        if self.usage_count > 0
+            && self.cost_count == self.usage_count
+            && self.invalid_cost_count == 0
+        {
+            usage.cost_units = Some(self.cost_units_sum);
+            usage.cost_currency = Some(UsageCostCurrency::SudoPoint);
+        } else {
+            usage.cost_units = None;
+            usage.cost_currency = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct UsageAggregation {
+    total: TokenUsage,
+    cost: UsageCostAggregation,
+}
+
+impl UsageAggregation {
+    pub(crate) fn push(&mut self, usage: TokenUsage) {
+        self.total.add_assign_token_counts(usage);
+        self.cost.push(usage);
+    }
+
+    #[must_use]
+    pub(crate) fn finish(mut self) -> TokenUsage {
+        self.cost.apply_to(&mut self.total);
+        self.total
+    }
 }
 
 /// Estimated dollar cost derived from a [`TokenUsage`] sample.
@@ -81,8 +162,13 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
 }
 
 impl TokenUsage {
-    /// Aggregates another TokenUsage into this one using saturating_add.
+    /// Aggregates another TokenUsage's token counters into this one using saturating_add.
     pub fn add_assign_usage(&mut self, other: Self) {
+        self.add_assign_token_counts(other);
+    }
+
+    /// Aggregates another TokenUsage's token counters into this one using saturating_add.
+    pub fn add_assign_token_counts(&mut self, other: Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.cache_creation_input_tokens = self
@@ -181,6 +267,7 @@ pub fn format_usd(amount: f64) -> String {
 pub struct UsageTracker {
     latest_turn: TokenUsage,
     cumulative: TokenUsage,
+    cumulative_cost: UsageCostAggregation,
     turns: u32,
 }
 
@@ -203,11 +290,10 @@ impl UsageTracker {
 
     pub fn record(&mut self, usage: TokenUsage) {
         self.latest_turn = usage;
-        self.cumulative.input_tokens += usage.input_tokens;
-        self.cumulative.output_tokens += usage.output_tokens;
-        self.cumulative.cache_creation_input_tokens += usage.cache_creation_input_tokens;
-        self.cumulative.cache_read_input_tokens += usage.cache_read_input_tokens;
-        self.turns += 1;
+        self.cumulative.add_assign_token_counts(usage);
+        self.cumulative_cost.push(usage);
+        self.cumulative_cost.apply_to(&mut self.cumulative);
+        self.turns = self.turns.saturating_add(1);
     }
 
     #[must_use]
@@ -240,7 +326,10 @@ impl UsageTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_usd, pricing_for_model, TokenUsage, UsageTracker};
+    use super::{
+        format_usd, parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCostCurrency,
+        UsageTracker,
+    };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 
     #[test]
@@ -250,12 +339,14 @@ mod tests {
             output_tokens: 2,
             cache_creation_input_tokens: 1,
             cache_read_input_tokens: 3,
+            ..TokenUsage::default()
         };
         total.add_assign_usage(TokenUsage {
             input_tokens: 20,
             output_tokens: 4,
             cache_creation_input_tokens: 2,
             cache_read_input_tokens: 6,
+            ..TokenUsage::default()
         });
 
         assert_eq!(total.input_tokens, 30);
@@ -272,12 +363,14 @@ mod tests {
             output_tokens: u32::MAX - 1,
             cache_creation_input_tokens: u32::MAX - 1,
             cache_read_input_tokens: u32::MAX - 1,
+            ..TokenUsage::default()
         };
         total.add_assign_usage(TokenUsage {
             input_tokens: 10,
             output_tokens: 10,
             cache_creation_input_tokens: 10,
             cache_read_input_tokens: 10,
+            ..TokenUsage::default()
         });
 
         // Should saturate at u32::MAX instead of wrapping
@@ -295,12 +388,16 @@ mod tests {
             output_tokens: 4,
             cache_creation_input_tokens: 2,
             cache_read_input_tokens: 1,
+            cost_units: Some(100),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
         });
         tracker.record(TokenUsage {
             input_tokens: 20,
             output_tokens: 6,
             cache_creation_input_tokens: 3,
             cache_read_input_tokens: 2,
+            cost_units: Some(200),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
         });
 
         assert_eq!(tracker.turns(), 2);
@@ -309,6 +406,64 @@ mod tests {
         assert_eq!(tracker.cumulative_usage().output_tokens, 10);
         assert_eq!(tracker.cumulative_usage().input_tokens, 30);
         assert_eq!(tracker.cumulative_usage().total_tokens(), 48);
+        assert_eq!(tracker.cumulative_usage().cost_units, Some(300));
+        assert_eq!(
+            tracker.cumulative_usage().cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
+    }
+
+    #[test]
+    fn tracker_omits_cumulative_cost_after_missing_cost() {
+        let mut tracker = UsageTracker::new();
+        tracker.record(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cache_creation_input_tokens: 2,
+            cache_read_input_tokens: 1,
+            cost_units: Some(100),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
+        });
+        tracker.record(TokenUsage {
+            input_tokens: 20,
+            output_tokens: 6,
+            cache_creation_input_tokens: 3,
+            cache_read_input_tokens: 2,
+            ..TokenUsage::default()
+        });
+
+        assert_eq!(tracker.cumulative_usage().total_tokens(), 48);
+        assert_eq!(tracker.cumulative_usage().cost_units, None);
+        assert_eq!(tracker.cumulative_usage().cost_currency, None);
+    }
+
+    #[test]
+    fn tracker_preserves_zero_cost() {
+        let mut tracker = UsageTracker::new();
+        tracker.record(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_units: Some(0),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
+        });
+
+        assert_eq!(tracker.cumulative_usage().cost_units, Some(0));
+        assert_eq!(
+            tracker.cumulative_usage().cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
+    }
+
+    #[test]
+    fn parses_only_supported_cost_currency() {
+        assert_eq!(
+            parse_usage_cost_currency(Some("sudo_point")),
+            Some(UsageCostCurrency::SudoPoint)
+        );
+        assert_eq!(parse_usage_cost_currency(Some("usd")), None);
+        assert_eq!(parse_usage_cost_currency(None), None);
     }
 
     #[test]
@@ -318,6 +473,7 @@ mod tests {
             output_tokens: 500_000,
             cache_creation_input_tokens: 100_000,
             cache_read_input_tokens: 200_000,
+            ..TokenUsage::default()
         };
 
         let cost = usage.estimate_cost_usd();
@@ -336,6 +492,7 @@ mod tests {
             output_tokens: 500_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            ..TokenUsage::default()
         };
 
         let haiku = pricing_for_model("claude-haiku-4-5-20251001").expect("haiku pricing");
@@ -353,6 +510,7 @@ mod tests {
             output_tokens: 100,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            ..TokenUsage::default()
         };
         let lines = usage.summary_lines_for_model("usage", Some("custom-model"));
         assert!(lines[0].contains("pricing=estimated-default"));
@@ -371,6 +529,8 @@ mod tests {
                 output_tokens: 2,
                 cache_creation_input_tokens: 1,
                 cache_read_input_tokens: 0,
+                cost_units: Some(500),
+                cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
             model: None,
         }];

@@ -1,4 +1,4 @@
-use runtime::{pricing_for_model, TokenUsage, UsageCostEstimate};
+use runtime::{parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCostEstimate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -220,6 +220,10 @@ pub struct Usage {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cost_units: Option<u64>,
+    #[serde(default)]
+    pub cost_currency: Option<String>,
 }
 
 impl Usage {
@@ -232,12 +236,14 @@ impl Usage {
     }
 
     #[must_use]
-    pub const fn token_usage(&self) -> TokenUsage {
+    pub fn token_usage(&self) -> TokenUsage {
         TokenUsage {
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
             cache_read_input_tokens: self.cache_read_input_tokens,
+            cost_units: self.cost_units,
+            cost_currency: parse_usage_cost_currency(self.cost_currency.as_deref()),
         }
     }
 
@@ -313,7 +319,7 @@ pub enum StreamEvent {
 
 #[cfg(test)]
 mod tests {
-    use runtime::format_usd;
+    use runtime::{format_usd, UsageCostCurrency};
 
     use super::{MessageResponse, Usage};
 
@@ -324,6 +330,7 @@ mod tests {
             cache_creation_input_tokens: 2,
             cache_read_input_tokens: 3,
             output_tokens: 4,
+            ..Usage::default()
         };
 
         assert_eq!(usage.total_tokens(), 19);
@@ -345,6 +352,7 @@ mod tests {
                 cache_creation_input_tokens: 100_000,
                 cache_read_input_tokens: 200_000,
                 output_tokens: 500_000,
+                ..Usage::default()
             },
             request_id: None,
         };
@@ -352,5 +360,54 @@ mod tests {
         let cost = response.usage.estimated_cost_usd(&response.model);
         assert_eq!(format_usd(cost.total_cost_usd()), "$54.6750");
         assert_eq!(response.total_tokens(), 1_800_000);
+    }
+
+    #[test]
+    fn usage_deserializes_cost_fields() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cost_units": 43700,
+            "cost_currency": "sudo_point"
+        }))
+        .expect("usage should deserialize");
+
+        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_currency.as_deref(), Some("sudo_point"));
+        let token_usage = usage.token_usage();
+        assert_eq!(token_usage.cost_units, Some(43_700));
+        assert_eq!(
+            token_usage.cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
+    }
+
+    #[test]
+    fn usage_deserializes_missing_cost_as_none() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 4
+        }))
+        .expect("usage should deserialize");
+
+        assert_eq!(usage.cost_units, None);
+        assert_eq!(usage.cost_currency, None);
+        assert_eq!(usage.token_usage().cost_currency, None);
+    }
+
+    #[test]
+    fn usage_preserves_but_does_not_accept_unknown_currency_for_token_usage() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cost_units": 43700,
+            "cost_currency": "usd"
+        }))
+        .expect("usage should deserialize");
+
+        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_currency.as_deref(), Some("usd"));
+        assert_eq!(usage.token_usage().cost_units, Some(43_700));
+        assert_eq!(usage.token_usage().cost_currency, None);
     }
 }

@@ -19,6 +19,7 @@ use crate::permissions::{
     PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
     QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
+use crate::usage::UsageCostCurrency;
 use agent_client_protocol::{
     on_receive_dispatch, on_receive_notification, on_receive_request, ConnectTo, ConnectionTo,
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
@@ -371,6 +372,8 @@ pub struct PromptUsage {
     pub cache_write_tokens: Option<u64>,
     pub context_window_tokens: Option<u64>,
     pub estimated_session_tokens: Option<u64>,
+    pub cost_units: Option<u64>,
+    pub cost_currency: Option<UsageCostCurrency>,
     /// Cumulative usage for the entire session, exposed via _meta.sudocode.cumulativeUsage
     pub cumulative_usage: Option<CumulativeUsage>,
 }
@@ -383,6 +386,73 @@ pub struct CumulativeUsage {
     pub total_tokens: u64,
     pub cached_read_tokens: Option<u64>,
     pub cached_write_tokens: Option<u64>,
+}
+
+fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::Value> {
+    let mut sudocode_meta = Map::new();
+    sudocode_meta.insert(
+        "contextWindowTokens".to_string(),
+        json!(u.context_window_tokens),
+    );
+    sudocode_meta.insert(
+        "estimatedSessionTokens".to_string(),
+        json!(u.estimated_session_tokens),
+    );
+    if let Some(cost_units) = u.cost_units {
+        sudocode_meta.insert("costUnits".to_string(), json!(cost_units));
+    }
+    if let Some(cost_currency) = u.cost_currency {
+        sudocode_meta.insert("costCurrency".to_string(), json!(cost_currency.as_str()));
+    }
+    if let Some(cumulative) = &u.cumulative_usage {
+        sudocode_meta.insert(
+            "cumulativeUsage".to_string(),
+            json!({
+                "inputTokens": cumulative.input_tokens,
+                "outputTokens": cumulative.output_tokens,
+                "totalTokens": cumulative.total_tokens,
+                "cachedReadTokens": cumulative.cached_read_tokens,
+                "cachedWriteTokens": cumulative.cached_write_tokens,
+            }),
+        );
+    }
+    sudocode_meta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage};
+    use crate::usage::UsageCostCurrency;
+
+    #[test]
+    fn prompt_usage_meta_includes_cost_without_standard_usage_tokens() {
+        let meta = sudocode_meta_from_prompt_usage(&PromptUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            total_tokens: 14,
+            cache_read_tokens: Some(3),
+            cache_write_tokens: Some(0),
+            context_window_tokens: Some(200_000),
+            estimated_session_tokens: Some(42),
+            cost_units: Some(43_700),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
+            cumulative_usage: Some(CumulativeUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+                cached_read_tokens: Some(3),
+                cached_write_tokens: Some(0),
+            }),
+        });
+
+        assert_eq!(meta["costUnits"], serde_json::json!(43_700));
+        assert_eq!(meta["costCurrency"], serde_json::json!("sudo_point"));
+        assert!(meta.get("totalTokens").is_none());
+        assert_eq!(
+            meta["cumulativeUsage"]["totalTokens"],
+            serde_json::json!(14)
+        );
+    }
 }
 
 /// Thread-safe handle to a delegate, shared across async handlers.
@@ -960,28 +1030,7 @@ pub(crate) async fn run_acp_on_transport(
                             Ok((stop_reason, prompt_usage)) => {
                                 let mut response = PromptResponse::new(stop_reason);
                                 if let Some(u) = prompt_usage {
-                                    let mut sudocode_meta = Map::new();
-                                    sudocode_meta.insert(
-                                        "contextWindowTokens".to_string(),
-                                        json!(u.context_window_tokens),
-                                    );
-                                    sudocode_meta.insert(
-                                        "estimatedSessionTokens".to_string(),
-                                        json!(u.estimated_session_tokens),
-                                    );
-                                    // Add cumulativeUsage for clients that need session totals
-                                    if let Some(cumulative) = &u.cumulative_usage {
-                                        sudocode_meta.insert(
-                                            "cumulativeUsage".to_string(),
-                                            json!({
-                                                "inputTokens": cumulative.input_tokens,
-                                                "outputTokens": cumulative.output_tokens,
-                                                "totalTokens": cumulative.total_tokens,
-                                                "cachedReadTokens": cumulative.cached_read_tokens,
-                                                "cachedWriteTokens": cumulative.cached_write_tokens,
-                                            }),
-                                        );
-                                    }
+                                    let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
                                     let mut meta = Map::new();
                                     meta.insert("sudocode".to_string(), json!(sudocode_meta));
                                     response = response.usage(

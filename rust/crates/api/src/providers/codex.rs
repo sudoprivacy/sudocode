@@ -667,6 +667,7 @@ impl StreamState {
                             as u32,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        ..Usage::default()
                     });
                 }
                 self.stop_reason = Some(if self.tool_blocks.is_empty() {

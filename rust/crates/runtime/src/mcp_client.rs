@@ -57,6 +57,14 @@ pub struct McpClientBootstrap {
     pub tool_prefix: String,
     pub signature: Option<String>,
     pub transport: McpClientTransport,
+    /// Origin scope of this server configuration (User / Project / Local).
+    /// Used by `headers_helper` trust gating: Project/Local scoped helpers
+    /// are only executed when the workspace is trusted.
+    pub scope: crate::config::ConfigSource,
+    /// Whether the workspace has been verified as trusted.
+    /// Defaults to `true` (permissive); the CLI layer should set this to
+    /// `false` for untrusted workspaces before connecting.
+    pub workspace_is_trusted: bool,
 }
 
 impl McpClientBootstrap {
@@ -68,6 +76,8 @@ impl McpClientBootstrap {
             tool_prefix: mcp_tool_prefix(server_name),
             signature: mcp_server_signature(&config.config),
             transport: McpClientTransport::from_config(&config.config),
+            scope: config.scope,
+            workspace_is_trusted: true, // default permissive; caller can override
         }
     }
 }

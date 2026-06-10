@@ -31,10 +31,17 @@ mod lane_events;
 pub mod lsp_client;
 mod mcp;
 mod mcp_client;
+pub mod mcp_headers_helper;
+mod mcp_http;
 pub mod mcp_lifecycle_hardened;
+mod mcp_managed_proxy;
+mod mcp_oauth;
 pub mod mcp_server;
+mod mcp_sse;
 mod mcp_stdio;
 pub mod mcp_tool_bridge;
+mod mcp_transport;
+mod mcp_websocket;
 pub mod memory;
 pub mod model_capabilities;
 mod oauth;
@@ -125,6 +132,7 @@ pub use mcp_client::{
     McpClientAuth, McpClientBootstrap, McpClientTransport, McpManagedProxyTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,
 };
+pub use mcp_headers_helper::{build_request_headers, HeadersHelperError};
 pub use mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase, McpLifecycleState,
     McpLifecycleValidator, McpPhaseResult,
@@ -139,6 +147,7 @@ pub use mcp_stdio::{
     McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult, McpToolDiscoveryReport,
     UnsupportedMcpServer,
 };
+pub use mcp_transport::{connect_mcp_process, McpTransportConnectError, McpTransportProcess};
 pub use oauth::{
     clear_oauth_credentials, clear_oauth_credentials_from_keyring, clear_oauth_credentials_with,
     code_challenge_s256, credentials_path, generate_pkce_pair, generate_state,

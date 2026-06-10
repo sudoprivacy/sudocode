@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use crate::config::{McpTransport, RuntimeConfig, ScopedMcpServerConfig};
 use crate::mcp::mcp_tool_name;
-use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
+use crate::mcp_client::{McpClientAuth, McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase,
 };
@@ -34,7 +34,7 @@ const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 2_000;
 #[cfg(not(test))]
 const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 30_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum JsonRpcId {
     Number(u64),
@@ -502,7 +502,7 @@ const MCP_SPAWN_ATTEMPT_LIMIT: u32 = 2;
 #[derive(Debug)]
 struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
-    process: Option<McpStdioProcess>,
+    process: Option<Box<dyn crate::mcp_transport::McpTransportProcess + Send>>,
     initialized: bool,
     /// Total spawn attempts (including retries) made against this server.
     /// Capped at MCP_SPAWN_ATTEMPT_LIMIT to short-circuit the spawn loop.
@@ -545,18 +545,35 @@ impl McpServerManager {
         let mut unsupported_servers = Vec::new();
 
         for (server_name, server_config) in servers {
-            if server_config.transport() == McpTransport::Stdio {
-                let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
-                managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
-            } else {
-                unsupported_servers.push(UnsupportedMcpServer {
-                    server_name: server_name.clone(),
-                    transport: server_config.transport(),
-                    reason: format!(
-                        "transport {:?} is not supported by McpServerManager",
-                        server_config.transport()
-                    ),
-                });
+            let transport = server_config.transport();
+            match transport {
+                McpTransport::Stdio
+                | McpTransport::Sse
+                | McpTransport::Http
+                | McpTransport::Ws
+                | McpTransport::ManagedProxy => {
+                    let bootstrap =
+                        McpClientBootstrap::from_scoped_config(server_name, server_config);
+
+                    // Check for XAA (SEP-990) — unsupported, reject at gate.
+                    if Self::has_xaa(&bootstrap) {
+                        unsupported_servers.push(UnsupportedMcpServer {
+                            server_name: server_name.clone(),
+                            transport,
+                            reason: "XAA (SEP-990) is not implemented".to_string(),
+                        });
+                        continue;
+                    }
+
+                    managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
+                }
+                McpTransport::Sdk => {
+                    unsupported_servers.push(UnsupportedMcpServer {
+                        server_name: server_name.clone(),
+                        transport,
+                        reason: "SDK transport is not supported by McpServerManager".to_string(),
+                    });
+                }
             }
         }
 
@@ -565,6 +582,16 @@ impl McpServerManager {
             unsupported_servers,
             tool_index: BTreeMap::new(),
             next_request_id: 1,
+        }
+    }
+
+    /// Check if the bootstrap's transport has XAA (SEP-990) enabled.
+    fn has_xaa(bootstrap: &McpClientBootstrap) -> bool {
+        match &bootstrap.transport {
+            McpClientTransport::Sse(t) | McpClientTransport::Http(t) => {
+                matches!(t.auth, McpClientAuth::OAuth(ref config) if config.xaa == Some(true))
+            }
+            _ => false,
         }
     }
 
@@ -813,10 +840,20 @@ impl McpServerManager {
                 })?;
         match &server.bootstrap.transport {
             McpClientTransport::Stdio(transport) => Ok(transport.resolved_tool_call_timeout_ms()),
-            other => Err(McpServerManagerError::InvalidResponse {
+            // Non-stdio transports use the default timeout; the actual value is
+            // stored in each transport process but read here from bootstrap to
+            // avoid depending on the process being spawned yet (timeout is read
+            // before ensure_server_ready).
+            McpClientTransport::Sse(_)
+            | McpClientTransport::Http(_)
+            | McpClientTransport::WebSocket(_)
+            | McpClientTransport::ManagedProxy(_) => {
+                Ok(crate::mcp_client::DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS)
+            }
+            McpClientTransport::Sdk(_) => Err(McpServerManagerError::InvalidResponse {
                 server_name: server_name.to_string(),
                 method: "tools/call",
-                details: format!("unsupported MCP transport for stdio manager: {other:?}"),
+                details: "SDK transport is not supported".to_string(),
             }),
         }
     }
@@ -1144,7 +1181,16 @@ impl McpServerManager {
                 }
                 let server = self.server_mut(server_name)?;
                 server.spawn_attempts = server.spawn_attempts.saturating_add(1);
-                server.process = Some(spawn_mcp_stdio_process(&server.bootstrap)?);
+                server.process = Some(
+                    crate::mcp_transport::connect_mcp_process(&server.bootstrap)
+                        .await
+                        .map_err(|e| {
+                            McpServerManagerError::Io(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("failed to connect MCP transport: {e}"),
+                            ))
+                        })?,
+                );
                 server.initialized = false;
             }
 
@@ -1228,6 +1274,7 @@ pub struct McpStdioProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    tool_call_timeout_ms: u64,
 }
 
 impl McpStdioProcess {
@@ -1257,6 +1304,7 @@ impl McpStdioProcess {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            tool_call_timeout_ms: transport.resolved_tool_call_timeout_ms(),
         })
     }
 
@@ -2995,10 +3043,11 @@ mod tests {
         let manager = McpServerManager::from_servers(&servers);
         let unsupported = manager.unsupported_servers();
 
-        assert_eq!(unsupported.len(), 3);
-        assert_eq!(unsupported[0].server_name, "http");
-        assert_eq!(unsupported[1].server_name, "sdk");
-        assert_eq!(unsupported[2].server_name, "ws");
+        // After MCP transport expansion (§6.2 ②), HTTP and WS transports
+        // are routed to managed_servers instead of unsupported_servers.
+        // Only SDK remains unsupported.
+        assert_eq!(unsupported.len(), 1);
+        assert_eq!(unsupported[0].server_name, "sdk");
         assert_eq!(
             unsupported_server_failed_server(&unsupported[0]).phase,
             McpLifecyclePhase::ServerRegistration
@@ -3108,5 +3157,68 @@ mod tests {
 
             cleanup_script(&script_path);
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Modification ⑤: impl McpTransportProcess for McpStdioProcess
+// ---------------------------------------------------------------------------
+
+use crate::mcp_transport::McpTransportProcess;
+
+#[async_trait::async_trait]
+impl McpTransportProcess for McpStdioProcess {
+    async fn initialize(
+        &mut self,
+        id: crate::mcp_stdio::JsonRpcId,
+        params: crate::mcp_stdio::McpInitializeParams,
+    ) -> io::Result<crate::mcp_stdio::JsonRpcResponse<crate::mcp_stdio::McpInitializeResult>> {
+        self.initialize(id, params).await
+    }
+
+    async fn list_tools(
+        &mut self,
+        id: crate::mcp_stdio::JsonRpcId,
+        params: Option<crate::mcp_stdio::McpListToolsParams>,
+    ) -> io::Result<crate::mcp_stdio::JsonRpcResponse<crate::mcp_stdio::McpListToolsResult>> {
+        self.list_tools(id, params).await
+    }
+
+    async fn call_tool(
+        &mut self,
+        id: crate::mcp_stdio::JsonRpcId,
+        params: crate::mcp_stdio::McpToolCallParams,
+    ) -> io::Result<crate::mcp_stdio::JsonRpcResponse<crate::mcp_stdio::McpToolCallResult>> {
+        self.call_tool(id, params).await
+    }
+
+    async fn list_resources(
+        &mut self,
+        id: crate::mcp_stdio::JsonRpcId,
+        params: Option<crate::mcp_stdio::McpListResourcesParams>,
+    ) -> io::Result<crate::mcp_stdio::JsonRpcResponse<crate::mcp_stdio::McpListResourcesResult>>
+    {
+        self.list_resources(id, params).await
+    }
+
+    async fn read_resource(
+        &mut self,
+        id: crate::mcp_stdio::JsonRpcId,
+        params: crate::mcp_stdio::McpReadResourceParams,
+    ) -> io::Result<crate::mcp_stdio::JsonRpcResponse<crate::mcp_stdio::McpReadResourceResult>>
+    {
+        self.read_resource(id, params).await
+    }
+
+    fn has_exited(&mut self) -> io::Result<bool> {
+        self.has_exited()
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        self.shutdown().await
+    }
+
+    fn resolved_tool_call_timeout_ms(&self) -> u64 {
+        self.tool_call_timeout_ms
     }
 }

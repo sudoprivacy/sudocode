@@ -480,7 +480,7 @@ fn generate_random_token(bytes: usize) -> io::Result<String> {
     // `Os { code: 3, kind: NotFound, message: "The system cannot
     // find the path specified." }` and broke every PKCE flow there.
     let mut buffer = vec![0_u8; bytes];
-    getrandom::getrandom(&mut buffer)
+    getrandom::fill(&mut buffer)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     Ok(base64url_encode(&buffer))
 }

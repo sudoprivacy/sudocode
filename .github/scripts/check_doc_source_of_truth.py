@@ -8,10 +8,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 FILES = [
     ROOT / 'README.md',
-    ROOT / 'USAGE.md',
-    ROOT / 'PARITY.md',
-    ROOT / 'PHILOSOPHY.md',
+    ROOT / 'README_zh.md',
     ROOT / 'ROADMAP.md',
+    ROOT / 'CLAUDE.md',
+    ROOT / 'CONTRIBUTING.md',
     ROOT / '.github' / 'FUNDING.yml',
 ]
 FILES.extend(sorted((ROOT / 'docs').rglob('*.md')) if (ROOT / 'docs').exists() else [])

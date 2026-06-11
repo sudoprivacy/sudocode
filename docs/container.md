@@ -1,19 +1,21 @@
-# Container-first sudocode workflows
+# Container workflows
 
-This repo already had **container detection** in the Rust runtime before this document was added:
+`sudocode` ships a checked-in [`Containerfile`](../Containerfile) that
+gives Docker and Podman users one canonical container workflow for
+building and testing the Rust workspace.
 
-- `rust/crates/runtime/src/sandbox.rs` detects Docker/Podman/container markers such as `/.dockerenv`, `/run/.containerenv`, matching env vars, and `/proc/1/cgroup` hints.
-- `rust/crates/rusty-claude-cli/src/main.rs` exposes that state through the `scode sandbox` / `cargo run -p rusty-claude-cli -- sandbox` report.
-- `.github/workflows/rust-ci.yml` runs on `ubuntu-latest`, but it does **not** define a Docker or Podman container job.
-- Before this change, the repo did **not** have a checked-in `Dockerfile`, `Containerfile`, or `.devcontainer/` config.
+The Rust runtime detects container environments via `/.dockerenv`,
+`/run/.containerenv`, matching environment variables, and
+`/proc/1/cgroup` hints, and surfaces the detection through
+`scode sandbox` and `scode doctor`. The container workflow below uses
+this detection as a sanity check.
 
-This document adds a small checked-in `Containerfile` so Docker and Podman users have one canonical container workflow.
+## What the image is
 
-## What the checked-in container image is for
-
-The root [`../Containerfile`](../Containerfile) gives you a reusable Rust build/test shell with the extra packages this workspace commonly needs (`git`, `pkg-config`, `libssl-dev`, certificates).
-
-It does **not** copy the repository into the image. Instead, the recommended flow is to bind-mount your checkout into `/workspace` so edits stay on the host.
+The image is a reusable Rust build and test shell with the extra
+packages this workspace commonly needs (`git`, `pkg-config`,
+`libssl-dev`, certificates). The repository is bind-mounted into
+`/workspace` at run time; edits stay on the host.
 
 ## Build the image
 
@@ -33,7 +35,8 @@ podman build -t sudocode-dev -f Containerfile .
 
 ## Run `cargo test --workspace` in the container
 
-These commands mount the repo, keep Cargo build artifacts out of the working tree, and run from the Rust workspace at `rust/`.
+These commands mount the repo, keep Cargo build artifacts off the
+working tree, and run from the Rust workspace at `rust/`.
 
 ### Docker
 
@@ -57,7 +60,7 @@ podman run --rm -it \
   cargo test --workspace
 ```
 
-If you want a fully clean rebuild, add `cargo clean &&` before `cargo test --workspace`.
+For a clean rebuild, prefix the command with `cargo clean &&`.
 
 ## Open a shell in the container
 
@@ -86,15 +89,17 @@ Inside the shell:
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo run -p rusty-claude-cli -- --help
-cargo run -p rusty-claude-cli -- sandbox
+cargo run -p rusty-sudocode-cli -- --help
+cargo run -p rusty-sudocode-cli -- sandbox
 ```
 
-The `sandbox` command is a useful sanity check: inside Docker or Podman it should report `In container true` and list the markers the runtime detected.
+`scode sandbox` is a useful sanity check: inside Docker or Podman it
+reports `In container true` and lists the markers the runtime detected.
 
 ## Bind-mount this repo and another repo at the same time
 
-If you want to run `scode` against a second checkout while keeping `sudocode` itself mounted read-write:
+To run `scode` against a second checkout while keeping `sudocode`
+itself mounted read-write:
 
 ### Docker
 
@@ -121,12 +126,15 @@ podman run --rm -it \
 Then, for example:
 
 ```bash
-cargo run -p rusty-claude-cli -- prompt "summarize /repo"
+cargo run -p rusty-sudocode-cli -- prompt "summarize /repo"
 ```
 
 ## Notes
 
 - Docker and Podman use the same checked-in `Containerfile`.
-- The `:Z` suffix in the Podman examples is for SELinux relabeling; keep it on Fedora/RHEL-class hosts.
-- Running with `CARGO_TARGET_DIR=/tmp/scode-target` avoids leaving container-owned `target/` artifacts in your bind-mounted checkout.
-- For non-container local development, keep using [`../USAGE.md`](../USAGE.md) and [`../rust/README.md`](../rust/README.md).
+- The `:Z` suffix in the Podman examples is for SELinux relabeling on
+  Fedora/RHEL-class hosts.
+- Running with `CARGO_TARGET_DIR=/tmp/scode-target` keeps
+  container-owned `target/` artifacts out of the bind-mounted checkout.
+- For host-side workflows, see [`usage.md`](./usage.md) and
+  [`../rust/README.md`](../rust/README.md).

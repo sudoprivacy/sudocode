@@ -1,22 +1,43 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Detected stack
-- Languages: Rust.
-- Frameworks: none detected from the supported starter markers.
-
-## Verification
-- Run Rust verification from `rust/`: `scripts/fmt.sh` (or `cargo fmt` from `rust/`), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
-- Use `scripts/fmt.sh` from the repo root to format Rust code (forwards flags, e.g. `scripts/fmt.sh --check`)
-- `src/` and `tests/` are both present; update both surfaces together when behavior changes.
-
-## Repository shape
-- `rust/` contains the Rust workspace and active CLI/runtime implementation.
-- `src/` contains source files that should stay consistent with generated guidance and tests.
-- `tests/` contains validation surfaces that should be reviewed alongside code changes.
+Guidance for agents working in this repository.
 
 ## Working agreement
-- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.
-- Keep shared defaults in `.claude.json`; reserve `.claude/settings.local.json` for machine-local overrides.
-- Do not overwrite existing `CLAUDE.md` content automatically; update it intentionally when repo workflows change.
+
+- Prefer small, reviewable changes. Group related edits in a single
+  commit; split unrelated edits across commits.
+- Shared defaults live in `.scode.json`. Machine-local overrides live in
+  `.nexus/sudocode/settings.local.json`.
+- Update existing files intentionally; edit content rather than replace
+  whole files unless the file is being restructured.
+
+## Verification
+
+The Rust workspace lives in `rust/`. From the repo root the standard
+checks are:
+
+```bash
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`scripts/fmt.sh` from the repo root wraps `cd rust && cargo fmt` and
+forwards flags.
+
+## Documentation map
+
+- [`README.md`](./README.md) — project entry, install, quick start.
+- [`ROADMAP.md`](./ROADMAP.md) — goals.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor setup and PR
+  workflow.
+- [`docs/`](./docs/) — topic-scoped SSOTs (usage, authentication,
+  permissions, ACP, models, plugins, parity, mock harness, container).
+- [`docs/plans/active/`](./docs/plans/active/) — in-flight design plans.
+- [`docs/plans/archive/`](./docs/plans/archive/) — landed and superseded
+  plans.
+- [`rust/README.md`](./rust/README.md) — Cargo workspace map.
+
+When the repository workflow changes, update this file along with the
+change.

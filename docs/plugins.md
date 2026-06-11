@@ -2,20 +2,19 @@
 
 # SudoCode plugins
 
-> **Status: experimental.** Plugin schema and command surface may still
-> change. This document describes what `scode` does today; gaps and
-> caveats are listed explicitly in §6 and §7 so you know where the edges
-> are.
-
-A SudoCode plugin is a **local directory** containing a
+A SudoCode plugin is a local directory containing a
 `.sudocode-plugin/plugin.json` manifest. Once installed, the manifest's
-declared **MCP servers, skills, and hooks** are projected into the
-`scode` runtime.
+declared MCP servers, skills, and hooks are projected into the `scode`
+runtime.
 
-- ✅ Local-path install, list, enable/disable, remove, update
-- ✅ Marketplace manifest **discovery** (read-only listing)
-- ❌ One-command remote install (git / npm / registry) — see §7
-- ❌ Trust prompts or sandboxing — see §5
+This document covers:
+
+- Using plugins (§1)
+- Authoring a plugin (§2)
+- Distribution (§3)
+- Compatibility with Claude Code plugins (§4)
+- Security model (§5)
+- Where to look in the code (§6)
 
 The reference implementation lives in
 [`rust/crates/plugins/`](../rust/crates/plugins/); two minimal worked
@@ -285,12 +284,11 @@ plugins are minimal hook-only examples worth copying from.
 
 ---
 
-## 3. Distribution today
+## 3. Distribution
 
-### 3.1 The current path
+### 3.1 Git + local install
 
-Until remote install lands (§7), the only supported distribution model
-is **git + local install**:
+The supported distribution model is **git + local install**:
 
 ```
 Author:  pushes a directory with .sudocode-plugin/plugin.json to git
@@ -318,9 +316,8 @@ file is rendered by `scode plugins marketplace`:
 }
 ```
 
-`scode` does **not** act on the `source` field — discovery is a
-listing, not an install pipeline. The user still clones the repo and
-runs `scode plugins install`.
+The `source` field is descriptive. Discovery is a listing surface; the
+user clones the repo and runs `scode plugins install` to install.
 
 The legacy path `.agents/plugins/marketplace.json` is read as a
 fallback when the primary path is missing.
@@ -345,27 +342,20 @@ picks the latter when both are present.
 
 ---
 
-## 5. Security
+## 5. Security model
 
-This is the most important section to read before installing a
-third-party plugin.
+Read this section before installing a third-party plugin.
 
-### 5.1 No sandbox
+### 5.1 Execution context
 
-A plugin's:
-
-- **hook scripts** run as the current user
-- **MCP server processes** run as the current user
-
-They can read your SSH keys, write to your home directory, talk to
-arbitrary networks. scode does **not** show a "this plugin will run
-arbitrary code" confirmation before installing.
+A plugin's hook scripts and MCP server processes run as the current
+user, with the current user's filesystem and network access.
 
 > Installing a stranger's plugin is equivalent to running their code
 > on your machine. Inspect the manifest and hook scripts before
 > `scode plugins install`.
 
-### 5.2 Manifest metadata is not injected into the system prompt
+### 5.2 Manifest metadata stays out of the system prompt
 
 To defend against prompt-injection authored into manifest fields, the
 plugin capability section in the system prompt lists plugins
@@ -377,13 +367,12 @@ anonymously:
  - Plugin 1; provides 2 tools, 1 hook, MCP servers
 ```
 
-Plugin `name`, `display_name`, and `description` are deliberately
-omitted from the model-facing channel. The CLI surfaces them
-(`scode plugins`, `scode mcp`), but the model does not see them in the
-system prompt.
+Plugin `name`, `display_name`, and `description` surface only in the
+CLI (`scode plugins`, `scode mcp`); the model-facing system prompt sees
+only the anonymous capability summary.
 
-> The model **does** see MCP tool names like `everything_add` —
-> those are contracts published by the MCP server itself, not by the
+> MCP tool names like `everything_add` are visible to the model — those
+> are contracts published by the MCP server itself, separate from the
 > manifest. Tool descriptions are the server's responsibility.
 
 ### 5.3 Hook script paths are constrained to the plugin root
@@ -401,60 +390,7 @@ plugins.
 
 ---
 
-## 6. Limitations & known issues
-
-| Issue | Impact | Workaround |
-|---|---|---|
-| Upstream API errors (502 / wrong model id) can leave `scode` hanging silently | Not plugin-specific, but surfaces during plugin testing | Verify the API endpoint with a direct `curl` first |
-| A single `scode prompt` call can spawn the MCP server several times (the server's startup banner appears multiple times) | Slower startup, especially with `npx`-launched servers | Pre-warm `npx -y <package> --help` once before the first run |
-| Models occasionally mistake the plugin id `<name>@<source>` for an MCP server name | Tool calls fail with `server '<name>@<source>' not found` | Phrase prompts using the tool name directly (`everything_echo`) rather than describing it as "the MCP server `<name>`" |
-| `scode plugins update` only re-copies the original `source` path | Remote update is not wired up | `git pull` in the source checkout, then `scode plugins update` |
-| Plugin can not load skills or MCP **dynamically** — manifest is read at install / runtime construction | Edits to an installed copy require re-install | `scode plugins install <source-dir>` again to overwrite |
-
----
-
-## 7. Roadmap gaps
-
-Things the current code base **does not** support. Listed here so
-authors and integrators do not build on assumptions.
-
-| Capability | Status |
-|---|---|
-| `scode plugins install github:owner/repo` (git source) | Not implemented |
-| `scode plugins install <pkg>` from npm / curated registry | Not implemented |
-| Centralised SudoCode plugin marketplace (search / browse / install) | Out of scope for the current iteration |
-| Plugin signature / supply-chain verification | Not implemented |
-| Sandbox for hook scripts / MCP server processes | Not implemented |
-| Broader hook events (`SessionStart`, `UserPromptSubmit`, `PreCompact`, `Stop`, …) | Not implemented |
-| Plugin `@mention` in conversation (`@github`, `plugin://…`) | Not implemented; depends on a trust-tier design |
-| Per-plugin MCP policy (`enabledTools` / `disabledTools` / approval mode) | Not implemented |
-
-If you are building on top of plugins, prefer features in §1–§5 over
-anything in this table.
-
----
-
-## 8. When to use plugins
-
-**Good fit**
-
-- Packaging a curated MCP server bundle for a project or team
-- Distributing internal hook scripts inside an organisation
-- Wrapping an upstream MCP server with preset env / args
-- Shipping a team-specific skill set
-
-**Not a fit**
-
-- Public distribution to strangers — there is no trust mechanism
-- Auto-updating, npm-style ecosystem — no remote install pipeline
-- Replacing your package manager — `scode plugins` is not npm/pip
-
-Treat plugins today as **"team / project toolboxes"**, not as
-publicly shippable products.
-
----
-
-## 9. Where to look in the code
+## 6. Where to look in the code
 
 | Concern | Crate / file |
 |---|---|
@@ -467,7 +403,6 @@ publicly shippable products.
 
 ---
 
-See also: [`../README.md`](../README.md) for project overview,
-[`../rust/README.md`](../rust/README.md) for scode workspace layout,
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md) for contribution guidelines,
+See also: [`../README.md`](../README.md), [`../rust/README.md`](../rust/README.md),
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`./README.md`](./README.md),
 [简体中文版](./plugins_zh.md).

@@ -2,17 +2,18 @@
 
 # SudoCode 插件
 
-> **状态：实验性。** 插件清单格式和命令接口仍可能变动。本文只描述
-> `scode` **当前** 的实际行为；功能缺口和注意事项在 §6 §7 显式列出。
+一个 SudoCode 插件是一个本地目录，包含一份
+`.sudocode-plugin/plugin.json` 清单。安装后，清单中声明的 MCP
+servers / skills / hooks 会被投影到 `scode` runtime。
 
-一个 SudoCode 插件是一个**本地目录**，里面有
-`.sudocode-plugin/plugin.json` 清单。安装后，清单声明的
-**MCP servers / skills / hooks** 会被投影到 `scode` runtime。
+本文涵盖：
 
-- ✅ 本地路径安装、列表、启停、卸载、更新
-- ✅ Marketplace 清单**只读展示**
-- ❌ 远端一键安装（git / npm / registry），见 §7
-- ❌ 信任提示 / 沙箱，见 §5
+- 用户视角（§1）
+- 作者视角（§2）
+- 分发（§3）
+- 与 Claude Code 插件的兼容性（§4）
+- 安全模型（§5）
+- 代码索引（§6）
 
 参考实现位于
 [`rust/crates/plugins/`](../rust/crates/plugins/)，
@@ -372,57 +373,7 @@ sticky `PermanentlyFailed` 状态，不再尝试。避免坏插件 fork-bomb。
 
 ---
 
-## 6. 限制与已知问题
-
-| 问题 | 影响 | 应对 |
-|---|---|---|
-| 上游 API 错误（502 / 错误模型 id）时 scode 可能静默挂起 | 不是插件特有，但测插件时容易碰到 | 先用 `curl` 直接验证 API endpoint 可用 |
-| 一次 `scode prompt` 调用中 MCP server 会被 spawn 多次（server 自己的启动 banner 重复出现）| 启动变慢，`npx` 拉包尤其明显 | 首次跑前预热 `npx -y <package> --help` |
-| 模型偶尔把 plugin id `<name>@<source>` 当成 MCP server 名 | 工具调用报 `server '<name>@<source>' not found` | prompt 里直接说工具名（`everything_echo`），不要描述「the MCP server `<name>`」|
-| `scode plugins update` 只 re-copy 原 `source` 路径 | 没接远端 update | 在 source checkout 里 `git pull`，再 `scode plugins update` |
-| 插件不能**动态**重载 skills / MCP —— 清单只在 install / runtime 构造时读 | 改 installed 目录后行为不变 | 重新 `scode plugins install <source-dir>` 覆盖 |
-
----
-
-## 7. Roadmap 缺口
-
-仍**未实现**的能力 —— 列在这里是为了让作者和集成方知道边界，不要基于假设构建。
-
-| 能力 | 状态 |
-|---|---|
-| `scode plugins install github:owner/repo`（git source）| 未实现 |
-| `scode plugins install <pkg>` 走 npm / curated registry | 未实现 |
-| 集中式 SudoCode plugin marketplace（搜索 / 浏览 / 安装）| 当前迭代范围外 |
-| 插件签名 / 供应链校验 | 未实现 |
-| Hook 脚本 / MCP server 进程的沙箱 | 未实现 |
-| 更多 hook 事件（`SessionStart`、`UserPromptSubmit`、`PreCompact`、`Stop` …）| 未实现 |
-| 对话中 @-mention 插件（`@github`、`plugin://…`）| 未实现；依赖一套信任分层设计 |
-| 单插件 MCP 策略（`enabledTools` / `disabledTools` / 审批模式）| 未实现 |
-
-如果你正在基于插件构建上层能力，请优先使用 §1–§5 描述的能力，避免依赖本表里的项。
-
----
-
-## 8. 什么时候该用插件
-
-**适合**
-
-- 给一个项目打包一组 MCP server，团队共享
-- 在组织内部分发自用的 hook 脚本
-- 包装上游 MCP server，预设 env / args
-- 团队特定的 skill 集合
-
-**不适合**
-
-- 公开分发给陌生人 —— 没信任机制
-- 自动更新、npm 式生态 —— 没远端 install pipeline
-- 替代你的包管理器 —— `scode plugins` 不是 npm/pip
-
-简单原则：**目前插件更像「团队/项目工具包」，不是面向公众的发布产品**。
-
----
-
-## 9. 代码索引
+## 6. 代码索引
 
 | 关注点 | crate / 文件 |
 |---|---|
@@ -435,7 +386,6 @@ sticky `PermanentlyFailed` 状态，不再尝试。避免坏插件 fork-bomb。
 
 ---
 
-另见：[`../README.md`](../README.md)（项目概览）、
-[`../rust/README.md`](../rust/README.md)（scode 工作区结构）、
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md)（贡献指南）、
+另见：[`../README.md`](../README.md)、[`../rust/README.md`](../rust/README.md)、
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md)、[`./README.md`](./README.md)、
 [English version](./plugins.md)。

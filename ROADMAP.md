@@ -1,116 +1,99 @@
 # Sudo Code Roadmap
 
-> **Living document. Goals only — no task tracking.**
-> 这里只写**最终目标**，不追踪每日任务。
-> Tactical weekly plans are ephemeral; the roadmap is the single source of truth for
-> what sudo code is becoming.
+> **Goals only.** This document describes where `sudocode` is going.
+> Day-to-day work — tasks, sprint boards, weekly schedules — lives in PRs,
+> issues, and 1:1 notes.
 
 ## What sudo code is
 
-`sudocode` (binary: `scode`) is a Rust-native ACP engine for coding agents — the
-**hacker-facing CLI half** of the sudo* family.
+`sudocode` (binary: `scode`) is a Rust-native ACP engine for coding agents
+— the hacker-facing CLI half of the sudo* family.
 
 | | sudowork | sudocode |
 |---|---|---|
 | Audience | Non-technical end users | Developers, hackers, machines |
 | Surface | GUI / Electron | CLI / headless / ACP |
 | Defaults | Safe, hand-held, friendly copy | Composable, terse, full power |
-| Relationship | sudowork **uses** sudocode as one of its execution engines | — |
+| Relationship | sudowork uses sudocode as one of its execution engines | — |
 
-The two are deliberately tuned for different audiences. The same capability
-can land safely-defaulted in sudowork while exposing the full knob in sudocode.
+The two are tuned for different audiences. The same capability can land
+safely-defaulted in sudowork and exposed as a full knob in sudocode.
 
 ## North star
 
-- **Rust-native** — single binary, no Node/Python startup tax, deterministic shutdown
-- **Model-agnostic** — Anthropic, OpenAI, xAI, Gemini, plus OAuth subscriptions and arbitrary proxy backends
-- **Headless-first** — ACP over both stdio and WebSocket; embeddable as "agent as a service"
-- **Safe by design** — explicit permission modes (`read-only` / `workspace-write` / `danger-full-access`) + Linux user-namespace sandbox
+- **Rust-native** — single binary, deterministic shutdown, lean footprint.
+- **Model-agnostic** — Anthropic, OpenAI, xAI, Gemini, OAuth subscriptions,
+  arbitrary proxy backends.
+- **Headless-first** — ACP over stdio and WebSocket; embeddable as
+  "agent as a service."
+- **Safe by design** — explicit permission modes plus a Linux
+  user-namespace sandbox.
 
 ## Active goals — 2026-Q2
 
 ### Goal 1 · Lock the baseline
 
-**e2e coverage ≥ 90% on sudocode CI, green every commit.**
+`scode` CLI e2e coverage reaches and stays at **≥ 90%** of the
+scode-native testable feature surface, green on every `main` commit of
+sudocode CI.
 
-- Coverage is measured over **scode-native testable features**:
-  - Drop sudowork-UI-only items (agent switching in UI, `/auth` UI toggle)
-  - Drop L2-deferred items (LSP ×4, Workers/Teams/Cron ×3, Plugins lifecycle ×1) — these need heavier setup and land in a follow-up quarter
-- Current denominator: ~44 features. 90% = 40 covered.
-- Tests live in `rust/crates/rusty-sudocode-cli/tests/`; new cases extend
-  `mock_parity_harness.rs` + `mock_parity_scenarios.json`.
-- Live API smoke (`acp_live_smoke`) stays gated on main push to defend against
-  real API drift.
+Coverage scope and the test surface are described in
+[`docs/parity.md`](./docs/parity.md). The mock parity harness used to
+exercise this surface is described in
+[`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md).
 
 ### Goal 2 · claude-code parity
 
-**Every gap vs `anthropics/claude-code` has a written resolution.**
-"Resolution" ≠ "implemented" — a concrete plan also counts.
+Every feature gap between `scode` and `anthropics/claude-code` carries a
+written resolution — `[BUILD]` / `[CHERRY-PICK]` / `[SKIP]` / `[N/A]` /
+`[OBSERVE]` — with a one-line rationale.
 
-- Reference target: `anthropics/claude-code` (source code is private; we work
-  from the public CHANGELOG, the npm bundle's tool/slash surface, and official docs)
-- Sync mechanism: tracked in `rust/PARITY.md`. `LAST_PARITY_SYNC_COMMIT`
-  semantics will be replaced with `LAST_CLAUDE_CODE_VERSION` (a release tag).
-- Resolution tags per gap: `[BUILD]` / `[CHERRY-PICK]` / `[SKIP]` / `[N/A]` /
-  `[OBSERVE]` (watch how `ultraworkers/claw-code` ports it)
-- `ultraworkers/claw-code` is kept as a **cherry-pick source**, not as
-  upstream-of-truth. They diverged from claude-code parity and now develop
-  independently; we still pull what's useful.
-- Comparison window starts at `claude-code` releases shipped on or after
-  **2026-01-01** (~4 months of feature surface, aligned with our assistant's
-  knowledge cutoff).
+The reference target is `anthropics/claude-code`. Comparison runs against
+public release notes, the published npm bundle's tool and slash
+surfaces, and official documentation, anchored to a tracked sync marker.
+The mechanism is described in [`docs/parity.md`](./docs/parity.md).
+
+`ultraworkers/claw-code` is a cherry-pick source for Rust-side
+implementations of overlapping features. Their work is treated as
+optional input rather than upstream-of-truth.
 
 ### Goal 3 · Ship features real users miss
 
-User friction beats CHANGELOG triage. Items here are committed because an
-actual sudocode user (internal or external) hit the gap.
+When an actual user — internal or external — hits a sharp edge in `scode`
+that `claude-code` has already smoothed, the feature lands here as a
+committed item.
 
-| Feature | Source signal | Committed |
-|---|---|---|
-| `!` bash mode (inline shell from prompt) | 武鹏 2026-06-10 (内部用户) | ✅ |
+| Feature | Source signal |
+|---|---|
+| `!` bash mode (inline shell from prompt) | 武鹏 — 2026-06-10 (内部用户) |
 
 #### Implementation note — `!` bash mode
 
-What it does: a prompt that starts with `!` bypasses the LLM round-trip and
-dispatches directly to `runtime::bash` — `!ls`, `!git status`, `!cd path`,
-etc. Matches `claude-code`'s bash-mode semantics for muscle-memory parity.
+A prompt beginning with `!` dispatches directly to `runtime::bash` —
+`!ls`, `!git status`, `!cd path`, and so on — matching `claude-code`'s
+bash-mode semantics for muscle-memory parity.
 
-Where we go further than claude-code:
-- **Always show `pwd` in the bash-mode prompt.** Hacker friction point: in
-  claude-code, `!ls` doesn't display the working directory, so the user is
-  blind to what they're listing. sudocode's bash mode shows the resolved
-  `pwd` on every prompt redraw.
-- Preserve session `cwd` across `!cd` invocations and surface it back to the
-  LLM context so subsequent tool calls inherit the same view.
-- Honor the active permission mode (`!rm -rf /` still goes through the same
-  `bash` validators as the LLM-driven tool path; no permission shortcut).
+`scode`'s bash mode additionally:
 
-## Working agreement on this doc
+- Displays the resolved `pwd` on every bash-mode prompt redraw, so the
+  active working directory is always visible.
+- Threads `cwd` state through `!cd` so subsequent prompt-driven and
+  LLM-driven tool calls share the same directory view.
+- Routes every `!` command through the same validators as the
+  LLM-driven `bash` tool path, so the active permission mode applies
+  identically.
 
-- Update **here** when scope shifts. PRs that change scope touch ROADMAP.md.
-- Daily task tracking, sprint boards, weekly schedules — **not here**. Those
-  are ephemeral and live in PRs, issues, or 1:1 notes.
-- External communication (周报, 进鲸 / cross-team updates) can mirror this
-  doc on ShareOne or similar surfaces. Mirrors are point-in-time snapshots,
-  not authoritative.
+## Working agreement on this document
 
-## Out of scope (2026-Q2)
-
-- Full plugin install/enable/disable/uninstall lifecycle (deferred to Q3)
-- LSP integration depth beyond surface parity (deferred)
-- Workers / Teams / Cron wall-clock testing (deferred)
-- Full claude-code source-level diff (their source is private; we work from
-  the public surface)
+Scope changes update this document in the same PR. External
+communications can mirror the current state into other surfaces; this
+document remains the canonical reference.
 
 ## Pointers
 
-- `rust/PARITY.md` — detailed parity status (tool surface, slash commands, behavioral checkpoints)
-- `rust/crates/rusty-sudocode-cli/tests/` — e2e harness + scenarios
-- `docs/plans/` — historical / experimental plan files (archive)
-- `README.md` — what sudocode is, how to install, how to run
-
----
-
-*Last touched: 2026-06-10. This doc is a goal-only living document; if you
-need a snapshot for external sharing, mirror the current state to ShareOne
-or similar and link back here.*
+- [`docs/parity.md`](./docs/parity.md) — what parity means for sudocode
+  and how we measure it.
+- [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the
+  harness that exercises the e2e surface.
+- [`docs/plans/`](./docs/plans/) — active and archived design plans.
+- [`README.md`](./README.md) — project entry, install, quick start.

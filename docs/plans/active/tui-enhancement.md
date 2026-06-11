@@ -77,7 +77,7 @@ Make tool execution legible and navigable.
 | 3.1 | Collapsible tool output. For tool results longer than N lines (configurable, default 15), show a summary with an `[+] Expand` hint; pressing a key reveals the full output. Initial form: truncation with a "full output saved to file" fallback. |
 | 3.2 | Syntax-highlighted tool results. When tool results contain code (detected by tool name — `bash` stdout, `read_file` content, `REPL` output), apply syntect highlighting alongside the plain text rendering. |
 | 3.3 | Tool call timeline. For multi-tool turns, show a compact summary after all tool calls complete: `🔧 bash → ✓ | read_file → ✓ | edit_file → ✓ (3 tools, 1.2s)`. |
-| 3.4 | Diff-aware `edit_file` display. When `edit_file` succeeds, render a colored unified diff of the change alongside `✓ edit_file: path`. The data round-trip is documented in [`spike-179.md`](./spike-179.md) (S1). |
+| 3.4 | Diff-aware `edit_file` display. When `edit_file` succeeds, render a colored unified diff of the change alongside `✓ edit_file: path`. The data round-trip is documented in [`../archive/2026-06-08-spike-179.md`](../archive/2026-06-08-spike-179.md) (S1). |
 | 3.5 | Permission prompt enhancement. Style the approval prompt with box drawing, color the tool name, show a one-line summary of what the tool will do. |
 
 ### Phase 4 · Slash commands and navigation
@@ -88,8 +88,8 @@ Improve information display and add capabilities.
 |---|---|
 | 4.1 | Colored `/diff` output. Parse the git diff and render it with red/green coloring for removals and additions, similar to `delta` or `diff-so-fancy`. |
 | 4.2 | Pager for long outputs. When `/status`, `/config`, `/memory`, or `/diff` produce output longer than the terminal height, pipe through an internal pager (scroll with j/k/q) or external `$PAGER`. |
-| 4.3 | `/search` command. Add a command to search conversation history by keyword. Scope is documented in [`spike-179.md`](./spike-179.md) (S2). |
-| 4.4 | `/undo` command. Undo the last file edit by restoring from the `original_file` data in `write_file`/`edit_file` tool results. Data round-trip is documented in [`spike-179.md`](./spike-179.md) (S3). |
+| 4.3 | `/search` command. Add a command to search conversation history by keyword. Scope is documented in [`../archive/2026-06-08-spike-179.md`](../archive/2026-06-08-spike-179.md) (S2). |
+| 4.4 | `/undo` command. Undo the last file edit by restoring from the `original_file` data in `write_file`/`edit_file` tool results. Data round-trip is documented in [`../archive/2026-06-08-spike-179.md`](../archive/2026-06-08-spike-179.md) (S3). |
 | 4.5 | Interactive session picker. Replace the text-based `/session list` with an interactive fuzzy-filterable list (up/down arrows to select, enter to switch). |
 | 4.6 | Tab completion for tool arguments. Extend `SlashCommandHelper` to complete file paths after `/export`, model names after `/model`, session IDs after `/session switch`. |
 

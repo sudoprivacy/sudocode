@@ -8,17 +8,19 @@ In-flight plans for work currently being scoped, designed, or built.
 
 - [`active/tui-enhancement.md`](./active/tui-enhancement.md) — a phased
   approach to the terminal UI for `rusty-sudocode-cli`.
-- [`active/spike-179.md`](./active/spike-179.md) — investigation notes
-  for the three spike threads attached to issue #179
-  (diff-aware `edit_file` display, `/search` scope, `/undo` data
-  round-trip).
 
 ## Archive
 
 Plans whose scope has landed or been superseded. Kept for historical
 context.
 
-- [`archive/2026-05-20-log-optimization.md`](./archive/2026-05-20-log-optimization.md)
+- [`archive/2026-05-20-log-optimization.md`](./archive/2026-05-20-log-optimization.md) —
+  log system overhaul.
+- [`archive/2026-06-08-spike-179.md`](./archive/2026-06-08-spike-179.md) —
+  investigation for the three spike threads attached to issue #179
+  (diff-aware `edit_file` display, `/search` scope, `/undo` data
+  round-trip). Its answers feed Phases 3.4, 4.3, and 4.4 of the TUI
+  plan.
 
 ## Conventions
 

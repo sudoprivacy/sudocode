@@ -233,7 +233,33 @@ type RuntimePluginStateBuildOutput = (
     Vec<RuntimeToolDefinition>,
 );
 
+/// Enable ANSI/VT escape-sequence processing on the Windows console.
+///
+/// Much of the CLI emits raw ANSI escapes via `println!`/`write!` (banner,
+/// status bar, tool output, separators, etc.) instead of routing every byte
+/// through crossterm. On Windows the console has virtual-terminal processing
+/// disabled by default, so those escapes render as literal garbage (e.g.
+/// `[2m`, `[38;5;245m`, `[0m`). crossterm only flips the VT flag on its first
+/// command execution — which, via `Spinner::start()`, happens deep inside
+/// `run_turn`, long after the banner and other early output have already been
+/// written with raw escapes. Calling this at the very top of `main` triggers
+/// crossterm's `enable_vt_processing()` up front so all subsequent raw escapes
+/// are interpreted correctly. No-op on non-Windows platforms.
+#[cfg(windows)]
+fn enable_windows_ansi_support() {
+    // Side effect: on first call this enables ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    // on the current stdout console handle. We ignore the returned support flag.
+    let _ = crossterm::ansi_support::supports_ansi();
+}
+
+#[cfg(not(windows))]
+fn enable_windows_ansi_support() {}
+
 fn main() {
+    // Must run before any output so early raw ANSI escapes render correctly on
+    // the Windows console (see `enable_windows_ansi_support`).
+    enable_windows_ansi_support();
+
     if let Err(error) = run() {
         let message = error.to_string();
         // When --output-format json is active, emit errors as JSON so downstream

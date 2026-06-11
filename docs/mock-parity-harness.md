@@ -1,49 +1,50 @@
-# Mock LLM parity harness
+# Mock parity harness
 
-This milestone adds a deterministic Anthropic-compatible mock service plus a reproducible CLI harness for the Rust `scode` binary.
+The mock parity harness exercises the `scode` CLI end-to-end against a
+deterministic, Anthropic-compatible mock backend in a clean environment.
+It is the measurement vehicle for the e2e coverage goal described in
+[`../ROADMAP.md`](../ROADMAP.md) (Goal 1).
 
-## Artifacts
+## Components
 
-- `crates/mock-anthropic-service/` — mock `/v1/messages` service
-- `crates/rusty-sudocode-cli/tests/mock_parity_harness.rs` — end-to-end clean-environment harness
-- `scripts/run_mock_parity_harness.sh` — convenience wrapper
+- `rust/crates/mock-anthropic-service/` — the deterministic
+  `/v1/messages` mock service.
+- `rust/crates/rusty-sudocode-cli/tests/mock_parity_harness.rs` —
+  the end-to-end harness with isolated environment variables.
+- `rust/scripts/run_mock_parity_harness.sh` — the wrapper script for
+  local runs.
+- `rust/mock_parity_scenarios.json` — the scenario manifest.
 
-## Scenarios
-
-The harness runs these scripted scenarios against a fresh workspace and isolated environment variables:
-
-1. `streaming_text`
-2. `read_file_roundtrip`
-3. `grep_chunk_assembly`
-4. `write_file_allowed`
-5. `write_file_denied`
-6. `multi_tool_turn_roundtrip`
-7. `bash_stdout_roundtrip`
-8. `bash_permission_prompt_approved`
-9. `bash_permission_prompt_denied`
-10. `plugin_tool_roundtrip`
-
-## Run
+## Running the harness
 
 ```bash
 cd rust/
 ./scripts/run_mock_parity_harness.sh
 ```
 
-Behavioral checklist / parity diff:
+Behavioral diff against the scenario manifest:
 
 ```bash
 cd rust/
 python3 scripts/run_mock_parity_diff.py
 ```
 
-Scenario-to-PARITY mappings live in `mock_parity_scenarios.json`.
+## Running the mock service alone
 
-## Manual mock server
+For ad-hoc CLI runs against the mock:
 
 ```bash
 cd rust/
 cargo run -p mock-anthropic-service -- --bind 127.0.0.1:0
 ```
 
-The server prints `MOCK_ANTHROPIC_BASE_URL=...`; point `ANTHROPIC_BASE_URL` at that URL and use any non-empty `ANTHROPIC_API_KEY`.
+The server prints `MOCK_ANTHROPIC_BASE_URL=...` on startup. Point
+`ANTHROPIC_BASE_URL` at that URL and use any non-empty
+`ANTHROPIC_API_KEY` to drive `scode` through it.
+
+## Scenario manifest
+
+Scenario names, categories, and the parity dimensions they cover are
+maintained in `rust/mock_parity_scenarios.json`. New scenarios extend
+this manifest along with their corresponding `ScenarioCase` entries in
+the harness source.

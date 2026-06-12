@@ -210,10 +210,10 @@ struct CliStreamState {
     renderer: TerminalRenderer,
     glyph_state: ResponseGlyphState,
     buffer: VecDeque<AssistantEvent>,
+    prefetched_next: Option<Option<ApiStreamEvent>>,
     saw_stop: bool,
     has_content: bool,
     received_any_event: bool,
-    apply_stall_timeout: bool,
     done: bool,
     /// Clone of the provider client used to extract prompt cache at end of stream.
     client: ApiProviderClient,
@@ -382,13 +382,37 @@ impl AnthropicRuntimeClient {
         is_post_tool: bool,
         trace_id: Option<&str>,
     ) -> Result<AssistantEventStream, RuntimeError> {
-        let provider_stream = self
+        let mut provider_stream = self
             .client
             .stream_message(message_request, trace_id)
             .await
             .map_err(|error| {
                 RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
             })?;
+
+        let prefetched_next = if apply_stall_timeout {
+            match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, provider_stream.next_event()).await
+            {
+                Ok(inner) => match inner.map_err(|error| {
+                    RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
+                })? {
+                    Some(event) => Some(Some(event)),
+                    None => {
+                        return Err(RuntimeError::new(
+                            "post-tool stall: model stream ended before first event",
+                        ));
+                    }
+                },
+                Err(_elapsed) => {
+                    return Err(RuntimeError::new(
+                        "post-tool stall: model did not respond within timeout",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let received_any_event = prefetched_next.as_ref().is_some_and(|next| next.is_some());
 
         let state = CliStreamState {
             provider_stream,
@@ -403,10 +427,10 @@ impl AnthropicRuntimeClient {
             renderer: TerminalRenderer::new(),
             glyph_state: ResponseGlyphState::new(query_terminal_width()),
             buffer: VecDeque::new(),
+            prefetched_next,
             saw_stop: false,
             has_content: false,
-            received_any_event: false,
-            apply_stall_timeout,
+            received_any_event,
             done: false,
             client: self.client.clone(),
             fallback_request: Some(build_non_streaming_fallback_request(
@@ -427,25 +451,8 @@ impl AnthropicRuntimeClient {
                 }
 
                 loop {
-                    let next = if state.apply_stall_timeout && !state.received_any_event {
-                        match tokio::time::timeout(
-                            POST_TOOL_STALL_TIMEOUT,
-                            state.provider_stream.next_event(),
-                        )
-                        .await
-                        {
-                            Ok(inner) => inner.map_err(|error| {
-                                RuntimeError::new(format_user_visible_api_error(
-                                    &state.session_id,
-                                    &error,
-                                ))
-                            })?,
-                            Err(_elapsed) => {
-                                return Err(RuntimeError::new(
-                                    "post-tool stall: model did not respond within timeout",
-                                ));
-                            }
-                        }
+                    let next = if let Some(prefetched_next) = state.prefetched_next.take() {
+                        prefetched_next
                     } else {
                         state.provider_stream.next_event().await.map_err(|error| {
                             RuntimeError::new(format_user_visible_api_error(
@@ -531,7 +538,7 @@ pub(crate) fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
         .is_some_and(|message| message.role == MessageRole::Tool)
 }
 
-const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is complete. Send a final ordinary assistant message to the user in the user's language. Summarize the result and list generated or updated files if any are known. Do not call tools.";
+const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is complete. Send a final ordinary assistant message to the user in the user's language. Do not call tools. Only describe actions explicitly confirmed by the tool results. Only list files whose paths are explicitly present in the tool results. If the tool result only created a draft/helper script, say that the final deliverables have not been generated yet and identify the draft script path.";
 
 pub(crate) fn build_non_streaming_fallback_request(
     request: &MessageRequest,
@@ -1058,6 +1065,14 @@ mod tests {
         assert!(matches!(
             fallback.messages[1].content[0],
             InputContentBlock::Text { ref text } if text.contains("Do not call tools")
+        ));
+        assert!(matches!(
+            fallback.messages[1].content[0],
+            InputContentBlock::Text { ref text } if text.contains("Only describe actions explicitly confirmed by the tool results")
+        ));
+        assert!(matches!(
+            fallback.messages[1].content[0],
+            InputContentBlock::Text { ref text } if text.contains("final deliverables have not been generated yet")
         ));
     }
 

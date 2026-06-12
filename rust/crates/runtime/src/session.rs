@@ -70,6 +70,7 @@ pub struct SessionCompaction {
     pub count: u32,
     pub removed_message_count: usize,
     pub summary: String,
+    pub usage: Option<TokenUsage>,
 }
 
 /// Provenance recorded when a session is forked from another session.
@@ -312,12 +313,22 @@ impl Session {
     }
 
     pub fn record_compaction(&mut self, summary: impl Into<String>, removed_message_count: usize) {
+        self.record_compaction_with_usage(summary, removed_message_count, None);
+    }
+
+    pub fn record_compaction_with_usage(
+        &mut self,
+        summary: impl Into<String>,
+        removed_message_count: usize,
+        usage: Option<TokenUsage>,
+    ) {
         self.touch();
         let count = self.compaction.as_ref().map_or(1, |value| value.count + 1);
         self.compaction = Some(SessionCompaction {
             count,
             removed_message_count,
             summary: summary.into(),
+            usage,
         });
     }
 
@@ -955,6 +966,9 @@ impl SessionCompaction {
             "summary".to_string(),
             JsonValue::String(self.summary.clone()),
         );
+        if let Some(usage) = self.usage {
+            object.insert("usage".to_string(), usage_to_json(usage));
+        }
         Ok(JsonValue::Object(object))
     }
 
@@ -979,6 +993,9 @@ impl SessionCompaction {
             "summary".to_string(),
             JsonValue::String(self.summary.clone()),
         );
+        if let Some(usage) = self.usage {
+            object.insert("usage".to_string(), usage_to_json(usage));
+        }
         Ok(JsonValue::Object(object))
     }
 
@@ -990,6 +1007,7 @@ impl SessionCompaction {
             count: required_u32(object, "count")?,
             removed_message_count: required_usize(object, "removed_message_count")?,
             summary: required_string(object, "summary")?,
+            usage: object.get("usage").map(usage_from_json).transpose()?,
         })
     }
 }
@@ -1498,7 +1516,18 @@ mod tests {
         session
             .push_user_text("before")
             .expect("message should append");
-        session.record_compaction("summarized earlier work", 4);
+        session.record_compaction_with_usage(
+            "summarized earlier work",
+            4,
+            Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 2,
+                cost_units: Some(43_700),
+                cost_currency: Some(UsageCostCurrency::SudoPoint),
+            }),
+        );
         session.save_to_path(&path).expect("session should save");
 
         let restored = Session::load_from_path(&path).expect("session should load");
@@ -1508,6 +1537,31 @@ mod tests {
         assert_eq!(compaction.count, 1);
         assert_eq!(compaction.removed_message_count, 4);
         assert!(compaction.summary.contains("summarized"));
+        let usage = compaction.usage.expect("compaction usage");
+        assert_eq!(usage.total_tokens(), 17);
+        assert_eq!(usage.cost_units, Some(43_700));
+        assert_eq!(usage.cost_currency, Some(UsageCostCurrency::SudoPoint));
+    }
+
+    #[test]
+    fn loads_legacy_compaction_without_usage() {
+        let path = write_temp_session_file(
+            "legacy-compaction",
+            concat!(
+                "{\"type\":\"session_meta\",\"version\":1,\"session_id\":\"legacy-compaction\",\"created_at_ms\":1,\"updated_at_ms\":1}\n",
+                "{\"type\":\"compaction\",\"count\":1,\"removed_message_count\":4,\"summary\":\"summarized earlier work\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"blocks\":[{\"type\":\"text\",\"text\":\"after\"}]}}\n"
+            ),
+        );
+
+        let restored =
+            Session::load_from_path(&path).expect("legacy compaction session should load");
+        fs::remove_file(&path).expect("temp file should be removable");
+
+        let compaction = restored.compaction.expect("compaction metadata");
+        assert_eq!(compaction.count, 1);
+        assert_eq!(compaction.removed_message_count, 4);
+        assert_eq!(compaction.usage, None);
     }
 
     #[test]

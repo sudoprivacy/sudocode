@@ -1,4 +1,5 @@
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use crate::usage::{TokenUsage, UsageAggregation};
 
 const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n";
@@ -191,8 +192,10 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
         }
         k
     };
+    let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
     let removed = &session.messages[compacted_prefix_len..keep_from];
     let preserved = session.messages[keep_from..].to_vec();
+    let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
     let summary =
         merge_compact_summaries(existing_summary.as_deref(), &summarize_messages(removed));
     let formatted_summary = format_compact_summary(&summary);
@@ -208,7 +211,7 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction(summary.clone(), removed.len());
+    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
 
     CompactionResult {
         summary,
@@ -216,6 +219,28 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
         compacted_session,
         removed_message_count: removed.len(),
     }
+}
+
+fn aggregate_compaction_usage(
+    existing_usage: Option<TokenUsage>,
+    removed_messages: &[ConversationMessage],
+) -> Option<TokenUsage> {
+    let mut total = UsageAggregation::default();
+    let mut found = false;
+    if let Some(usage) = existing_usage {
+        total.push(usage);
+        found = true;
+    }
+    for message in removed_messages {
+        if message.role != MessageRole::Assistant {
+            continue;
+        }
+        if let Some(usage) = message.usage {
+            total.push(usage);
+            found = true;
+        }
+    }
+    found.then(|| total.finish())
 }
 
 fn compacted_summary_prefix_len(session: &Session) -> usize {
@@ -598,6 +623,7 @@ mod tests {
         get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use crate::usage::{TokenUsage, UsageCostCurrency};
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -680,17 +706,98 @@ mod tests {
     }
 
     #[test]
+    fn compaction_records_usage_for_removed_assistant_messages() {
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "two ".repeat(200),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 1,
+                    cache_read_input_tokens: 2,
+                    cost_units: Some(100),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "four ".repeat(200),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 6,
+                    cache_creation_input_tokens: 3,
+                    cache_read_input_tokens: 5,
+                    cost_units: Some(250),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let result = compact_session(
+            &session,
+            CompactionConfig {
+                preserve_recent_messages: 2,
+                max_estimated_tokens: 1,
+            },
+        );
+
+        let usage = result
+            .compacted_session
+            .compaction
+            .expect("compaction")
+            .usage
+            .expect("compacted usage");
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.cache_creation_input_tokens, 4);
+        assert_eq!(usage.cache_read_input_tokens, 7);
+        assert_eq!(usage.cost_units, Some(350));
+        assert_eq!(usage.cost_currency, Some(UsageCostCurrency::SudoPoint));
+        assert_eq!(result.compacted_session.messages[0].usage, None);
+    }
+
+    #[test]
     fn keeps_previous_compacted_context_when_compacting_again() {
         let mut initial_session = Session::new();
         initial_session.messages = vec![
             ConversationMessage::user_text("Investigate rust/crates/runtime/src/compact.rs"),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "I will inspect the compact flow.".to_string(),
-            }]),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "I will inspect the compact flow.".to_string(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    cache_creation_input_tokens: 1,
+                    cache_read_input_tokens: 2,
+                    cost_units: Some(100),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
             ConversationMessage::user_text("Also update rust/crates/runtime/src/conversation.rs"),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "Next: preserve prior summary context during auto compact.".to_string(),
-            }]),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "Next: preserve prior summary context during auto compact.".to_string(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 6,
+                    cache_creation_input_tokens: 3,
+                    cache_read_input_tokens: 5,
+                    cost_units: Some(250),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
         ];
         let config = CompactionConfig {
             preserve_recent_messages: 2,
@@ -701,12 +808,23 @@ mod tests {
         let mut follow_up_messages = first.compacted_session.messages.clone();
         follow_up_messages.extend([
             ConversationMessage::user_text("Please add regression tests for compaction."),
-            ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "Working on regression coverage now.".to_string(),
-            }]),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "Working on regression coverage now.".to_string(),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 30,
+                    output_tokens: 8,
+                    cache_creation_input_tokens: 4,
+                    cache_read_input_tokens: 7,
+                    cost_units: Some(400),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
         ]);
 
         let mut second_session = Session::new();
+        second_session.compaction = first.compacted_session.compaction.clone();
         second_session.messages = follow_up_messages;
         let second = compact_session(&second_session, config);
 
@@ -732,6 +850,17 @@ mod tests {
             &second.compacted_session.messages[1].blocks[0],
             ContentBlock::Text { text } if text.contains("Please add regression tests for compaction.")
         ));
+        let usage = second
+            .compacted_session
+            .compaction
+            .expect("second compaction")
+            .usage
+            .expect("merged compaction usage");
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.cache_creation_input_tokens, 4);
+        assert_eq!(usage.cache_read_input_tokens, 7);
+        assert_eq!(usage.cost_units, Some(350));
     }
 
     #[test]

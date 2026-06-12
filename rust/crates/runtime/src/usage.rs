@@ -280,6 +280,9 @@ impl UsageTracker {
     #[must_use]
     pub fn from_session(session: &Session) -> Self {
         let mut tracker = Self::new();
+        if let Some(usage) = session.compaction.as_ref().and_then(|value| value.usage) {
+            tracker.record(usage);
+        }
         for message in &session.messages {
             if let Some(usage) = message.usage {
                 tracker.record(usage);
@@ -330,7 +333,9 @@ mod tests {
         format_usd, parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCostCurrency,
         UsageTracker,
     };
-    use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use crate::session::{
+        ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction,
+    };
 
     #[test]
     fn adds_token_usage_fields() {
@@ -538,5 +543,50 @@ mod tests {
         let tracker = UsageTracker::from_session(&session);
         assert_eq!(tracker.turns(), 1);
         assert_eq!(tracker.cumulative_usage().total_tokens(), 8);
+    }
+
+    #[test]
+    fn reconstructs_usage_from_compaction_and_session_messages() {
+        let mut session = Session::new();
+        session.compaction = Some(SessionCompaction {
+            count: 1,
+            removed_message_count: 2,
+            summary: "summarized earlier work".to_string(),
+            usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 2,
+                cost_units: Some(100),
+                cost_currency: Some(UsageCostCurrency::SudoPoint),
+            }),
+        });
+        session.messages = vec![ConversationMessage {
+            role: MessageRole::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+            usage: Some(TokenUsage {
+                input_tokens: 5,
+                output_tokens: 2,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 0,
+                cost_units: Some(50),
+                cost_currency: Some(UsageCostCurrency::SudoPoint),
+            }),
+            model: None,
+        }];
+
+        let tracker = UsageTracker::from_session(&session);
+        assert_eq!(tracker.turns(), 2);
+        assert_eq!(tracker.current_turn_usage().total_tokens(), 8);
+        assert_eq!(tracker.cumulative_usage().input_tokens, 15);
+        assert_eq!(tracker.cumulative_usage().output_tokens, 6);
+        assert_eq!(tracker.cumulative_usage().total_tokens(), 25);
+        assert_eq!(tracker.cumulative_usage().cost_units, Some(150));
+        assert_eq!(
+            tracker.cumulative_usage().cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
     }
 }

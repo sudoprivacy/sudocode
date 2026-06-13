@@ -153,6 +153,27 @@ harness described in [`mock-parity-harness.md`](./mock-parity-harness.md).
 The harness runs against the `scode` binary in a clean environment and
 covers the scode-native testable feature surface.
 
+## Case study: first run of the standing rule
+
+The first design document produced under this rule —
+[`plans/active/bash-mode-design.md`](./plans/active/bash-mode-design.md)
+— made the value concrete:
+
+- Validated that our `Stdio::null()` choice for the bash spawn path is
+  functionally equivalent to CC's `pipe` choice for the current scope,
+  and recorded what the difference unlocks if we ever want interactive
+  passthrough.
+- Identified CC's `pwd -P >| <track_file>` pattern as the right
+  blueprint for the `!cd` cwd-persistence requirement in
+  [ROADMAP Goal 3](../ROADMAP.md).
+- Captured six adjacent CC patterns that are out of scope for the
+  current cycle but each carry a recorded trigger condition for when
+  we should revisit them.
+
+None of these would have surfaced from the CHANGELOG entries alone.
+Every design document for a feature with parity intent goes through
+the same loop.
+
 ## Quick reference: where each source enters a parity decision
 
 | Step | Source | Action |

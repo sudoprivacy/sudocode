@@ -21,6 +21,13 @@ source. CCB is not a cherry-pick source for our Rust tree; we read it
 for understanding only. The full triage flow, sync markers, and
 resolution taxonomy live in [`docs/parity.md`](./docs/parity.md).
 
+Every design document under `docs/plans/active/` that touches a feature
+with parity intent **leads** with a CCB validation section: which CCB
+files were read, what behavior was confirmed, what surprises were
+found, and what decisions follow. The first such document,
+[`docs/plans/active/bash-mode-design.md`](./docs/plans/active/bash-mode-design.md),
+is the shape future design docs follow.
+
 ## Verification
 
 The Rust workspace lives in `rust/`. From the repo root the standard

@@ -8,6 +8,11 @@ In-flight plans for work currently being scoped, designed, or built.
 
 - [`active/tui-enhancement.md`](./active/tui-enhancement.md) — a phased
   approach to the terminal UI for `rusty-sudocode-cli`.
+- [`active/bash-mode-design.md`](./active/bash-mode-design.md) — design
+  notes for the `!`-prefix bash mode under
+  [ROADMAP Goal 3](../../ROADMAP.md); the first design document
+  produced under the [`docs/parity.md`](../parity.md) standing rule
+  (CHANGELOG → grep CCB → align → resolution).
 
 ## Archive
 

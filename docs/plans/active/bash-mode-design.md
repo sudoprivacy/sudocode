@@ -26,45 +26,88 @@ claude-code, plus two `scode`-specific guarantees:
 
 ## CCB validation — concrete findings
 
-### stdin handling: `Stdio::null()` vs `pipe`
+### stdin handling: `Stdio::null()` vs `pipe` — landing on `pipe`
 
 CCB uses `child_process.spawn({ stdio: ['pipe', ...] })` for the bash
-tool path. We currently use `Stdio::null()` (PR #192). The two are
-**functionally equivalent for the current LLM-driven bash tool**:
-reading stdin in the child closes/EOFs immediately under both. The
-difference is forward-looking: CCB's `pipe` leaves the door open to a
-later keystroke relay for interactive children; `Stdio::null()` closes
-that door.
+tool path. PR #192 landed `Stdio::null()` on our side. The two are
+functionally equivalent for the current LLM-driven bash tool —
+reading stdin in the child closes/EOFs immediately under both — and
+the original `null` decision was made to minimise surface.
 
-For the current `!`-bash-mode scope, `Stdio::null()` is fine because:
+Ethan's call on 2026-06-13 overrides that choice: we mirror CCB and
+move to `Stdio::piped()`. Reasoning:
 
-- The mode runs single non-interactive commands per prompt
-  (`!ls`, `!git status`, `!cd /tmp`).
-- CCB itself does not implement keystroke relay either — `!vim` and
-  `!ssh` are non-functional in CC too.
-- Switching to `pipe` is only justified if we later commit to a true
-  interactive REPL passthrough, which is past the current goal.
+- The `pipe` choice is forward-compatible. Keystroke relay for a
+  future interactive `!`-mode v2 (passing user input through to
+  `!python`, `!ssh`, `!vim`-style commands) does not need a
+  re-architecture — only a parent-side writer.
+- Mirroring CCB at the spawn site keeps the standing rule's
+  invariant clean: when CCB and our implementation diverge, we
+  document why, and "we chose less surface area to start" is a
+  weaker reason than "we want the optionality CCB demonstrates."
+- Pairing `pipe` with the rearranger below preserves the
+  hang-prevention behaviour PR #192 was about.
 
-**Decision:** keep `Stdio::null()` in the spawn path. If a future scope
-commits to interactive passthrough, the swap is local to `prepare_tokio_command`
-in `runtime::bash`.
+**Decision:** switch `prepare_tokio_command` in `runtime::bash` from
+`Stdio::null()` to `Stdio::piped()` for stdin. The parent side closes
+its writer end immediately for the current scope — the child still
+sees EOF, exactly as today — but the spawn shape is now CCB-aligned.
 
-### `< /dev/null` injection for piped commands
+### `< /dev/null` injection for piped commands — adopting the rearranger
 
 CCB's `bashProvider.ts:152-154` rearranges piped commands to inject
 `< /dev/null` after the first command (e.g. transforming
-`rg foo | wc -l` into `rg foo < /dev/null | wc -l`). The mechanism is
-documented in CCB inline: when the spawn-level stdin is a `pipe`,
-piped commands inside `eval` inherit the spawn pipe on the first
-command's stdin, and a no-path `rg` waits on that pipe forever.
+`rg foo | wc -l` into `rg foo < /dev/null | wc -l`). The CCB inline
+comment captures the failure mode: when the spawn-level stdin is a
+`pipe`, piped commands inside `eval` inherit the spawn pipe on the
+first command's stdin, and a no-path `rg` waits on that pipe forever.
 
-Because we use `Stdio::null()` at spawn level, the entire `sh -lc`
-process tree sees `/dev/null` for stdin, and the same `rg foo | wc -l`
-runs without hanging. We do not need the rearranger as long as we keep
-the `Stdio::null()` decision above.
+Because the stdin decision above moves us to `pipe`, the rearranger
+ships with it. Without the rearranger, `pipe` regresses the hang
+behaviour that PR #192 fixed.
 
-**Decision:** no rearranger needed. If the spawn-level stdin ever
-becomes `pipe`, the rearranger lands together with that change.
+**Decision:** port `rearrangePipeCommand` into `runtime::bash`. The
+function inspects the command, detects the first `|` outside quoted
+segments, and inserts `< /dev/null` before it. Re-implement in Rust
+from understanding, no TS lift. Cover the cases CCB covers — quoted
+pipes (`echo "a|b"`) stay untouched, heredocs (`<<EOF`) and process
+substitution (`<( ... )`) keep their semantics.
+
+### Why we are not switching the underlying pipe to nexus-vfs DT_PIPE
+
+`nexus-vfs/rust/kernel/benches/syscall_bench.rs` records DT_PIPE at
+~246 ns round-trip versus host OS pipe at ~1–2 µs — roughly
+4–8× faster — for **in-process Rust ↔ Rust** byte handoffs.
+
+That win does not transfer to bash subprocess stdin, for two
+structural reasons:
+
+- bash is a foreign OS process. Its `read(stdin_fd)` is an honest host
+  syscall against an fd the kernel gave it. There is no path for
+  bash to call `kernel.pipe_read_nowait()` directly.
+- The only way to expose DT_PIPE bytes to a foreign process is via
+  nexus-fuse mount or LD_PRELOAD. Both add a userspace round-trip on
+  top of host pipe — strictly slower than a direct host pipe.
+
+`nexus/rust/services/src/acp/subprocess.rs` matches this reasoning
+in practice: it spawns its ACP CLI subprocess with normal host OS
+pipes, then `dup`s the parent-side fds and hands the duplicates to
+the kernel as stdio-backed DT_PIPE entries. The DT_PIPE wrapping is
+for **VFS observability of the ACP traffic**, not for raw throughput.
+The child still uses host pipes.
+
+**Decision:** the bash subprocess pipe is host OS pipe. The DT_PIPE
+optionality is reserved for two future scopes:
+
+- ACP-style stdio observability for `!`-mode commands (parent-side
+  wrap, child unchanged) — only when we want audit / replay /
+  cross-session inspection of bash output.
+- Any future Rust ↔ Rust in-process pipe inside sudocode that does
+  not cross a process boundary — there DT_PIPE is the right default.
+
+A regression benchmark for the host pipe path lives in
+[`rust/crates/runtime/benches/bash_pipe_throughput.rs`](../../../rust/crates/runtime/benches/bash_pipe_throughput.rs)
+so any change to the spawn shape surfaces in CI.
 
 ### cwd persistence: the `pwd -P >| <track_file>` pattern
 

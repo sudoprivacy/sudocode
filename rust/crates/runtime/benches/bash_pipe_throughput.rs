@@ -38,12 +38,15 @@ const PAYLOAD: &[u8] =
 fn bench_host_pipe_roundtrip(c: &mut Criterion) {
     let (read_end, write_end) = pipe().expect("create pipe");
     let read_fd = read_end.as_raw_fd();
-    let write_fd = write_end.as_raw_fd();
     let mut read_buf = [0u8; 128];
 
     c.bench_function("host_pipe_roundtrip", |b| {
         b.iter(|| {
-            write(write_fd, PAYLOAD).expect("write");
+            // nix 0.29 quirk: `write` takes `AsFd`, `read` takes `RawFd`.
+            // Keep the `OwnedFd` reference for `write` and the raw fd for
+            // `read`. The OwnedFds outlive the closure, so the raw fd
+            // stays valid.
+            write(&write_end, PAYLOAD).expect("write");
             let n = read(read_fd, &mut read_buf).expect("read");
             black_box(n);
             black_box(&read_buf);

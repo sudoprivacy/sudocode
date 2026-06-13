@@ -24,6 +24,7 @@
 
 use std::hint::black_box;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -36,12 +37,14 @@ const PAYLOAD: &[u8] =
 
 fn bench_host_pipe_roundtrip(c: &mut Criterion) {
     let (read_end, write_end) = pipe().expect("create pipe");
+    let read_fd = read_end.as_raw_fd();
+    let write_fd = write_end.as_raw_fd();
     let mut read_buf = [0u8; 128];
 
     c.bench_function("host_pipe_roundtrip", |b| {
         b.iter(|| {
-            write(&write_end, PAYLOAD).expect("write");
-            let n = read(&read_end, &mut read_buf).expect("read");
+            write(write_fd, PAYLOAD).expect("write");
+            let n = read(read_fd, &mut read_buf).expect("read");
             black_box(n);
             black_box(&read_buf);
         });

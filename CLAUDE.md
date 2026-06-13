@@ -11,6 +11,16 @@ Guidance for agents working in this repository.
 - Update existing files intentionally; edit content rather than replace
   whole files unless the file is being restructured.
 
+## Parity work: standing rule
+
+When making a parity decision against `anthropics/claude-code`, **always**
+also check `claude-code-best/claude-code` (CCB) — the TypeScript
+behavioral reference — before settling the resolution. CHANGELOG entries
+are usually too coarse on their own; CCB converts them into readable
+source. CCB is not a cherry-pick source for our Rust tree; we read it
+for understanding only. The full triage flow, sync markers, and
+resolution taxonomy live in [`docs/parity.md`](./docs/parity.md).
+
 ## Verification
 
 The Rust workspace lives in `rust/`. From the repo root the standard

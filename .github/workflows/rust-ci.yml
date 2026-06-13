@@ -17,6 +17,7 @@ on:
       - CLAUDE.md
       - CONTRIBUTING.md
       - LAST_PARITY_SYNC_COMMIT
+      - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
   pull_request:
@@ -33,6 +34,7 @@ on:
       - CLAUDE.md
       - CONTRIBUTING.md
       - LAST_PARITY_SYNC_COMMIT
+      - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
   workflow_dispatch:

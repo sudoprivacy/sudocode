@@ -40,5 +40,12 @@ walkdir = "2"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["poll", "process"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bash_pipe_throughput"
+harness = false
+
 [lints]
 workspace = true

@@ -95,6 +95,16 @@ bash-mode semantics for muscle-memory parity.
   LLM-driven `bash` tool path, so the active permission mode applies
   identically.
 
+Implementation design, including the three CCB-validated patterns to
+adopt (`pwd -P >| <track_file>` for cwd persistence, alignment with
+CCB's spawn shape, and the PowerShell flag parity already in place),
+plus the six CCB patterns observed but deferred until their triggering
+features land, is in
+[`docs/plans/active/bash-mode-design.md`](./docs/plans/active/bash-mode-design.md).
+This is the first artifact produced under the
+[`docs/parity.md`](./docs/parity.md) standing rule
+(CHANGELOG → grep CCB → align understanding → resolution).
+
 ## Working agreement on this document
 
 Scope changes update this document in the same PR. External

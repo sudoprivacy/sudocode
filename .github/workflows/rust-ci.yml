@@ -91,6 +91,18 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+  bench-compile:
+    name: cargo bench --no-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Compile benches (catches API drift without paying full sample cost)
+        run: cargo bench --workspace --no-run
+
   clippy-workspace:
     name: cargo clippy --workspace
     runs-on: ubuntu-latest

@@ -48,14 +48,26 @@ Every feature gap between `scode` and `anthropics/claude-code` carries a
 written resolution — `[BUILD]` / `[CHERRY-PICK]` / `[SKIP]` / `[N/A]` /
 `[OBSERVE]` — with a one-line rationale.
 
-The reference target is `anthropics/claude-code`. Comparison runs against
-public release notes, the published npm bundle's tool and slash
-surfaces, and official documentation, anchored to a tracked sync marker.
-The mechanism is described in [`docs/parity.md`](./docs/parity.md).
+Three reference sources, with distinct roles:
 
-`ultraworkers/claw-code` is a cherry-pick source for Rust-side
-implementations of overlapping features. Their work is treated as
-optional input rather than upstream-of-truth.
+- **Source of truth** — `anthropics/claude-code` itself. The source is
+  private; the signal comes from the public CHANGELOG, the npm bundle's
+  tool and slash surfaces, and the official docs.
+- **Behavioral reference** — `claude-code-best/claude-code` (CCB), a
+  TypeScript reconstruction of Claude Code that aims for high
+  source-level fidelity. We **always** open CCB while making a parity
+  decision: it converts CHANGELOG entries into readable source so we
+  can confirm what CC actually does. We read it; we do not lift its
+  TypeScript into our Rust tree.
+- **Cherry-pick source** — `ultraworkers/claw-code`, a Rust port we can
+  lift commits from when the feature shape overlaps. Optional input,
+  not upstream-of-truth.
+
+The mechanism, the standing assumption about CCB, the mandatory
+"CHANGELOG → grep CCB → align understanding" loop, and the two sync
+markers (`LAST_PARITY_SYNC_COMMIT` for claw-code,
+`LAST_CCB_REF_VERSION` for CCB) all live in
+[`docs/parity.md`](./docs/parity.md).
 
 ### Goal 3 · Ship features real users miss
 

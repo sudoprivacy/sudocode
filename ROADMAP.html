@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<!--
+  Sudo Code Roadmap — single SSOT plan file.
+  This is the canonical plan. Edit this file; publish to ShareOne with
+  the curl command in CLAUDE.md when you want to mirror it externally.
+  Self-contained: no build step, no JS bundler, no Markdown
+  transformation. Styled to render well both as `file://` open and as
+  a ShareOne-hosted page.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudo Code Roadmap</title>
+<style>
+  :root {
+    --bg: #0f172a;          /* page background — slate-900 */
+    --surface: #1e293b;     /* cards / TOC / table header — slate-800 */
+    --surface-alt: #172033; /* zebra row — between bg and surface */
+    --fg: #e2e8f0;          /* body text — slate-200 */
+    --muted: #94a3b8;       /* meta / footer — slate-400 */
+    --accent: #60a5fa;      /* links / h3 — blue-400 (softer than 600 on dark) */
+    --accent-dim: rgba(96, 165, 250, 0.12); /* callout fill */
+    --warn: rgba(251, 191, 36, 0.18);       /* callout-warn fill */
+    --warn-fg: #fcd34d;     /* amber-300 — readable on the tinted fill */
+    --code-bg: #1e293b;
+    --border: #334155;      /* slate-700 */
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 60px 28px 100px;
+    line-height: 1.65;
+    font-size: 16px;
+  }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  h2 {
+    font-size: 22px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 2px solid var(--border);
+    color: var(--fg);
+  }
+  h3 { font-size: 18px; margin-top: 32px; color: var(--accent); }
+  h4 { font-size: 16px; margin-top: 24px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .callout {
+    background: var(--accent-dim);
+    border-left: 4px solid var(--accent);
+    padding: 14px 20px;
+    margin: 20px 0;
+    border-radius: 4px;
+  }
+  .callout-warn { background: var(--warn); border-left-color: #f59e0b; color: var(--warn-fg); }
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; font-size: 13px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--surface); font-weight: 600; color: var(--fg); }
+  tbody tr:nth-child(even) td { background: var(--surface-alt); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+  ul li, ol li { margin: 4px 0; }
+  blockquote {
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+    padding: 4px 16px;
+    margin: 16px 0;
+  }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 24px 0 32px;
+  }
+  .toc ol { margin: 8px 0 0 16px; padding: 0; }
+  .toc li { margin: 4px 0; }
+  a { color: var(--accent); }
+  a:hover { text-decoration: underline; }
+  footer { margin-top: 80px; color: var(--muted); font-size: 13px; text-align: center; }
+  pre.mermaid {
+    background: none;
+    border: none;
+    text-align: center;
+    padding: 20px 0;
+    visibility: hidden;
+  }
+  pre.mermaid[data-processed] { visibility: visible; }
+</style>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+
+<h1>Sudo Code Roadmap</h1>
+<div class="meta">Single SSOT plan file. Edit this file; publish to ShareOne when mirroring.</div>
+
+<div class="callout">
+  Project goals plus the active design detail for each goal live here.
+  Reference docs that explain mechanism — <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>,
+  <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a> —
+  remain separate and are linked from this file. Day-to-day work
+  (tasks, sprint boards, schedules) lives in PRs, issues, and 1:1 notes.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#what-sudo-code-is">What sudo code is</a></li>
+    <li><a href="#north-star">North star</a></li>
+    <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
+    <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
+    <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
+    <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
+    <li><a href="#working-agreement">Working agreement</a></li>
+    <li><a href="#references">Reference docs</a></li>
+  </ol>
+</div>
+
+<h2 id="what-sudo-code-is">What sudo code is</h2>
+
+<p><code>sudocode</code> (binary: <code>scode</code>) is a Rust-native ACP engine
+for coding agents — the hacker-facing CLI half of the sudo* family.</p>
+
+<table>
+  <thead>
+    <tr><th></th><th>sudowork</th><th>sudocode</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Audience</td><td>Non-technical end users</td><td>Developers, hackers, machines</td></tr>
+    <tr><td>Surface</td><td>GUI / Electron</td><td>CLI / headless / ACP</td></tr>
+    <tr><td>Defaults</td><td>Safe, hand-held, friendly copy</td><td>Composable, terse, full power</td></tr>
+    <tr><td>Relationship</td><td colspan="2">sudowork uses sudocode as one of its execution engines</td></tr>
+  </tbody>
+</table>
+
+<p>The two are tuned for different audiences. The same capability can land
+safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
+
+<h2 id="north-star">North star</h2>
+
+<ul>
+  <li><strong>Rust-native</strong> — single binary, deterministic shutdown, lean footprint.</li>
+  <li><strong>Model-agnostic</strong> — Anthropic, OpenAI, xAI, Gemini, OAuth subscriptions, arbitrary proxy backends.</li>
+  <li><strong>Headless-first</strong> — ACP over stdio and WebSocket; embeddable as "agent as a service".</li>
+  <li><strong>Safe by design</strong> — explicit permission modes plus a Linux user-namespace sandbox.</li>
+</ul>
+
+<h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
+
+<p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
+of the scode-native testable feature surface, green on every
+<code>main</code> commit of sudocode CI.</p>
+
+<h3>Test infrastructure — two layers, one of them counts</h3>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Purpose</th><th>Counts toward 90%?</th><th>Source</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>pty-expect</code> PTY harness</td>
+      <td>Human-fidelity. Drives <code>scode</code> through a real PTY
+      (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
+      either the raw stream or a VT100-rendered view. Catches what a
+      real user sees: REPL UX, signals, tab completion, ANSI redraw,
+      cursor placement.</td>
+      <td><strong>Yes — this is the coverage measure.</strong></td>
+      <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
+    </tr>
+    <tr>
+      <td>Mock parity harness</td>
+      <td>Fast, in-process. Scripts a mock Anthropic backend and
+      asserts on the byte stream <code>scode</code> produces. Catches
+      API integration / tool dispatch / streaming regressions without
+      any TTY.</td>
+      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
+  when <code>pty-expect</code> exercises it end-to-end on
+  <code>main</code> CI. The mock parity harness still runs on every
+  PR as a required gate and catches API / dispatch / streaming
+  regressions early — but it tests the lower half of the stack
+  ("does <code>scode</code> dispatch and stream correctly?") and
+  not the upper half a user actually sees ("does the REPL render it
+  correctly, does Ctrl+C interrupt cleanly, does the prompt redraw
+  without flicker?"). Those upper-half failures are what the 90%
+  goal is about, so only the PTY layer earns coverage credit.
+</div>
+
+<p>This makes the 90% target a strictly higher bar than the previous
+"at least one harness exercises it" rule. It mirrors the same
+anthropomorphic-fidelity argument that drives ai-dev-browser's
+real-Chromium + real-mouse stance for sudowork: the only way to
+catch the failure modes a human will hit is to exercise the same
+surface the human exercises.</p>
+
+<h4>Test layer policy: PTY is the bar, unit tests are forbidden</h4>
+
+<p>Most engineering orgs reach for a three-layer pyramid by default
+(unit / integration / e2e). We deliberately do not. The product
+owner's empirical observation, drawn from a year of agent-driven
+development across multiple projects: <strong>unit tests have not
+caught a single real bug in that window</strong>. The bugs that
+shipped were caught either by the e2e harness or by humans using
+the product. Unit tests in this codebase have so far functioned as
+overhead — pure re-statements of the implementation, dragged
+alongside every refactor, paying for themselves in neither caught
+bugs nor refactor confidence.</p>
+
+<p>So the policy for sudocode is:</p>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Status</th><th>When to write</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>PTY (pty-expect)</strong></td>
+      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td>Every user-facing feature</td>
+    </tr>
+    <tr>
+      <td>Integration (mock harness)</td>
+      <td>Optional — debug accelerator, not a gate</td>
+      <td>When a PTY failure's root cause sits behind a wide blast radius (LLM transport, runtime state machine, ACP wire) and shrinking the bisection distance is worth the file</td>
+    </tr>
+    <tr>
+      <td>Unit</td>
+      <td><strong>Forbidden by rule</strong></td>
+      <td>Don't write them. PRs that add unit tests will be asked to remove them. There is no "exceptional case" carve-out — the rule is the rule, intentionally bright-line so it doesn't erode case by case.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h5>Why we trust this — fast triage replaces fine-grained tests</h5>
+
+<p>The defense most often given for unit tests is failure
+attribution: "PTY tests just say <em>the REPL is wrong somewhere</em>;
+unit tests point at a line." That defense collapses if PTY failures
+are themselves fast to triage. Our substitute is <strong>trace
+quality</strong>:</p>
+
+<ul>
+  <li>Structured logs across runtime / API / tool dispatch so a PTY
+  failure carries enough breadcrumbs to walk back to the offending
+  layer in minutes, not unit-test-precision seconds.</li>
+  <li>Mock harness available on demand for the wide-blast-radius
+  cases (it stays opt-in, not a CI gate, but it lives in the repo).</li>
+  <li>The agent (sudocode itself) doing the debugging — the assumed
+  developer workflow on this project is agent-assisted, and an
+  agent reading a structured trace converges as fast on root cause
+  as a human reading a failing unit test name.</li>
+</ul>
+
+<h5>What we give up — explicit, not hidden</h5>
+
+<ul>
+  <li><code>cargo test --workspace</code> wall-clock no longer
+  benefits from a unit layer. The runtime is dominated by PTY
+  tests. We accept this; sub-second inner-loop feedback is not the
+  workflow we are optimising for.</li>
+  <li>Rare error branches (panic recovery, edge-case config parse
+  errors) get exercised only when a PTY scenario reaches them.
+  Branches the PTY scenarios never touch will silently rot. We
+  accept this; if those branches never trip in real use either,
+  the rot is harmless, and if they do trip we will see it as a
+  user-visible failure and write a PTY scenario.</li>
+  <li>Internal refactors lose fine-grained behaviour verification.
+  We accept this; PTY tests describe the contract the user actually
+  cares about, and refactors that don't move the user-visible
+  contract are exactly the ones unit tests would have re-stated
+  rather than verified.</li>
+</ul>
+
+<p>This is a deliberate, owner-blessed deviation from the standard
+testing pyramid, and the rule is bright-line on purpose. "We'll
+allow it just this once because the input space is combinatorial"
+is exactly how the unit layer reappears, accumulates, and starts
+costing refactor velocity again. So: no unit tests, no exceptions.
+If a future maintainer wants to reopen this, the burden is a
+concrete bug that a unit test would have caught and a PTY scenario
+would not — and a separate ROADMAP edit to change the rule before
+the test lands, not the test landing first.</p>
+
+<h3>Feature inventory</h3>
+
+<p>Mirrored from the original sudowork-side coverage tracker
+(<code>sudowork/docs/scode-e2e-coverage.md</code>) and <strong>status
+reset</strong> for the new sudocode-side harness. The previous sudowork-YAML
+coverage drove features through the sudowork UI (mouse / Electron / ACP);
+the new infra exercises them inside the sudocode crate itself, so
+coverage starts fresh and is tracked here as the single source.</p>
+
+<p>Status values:</p>
+<ul>
+  <li><strong>Covered</strong> — at least one sudocode-side harness test exists on <code>main</code>.</li>
+  <li><strong>Gap</strong> — needs a test.</li>
+  <li><strong>N/A</strong> — out of scope for <code>scode</code> itself.</li>
+</ul>
+
+<h4>1. Core conversation</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Single-turn prompt</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Multi-turn context</td><td>Gap</td><td>—</td><td>Follow-up references prior turn</td></tr>
+    <tr><td>Streaming response</td><td>Gap</td><td>—</td><td>Implicit in every interaction</td></tr>
+    <tr><td>Graceful cancel mid-execution</td><td>Gap</td><td>—</td><td>Stop during sleep, verify context preserved</td></tr>
+    <tr><td>Agent switching (Sudoclaw ↔ scode)</td><td>N/A</td><td>—</td><td>sudowork-UI concern</td></tr>
+  </tbody>
+</table>
+
+<h4>2. Tool usage — file operations</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>read_file</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>write_file</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>edit_file</code></td><td>Gap</td><td>—</td><td>Write → edit → read back</td></tr>
+    <tr><td><code>glob_search</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>grep_search</code></td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>3. Tool usage — execution</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>bash</code></td><td>Gap</td><td>—</td><td>Run script, echo, sleep</td></tr>
+    <tr><td>REPL (persistent Python/JS subprocess)</td><td>Gap</td><td>—</td><td>Different from one-shot bash</td></tr>
+    <tr><td>PowerShell</td><td>Gap</td><td>—</td><td>Windows-only path</td></tr>
+    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td>Gap</td><td>—</td><td>Needs <code>.ipynb</code> fixture</td></tr>
+  </tbody>
+</table>
+
+<h4>4. Tool usage — search &amp; web</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>WebSearch</code></td><td>Gap</td><td>—</td><td>Searches current info, verifies results</td></tr>
+    <tr><td><code>WebFetch</code> (URL → extract)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>5. Tool usage — code intelligence</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>LSP <code>goToDefinition</code></td><td>Gap (L2)</td><td>—</td><td>Needs mock language server</td></tr>
+    <tr><td>LSP <code>findReferences</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>hover</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>documentSymbol</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td><code>ToolSearch</code></td><td>Gap</td><td>—</td><td>Search for tools by keyword</td></tr>
+  </tbody>
+</table>
+
+<h4>6. Tool usage — planning &amp; structured</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td>Gap</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
+    <tr><td><code>TodoWrite</code></td><td>Gap</td><td>—</td><td>Task list management</td></tr>
+    <tr><td><code>AskUserQuestion</code></td><td>Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
+    <tr><td><code>StructuredOutput</code></td><td>Gap</td><td>—</td><td>Return structured data</td></tr>
+    <tr><td><code>Sleep</code></td><td>Gap</td><td>—</td><td>Low priority</td></tr>
+  </tbody>
+</table>
+
+<h4>7. Tool usage — background &amp; parallel</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>Agent</code> (sub-agents)</td><td>Gap (L2)</td><td>—</td><td>Launch parallel sub-agents</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td>Gap (L2)</td><td>—</td><td>Background task management</td></tr>
+    <tr><td>Workers (boot, trust, prompt)</td><td>Gap (L2)</td><td>—</td><td>Worker lifecycle</td></tr>
+    <tr><td>Teams (parallel sub-agents)</td><td>Gap (L2)</td><td>—</td><td>Team coordination</td></tr>
+    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td>Gap (L2)</td><td>—</td><td>Needs wall-clock or fake timer</td></tr>
+  </tbody>
+</table>
+
+<h4>8. Git workflow</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/commit</code> (generate + create)</td><td>Gap</td><td>—</td><td>Init repo → write → commit → verify log</td></tr>
+    <tr><td><code>/pr</code> (draft / create PR)</td><td>Gap</td><td>—</td><td><strong>P0</strong> — core workflow</td></tr>
+    <tr><td><code>/diff</code> (show changes)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/issue</code> (create GitHub issue)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/review</code> (code review)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>9. Session management</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Session auto-save</td><td>Gap</td><td>—</td><td>Persists across turns</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td>Gap</td><td>—</td><td>send → close → resume → verify</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>10. Configuration &amp; discovery</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/model</code> (switch model)</td><td>Gap</td><td>—</td><td>Show current + switch</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td>Gap</td><td>—</td><td>read-only / workspace-write / danger</td></tr>
+    <tr><td><code>/auth</code> (switch auth mode)</td><td>N/A</td><td>—</td><td>sudowork credential injection concern</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/agents</code> (list)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/mcp</code> (list / show servers)</td><td>Gap (L2)</td><td>—</td><td>Plugin lifecycle</td></tr>
+    <tr><td><code>/plugins</code> (manage)</td><td>Gap (L2)</td><td>—</td><td>Plugin install/enable/disable</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>11. Diagnostics</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/doctor</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/status</code></td><td>Gap</td><td>—</td><td>Model, permissions, usage</td></tr>
+    <tr><td><code>/sandbox</code></td><td>Gap</td><td>—</td><td>Isolation status</td></tr>
+    <tr><td><code>/cost</code> (token usage)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Prompt-response token usage</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>12. Auth</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Subscription auth (CC OAuth)</td><td>Gap</td><td>—</td><td>Uses injected <code>CLAUDE_CODE_OAUTH_TOKEN</code></td></tr>
+    <tr><td>Proxy auth (sudorouter)</td><td>Gap</td><td>—</td><td>Via <code>ANTHROPIC_API_KEY</code> injection</td></tr>
+    <tr><td>API key auth</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>scode login</code> (CLI)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>scode logout</code> (CLI)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h3>Coverage denominator (the 90% target)</h3>
+
+<table>
+  <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In current denominator</th></tr></thead>
+  <tbody>
+    <tr><td>Core Conversation</td><td>5</td><td>1</td><td>0</td><td>4</td></tr>
+    <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td></tr>
+    <tr><td>Search &amp; Web</td><td>2</td><td>0</td><td>0</td><td>2</td></tr>
+    <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td></tr>
+    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Session Management</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>8</td><td>1</td><td>2</td><td>5</td></tr>
+    <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><th>Total</th><th>59</th><th>2</th><th>11</th><th>46</th></tr>
+  </tbody>
+</table>
+
+<p><strong>90% target = 42 features covered</strong> out of the 46 in-denominator
+features. <code>L2 deferred</code> items are real surface but need heavier
+setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
+but do not count toward the Q2 number.</p>
+
+<h3>Priority sequencing</h3>
+
+<table>
+  <thead><tr><th>Tier</th><th>Items</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>P0 — core differentiators</strong></td>
+      <td><code>/commit</code>, <code>/pr</code> (git workflow);
+      EnterPlanMode/ExitPlanMode → execute; <code>edit_file</code>
+      text-replace verification; <strong>true async cancel</strong>
+      (interrupt in-flight API mid-request, not only between iterations)</td>
+    </tr>
+    <tr>
+      <td><strong>P1 — high-value tools</strong></td>
+      <td><code>WebFetch</code>, sub-agents (<code>Agent</code>),
+      background tasks (<code>TaskCreate</code> + <code>TaskGet</code>)
+      — these three are L2 deferred but earn early follow-up</td>
+    </tr>
+    <tr>
+      <td><strong>P2 — session &amp; config</strong></td>
+      <td><code>/resume</code>, permission modes, <code>/doctor</code>
+      through the REPL</td>
+    </tr>
+    <tr>
+      <td><strong>P3 — advanced (post-Q2)</strong></td>
+      <td>LSP code navigation, REPL persistent sessions, cron
+      scheduling, MCP / Skills / Plugins lifecycle</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The async-cancel item under P0 is a <em>behavioural</em> P0, not just a
+coverage gap: today the runtime only checks
+<code>hook_abort_signal.is_aborted()</code> between API call iterations,
+so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
+not interrupt the request — it takes effect only on the next loop
+iteration. Cancel needs to flow through to the streaming response path
+(e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
+<code>sleep 999</code> + API call is truly interruptible.</p>
+
+<h2 id="goal-2">Goal 2 · claude-code parity</h2>
+
+<p>Every feature gap between <code>scode</code> and
+<code>anthropics/claude-code</code> carries a written resolution —
+<code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> /
+<code>[N/A]</code> / <code>[OBSERVE]</code> — with a one-line rationale.</p>
+
+<p>Three reference sources, with distinct roles:</p>
+
+<ul>
+  <li><strong>Source of truth</strong> —
+  <code>anthropics/claude-code</code> itself. The source is private;
+  the signal comes from the public CHANGELOG, the npm bundle's tool
+  and slash surfaces, and the official docs.</li>
+  <li><strong>Behavioral reference</strong> —
+  <code>claude-code-best/claude-code</code> (CCB), a TypeScript
+  reconstruction of Claude Code that aims for high source-level
+  fidelity. We <strong>always</strong> open CCB while making a parity
+  decision: it converts CHANGELOG entries into readable source so we
+  can confirm what CC actually does. We read it; we do not lift its
+  TypeScript into our Rust tree.</li>
+  <li><strong>Cherry-pick source</strong> —
+  <code>ultraworkers/claw-code</code>, a Rust port we can lift
+  commits from when the feature shape overlaps. Optional input, not
+  upstream-of-truth.</li>
+</ul>
+
+<p>The mechanism, the standing assumption about CCB, the mandatory
+"CHANGELOG → grep CCB → align understanding" loop, and the two sync
+markers (<code>LAST_PARITY_SYNC_COMMIT</code> for claw-code,
+<code>LAST_CCB_REF_VERSION</code> for CCB) all live in
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>. The current
+sync cycle report is at
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+
+<h2 id="goal-3">Goal 3 · Ship features real users miss</h2>
+
+<p>When an actual user — internal or external — hits a sharp edge in
+<code>scode</code> that <code>claude-code</code> has already smoothed,
+the feature lands here as a committed item.</p>
+
+<table>
+  <thead><tr><th>Feature</th><th>Source signal</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>!</code> bash mode (inline shell from prompt)</td>
+      <td>武鹏 — 2026-06-10 (内部用户)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3><code>!</code> bash mode — design</h3>
+
+<p>The standing rule on parity work (every parity decision opens CCB and
+confirms what CC actually does, documented in
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> and
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>) was first run for this
+feature against CCB <code>@91cffe16</code> on 2026-06-13.</p>
+
+<h4>What <code>!</code> bash mode is</h4>
+
+<p>A prompt that starts with <code>!</code> bypasses the LLM round-trip
+and dispatches the rest of the line directly to a shell — <code>!ls</code>,
+<code>!git status</code>, <code>!cd path</code>, and so on. Muscle-memory
+parity with claude-code plus two scode-specific guarantees:</p>
+
+<ul>
+  <li>The resolved <code>pwd</code> is displayed on every bash-mode prompt redraw.</li>
+  <li><code>!cd</code> updates the session <code>cwd</code>; subsequent
+  prompt-driven and LLM-driven tool calls share the same working
+  directory.</li>
+  <li>Every <code>!</code> command routes through the same validators
+  as the LLM-driven <code>bash</code> tool path, so the active
+  permission mode applies identically.</li>
+</ul>
+
+<h4>CCB validation — concrete findings</h4>
+
+<h4>stdin handling: <code>Stdio::null()</code> vs <code>pipe</code> — landing on <code>pipe</code></h4>
+
+<p>CCB uses <code>child_process.spawn({ stdio: ['pipe', ...] })</code> for
+the bash tool path. PR #192 landed <code>Stdio::null()</code> on our
+side. The two are functionally equivalent for the current LLM-driven
+bash tool — reading stdin in the child closes/EOFs immediately under
+both — and the original <code>null</code> decision was made to minimise
+surface.</p>
+
+<p>Ethan's call on 2026-06-13 overrides: mirror CCB and move to
+<code>Stdio::piped()</code>. Reasoning:</p>
+
+<ul>
+  <li>The <code>pipe</code> choice is forward-compatible. Keystroke
+  relay for a future interactive <code>!</code>-mode v2 (passing user
+  input through to <code>!python</code>, <code>!ssh</code>,
+  <code>!vim</code>-style commands) does not need a re-architecture —
+  only a parent-side writer.</li>
+  <li>Mirroring CCB at the spawn site keeps the standing rule's
+  invariant clean.</li>
+  <li>Pairing <code>pipe</code> with the rearranger below preserves
+  the hang-prevention behaviour PR #192 was about.</li>
+</ul>
+
+<div class="callout">
+  <strong>Decision:</strong> switch <code>prepare_tokio_command</code>
+  in <code>runtime::bash</code> from <code>Stdio::null()</code> to
+  <code>Stdio::piped()</code> for stdin. The parent side closes its
+  writer end immediately for the current scope — the child still sees
+  EOF, exactly as today — but the spawn shape is now CCB-aligned.
+</div>
+
+<h4><code>&lt; /dev/null</code> injection for piped commands — adopting the rearranger</h4>
+
+<p>CCB's <code>bashProvider.ts:152-154</code> rearranges piped commands
+to inject <code>&lt; /dev/null</code> after the first command (e.g.
+transforming <code>rg foo | wc -l</code> into
+<code>rg foo &lt; /dev/null | wc -l</code>). The CCB inline comment
+captures the failure mode: when the spawn-level stdin is a
+<code>pipe</code>, piped commands inside <code>eval</code> inherit the
+spawn pipe on the first command's stdin, and a no-path <code>rg</code>
+waits on that pipe forever.</p>
+
+<p>Because the stdin decision above moves us to <code>pipe</code>, the
+rearranger ships with it. Without the rearranger, <code>pipe</code>
+regresses the hang behaviour that PR #192 fixed.</p>
+
+<div class="callout">
+  <strong>Decision:</strong> port <code>rearrangePipeCommand</code>
+  into <code>runtime::bash</code>. The function inspects the command,
+  detects the first <code>|</code> outside quoted segments, and
+  inserts <code>&lt; /dev/null</code> before it. Re-implement in Rust
+  from understanding, no TS lift. Cover the cases CCB covers — quoted
+  pipes (<code>echo "a|b"</code>) stay untouched, heredocs
+  (<code>&lt;&lt;EOF</code>) and process substitution
+  (<code>&lt;( ... )</code>) keep their semantics.
+</div>
+
+<h4>Why we are not switching the underlying pipe to nexus-vfs DT_PIPE</h4>
+
+<p><code>nexus-vfs/rust/kernel/benches/syscall_bench.rs</code> records
+DT_PIPE at ~246 ns round-trip versus host OS pipe at ~1–2 µs —
+roughly 4–8× faster — for <strong>in-process Rust ↔ Rust</strong>
+byte handoffs.</p>
+
+<p>That win does not transfer to bash subprocess stdin, for two
+structural reasons:</p>
+
+<ul>
+  <li>bash is a foreign OS process. Its <code>read(stdin_fd)</code>
+  is an honest host syscall against an fd the kernel gave it. There
+  is no path for bash to call <code>kernel.pipe_read_nowait()</code>
+  directly.</li>
+  <li>The only way to expose DT_PIPE bytes to a foreign process is
+  via nexus-fuse mount or LD_PRELOAD. Both add a userspace round-trip
+  on top of host pipe — strictly slower than a direct host pipe.</li>
+</ul>
+
+<p><code>nexus/rust/services/src/acp/subprocess.rs</code> matches this
+reasoning in practice: it spawns its ACP CLI subprocess with normal
+host OS pipes, then <code>dup</code>s the parent-side fds and hands
+the duplicates to the kernel as stdio-backed DT_PIPE entries. The
+DT_PIPE wrapping is for <strong>VFS observability of the ACP
+traffic</strong>, not for raw throughput. The child still uses host
+pipes.</p>
+
+<div class="callout">
+  <strong>Decision:</strong> the bash subprocess pipe is host OS pipe.
+  The DT_PIPE optionality is reserved for two future scopes:
+  <ul>
+    <li>ACP-style stdio observability for <code>!</code>-mode commands
+    (parent-side wrap, child unchanged) — only when we want audit /
+    replay / cross-session inspection of bash output.</li>
+    <li>Any future Rust ↔ Rust in-process pipe inside sudocode that
+    does not cross a process boundary — there DT_PIPE is the right
+    default.</li>
+  </ul>
+</div>
+
+<p>A regression benchmark for the host pipe path lives in
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/crates/runtime/benches/bash_pipe_throughput.rs"><code>rust/crates/runtime/benches/bash_pipe_throughput.rs</code></a>
+so any change to the spawn shape surfaces in CI.</p>
+
+<h4>cwd persistence: the <code>pwd -P &gt;| &lt;track_file&gt;</code> pattern</h4>
+
+<p>CCB tracks cwd by appending <code>pwd -P &gt;| ${shellCwdFilePath}</code>
+to the command string and reading the file back from the host side
+after the command completes (<code>src/utils/bootstrap/state.ts</code>
+exposes <code>setCwdState</code>). This is the same problem
+<code>!cd</code> persistence solves for us, and CCB's pattern is the
+blueprint:</p>
+
+<ul>
+  <li>Each bash-mode command appends a <code>pwd -P</code> write to a
+  per-session temp file.</li>
+  <li>After the command returns, the host reads the file, parses the
+  cwd, and updates the session state used to launch the next
+  command.</li>
+  <li>The next launch picks up the new cwd as its
+  <code>current_dir</code>.</li>
+</ul>
+
+<div class="callout">
+  <strong>Decision:</strong> port this pattern into our
+  <code>runtime::bash</code> extension for <code>!</code>-mode.
+  Re-implement in Rust from understanding; do not lift TS.
+</div>
+
+<div class="callout callout-warn">
+  <strong>Verification gap</strong> (please test on macOS / Linux when
+  convenient): the user reports that CC's <code>!cd</code> does not
+  actually persist cwd in their daily use. CCB's source suggests it
+  does. The discrepancy may be that CC routes <code>!</code>-mode
+  through a different code path, or there is a platform-specific
+  regression. Confirm before declaring the pattern shipped.
+</div>
+
+<h4>CCB extras observed on the bash spawn path</h4>
+
+<p>Six patterns CCB applies on the bash spawn path that we have not yet
+adopted. Each is real and well-motivated; none is on the critical
+path for shipping <code>!</code>-mode v1. Captured here so the
+corresponding trigger surfaces the question at the right time.</p>
+
+<table>
+  <thead><tr><th>Pattern</th><th>Why CCB does it</th><th>When we revisit</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Snapshot file <code>source</code> on every command</td>
+      <td>Preserve user aliases and environment so commands behave like the user's interactive shell</td>
+      <td>When users report "this works in my terminal but not in scode" alias/env divergence</td>
+    </tr>
+    <tr>
+      <td>Session env hook script (<code>getSessionEnvironmentScript</code>)</td>
+      <td>Apply env vars set by session-start hooks before each command</td>
+      <td>When we land session-start hooks</td>
+    </tr>
+    <tr>
+      <td>Tmux socket isolation (<code>TMUX</code> env override)</td>
+      <td>Prevent the LLM from reading/writing the user's tmux session</td>
+      <td>When we ship multi-session / agents-in-tmux features</td>
+    </tr>
+    <tr>
+      <td>Extended glob disable (<code>shopt -u extglob</code> style)</td>
+      <td>Reduce attack surface for glob-based injection</td>
+      <td>When we land a permission tightening pass</td>
+    </tr>
+    <tr>
+      <td><code>CLAUDE_CODE_SHELL_PREFIX</code> env wrapper</td>
+      <td>Let users wrap every command (e.g. <code>nice -n 19 &lt;cmd&gt;</code>, sudo policy injection)</td>
+      <td>When users ask for cross-cutting command wrappers</td>
+    </tr>
+    <tr>
+      <td><code>pwd -P &gt;| &lt;track_file&gt;</code> written by command</td>
+      <td>Persist cwd across commands</td>
+      <td><strong>Now</strong> — directly informs <code>!cd</code> persistence above</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>PowerShell side: already aligned</h4>
+
+<p>CCB's PowerShell provider invokes pwsh with
+<code>-NoProfile -NonInteractive -Command &lt;cmd&gt;</code>. Our
+<code>tools::execute_shell_command</code> already uses the same flag
+set (<code>-NoProfile -NonInteractive</code>) plus
+<code>Stdio::null()</code> on the stdin handle. No gap.</p>
+
+<h4>Implementation steps for <code>!</code>-mode v1</h4>
+
+<ol>
+  <li>Prompt parser: treat <code>!</code>-prefix lines specially in the REPL input path.</li>
+  <li>Bash dispatch: <code>runtime::bash</code> entry that takes the
+  rest of the line, applies the cwd from session state, and appends
+  the CCB-style <code>pwd -P &gt;| &lt;track_file&gt;</code> to the
+  command.</li>
+  <li>cwd persistence: read the track file after each
+  <code>!</code>-command, update <code>Session::cwd</code>, surface
+  the resolved <code>pwd</code> in the prompt redraw.</li>
+  <li>Permission gating: route every <code>!</code>-command through
+  the same validator chain as the LLM-driven <code>bash</code> tool
+  path. No permission shortcut for <code>!</code>.</li>
+  <li>PTY-level acceptance test in <code>pty-expect</code> driving
+  <code>!ls</code> / <code>!cd /tmp</code> / <code>!pwd</code> and
+  asserting the rendered prompt shows the new pwd.</li>
+</ol>
+
+<h4>Reference</h4>
+
+<ul>
+  <li>Tier 2 source:
+  <code>claude-code-best/claude-code @ 91cffe16e23fc886f6860a7edfe8754d74a4abbf</code>
+  (recorded in <code>LAST_CCB_REF_VERSION</code>).</li>
+  <li>Files read for this design:
+    <ul>
+      <li><code>src/utils/Shell.ts</code> (spawn site, stdio config)</li>
+      <li><code>src/utils/ShellCommand.ts</code> (wrapSpawn wrapper)</li>
+      <li><code>src/utils/shell/bashProvider.ts</code> (bash command assembly, pwd tracking, pipe rearrangement)</li>
+      <li><code>src/utils/shell/powershellProvider.ts</code> (pwsh flags)</li>
+    </ul>
+  </li>
+  <li>Our current state: <code>rust/crates/runtime/src/bash.rs</code>,
+  <code>rust/crates/tools/src/lib.rs</code> (around
+  <code>execute_shell_command</code>, <code>run_powershell</code>).</li>
+</ul>
+
+<h3>Inline rendering polish</h3>
+
+<p>Improvements to how <code>rusty-sudocode-cli</code> draws its
+output inside the host terminal — colored diffs, syntax-highlighted
+tool results, post-turn timelines, box-drawn permission prompts,
+per-turn status lines. <strong>Inline only.</strong> sudocode stays
+a normal stream-to-stdout program; the terminal's scrollback,
+attach/detach, and pipe-composition stay intact. The bright-line
+against alternate-screen / <code>ratatui</code> is the next
+sub-section and applies to every entry below.</p>
+
+<h4>Architecture context</h4>
+
+<table>
+  <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>rusty-sudocode-cli</code></td><td>Main binary: REPL loop, arg parsing, rendering, API bridge</td></tr>
+    <tr><td><code>runtime</code></td><td>Session, conversation loop, config, permissions, compaction</td></tr>
+    <tr><td><code>api</code></td><td>Anthropic HTTP client + SSE streaming</td></tr>
+    <tr><td><code>commands</code></td><td>Slash command metadata, parsing, help</td></tr>
+    <tr><td><code>tools</code></td><td>Built-in tool implementations</td></tr>
+  </tbody>
+</table>
+
+<p>Current TUI components:</p>
+
+<table>
+  <thead><tr><th>Component</th><th>Source</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td>Input</td><td><code>input.rs</code></td><td><code>rustyline</code>-based line editor with slash-command tab completion, Shift+Enter newline, history</td></tr>
+    <tr><td>Rendering</td><td><code>render.rs</code></td><td>Markdown→terminal rendering (headings, lists, tables, code blocks with syntect highlighting, blockquotes); spinner widget</td></tr>
+    <tr><td>App/REPL loop</td><td><code>main.rs</code></td><td>The <code>LiveCli</code> struct: REPL loop, slash command handlers, streaming output, tool call display, permission prompting, session management</td></tr>
+  </tbody>
+</table>
+
+<p>Dependencies: <strong>crossterm 0.28</strong>,
+<strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
+<strong>rustyline 15</strong>, <strong>serde_json</strong>.</p>
+
+<h4>Phase 0 · Structural cleanup</h4>
+
+<p>Break <code>main.rs</code> into focused modules and establish the
+namespace for the new TUI work.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>0.1</td><td>Extract <code>LiveCli</code> into <code>app.rs</code>. Move the struct, its impl, and helpers (<code>format_*</code>, <code>render_*</code>, session management) into focused modules: <code>app.rs</code> (core), <code>format.rs</code> (report formatting), <code>session_manager.rs</code> (session CRUD).</td></tr>
+    <tr><td>0.2</td><td>Introduce module decomposition intentionally. Stream event handler patterns and other ideas from earlier prototypes land inside the active <code>LiveCli</code> extraction.</td></tr>
+    <tr><td>0.3</td><td>Extract <code>main.rs</code> arg parsing into a dedicated module when the work begins.</td></tr>
+    <tr><td>0.4</td><td>Create a <code>tui/</code> module at <code>crates/rusty-sudocode-cli/src/tui/mod.rs</code> as the namespace for new TUI components.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 1 · Status bar and live HUD</h4>
+
+<p>Persistent information display during interaction.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>1.1</td><td>Terminal-size-aware status line. Use <code>crossterm::terminal::size()</code> to render a bottom-pinned status bar showing model name, permission mode, session ID, cumulative token count, estimated cost.</td></tr>
+    <tr><td>1.2</td><td>Live token counter. Update the status bar in real-time as <code>AssistantEvent::Usage</code> and <code>AssistantEvent::TextDelta</code> events arrive during streaming.</td></tr>
+    <tr><td>1.3</td><td>Turn duration timer. Show elapsed time for the current turn.</td></tr>
+    <tr><td>1.4</td><td>Git branch indicator. Display the current git branch in the status bar (parsed via <code>parse_git_status_metadata</code>).</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 2 · Enhanced streaming output</h4>
+
+<p>Make the main response stream visually rich and responsive.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>2.1</td><td>Live markdown rendering. Buffer text deltas and incrementally render Markdown as it arrives.</td></tr>
+    <tr><td>2.2</td><td>Thinking indicator. When extended thinking/reasoning is active, show a distinct animated indicator alongside the generic <code>🦀 Thinking...</code>.</td></tr>
+    <tr><td>2.3</td><td>Streaming progress bar. Optional horizontal indicator showing approximate completion.</td></tr>
+    <tr><td>2.4</td><td>Tune main-stream pacing. The current <code>stream_markdown</code> sleeps 8ms per chunk for tool results; make this immediate or configurable for the main response stream.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 3 · Tool call visualization</h4>
+
+<p>Make tool execution legible and navigable.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>3.1</td><td>Collapsible tool output. For tool results longer than N lines (default 15), show a summary with an <code>[+] Expand</code> hint.</td></tr>
+    <tr><td>3.2</td><td>Syntax-highlighted tool results. Apply syntect highlighting to bash stdout / <code>read_file</code> content / <code>REPL</code> output.</td></tr>
+    <tr><td>3.3</td><td>Tool call timeline. Show a compact summary after all tool calls complete: <code>🔧 bash → ✓ | read_file → ✓ | edit_file → ✓ (3 tools, 1.2s)</code>.</td></tr>
+    <tr><td>3.4</td><td>Diff-aware <code>edit_file</code> display. Render a colored unified diff. The <code>EditFileOutput</code> schema already carries <code>original_file</code>, <code>old_string</code>, and <code>new_string</code>, so no schema change is needed; the CLI computes the diff in-process. Defensively strip any <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code> so hook fire does not silently disable the preview.</td></tr>
+    <tr><td>3.5</td><td>Permission prompt enhancement. Style the approval prompt with box drawing, color the tool name, show a one-line summary.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 4 · Slash commands and navigation</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>4.1</td><td>Colored <code>/diff</code> output.</td></tr>
+    <tr><td>4.2</td><td>Pager for long outputs (<code>/status</code>, <code>/config</code>, <code>/memory</code>, <code>/diff</code>).</td></tr>
+    <tr><td>4.3</td><td><code>/search</code> command. Default scope: current-session messages only (linear scan over <code>Session.messages</code>, ~50 ms even on large sessions, no storage redesign). <code>--all</code> opts in to all persisted JSONL sessions in the workspace; <code>--tools</code> opts in to scanning tool-result bodies. Cross-session and tool-output scopes are deferred until the default is in use.</td></tr>
+    <tr><td>4.4</td><td><code>/undo</code> command. Walk <code>session.messages.iter().rev()</code> for the most recent <code>ToolResult</code> whose <code>tool_name == "edit_file" | "write_file"</code> and matching <code>file_path</code>, then apply its <code>original_file</code>. Pre-image survives a single round-trip on the active JSONL but can be erased by session rotation (256 KiB threshold, 3 rotated keepers) and by <code>/compact</code> (default keeps last 4 messages plus summary). Defensive parse strips <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code>.</td></tr>
+    <tr><td>4.5</td><td>Interactive session picker. Replace text-based <code>/session list</code> with a fuzzy list.</td></tr>
+    <tr><td>4.6</td><td>Tab completion for tool arguments.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 5 · Color themes and configuration</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>5.1</td><td>Named color themes (<code>dark</code>, <code>light</code>, <code>solarized</code>, <code>catppuccin</code>).</td></tr>
+    <tr><td>5.2</td><td>ANSI-256 / truecolor detection.</td></tr>
+    <tr><td>5.3</td><td>Configurable spinner style.</td></tr>
+    <tr><td>5.4</td><td>Banner customization.</td></tr>
+  </tbody>
+</table>
+
+<h4>No alternate-screen / full-screen TUI mode — by rule</h4>
+
+<p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
+sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
+behind a <code>full-tui</code> cargo feature, with split-pane layout,
+scrollable conversation view, mouse support. <strong>This is forbidden
+by rule.</strong> sudocode does not adopt an alternate-screen mode,
+does not depend on <code>ratatui</code>, and will not ship split-pane
+or in-CLI multi-agent dashboards.</p>
+
+<p>The reasoning lines up with sudocode's sole-audience positioning
+(hacker — see <a href="#what-sudo-code-is">What sudo code is</a>) and
+the copilot-worker topology sudocode plugs into (see <a
+href="#collaboration-as-unit">Collaboration as a unit</a> below):</p>
+
+<ul>
+  <li><strong>Hackers already have the TUI stack.</strong> VS Code
+  shows diffs and syntax. tmux owns status bars and pane splits.
+  lazygit / ranger own focused TUI nav. sudocode fighting tmux for
+  split-pane real estate is exactly what claude-code does to push
+  non-coders into coding — and exactly what pisses hackers off.</li>
+  <li><strong>Alternate-screen kills scrollback.</strong> Hackers run
+  scode in a VS Code terminal, in a tmux pane, in an SSH session.
+  Quitting an alternate-screen app wipes the buffer; the wheel /
+  <code>Ctrl+B [</code> / <code>Cmd+K</code> muscle memory dies. This
+  is one of the concrete things claude-code's pager / fullscreen
+  prompts do that hackers route around.</li>
+  <li><strong>Alternate-screen breaks copilot-worker attach.</strong>
+  In the copilot-worker topology, an operator (or hydra-style UI)
+  attaches to a worker's terminal to inspect live state. A worker
+  that ran in alternate-screen would hijack the operator's terminal
+  on attach and erase its scrollback on detach. Inline scrollback
+  IS the affordance that makes attach/detach safe.</li>
+  <li><strong>Pipe-friendliness is load-bearing.</strong> <code>scode
+  "plan X" | tee /proc/p_worker/chat-with-me</code> only works when
+  scode writes to a regular tty / pipe. Alternate-screen makes scode
+  a black-box program, breaking unix composition. The same primitive
+  that lets a hacker pipe scode output around is what lets sudocode
+  participate as a unit in nexus-vfs chat-with-me streams.</li>
+</ul>
+
+<p>What <strong>is</strong> in scope, and already shipped in PR #180
+(2026-06-05): inline ANSI polish — colored diffs, syntax-highlighted
+tool results, post-turn tool timeline, box-drawn permission prompts,
+per-turn status line, <code>$PAGER</code> shell-out, fuzzy session
+picker, tab completion. These are <em>inline</em> rendering
+improvements; they do not enter alternate-screen, do not break
+scrollback, do not require new dependencies, and are friendly to
+attach/detach workflows. Future inline polish welcome under the same
+constraints.</p>
+
+<p>Reopening this rule requires the same shape as the
+no-unit-tests rule (Goal 1, "Test layer policy"): a concrete
+collaboration scenario where inline rendering demonstrably fails to
+serve a hacker workflow, and a separate ROADMAP edit to change the
+rule before any <code>ratatui</code> / alternate-screen code lands.
+"It would be nicer" doesn't qualify.</p>
+
+<h4>Inline polish sequencing (Phase 0–5; most already shipped in PR #180)</h4>
+
+<p>Phase 0 first (foundation). Within the rest, highest user-facing
+impact, lowest implementation cost first:</p>
+
+<ol>
+  <li><strong>Phase 0</strong> — module decomposition</li>
+  <li><strong>Phase 1.1–1.2</strong> — status bar with live tokens</li>
+  <li><strong>Phase 2.4</strong> — main-stream pacing</li>
+  <li><strong>Phase 3.1</strong> — collapsible tool output</li>
+  <li><strong>Phase 2.1</strong> — live markdown rendering</li>
+  <li><strong>Phase 3.2</strong> — syntax-highlighted tool results</li>
+  <li><strong>Phase 3.4</strong> — diff-aware edit display</li>
+  <li><strong>Phase 4.1</strong> — colored <code>/diff</code></li>
+  <li><strong>Phase 5</strong> — color themes (driven by user demand)</li>
+  <li><strong>Phase 4.2–4.6</strong> — enhanced navigation and commands</li>
+</ol>
+
+<h4>Inline rendering design principles</h4>
+
+<ol>
+  <li>Inline REPL only. <strong>No alternate-screen mode</strong> — see the bright-line rule above. Scrollback in the host terminal (VS Code, tmux, SSH) stays load-bearing.</li>
+  <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal, and so the same code path serves <code>--output-format json</code>, ACP, and pipe consumers.</li>
+  <li>Rendering works incrementally; the response stream renders as it arrives.</li>
+  <li>Terminal control goes through <code>crossterm</code> uniformly; raw ANSI escape codes stay out of the codepath.</li>
+  <li><strong>No <code>ratatui</code> dependency.</strong> Even behind a feature flag — its presence in <code>Cargo.lock</code> is itself the slippery slope toward the alternate-screen path the rule above forbids.</li>
+</ol>
+
+<h4>Module layout after Phase 0</h4>
+
+<pre><code>crates/rusty-sudocode-cli/src/
+├── main.rs              # Entrypoint, arg dispatch
+├── args.rs              # CLI argument parsing
+├── app.rs               # LiveCli struct, REPL loop, turn execution
+├── format.rs            # Report formatting (status, cost, model, permissions, …)
+├── session_mgr.rs       # Session CRUD: create, resume, list, switch, persist
+├── init.rs              # Repo initialization
+├── input.rs             # Line editor
+└── render.rs            # TerminalRenderer, Spinner, inline polish</code></pre>
+
+<p>The earlier draft included a <code>tui/</code> subdirectory holding
+<code>status_bar.rs</code> / <code>tool_panel.rs</code> /
+<code>diff_view.rs</code> / <code>pager.rs</code> / <code>theme.rs</code>
+as a namespace for Phase 6 components. Deleted: no Phase 6, no
+namespace. Status-bar / tool-panel / colored-diff logic lives in
+<code>format.rs</code> + <code>render.rs</code>; PR #180 already
+ships them there.</p>
+
+<h4>Risk and mitigation</h4>
+
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Refactor changes REPL behavior</td><td>Phase 0 stays a pure restructuring; existing test coverage as safety net.</td></tr>
+    <tr><td>Terminal compatibility (tmux, SSH, Windows)</td><td>Rely on <code>crossterm</code>'s abstraction; verify in degraded environments.</td></tr>
+    <tr><td>Rich rendering regresses performance</td><td>Profile before/after; keep the raw streaming path as a fast fallback.</td></tr>
+  </tbody>
+</table>
+
+<h3>Candidate · <code>publish_to_shareone</code> LLM tool</h3>
+
+<p>A future tool exposed to the LLM agent (alongside <code>bash</code>,
+<code>WebFetch</code>, <code>WebSearch</code>, etc.) that uploads a
+local HTML / PDF / PPTX file to ShareOne and returns the public share
+URL. <strong>Not a user-facing CLI command</strong> — the LLM agent
+inside <code>scode</code> calls it when the user asks "share this
+externally" / "publish my plan" / "give me a shareable link".</p>
+
+<table>
+  <thead><tr><th></th><th>Detail</th></tr></thead>
+  <tbody>
+    <tr><td>Source signal</td><td>Maintainers currently publish <code>ROADMAP.html</code> by hand via the shareone-skill or by curling the API. As the agent surface grows, users will start asking <code>scode</code> directly to share files; needing them to know about an external skill defeats the "scode is the agent" framing.</td></tr>
+    <tr><td>Tool shape</td><td>Single tool: <code>publish_to_shareone(file_path, options)</code>. Options include <code>filename</code> (defaults to file basename), <code>allow_comments</code> (default true), <code>share_id</code> (optional — passing this PUT-updates an existing share so the URL stays stable; omitting it POSTs a new share). Returns the resulting <code>share_url</code>.</td></tr>
+    <tr><td>Implementation</td><td>~100 lines of Rust hitting <code>POST /api/v1/pages</code> (new) and <code>PUT /api/v1/pages/{share_id}</code> (update) on the public ShareOne HTTP API. No skill dependency, no <code>npm</code>, no vendored client. Reads <code>SHAREONE_API_KEY</code> from env. Requires no infra change beyond adding the tool entry to <code>runtime::tools</code> registry.</td></tr>
+    <tr><td>Permission</td><td>Routes through the same permission validator chain as <code>WebFetch</code>: <code>read-only</code> and <code>workspace-write</code> reject the call (publishing is a privileged side effect, like a network write); <code>danger-full-access</code> and explicit user approval pass.</td></tr>
+    <tr><td>License hygiene</td><td>Our own Rust implementation against the public API, independent of the internal shareone-skill repo. No vendor, no drift, no LICENSE-of-someone-else concerns.</td></tr>
+    <tr><td>When we ship</td><td>When a real user (internal or external) asks for it. Same friction-driven gate as <code>!</code> bash mode. Today's flow (maintainer + curl) is enough for the team-internal use case.</td></tr>
+  </tbody>
+</table>
+
+<p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
+published by hand. The exact curl call is documented in
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
+
+<h2 id="goal-4">Goal 4 · Be a good unit in the copilot-worker topology</h2>
+
+<p id="collaboration-as-unit">The positioning — sudocode as one
+agent unit among peers on the nexus VFS chat-with-me plane,
+interchangeable with Claude / Codex / humans at the mailbox
+primitive — and the three diagrams (topology · one-binary-three-modes
+· hydra evolution) live in <a
+href="https://github.com/sudoprivacy/sudocode/blob/main/README.md#position-in-the-larger-picture"><code>README.md</code>
+§ Position in the larger picture</a>. That's where a hacker should
+first encounter the framing, alongside the rest of the philosophy.</p>
+
+<p>This goal section holds the engineering plan: what sudocode
+commits to implementing against the nexus protocol, what is
+deliberately not in scope, and the work sequencing. The protocol
+SSOT itself lives upstream in <a
+href="https://github.com/nexi-lab/nexus/blob/develop/docs/architecture/nexus-integration-architecture.md">nexi-lab/nexus
+integration architecture</a> (public, Apache-2.0, joint-owned with
+the nexus team). sudocode does not vendor it.</p>
+
+<h3>What sudocode commits to — implementation contract</h3>
+
+<ol>
+  <li><strong>Spawn surface.</strong> A sudocode session may be
+  started by an external orchestrator through
+  <code>ManagedAgentService.start_session_v1({agent_id, repos, model,
+  owner_id, zone_id})</code>. The returned <code>session_id</code>
+  IS the AgentRegistry pid; sudocode does not invent its own. The
+  same binary stays runnable as a standalone CLI without nexus —
+  the <code>FsBackend</code> trait abstracts this.</li>
+
+  <li><strong>FsBackend trait.</strong> All filesystem access in
+  the sudocode runtime routes through one
+  <code>FsBackend</code> trait with three impls:
+  <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
+  syscalls when running inside <code>sudocode-host</code>),
+  <code>StdFsBackend</code> (host <code>std::fs</code> for the
+  standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
+  kernel from an edge / dev CLI). No code path bypasses the trait —
+  not session jsonl, not config, not the workspace-bounded
+  <code>file_ops</code> helpers.</li>
+
+  <li><strong>Mailbox read / write.</strong> A sudocode session
+  watches its own <code>/proc/{self_pid}/chat-with-me</code> via
+  <code>sys_watch</code> for incoming prompts; it writes responses
+  to the conversation peer's <code>chat-with-me</code> using
+  <code>sys_write</code>. The on-disk envelope's <code>from</code>
+  field is stamped by the kernel (<code>MailboxStampingHook</code>);
+  sudocode does not forge it.</li>
+
+  <li><strong>Peer addressing inside a workspace.</strong> An
+  agent staged at <code>/proc/{pid}/workspace/...</code> writes
+  <code>chat-with-me</code> relative to its cwd — that path is a
+  DT_LINK back to the workspace owner's mailbox. sudocode honours
+  the convention; it does not bypass the link to find the owner
+  pid out-of-band.</li>
+
+  <li><strong>Workspace boundary.</strong> A write into another
+  agent's <code>workspace/</code> returns EPERM from
+  <code>WorkspaceBoundaryHook</code> with a structured payload
+  telling the LLM where to write instead (the
+  <code>chat-with-me</code> link). sudocode surfaces this EPERM
+  verbatim back to the LLM rather than catching and retrying — the
+  path layout is the SSOT for permissions and the error message
+  is the teaching channel.</li>
+
+  <li><strong>Session state placement.</strong> Inside
+  <code>sudocode-host</code>, session jsonl transcripts live at
+  <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
+  on the kernel VFS, not on the host filesystem. Booting a worker
+  reads its profile + the requested <code>--session-id</code>
+  transcript from that VFS path; the same path supports resume.</li>
+
+  <li><strong>Lifecycle.</strong> Out-of-band termination
+  (SIGTERM / SIGKILL / orphan reap from <code>AgentRegistry</code>)
+  must drop the session cleanly — flush in-flight chat-with-me
+  writes, close streams, release locks. No long-running
+  in-memory state that doesn't survive a host restart; the
+  <code>--session-id</code> transcript is the SSOT.</li>
+</ol>
+
+<h3>What is NOT sudocode's job here</h3>
+
+<ul>
+  <li><strong>Orchestration.</strong> Deciding which workers exist,
+  when to spawn, when to cancel — that is the orchestrator
+  (sudowork / hydra / a script). sudocode receives spawn calls; it
+  does not invent them.</li>
+  <li><strong>Multi-agent UI.</strong> Dashboards, worker-vital
+  sidebars, attach buttons — sudowork (Feishu / web) and hydra (VS
+  Code sidebar) own that surface. sudocode stays the unit. This is
+  the deepest reason the alternate-screen TUI rule (Goal 3) is
+  bright-line: a dashboard inside the unit is a category error.</li>
+  <li><strong>Cross-instance transport.</strong> Raft replication of
+  DT_STREAM, federation Raft cluster topology, Matrix C-S adapter
+  for stock chat clients — all kernel / nexus-services concerns.
+  sudocode reads and writes through <code>FsBackend</code> and
+  doesn't care whether the stream is same-host or replicated.</li>
+  <li><strong>Audit.</strong> <code>AuditHook</code> is a kernel
+  POST-write hook fired by every <code>sys_write</code>; sudocode
+  needs to do nothing to participate.</li>
+</ul>
+
+<h3>Sequencing</h3>
+
+<p>The work falls into a few sequenced chunks; each ships its own
+PR. None of this depends on Goal 3 inline polish; the two streams
+proceed in parallel.</p>
+
+<ol>
+  <li><strong>FsBackend trait + StdFsBackend.</strong> Audit every
+  <code>std::fs</code> call site in the sudocode runtime, route
+  through the trait. No behavioural change to standalone CLI;
+  this is a refactor that opens the door for the other two
+  backends.</li>
+  <li><strong>NexusVfsFsBackend.</strong> gRPC client against the
+  nexus <code>NexusVFSService.Call</code> surface. First end-to-end
+  validation: a standalone scode pointing at a remote nexus serves
+  its session jsonl from the kernel.</li>
+  <li><strong>KernelFsBackend + <code>sudocode-host</code>
+  binary.</strong> The binary edge that links nexus
+  <code>kernel</code> + <code>services</code> in-process and
+  monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
+  the dependency edge sudocode → nexus is realised.</li>
+  <li><strong>Mailbox read/write loop.</strong> Inside the managed
+  runtime, replace stdin/stdout prompts with
+  <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
+  and <code>sys_write</code> on the peer's mailbox. The runtime
+  surface to the LLM stays the same.</li>
+  <li><strong>WorkspaceBoundaryHook EPERM round-trip.</strong>
+  Surface the kernel's structured EPERM verbatim into the LLM
+  conversation; confirm by PTY scenario that the LLM learns the
+  <code>chat-with-me</code> redirect without system-prompt edits.</li>
+</ol>
+
+<h2 id="working-agreement">Working agreement on this document</h2>
+
+<p>Scope changes update this document in the same PR. External
+communications can mirror the current state into other surfaces; this
+document remains the canonical reference. When a feature ships or a
+section is superseded, remove its content from this file in the same
+PR — the roadmap tracks the live state, not history.</p>
+
+<h2 id="references">Reference docs (mechanism, not plan)</h2>
+
+<ul>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> — what
+  claude-code parity means, the three-tier reference model, the
+  standing rule, the sync markers.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>
+  — the in-process mock backend layer.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>
+  — current cycle's 614-commit triage report.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/README.md"><code>README.md</code></a> — project entry,
+  install, quick start.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/README.md"><code>rust/README.md</code></a> —
+  Cargo workspace map.</li>
+  <li><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a>
+  — PTY harness crate, source of human-fidelity e2e tests.</li>
+</ul>
+
+<footer>
+  Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.
+</footer>
+
+</body>
+</html>

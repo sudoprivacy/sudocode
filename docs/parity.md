@@ -5,7 +5,7 @@ This document describes how `scode` tracks feature parity with
 sources we compare against, the resolution taxonomy applied to each gap,
 and the sync markers that anchor each source to a point in time.
 
-The roadmap that owns this work is [`../ROADMAP.md`](../ROADMAP.md)
+The roadmap that owns this work is [`../ROADMAP.html`](../ROADMAP.html)
 (Goal 2).
 
 ## Scope
@@ -148,7 +148,7 @@ The comparison window for the current cycle starts at
 ## Measurement
 
 The e2e coverage half of parity (Goal 1 in
-[`../ROADMAP.md`](../ROADMAP.md)) is exercised by the mock parity
+[`../ROADMAP.html`](../ROADMAP.html)) is exercised by the mock parity
 harness described in [`mock-parity-harness.md`](./mock-parity-harness.md).
 The harness runs against the `scode` binary in a clean environment and
 covers the scode-native testable feature surface.
@@ -156,7 +156,7 @@ covers the scode-native testable feature surface.
 ## Case study: first run of the standing rule
 
 The first design write-up under this rule — the `!` bash mode
-section inside [`../ROADMAP.md`](../ROADMAP.md) Goal 3 — made the
+section inside [`../ROADMAP.html`](../ROADMAP.html) Goal 3 — made the
 value concrete:
 
 - Validated that our `Stdio::null()` choice for the bash spawn path is
@@ -165,7 +165,7 @@ value concrete:
   passthrough.
 - Identified CC's `pwd -P >| <track_file>` pattern as the right
   blueprint for the `!cd` cwd-persistence requirement in
-  [ROADMAP Goal 3](../ROADMAP.md).
+  [ROADMAP Goal 3](../ROADMAP.html).
 - Captured six adjacent CC patterns that are out of scope for the
   current cycle but each carry a recorded trigger condition for when
   we should revisit them.

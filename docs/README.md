@@ -36,7 +36,7 @@ the content.
 
 ## Plan
 
-- [`../ROADMAP.md`](../ROADMAP.md) — single SSOT plan file. Project
+- [`../ROADMAP.html`](../ROADMAP.html) — single SSOT plan file. Project
   goals plus the active design detail for each goal (e2e coverage
   inventory under Goal 1, `!` bash mode + TUI enhancement under
   Goal 3, etc.). All plan content lives here.
@@ -44,7 +44,7 @@ the content.
 ## See also
 
 - [`../README.md`](../README.md) — project entry, install, quick start.
-- [`../ROADMAP.md`](../ROADMAP.md) — project goals.
+- [`../ROADMAP.html`](../ROADMAP.html) — project goals.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — contributor setup and PR
   workflow.
 - [`../rust/README.md`](../rust/README.md) — Cargo workspace map.

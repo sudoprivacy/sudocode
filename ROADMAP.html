@@ -14,17 +14,20 @@
 <title>Sudo Code Roadmap</title>
 <style>
   :root {
-    --fg: #1a1a1a;
-    --muted: #6b7280;
-    --accent: #2563eb;
-    --accent-dim: #eff6ff;
-    --warn: #fef3c7;
-    --warn-fg: #78350f;
-    --code-bg: #f3f4f6;
-    --border: #e5e7eb;
-    --row-alt: #fafafa;
+    --bg: #0f172a;          /* page background — slate-900 */
+    --surface: #1e293b;     /* cards / TOC / table header — slate-800 */
+    --surface-alt: #172033; /* zebra row — between bg and surface */
+    --fg: #e2e8f0;          /* body text — slate-200 */
+    --muted: #94a3b8;       /* meta / footer — slate-400 */
+    --accent: #60a5fa;      /* links / h3 — blue-400 (softer than 600 on dark) */
+    --accent-dim: rgba(96, 165, 250, 0.12); /* callout fill */
+    --warn: rgba(251, 191, 36, 0.18);       /* callout-warn fill */
+    --warn-fg: #fcd34d;     /* amber-300 — readable on the tinted fill */
+    --code-bg: #1e293b;
+    --border: #334155;      /* slate-700 */
   }
   * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                  "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -82,8 +85,8 @@
     text-align: left;
     vertical-align: top;
   }
-  th { background: #f9fafb; font-weight: 600; }
-  tbody tr:nth-child(even) td { background: var(--row-alt); }
+  th { background: var(--surface); font-weight: 600; color: var(--fg); }
+  tbody tr:nth-child(even) td { background: var(--surface-alt); }
   hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
   ul li, ol li { margin: 4px 0; }
   blockquote {
@@ -93,7 +96,7 @@
     margin: 16px 0;
   }
   .toc {
-    background: #fafafa;
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 18px 22px;

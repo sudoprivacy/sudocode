@@ -836,13 +836,18 @@ set (<code>-NoProfile -NonInteractive</code>) plus
   <code>execute_shell_command</code>, <code>run_powershell</code>).</li>
 </ul>
 
-<h3>TUI enhancement — phased plan</h3>
+<h3>Inline rendering polish</h3>
 
-<p>Evolving the <code>rusty-sudocode-cli</code> terminal UI from the
-current REPL/prompt CLI toward a polished, modern TUI experience while
-preserving the clean architecture and existing test coverage.</p>
+<p>Improvements to how <code>rusty-sudocode-cli</code> draws its
+output inside the host terminal — colored diffs, syntax-highlighted
+tool results, post-turn timelines, box-drawn permission prompts,
+per-turn status lines. <strong>Inline only.</strong> sudocode stays
+a normal stream-to-stdout program; the terminal's scrollback,
+attach/detach, and pipe-composition stay intact. The bright-line
+against alternate-screen / <code>ratatui</code> is the next
+sub-section and applies to every entry below.</p>
 
-<h4>TUI architecture context</h4>
+<h4>Architecture context</h4>
 
 <table>
   <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
@@ -1012,7 +1017,7 @@ serve a hacker workflow, and a separate ROADMAP edit to change the
 rule before any <code>ratatui</code> / alternate-screen code lands.
 "It would be nicer" doesn't qualify.</p>
 
-<h4>Inline polish sequencing (Phase 0–5)</h4>
+<h4>Inline polish sequencing (Phase 0–5; most already shipped in PR #180)</h4>
 
 <p>Phase 0 first (foundation). Within the rest, highest user-facing
 impact, lowest implementation cost first:</p>
@@ -1060,7 +1065,7 @@ namespace. Status-bar / tool-panel / colored-diff logic lives in
 <code>format.rs</code> + <code>render.rs</code>; PR #180 already
 ships them there.</p>
 
-<h4>TUI risk and mitigation</h4>
+<h4>Risk and mitigation</h4>
 
 <table>
   <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>

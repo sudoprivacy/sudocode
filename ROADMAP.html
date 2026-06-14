@@ -161,7 +161,267 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
   <li><strong>Safe by design</strong> — explicit permission modes plus a Linux user-namespace sandbox.</li>
 </ul>
 
-<!-- Goal 1, Goal 2, Goal 3, working agreement, references land in follow-up commits. -->
+<h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
+
+<p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
+of the scode-native testable feature surface, green on every
+<code>main</code> commit of sudocode CI.</p>
+
+<h3>Test infrastructure — two layers</h3>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Purpose</th><th>Source</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Mock parity harness</td>
+      <td>Fast, in-process; scripts a mock Anthropic backend and asserts
+      on the byte stream <code>scode</code> produces. Catches API
+      integration / tool dispatch / streaming regressions without any TTY.</td>
+      <td><a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
+    </tr>
+    <tr>
+      <td><code>pty-expect</code> PTY harness</td>
+      <td>Human-fidelity; drives <code>scode</code> through a real PTY
+      (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
+      either the raw stream or a VT100-rendered view. Catches REPL UX,
+      signals, tab completion, ANSI redraw.</td>
+      <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Coverage is measured as: a feature is <em>Covered</em> when <strong>at
+least one</strong> of the two harnesses exercises it end-to-end on
+<code>main</code> CI.</p>
+
+<h3>Feature inventory</h3>
+
+<p>Mirrored from the original sudowork-side coverage tracker
+(<code>sudowork/docs/scode-e2e-coverage.md</code>) and <strong>status
+reset</strong> for the new sudocode-side harness. The previous sudowork-YAML
+coverage drove features through the sudowork UI (mouse / Electron / ACP);
+the new infra exercises them inside the sudocode crate itself, so
+coverage starts fresh and is tracked here as the single source.</p>
+
+<p>Status values:</p>
+<ul>
+  <li><strong>Covered</strong> — at least one sudocode-side harness test exists on <code>main</code>.</li>
+  <li><strong>Gap</strong> — needs a test.</li>
+  <li><strong>N/A</strong> — out of scope for <code>scode</code> itself.</li>
+</ul>
+
+<h4>1. Core conversation</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Single-turn prompt</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Multi-turn context</td><td>Gap</td><td>—</td><td>Follow-up references prior turn</td></tr>
+    <tr><td>Streaming response</td><td>Gap</td><td>—</td><td>Implicit in every interaction</td></tr>
+    <tr><td>Graceful cancel mid-execution</td><td>Gap</td><td>—</td><td>Stop during sleep, verify context preserved</td></tr>
+    <tr><td>Agent switching (Sudoclaw ↔ scode)</td><td>N/A</td><td>—</td><td>sudowork-UI concern</td></tr>
+  </tbody>
+</table>
+
+<h4>2. Tool usage — file operations</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>read_file</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>write_file</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>edit_file</code></td><td>Gap</td><td>—</td><td>Write → edit → read back</td></tr>
+    <tr><td><code>glob_search</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>grep_search</code></td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>3. Tool usage — execution</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>bash</code></td><td>Gap</td><td>—</td><td>Run script, echo, sleep</td></tr>
+    <tr><td>REPL (persistent Python/JS subprocess)</td><td>Gap</td><td>—</td><td>Different from one-shot bash</td></tr>
+    <tr><td>PowerShell</td><td>Gap</td><td>—</td><td>Windows-only path</td></tr>
+    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td>Gap</td><td>—</td><td>Needs <code>.ipynb</code> fixture</td></tr>
+  </tbody>
+</table>
+
+<h4>4. Tool usage — search &amp; web</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>WebSearch</code></td><td>Gap</td><td>—</td><td>Searches current info, verifies results</td></tr>
+    <tr><td><code>WebFetch</code> (URL → extract)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>5. Tool usage — code intelligence</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>LSP <code>goToDefinition</code></td><td>Gap (L2)</td><td>—</td><td>Needs mock language server</td></tr>
+    <tr><td>LSP <code>findReferences</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>hover</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>documentSymbol</code></td><td>Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td><code>ToolSearch</code></td><td>Gap</td><td>—</td><td>Search for tools by keyword</td></tr>
+  </tbody>
+</table>
+
+<h4>6. Tool usage — planning &amp; structured</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td>Gap</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
+    <tr><td><code>TodoWrite</code></td><td>Gap</td><td>—</td><td>Task list management</td></tr>
+    <tr><td><code>AskUserQuestion</code></td><td>Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
+    <tr><td><code>StructuredOutput</code></td><td>Gap</td><td>—</td><td>Return structured data</td></tr>
+    <tr><td><code>Sleep</code></td><td>Gap</td><td>—</td><td>Low priority</td></tr>
+  </tbody>
+</table>
+
+<h4>7. Tool usage — background &amp; parallel</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>Agent</code> (sub-agents)</td><td>Gap (L2)</td><td>—</td><td>Launch parallel sub-agents</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td>Gap (L2)</td><td>—</td><td>Background task management</td></tr>
+    <tr><td>Workers (boot, trust, prompt)</td><td>Gap (L2)</td><td>—</td><td>Worker lifecycle</td></tr>
+    <tr><td>Teams (parallel sub-agents)</td><td>Gap (L2)</td><td>—</td><td>Team coordination</td></tr>
+    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td>Gap (L2)</td><td>—</td><td>Needs wall-clock or fake timer</td></tr>
+  </tbody>
+</table>
+
+<h4>8. Git workflow</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/commit</code> (generate + create)</td><td>Gap</td><td>—</td><td>Init repo → write → commit → verify log</td></tr>
+    <tr><td><code>/pr</code> (draft / create PR)</td><td>Gap</td><td>—</td><td><strong>P0</strong> — core workflow</td></tr>
+    <tr><td><code>/diff</code> (show changes)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/issue</code> (create GitHub issue)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/review</code> (code review)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>9. Session management</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Session auto-save</td><td>Gap</td><td>—</td><td>Persists across turns</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td>Gap</td><td>—</td><td>send → close → resume → verify</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>10. Configuration &amp; discovery</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/model</code> (switch model)</td><td>Gap</td><td>—</td><td>Show current + switch</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td>Gap</td><td>—</td><td>read-only / workspace-write / danger</td></tr>
+    <tr><td><code>/auth</code> (switch auth mode)</td><td>N/A</td><td>—</td><td>sudowork credential injection concern</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/agents</code> (list)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/mcp</code> (list / show servers)</td><td>Gap (L2)</td><td>—</td><td>Plugin lifecycle</td></tr>
+    <tr><td><code>/plugins</code> (manage)</td><td>Gap (L2)</td><td>—</td><td>Plugin install/enable/disable</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>11. Diagnostics</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/doctor</code></td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/status</code></td><td>Gap</td><td>—</td><td>Model, permissions, usage</td></tr>
+    <tr><td><code>/sandbox</code></td><td>Gap</td><td>—</td><td>Isolation status</td></tr>
+    <tr><td><code>/cost</code> (token usage)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Prompt-response token usage</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h4>12. Auth</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Subscription auth (CC OAuth)</td><td>Gap</td><td>—</td><td>Uses injected <code>CLAUDE_CODE_OAUTH_TOKEN</code></td></tr>
+    <tr><td>Proxy auth (sudorouter)</td><td>Gap</td><td>—</td><td>Via <code>ANTHROPIC_API_KEY</code> injection</td></tr>
+    <tr><td>API key auth</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>scode login</code> (CLI)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>scode logout</code> (CLI)</td><td>Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h3>Coverage denominator (the 90% target)</h3>
+
+<table>
+  <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In current denominator</th></tr></thead>
+  <tbody>
+    <tr><td>Core Conversation</td><td>5</td><td>1</td><td>0</td><td>4</td></tr>
+    <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td></tr>
+    <tr><td>Search &amp; Web</td><td>2</td><td>0</td><td>0</td><td>2</td></tr>
+    <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td></tr>
+    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Session Management</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>8</td><td>1</td><td>2</td><td>5</td></tr>
+    <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
+    <tr><th>Total</th><th>59</th><th>2</th><th>11</th><th>46</th></tr>
+  </tbody>
+</table>
+
+<p><strong>90% target = 42 features covered</strong> out of the 46 in-denominator
+features. <code>L2 deferred</code> items are real surface but need heavier
+setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
+but do not count toward the Q2 number.</p>
+
+<h3>Priority sequencing</h3>
+
+<table>
+  <thead><tr><th>Tier</th><th>Items</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>P0 — core differentiators</strong></td>
+      <td><code>/commit</code>, <code>/pr</code> (git workflow);
+      EnterPlanMode/ExitPlanMode → execute; <code>edit_file</code>
+      text-replace verification; <strong>true async cancel</strong>
+      (interrupt in-flight API mid-request, not only between iterations)</td>
+    </tr>
+    <tr>
+      <td><strong>P1 — high-value tools</strong></td>
+      <td><code>WebFetch</code>, sub-agents (<code>Agent</code>),
+      background tasks (<code>TaskCreate</code> + <code>TaskGet</code>)
+      — these three are L2 deferred but earn early follow-up</td>
+    </tr>
+    <tr>
+      <td><strong>P2 — session &amp; config</strong></td>
+      <td><code>/resume</code>, permission modes, <code>/doctor</code>
+      through the REPL</td>
+    </tr>
+    <tr>
+      <td><strong>P3 — advanced (post-Q2)</strong></td>
+      <td>LSP code navigation, REPL persistent sessions, cron
+      scheduling, MCP / Skills / Plugins lifecycle</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The async-cancel item under P0 is a <em>behavioural</em> P0, not just a
+coverage gap: today the runtime only checks
+<code>hook_abort_signal.is_aborted()</code> between API call iterations,
+so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
+not interrupt the request — it takes effect only on the next loop
+iteration. Cancel needs to flow through to the streaming response path
+(e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
+<code>sleep 999</code> + API call is truly interruptible.</p>
+
+<!-- Goal 2, Goal 3, working agreement, references land in follow-up commits. -->
 
 <footer>
   Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.

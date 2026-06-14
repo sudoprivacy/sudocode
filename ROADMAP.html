@@ -921,7 +921,32 @@ impact, lowest implementation cost first:</p>
   </tbody>
 </table>
 
-<!-- publish_to_shareone LLM tool candidate + working agreement + references in follow-up commits. -->
+<h3>Candidate · <code>publish_to_shareone</code> LLM tool</h3>
+
+<p>A future tool exposed to the LLM agent (alongside <code>bash</code>,
+<code>WebFetch</code>, <code>WebSearch</code>, etc.) that uploads a
+local HTML / PDF / PPTX file to ShareOne and returns the public share
+URL. <strong>Not a user-facing CLI command</strong> — the LLM agent
+inside <code>scode</code> calls it when the user asks "share this
+externally" / "publish my plan" / "give me a shareable link".</p>
+
+<table>
+  <thead><tr><th></th><th>Detail</th></tr></thead>
+  <tbody>
+    <tr><td>Source signal</td><td>Maintainers currently publish <code>ROADMAP.html</code> by hand via the shareone-skill or by curling the API. As the agent surface grows, users will start asking <code>scode</code> directly to share files; needing them to know about an external skill defeats the "scode is the agent" framing.</td></tr>
+    <tr><td>Tool shape</td><td>Single tool: <code>publish_to_shareone(file_path, options)</code>. Options include <code>filename</code> (defaults to file basename), <code>allow_comments</code> (default true), <code>share_id</code> (optional — passing this PUT-updates an existing share so the URL stays stable; omitting it POSTs a new share). Returns the resulting <code>share_url</code>.</td></tr>
+    <tr><td>Implementation</td><td>~100 lines of Rust hitting <code>POST /api/v1/pages</code> (new) and <code>PUT /api/v1/pages/{share_id}</code> (update) on the public ShareOne HTTP API. No skill dependency, no <code>npm</code>, no vendored client. Reads <code>SHAREONE_API_KEY</code> from env. Requires no infra change beyond adding the tool entry to <code>runtime::tools</code> registry.</td></tr>
+    <tr><td>Permission</td><td>Routes through the same permission validator chain as <code>WebFetch</code>: <code>read-only</code> and <code>workspace-write</code> reject the call (publishing is a privileged side effect, like a network write); <code>danger-full-access</code> and explicit user approval pass.</td></tr>
+    <tr><td>License hygiene</td><td>Our own Rust implementation against the public API, independent of the internal shareone-skill repo. No vendor, no drift, no LICENSE-of-someone-else concerns.</td></tr>
+    <tr><td>When we ship</td><td>When a real user (internal or external) asks for it. Same friction-driven gate as <code>!</code> bash mode. Today's flow (maintainer + curl) is enough for the team-internal use case.</td></tr>
+  </tbody>
+</table>
+
+<p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
+published by hand. The exact curl call is documented in
+<a href="./CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
+
+<!-- working agreement + references in follow-up commits. -->
 
 <footer>
   Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.

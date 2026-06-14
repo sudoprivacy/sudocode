@@ -728,7 +728,200 @@ set (<code>-NoProfile -NonInteractive</code>) plus
   <code>execute_shell_command</code>, <code>run_powershell</code>).</li>
 </ul>
 
-<!-- TUI plan + working agreement + references land in follow-up commits. -->
+<h3>TUI enhancement — phased plan</h3>
+
+<p>Evolving the <code>rusty-sudocode-cli</code> terminal UI from the
+current REPL/prompt CLI toward a polished, modern TUI experience while
+preserving the clean architecture and existing test coverage.</p>
+
+<h4>TUI architecture context</h4>
+
+<table>
+  <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>rusty-sudocode-cli</code></td><td>Main binary: REPL loop, arg parsing, rendering, API bridge</td></tr>
+    <tr><td><code>runtime</code></td><td>Session, conversation loop, config, permissions, compaction</td></tr>
+    <tr><td><code>api</code></td><td>Anthropic HTTP client + SSE streaming</td></tr>
+    <tr><td><code>commands</code></td><td>Slash command metadata, parsing, help</td></tr>
+    <tr><td><code>tools</code></td><td>Built-in tool implementations</td></tr>
+  </tbody>
+</table>
+
+<p>Current TUI components:</p>
+
+<table>
+  <thead><tr><th>Component</th><th>Source</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td>Input</td><td><code>input.rs</code></td><td><code>rustyline</code>-based line editor with slash-command tab completion, Shift+Enter newline, history</td></tr>
+    <tr><td>Rendering</td><td><code>render.rs</code></td><td>Markdown→terminal rendering (headings, lists, tables, code blocks with syntect highlighting, blockquotes); spinner widget</td></tr>
+    <tr><td>App/REPL loop</td><td><code>main.rs</code></td><td>The <code>LiveCli</code> struct: REPL loop, slash command handlers, streaming output, tool call display, permission prompting, session management</td></tr>
+  </tbody>
+</table>
+
+<p>Dependencies: <strong>crossterm 0.28</strong>,
+<strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
+<strong>rustyline 15</strong>, <strong>serde_json</strong>.</p>
+
+<h4>Phase 0 · Structural cleanup</h4>
+
+<p>Break <code>main.rs</code> into focused modules and establish the
+namespace for the new TUI work.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>0.1</td><td>Extract <code>LiveCli</code> into <code>app.rs</code>. Move the struct, its impl, and helpers (<code>format_*</code>, <code>render_*</code>, session management) into focused modules: <code>app.rs</code> (core), <code>format.rs</code> (report formatting), <code>session_manager.rs</code> (session CRUD).</td></tr>
+    <tr><td>0.2</td><td>Introduce module decomposition intentionally. Stream event handler patterns and other ideas from earlier prototypes land inside the active <code>LiveCli</code> extraction.</td></tr>
+    <tr><td>0.3</td><td>Extract <code>main.rs</code> arg parsing into a dedicated module when the work begins.</td></tr>
+    <tr><td>0.4</td><td>Create a <code>tui/</code> module at <code>crates/rusty-sudocode-cli/src/tui/mod.rs</code> as the namespace for new TUI components.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 1 · Status bar and live HUD</h4>
+
+<p>Persistent information display during interaction.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>1.1</td><td>Terminal-size-aware status line. Use <code>crossterm::terminal::size()</code> to render a bottom-pinned status bar showing model name, permission mode, session ID, cumulative token count, estimated cost.</td></tr>
+    <tr><td>1.2</td><td>Live token counter. Update the status bar in real-time as <code>AssistantEvent::Usage</code> and <code>AssistantEvent::TextDelta</code> events arrive during streaming.</td></tr>
+    <tr><td>1.3</td><td>Turn duration timer. Show elapsed time for the current turn.</td></tr>
+    <tr><td>1.4</td><td>Git branch indicator. Display the current git branch in the status bar (parsed via <code>parse_git_status_metadata</code>).</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 2 · Enhanced streaming output</h4>
+
+<p>Make the main response stream visually rich and responsive.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>2.1</td><td>Live markdown rendering. Buffer text deltas and incrementally render Markdown as it arrives.</td></tr>
+    <tr><td>2.2</td><td>Thinking indicator. When extended thinking/reasoning is active, show a distinct animated indicator alongside the generic <code>🦀 Thinking...</code>.</td></tr>
+    <tr><td>2.3</td><td>Streaming progress bar. Optional horizontal indicator showing approximate completion.</td></tr>
+    <tr><td>2.4</td><td>Tune main-stream pacing. The current <code>stream_markdown</code> sleeps 8ms per chunk for tool results; make this immediate or configurable for the main response stream.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 3 · Tool call visualization</h4>
+
+<p>Make tool execution legible and navigable.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>3.1</td><td>Collapsible tool output. For tool results longer than N lines (default 15), show a summary with an <code>[+] Expand</code> hint.</td></tr>
+    <tr><td>3.2</td><td>Syntax-highlighted tool results. Apply syntect highlighting to bash stdout / <code>read_file</code> content / <code>REPL</code> output.</td></tr>
+    <tr><td>3.3</td><td>Tool call timeline. Show a compact summary after all tool calls complete: <code>🔧 bash → ✓ | read_file → ✓ | edit_file → ✓ (3 tools, 1.2s)</code>.</td></tr>
+    <tr><td>3.4</td><td>Diff-aware <code>edit_file</code> display. Render a colored unified diff. The <code>EditFileOutput</code> schema already carries <code>original_file</code>, <code>old_string</code>, and <code>new_string</code>, so no schema change is needed; the CLI computes the diff in-process. Defensively strip any <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code> so hook fire does not silently disable the preview.</td></tr>
+    <tr><td>3.5</td><td>Permission prompt enhancement. Style the approval prompt with box drawing, color the tool name, show a one-line summary.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 4 · Slash commands and navigation</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>4.1</td><td>Colored <code>/diff</code> output.</td></tr>
+    <tr><td>4.2</td><td>Pager for long outputs (<code>/status</code>, <code>/config</code>, <code>/memory</code>, <code>/diff</code>).</td></tr>
+    <tr><td>4.3</td><td><code>/search</code> command. Default scope: current-session messages only (linear scan over <code>Session.messages</code>, ~50 ms even on large sessions, no storage redesign). <code>--all</code> opts in to all persisted JSONL sessions in the workspace; <code>--tools</code> opts in to scanning tool-result bodies. Cross-session and tool-output scopes are deferred until the default is in use.</td></tr>
+    <tr><td>4.4</td><td><code>/undo</code> command. Walk <code>session.messages.iter().rev()</code> for the most recent <code>ToolResult</code> whose <code>tool_name == "edit_file" | "write_file"</code> and matching <code>file_path</code>, then apply its <code>original_file</code>. Pre-image survives a single round-trip on the active JSONL but can be erased by session rotation (256 KiB threshold, 3 rotated keepers) and by <code>/compact</code> (default keeps last 4 messages plus summary). Defensive parse strips <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code>.</td></tr>
+    <tr><td>4.5</td><td>Interactive session picker. Replace text-based <code>/session list</code> with a fuzzy list.</td></tr>
+    <tr><td>4.6</td><td>Tab completion for tool arguments.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 5 · Color themes and configuration</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>5.1</td><td>Named color themes (<code>dark</code>, <code>light</code>, <code>solarized</code>, <code>catppuccin</code>).</td></tr>
+    <tr><td>5.2</td><td>ANSI-256 / truecolor detection.</td></tr>
+    <tr><td>5.3</td><td>Configurable spinner style.</td></tr>
+    <tr><td>5.4</td><td>Banner customization.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 6 · Full-screen TUI mode</h4>
+
+<p>Optional alternate-screen layout for power users.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>6.1</td><td>Add <code>ratatui</code> behind a <code>full-tui</code> feature flag.</td></tr>
+    <tr><td>6.2</td><td>Split-pane layout.</td></tr>
+    <tr><td>6.3</td><td>Scrollable conversation view (PgUp/PgDn).</td></tr>
+    <tr><td>6.4</td><td>Keyboard shortcuts panel (<code>?</code> overlay).</td></tr>
+    <tr><td>6.5</td><td>Mouse support.</td></tr>
+  </tbody>
+</table>
+
+<h4>TUI sequencing</h4>
+
+<p>Phase 0 first (foundation). Within the rest, highest user-facing
+impact, lowest implementation cost first:</p>
+
+<ol>
+  <li><strong>Phase 0</strong> — module decomposition</li>
+  <li><strong>Phase 1.1–1.2</strong> — status bar with live tokens</li>
+  <li><strong>Phase 2.4</strong> — main-stream pacing</li>
+  <li><strong>Phase 3.1</strong> — collapsible tool output</li>
+  <li><strong>Phase 2.1</strong> — live markdown rendering</li>
+  <li><strong>Phase 3.2</strong> — syntax-highlighted tool results</li>
+  <li><strong>Phase 3.4</strong> — diff-aware edit display</li>
+  <li><strong>Phase 4.1</strong> — colored <code>/diff</code></li>
+  <li><strong>Phase 5</strong> — color themes (driven by user demand)</li>
+  <li><strong>Phase 4.2–4.6</strong> — enhanced navigation and commands</li>
+  <li><strong>Phase 6</strong> — full-screen mode, after the earlier phases ship</li>
+</ol>
+
+<h4>TUI design principles</h4>
+
+<ol>
+  <li>The inline REPL stays the default; full-screen TUI is opt-in (<code>--tui</code>).</li>
+  <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal.</li>
+  <li>Rendering works incrementally; the response stream renders as it arrives.</li>
+  <li>Terminal control goes through <code>crossterm</code> uniformly; raw ANSI escape codes stay out of the codepath.</li>
+  <li>Heavy dependencies (<code>ratatui</code>) sit behind a feature flag.</li>
+</ol>
+
+<h4>TUI module layout after Phase 0</h4>
+
+<pre><code>crates/rusty-sudocode-cli/src/
+├── main.rs              # Entrypoint, arg dispatch
+├── args.rs              # CLI argument parsing
+├── app.rs               # LiveCli struct, REPL loop, turn execution
+├── format.rs            # Report formatting (status, cost, model, permissions, …)
+├── session_mgr.rs       # Session CRUD: create, resume, list, switch, persist
+├── init.rs              # Repo initialization
+├── input.rs             # Line editor
+├── render.rs            # TerminalRenderer, Spinner
+└── tui/
+    ├── mod.rs           # TUI module root
+    ├── status_bar.rs    # Persistent bottom status line
+    ├── tool_panel.rs    # Tool call visualization (boxes, timelines, collapsible)
+    ├── diff_view.rs     # Colored diff rendering
+    ├── pager.rs         # Internal pager for long outputs
+    └── theme.rs         # Color theme definitions and selection</code></pre>
+
+<h4>TUI risk and mitigation</h4>
+
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Refactor changes REPL behavior</td><td>Phase 0 stays a pure restructuring; existing test coverage as safety net.</td></tr>
+    <tr><td>Terminal compatibility (tmux, SSH, Windows)</td><td>Rely on <code>crossterm</code>'s abstraction; verify in degraded environments.</td></tr>
+    <tr><td>Rich rendering regresses performance</td><td>Profile before/after; keep the raw streaming path as a fast fallback.</td></tr>
+    <tr><td>Phase 6 scope expansion</td><td>Ship Phases 0–3 as a coherent release before opening Phase 6.</td></tr>
+  </tbody>
+</table>
+
+<!-- publish_to_shareone LLM tool candidate + working agreement + references in follow-up commits. -->
 
 <footer>
   Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.

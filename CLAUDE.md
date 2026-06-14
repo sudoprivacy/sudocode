@@ -21,12 +21,14 @@ source. CCB is not a cherry-pick source for our Rust tree; we read it
 for understanding only. The full triage flow, sync markers, and
 resolution taxonomy live in [`docs/parity.md`](./docs/parity.md).
 
-Every design document under `docs/plans/active/` that touches a feature
-with parity intent **leads** with a CCB validation section: which CCB
-files were read, what behavior was confirmed, what surprises were
-found, and what decisions follow. The first such document,
-[`docs/plans/active/bash-mode-design.md`](./docs/plans/active/bash-mode-design.md),
-is the shape future design docs follow.
+Every design write-up for a feature with parity intent **leads** with a
+CCB validation section: which CCB files were read, what behavior was
+confirmed, what surprises were found, and what decisions follow.
+Design write-ups live in [`ROADMAP.md`](./ROADMAP.md) under the goal
+they belong to (the `!` bash mode section under Goal 3 is the shape
+future design write-ups follow). When a plan ships or is superseded,
+remove its content from ROADMAP.md in the same PR; ROADMAP tracks the
+live state, not history.
 
 ## Verification
 
@@ -51,9 +53,6 @@ forwards flags.
   workflow.
 - [`docs/`](./docs/) — topic-scoped SSOTs (usage, authentication,
   permissions, ACP, models, plugins, parity, mock harness, container).
-- [`docs/plans/active/`](./docs/plans/active/) — in-flight design plans.
-- [`docs/plans/archive/`](./docs/plans/archive/) — landed and superseded
-  plans.
 - [`rust/README.md`](./rust/README.md) — Cargo workspace map.
 
 When the repository workflow changes, update this file along with the

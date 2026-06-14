@@ -1028,20 +1028,19 @@ impact, lowest implementation cost first:</p>
   <li><strong>Phase 4.1</strong> — colored <code>/diff</code></li>
   <li><strong>Phase 5</strong> — color themes (driven by user demand)</li>
   <li><strong>Phase 4.2–4.6</strong> — enhanced navigation and commands</li>
-  <li><strong>Phase 6</strong> — full-screen mode, after the earlier phases ship</li>
 </ol>
 
-<h4>TUI design principles</h4>
+<h4>Inline rendering design principles</h4>
 
 <ol>
-  <li>The inline REPL stays the default; full-screen TUI is opt-in (<code>--tui</code>).</li>
-  <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal.</li>
+  <li>Inline REPL only. <strong>No alternate-screen mode</strong> — see the bright-line rule above. Scrollback in the host terminal (VS Code, tmux, SSH) stays load-bearing.</li>
+  <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal, and so the same code path serves <code>--output-format json</code>, ACP, and pipe consumers.</li>
   <li>Rendering works incrementally; the response stream renders as it arrives.</li>
   <li>Terminal control goes through <code>crossterm</code> uniformly; raw ANSI escape codes stay out of the codepath.</li>
-  <li>Heavy dependencies (<code>ratatui</code>) sit behind a feature flag.</li>
+  <li><strong>No <code>ratatui</code> dependency.</strong> Even behind a feature flag — its presence in <code>Cargo.lock</code> is itself the slippery slope toward the alternate-screen path the rule above forbids.</li>
 </ol>
 
-<h4>TUI module layout after Phase 0</h4>
+<h4>Module layout after Phase 0</h4>
 
 <pre><code>crates/rusty-sudocode-cli/src/
 ├── main.rs              # Entrypoint, arg dispatch
@@ -1051,14 +1050,15 @@ impact, lowest implementation cost first:</p>
 ├── session_mgr.rs       # Session CRUD: create, resume, list, switch, persist
 ├── init.rs              # Repo initialization
 ├── input.rs             # Line editor
-├── render.rs            # TerminalRenderer, Spinner
-└── tui/
-    ├── mod.rs           # TUI module root
-    ├── status_bar.rs    # Persistent bottom status line
-    ├── tool_panel.rs    # Tool call visualization (boxes, timelines, collapsible)
-    ├── diff_view.rs     # Colored diff rendering
-    ├── pager.rs         # Internal pager for long outputs
-    └── theme.rs         # Color theme definitions and selection</code></pre>
+└── render.rs            # TerminalRenderer, Spinner, inline polish</code></pre>
+
+<p>The earlier draft included a <code>tui/</code> subdirectory holding
+<code>status_bar.rs</code> / <code>tool_panel.rs</code> /
+<code>diff_view.rs</code> / <code>pager.rs</code> / <code>theme.rs</code>
+as a namespace for Phase 6 components. Deleted: no Phase 6, no
+namespace. Status-bar / tool-panel / colored-diff logic lives in
+<code>format.rs</code> + <code>render.rs</code>; PR #180 already
+ships them there.</p>
 
 <h4>TUI risk and mitigation</h4>
 

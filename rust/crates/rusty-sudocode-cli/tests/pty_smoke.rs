@@ -29,11 +29,9 @@ use common::spawn_scode;
 /// Anything broken in the framework breaks this test loudly. Every
 /// other PTY test inherits the same wiring.
 ///
-/// `#[cfg(unix)]` because pty-expect's Windows ConPTY runtime is
-/// deferred to v0.2 (the Windows code path in pty-expect itself is
-/// gated the same way). On the Windows compile-check builds this
-/// test still type-checks; it just doesn't run.
-#[cfg(unix)]
+/// Cross-platform. pty-expect v0.1.1 (this PR's dep) responds to
+/// ConPTY's DSR(6) handshake automatically, so Windows local +
+/// Windows CI both run this test the same way Unix does.
 #[test]
 fn scode_help_prints_usage_and_exits_cleanly() {
     let mut sess = spawn_scode(&["--help"]).expect("spawn scode --help");

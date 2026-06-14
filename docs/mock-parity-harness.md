@@ -3,7 +3,7 @@
 The mock parity harness exercises the `scode` CLI end-to-end against a
 deterministic, Anthropic-compatible mock backend in a clean environment.
 It is the measurement vehicle for the e2e coverage goal described in
-[`../ROADMAP.md`](../ROADMAP.md) (Goal 1).
+[`../ROADMAP.html`](../ROADMAP.html) (Goal 1).
 
 ## Components
 

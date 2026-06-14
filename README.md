@@ -155,7 +155,7 @@ For day-to-day workflows see [`docs/usage.md`](./docs/usage.md).
 - [`docs/container.md`](./docs/container.md) — building and running inside a container.
 - [`docs/parity.md`](./docs/parity.md) — what claude-code parity means and how it is tracked.
 - [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the deterministic mock backend and harness.
-- [`ROADMAP.md`](./ROADMAP.md) — goals for the project.
+- [`ROADMAP.html`](./ROADMAP.html) — goals for the project.
 - [`rust/README.md`](./rust/README.md) — Cargo workspace map.
 
 ## Contributing

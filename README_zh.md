@@ -150,7 +150,7 @@ scode doctor
 - [`docs/container.md`](./docs/container.md) — 在容器中构建与运行。
 - [`docs/parity.md`](./docs/parity.md) — claude-code 对齐口径与跟踪机制。
 - [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — 确定性 mock 后端与 harness。
-- [`ROADMAP.md`](./ROADMAP.md) — 项目目标。
+- [`ROADMAP.html`](./ROADMAP.html) — 项目目标。
 - [`rust/README.md`](./rust/README.md) — Cargo 工作空间结构。
 
 ## 参与贡献

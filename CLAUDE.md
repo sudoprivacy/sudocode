@@ -24,10 +24,10 @@ resolution taxonomy live in [`docs/parity.md`](./docs/parity.md).
 Every design write-up for a feature with parity intent **leads** with a
 CCB validation section: which CCB files were read, what behavior was
 confirmed, what surprises were found, and what decisions follow.
-Design write-ups live in [`ROADMAP.md`](./ROADMAP.md) under the goal
+Design write-ups live in [`ROADMAP.html`](./ROADMAP.html) under the goal
 they belong to (the `!` bash mode section under Goal 3 is the shape
 future design write-ups follow). When a plan ships or is superseded,
-remove its content from ROADMAP.md in the same PR; ROADMAP tracks the
+remove its content from ROADMAP.html in the same PR; ROADMAP tracks the
 live state, not history.
 
 ## Verification
@@ -48,7 +48,7 @@ forwards flags.
 ## Documentation map
 
 - [`README.md`](./README.md) — project entry, install, quick start.
-- [`ROADMAP.md`](./ROADMAP.md) — goals.
+- [`ROADMAP.html`](./ROADMAP.html) — goals.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor setup and PR
   workflow.
 - [`docs/`](./docs/) — topic-scoped SSOTs (usage, authentication,

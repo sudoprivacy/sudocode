@@ -343,8 +343,20 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Single-turn prompt</td><td>Gap</td><td>—</td><td></td></tr>
     <tr><td>Multi-turn context</td><td>Gap</td><td>—</td><td>Follow-up references prior turn</td></tr>
     <tr><td>Streaming response</td><td>Gap</td><td>—</td><td>Implicit in every interaction</td></tr>
-    <tr><td>Graceful cancel mid-execution</td><td>Gap</td><td>—</td><td>Stop during sleep, verify context preserved</td></tr>
+    <tr><td>Multi-tool turn roundtrip</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — multiple tools in one assistant turn, each result feeds the next</td></tr>
+    <tr><td>Graceful cancel mid-execution</td><td>Gap</td><td>—</td><td>Integration-covered by <code>interrupt_e2e.rs</code>; PTY pending — SIGINT during bash, verify interrupted envelope and no continuation</td></tr>
     <tr><td>Agent switching (Sudoclaw ↔ scode)</td><td>N/A</td><td>—</td><td>sudowork-UI concern</td></tr>
+  </tbody>
+</table>
+
+<h4>1b. Transport (ACP)</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>ACP stdio transport</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; **kept as integration** — protocol-level surface, not REPL-fidelity, PTY adds no fidelity</td></tr>
+    <tr><td>ACP WebSocket transport</td><td>Gap</td><td>—</td><td>Same as above — protocol-level, integration is the right layer</td></tr>
+    <tr><td>ACP session lifecycle (EOF / orphan)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; tests that host stdin EOF makes the agent exit cleanly without orphans</td></tr>
+    <tr><td>Live API smoke (real Anthropic)</td><td>N/A</td><td>—</td><td>Covered by <code>acp_live_smoke.rs</code>; runs only on main with <code>CLAUDE_CODE_OAUTH_TOKEN</code>; live-gate, not a coverage-denominator concern</td></tr>
   </tbody>
 </table>
 
@@ -433,10 +445,14 @@ coverage starts fresh and is tracked here as the single source.</p>
   <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td>Session auto-save</td><td>Gap</td><td>—</td><td>Persists across turns</td></tr>
-    <tr><td><code>/resume</code> (load saved session)</td><td>Gap</td><td>—</td><td>send → close → resume → verify</td></tr>
+    <tr><td>Session JSONL persistence (model + transcript)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_live_smoke.rs</code> + <code>resume_slash_commands.rs</code>; PTY pending — assistant messages carry model field, transcript replayable</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — send → close → resume → verify</td></tr>
+    <tr><td><code>--resume latest</code> shortcut</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — restores most-recent managed session without an explicit id</td></tr>
     <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/export</code> (session to markdown)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON + plaintext modes</td></tr>
+    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>undo_e2e.rs</code>; PTY pending — restore after edit, delete created file, nothing-to-undo, hook-feedback robustness, JSON output</td></tr>
     <tr><td><code>/compact</code> (compress history)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Auto-compact trigger</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — runtime-initiated compaction when context fills, distinct from manual <code>/compact</code></td></tr>
   </tbody>
 </table>
 
@@ -444,14 +460,22 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/model</code> (switch model)</td><td>Gap</td><td>—</td><td>Show current + switch</td></tr>
-    <tr><td><code>/permissions</code> (switch mode)</td><td>Gap</td><td>—</td><td>read-only / workspace-write / danger</td></tr>
+    <tr><td><code>/model</code> (switch model)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
+    <tr><td>Permission prompt flow (approve / deny)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
     <tr><td><code>/auth</code> (switch auth mode)</td><td>N/A</td><td>—</td><td>sudowork credential injection concern</td></tr>
+    <tr><td>Informational commands bypass credential check</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
     <tr><td><code>/skills</code> (list / invoke)</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/agents</code> (list)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/agents</code> (list)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
     <tr><td><code>/mcp</code> (list / show servers)</td><td>Gap (L2)</td><td>—</td><td>Plugin lifecycle</td></tr>
     <tr><td><code>/plugins</code> (manage)</td><td>Gap (L2)</td><td>—</td><td>Plugin install/enable/disable</td></tr>
-    <tr><td><code>/config</code> (inspect)</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Plugin → system-prompt injection</td><td>Gap (L2)</td><td>—</td><td>Was unit-covered by deleted <code>plugin_prompt_injection.rs</code>; also exercised by <code>system_prompt_command.rs</code>; PTY pending — enabled plugin lands in dynamic sections, disabled does not</td></tr>
+    <tr><td>Plugin tool roundtrip</td><td>Gap (L2)</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — plugin-defined tool executes through the agent loop</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON section access + standard-location loading</td></tr>
+    <tr><td><code>--output-format json</code> (universal flag)</td><td>Gap</td><td>—</td><td>Integration-covered extensively by <code>output_format_contract.rs</code>; PTY pending — applies across help, version, status, sandbox, inventory, agents, bootstrap, system-prompt, dump-manifests, init, doctor, resume-status, config, export-help</td></tr>
+    <tr><td><code>--compact</code> output flag</td><td>Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
+    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
+    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td>Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code> + <code>system_prompt_command.rs</code>; PTY pending — each subcommand has both plaintext and structured-JSON modes</td></tr>
   </tbody>
 </table>
 
@@ -484,7 +508,8 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In current denominator</th></tr></thead>
   <tbody>
-    <tr><td>Core Conversation</td><td>5</td><td>1</td><td>0</td><td>4</td></tr>
+    <tr><td>Core Conversation</td><td>6</td><td>1</td><td>0</td><td>5</td></tr>
+    <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>0</td><td>3</td></tr>
     <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td></tr>
     <tr><td>Search &amp; Web</td><td>2</td><td>0</td><td>0</td><td>2</td></tr>
@@ -492,18 +517,27 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
-    <tr><td>Session Management</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
-    <tr><td>Config &amp; Discovery</td><td>8</td><td>1</td><td>2</td><td>5</td></tr>
+    <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>1</td><td>4</td><td>11</td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td></tr>
-    <tr><th>Total</th><th>59</th><th>2</th><th>11</th><th>46</th></tr>
+    <tr><th>Total</th><th>76</th><th>3</th><th>13</th><th>60</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 42 features covered</strong> out of the 46 in-denominator
+<p><strong>90% target = 54 features covered</strong> out of the 60 in-denominator
 features. <code>L2 deferred</code> items are real surface but need heavier
 setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
 but do not count toward the Q2 number.</p>
+
+<p>The numerator counts <strong>PTY-fidelity tests only</strong>, per the test
+policy: integration tests (kept for protocol-layer surface like ACP and
+the mock parity harness) and live-API smoke do not count toward the
+90% — those are "Integration-covered" with the corresponding feature
+still marked <strong>Gap</strong> until a PTY test exists. This is how
+multiple Goal 1 rows show "Integration-covered by &lt;file.rs&gt;; PTY
+pending" — they are real feature surface a heavy user touches, but the
+coverage measure waits on PTY.</p>
 
 <h3>Priority sequencing</h3>
 

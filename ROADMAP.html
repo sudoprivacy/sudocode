@@ -219,49 +219,93 @@ real-Chromium + real-mouse stance for sudowork: the only way to
 catch the failure modes a human will hit is to exercise the same
 surface the human exercises.</p>
 
-<h4>Coverage metric ≠ what tests we write</h4>
+<h4>Test layer policy: PTY is the bar, unit tests are forbidden</h4>
 
-<p>Important to keep these two questions separated, because conflating
-them would push us into bad engineering. Only PTY-fidelity tests
-count toward the 90% number — but unit tests and integration tests
-continue to carry their weight inside <code>cargo test --workspace</code>:</p>
+<p>Most engineering orgs reach for a three-layer pyramid by default
+(unit / integration / e2e). We deliberately do not. The product
+owner's empirical observation, drawn from a year of agent-driven
+development across multiple projects: <strong>unit tests have not
+caught a single real bug in that window</strong>. The bugs that
+shipped were caught either by the e2e harness or by humans using
+the product. Unit tests in this codebase have so far functioned as
+overhead — pure re-statements of the implementation, dragged
+alongside every refactor, paying for themselves in neither caught
+bugs nor refactor confidence.</p>
+
+<p>So the policy for sudocode is:</p>
 
 <table>
   <thead>
-    <tr><th></th><th>Unit</th><th>Integration (mock harness)</th><th>PTY (pty-expect)</th></tr>
+    <tr><th>Layer</th><th>Status</th><th>When to write</th></tr>
   </thead>
   <tbody>
-    <tr><td>Run time per test</td><td>µs</td><td>ms</td><td>seconds (spawn + PTY + parse)</td></tr>
-    <tr><td>Failure attribution</td><td>line number</td><td>function boundary</td><td>"the REPL is wrong somewhere"</td></tr>
-    <tr><td>Determinism</td><td>very high</td><td>high</td><td>medium — ConPTY quirks, scheduling flake</td></tr>
-    <tr><td>Error-path reachability</td><td>100% (direct inject)</td><td>high</td><td>low (rare branches hard to hit through the REPL)</td></tr>
-    <tr><td>Refactor feedback</td><td>immediate</td><td>immediate</td><td>slow</td></tr>
-    <tr><td>Counts toward the 90% e2e coverage metric</td><td>no</td><td>no</td><td><strong>yes</strong></td></tr>
-    <tr><td>Required on every PR (CI gate)</td><td><strong>yes</strong></td><td><strong>yes</strong></td><td><strong>yes</strong></td></tr>
+    <tr>
+      <td><strong>PTY (pty-expect)</strong></td>
+      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td>Every user-facing feature</td>
+    </tr>
+    <tr>
+      <td>Integration (mock harness)</td>
+      <td>Optional — debug accelerator, not a gate</td>
+      <td>When a PTY failure's root cause sits behind a wide blast radius (LLM transport, runtime state machine, ACP wire) and shrinking the bisection distance is worth the file</td>
+    </tr>
+    <tr>
+      <td>Unit</td>
+      <td><strong>Forbidden by rule</strong></td>
+      <td>Don't write them. PRs that add unit tests will be asked to remove them. There is no "exceptional case" carve-out — the rule is the rule, intentionally bright-line so it doesn't erode case by case.</td>
+    </tr>
   </tbody>
 </table>
 
-<p>If we wrote only PTY tests:</p>
+<h5>Why we trust this — fast triage replaces fine-grained tests</h5>
+
+<p>The defense most often given for unit tests is failure
+attribution: "PTY tests just say <em>the REPL is wrong somewhere</em>;
+unit tests point at a line." That defense collapses if PTY failures
+are themselves fast to triage. Our substitute is <strong>trace
+quality</strong>:</p>
 
 <ul>
-  <li><code>cargo test</code> would slow from sub-second to minutes,
-  destroying the inner-loop feedback that makes Rust pleasant to work
-  in.</li>
-  <li>Flake rate would rise sharply (PTY tests carry timing, ANSI
-  decode, and OS-level signal behaviour that unit tests do not).</li>
-  <li>Internal refactors that preserve behaviour would be unverifiable
-  at a fine grain — every change would route through the full REPL.</li>
-  <li>Rare error branches (parse errors, panic recovery, edge-case
-  config) would be hard to reach through the REPL surface, so they
-  would silently rot.</li>
+  <li>Structured logs across runtime / API / tool dispatch so a PTY
+  failure carries enough breadcrumbs to walk back to the offending
+  layer in minutes, not unit-test-precision seconds.</li>
+  <li>Mock harness available on demand for the wide-blast-radius
+  cases (it stays opt-in, not a CI gate, but it lives in the repo).</li>
+  <li>The agent (sudocode itself) doing the debugging — the assumed
+  developer workflow on this project is agent-assisted, and an
+  agent reading a structured trace converges as fast on root cause
+  as a human reading a failing unit test name.</li>
 </ul>
 
-<p>So: <strong>the 90% number is a user-friction reliability metric, not
-a directive on test composition.</strong> Unit and integration tests
-stay required for engineering health; PTY tests are the slice that
-answers "does this feature actually work for a human at a terminal".
-The metric only measures the latter because that is what the goal is
-about.</p>
+<h5>What we give up — explicit, not hidden</h5>
+
+<ul>
+  <li><code>cargo test --workspace</code> wall-clock no longer
+  benefits from a unit layer. The runtime is dominated by PTY
+  tests. We accept this; sub-second inner-loop feedback is not the
+  workflow we are optimising for.</li>
+  <li>Rare error branches (panic recovery, edge-case config parse
+  errors) get exercised only when a PTY scenario reaches them.
+  Branches the PTY scenarios never touch will silently rot. We
+  accept this; if those branches never trip in real use either,
+  the rot is harmless, and if they do trip we will see it as a
+  user-visible failure and write a PTY scenario.</li>
+  <li>Internal refactors lose fine-grained behaviour verification.
+  We accept this; PTY tests describe the contract the user actually
+  cares about, and refactors that don't move the user-visible
+  contract are exactly the ones unit tests would have re-stated
+  rather than verified.</li>
+</ul>
+
+<p>This is a deliberate, owner-blessed deviation from the standard
+testing pyramid, and the rule is bright-line on purpose. "We'll
+allow it just this once because the input space is combinatorial"
+is exactly how the unit layer reappears, accumulates, and starts
+costing refactor velocity again. So: no unit tests, no exceptions.
+If a future maintainer wants to reopen this, the burden is a
+concrete bug that a unit test would have caught and a PTY scenario
+would not — and a separate ROADMAP edit to change the rule before
+the test lands, not the test landing first.</p>
 
 <h3>Feature inventory</h3>
 

@@ -107,3 +107,14 @@ criterion_group!(
     bench_bash_spawn_echo_roundtrip
 );
 criterion_main!(benches);
+
+// Stub `main` for Windows so `cargo bench --no-run` produces a
+// valid target. The actual benches above are `#![cfg(unix)]`
+// (they depend on `nix::unistd::pipe` and `sh -c cat`, both
+// POSIX-only). Without this, the windows-latest bench-compile
+// CI job hits:
+//   error[E0601]: `main` function not found in crate
+//     `bash_pipe_throughput`
+// because `criterion_main!` lives inside the gated region.
+#[cfg(not(unix))]
+fn main() {}

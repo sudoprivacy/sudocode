@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<!--
+  Sudo Code Roadmap — single SSOT plan file.
+  This is the canonical plan. Edit this file; publish to ShareOne with
+  the curl command in CLAUDE.md when you want to mirror it externally.
+  Self-contained: no build step, no JS bundler, no Markdown
+  transformation. Styled to render well both as `file://` open and as
+  a ShareOne-hosted page.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudo Code Roadmap</title>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-dim: #eff6ff;
+    --warn: #fef3c7;
+    --warn-fg: #78350f;
+    --code-bg: #f3f4f6;
+    --border: #e5e7eb;
+    --row-alt: #fafafa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 60px 28px 100px;
+    line-height: 1.65;
+    font-size: 16px;
+  }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  h2 {
+    font-size: 22px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 2px solid var(--border);
+    color: var(--fg);
+  }
+  h3 { font-size: 18px; margin-top: 32px; color: var(--accent); }
+  h4 { font-size: 16px; margin-top: 24px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .callout {
+    background: var(--accent-dim);
+    border-left: 4px solid var(--accent);
+    padding: 14px 20px;
+    margin: 20px 0;
+    border-radius: 4px;
+  }
+  .callout-warn { background: var(--warn); border-left-color: #f59e0b; color: var(--warn-fg); }
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; font-size: 13px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f9fafb; font-weight: 600; }
+  tbody tr:nth-child(even) td { background: var(--row-alt); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+  ul li, ol li { margin: 4px 0; }
+  blockquote {
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+    padding: 4px 16px;
+    margin: 16px 0;
+  }
+  .toc {
+    background: #fafafa;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 24px 0 32px;
+  }
+  .toc ol { margin: 8px 0 0 16px; padding: 0; }
+  .toc li { margin: 4px 0; }
+  a { color: var(--accent); }
+  a:hover { text-decoration: underline; }
+  footer { margin-top: 80px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Sudo Code Roadmap</h1>
+<div class="meta">Single SSOT plan file. Edit this file; publish to ShareOne when mirroring.</div>
+
+<div class="callout">
+  Project goals plus the active design detail for each goal live here.
+  Reference docs that explain mechanism — <a href="./docs/parity.md"><code>docs/parity.md</code></a>,
+  <a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a> —
+  remain separate and are linked from this file. Day-to-day work
+  (tasks, sprint boards, schedules) lives in PRs, issues, and 1:1 notes.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#what-sudo-code-is">What sudo code is</a></li>
+    <li><a href="#north-star">North star</a></li>
+    <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
+    <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
+    <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
+    <li><a href="#working-agreement">Working agreement</a></li>
+    <li><a href="#references">Reference docs</a></li>
+  </ol>
+</div>
+
+<h2 id="what-sudo-code-is">What sudo code is</h2>
+
+<p><code>sudocode</code> (binary: <code>scode</code>) is a Rust-native ACP engine
+for coding agents — the hacker-facing CLI half of the sudo* family.</p>
+
+<table>
+  <thead>
+    <tr><th></th><th>sudowork</th><th>sudocode</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Audience</td><td>Non-technical end users</td><td>Developers, hackers, machines</td></tr>
+    <tr><td>Surface</td><td>GUI / Electron</td><td>CLI / headless / ACP</td></tr>
+    <tr><td>Defaults</td><td>Safe, hand-held, friendly copy</td><td>Composable, terse, full power</td></tr>
+    <tr><td>Relationship</td><td colspan="2">sudowork uses sudocode as one of its execution engines</td></tr>
+  </tbody>
+</table>
+
+<p>The two are tuned for different audiences. The same capability can land
+safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
+
+<h2 id="north-star">North star</h2>
+
+<ul>
+  <li><strong>Rust-native</strong> — single binary, deterministic shutdown, lean footprint.</li>
+  <li><strong>Model-agnostic</strong> — Anthropic, OpenAI, xAI, Gemini, OAuth subscriptions, arbitrary proxy backends.</li>
+  <li><strong>Headless-first</strong> — ACP over stdio and WebSocket; embeddable as "agent as a service".</li>
+  <li><strong>Safe by design</strong> — explicit permission modes plus a Linux user-namespace sandbox.</li>
+</ul>
+
+<!-- Goal 1, Goal 2, Goal 3, working agreement, references land in follow-up commits. -->
+
+<footer>
+  Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.
+</footer>
+
+</body>
+</html>

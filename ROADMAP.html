@@ -954,22 +954,65 @@ namespace for the new TUI work.</p>
   </tbody>
 </table>
 
-<h4>Phase 6 · Full-screen TUI mode</h4>
+<h4>No alternate-screen / full-screen TUI mode — by rule</h4>
 
-<p>Optional alternate-screen layout for power users.</p>
+<p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
+sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
+behind a <code>full-tui</code> cargo feature, with split-pane layout,
+scrollable conversation view, mouse support. <strong>This is forbidden
+by rule.</strong> sudocode does not adopt an alternate-screen mode,
+does not depend on <code>ratatui</code>, and will not ship split-pane
+or in-CLI multi-agent dashboards.</p>
 
-<table>
-  <thead><tr><th>Task</th><th>Description</th></tr></thead>
-  <tbody>
-    <tr><td>6.1</td><td>Add <code>ratatui</code> behind a <code>full-tui</code> feature flag.</td></tr>
-    <tr><td>6.2</td><td>Split-pane layout.</td></tr>
-    <tr><td>6.3</td><td>Scrollable conversation view (PgUp/PgDn).</td></tr>
-    <tr><td>6.4</td><td>Keyboard shortcuts panel (<code>?</code> overlay).</td></tr>
-    <tr><td>6.5</td><td>Mouse support.</td></tr>
-  </tbody>
-</table>
+<p>The reasoning lines up with sudocode's sole-audience positioning
+(hacker — see <a href="#what-sudo-code-is">What sudo code is</a>) and
+the copilot-worker topology sudocode plugs into (see <a
+href="#collaboration-as-unit">Collaboration as a unit</a> below):</p>
 
-<h4>TUI sequencing</h4>
+<ul>
+  <li><strong>Hackers already have the TUI stack.</strong> VS Code
+  shows diffs and syntax. tmux owns status bars and pane splits.
+  lazygit / ranger own focused TUI nav. sudocode fighting tmux for
+  split-pane real estate is exactly what claude-code does to push
+  non-coders into coding — and exactly what pisses hackers off.</li>
+  <li><strong>Alternate-screen kills scrollback.</strong> Hackers run
+  scode in a VS Code terminal, in a tmux pane, in an SSH session.
+  Quitting an alternate-screen app wipes the buffer; the wheel /
+  <code>Ctrl+B [</code> / <code>Cmd+K</code> muscle memory dies. This
+  is one of the concrete things claude-code's pager / fullscreen
+  prompts do that hackers route around.</li>
+  <li><strong>Alternate-screen breaks copilot-worker attach.</strong>
+  In the copilot-worker topology, an operator (or hydra-style UI)
+  attaches to a worker's terminal to inspect live state. A worker
+  that ran in alternate-screen would hijack the operator's terminal
+  on attach and erase its scrollback on detach. Inline scrollback
+  IS the affordance that makes attach/detach safe.</li>
+  <li><strong>Pipe-friendliness is load-bearing.</strong> <code>scode
+  "plan X" | tee /proc/p_worker/chat-with-me</code> only works when
+  scode writes to a regular tty / pipe. Alternate-screen makes scode
+  a black-box program, breaking unix composition. The same primitive
+  that lets a hacker pipe scode output around is what lets sudocode
+  participate as a unit in nexus-vfs chat-with-me streams.</li>
+</ul>
+
+<p>What <strong>is</strong> in scope, and already shipped in PR #180
+(2026-06-05): inline ANSI polish — colored diffs, syntax-highlighted
+tool results, post-turn tool timeline, box-drawn permission prompts,
+per-turn status line, <code>$PAGER</code> shell-out, fuzzy session
+picker, tab completion. These are <em>inline</em> rendering
+improvements; they do not enter alternate-screen, do not break
+scrollback, do not require new dependencies, and are friendly to
+attach/detach workflows. Future inline polish welcome under the same
+constraints.</p>
+
+<p>Reopening this rule requires the same shape as the
+no-unit-tests rule (Goal 1, "Test layer policy"): a concrete
+collaboration scenario where inline rendering demonstrably fails to
+serve a hacker workflow, and a separate ROADMAP edit to change the
+rule before any <code>ratatui</code> / alternate-screen code lands.
+"It would be nicer" doesn't qualify.</p>
+
+<h4>Inline polish sequencing (Phase 0–5)</h4>
 
 <p>Phase 0 first (foundation). Within the rest, highest user-facing
 impact, lowest implementation cost first:</p>
@@ -1025,7 +1068,6 @@ impact, lowest implementation cost first:</p>
     <tr><td>Refactor changes REPL behavior</td><td>Phase 0 stays a pure restructuring; existing test coverage as safety net.</td></tr>
     <tr><td>Terminal compatibility (tmux, SSH, Windows)</td><td>Rely on <code>crossterm</code>'s abstraction; verify in degraded environments.</td></tr>
     <tr><td>Rich rendering regresses performance</td><td>Profile before/after; keep the raw streaming path as a fast fallback.</td></tr>
-    <tr><td>Phase 6 scope expansion</td><td>Ship Phases 0–3 as a coherent release before opening Phase 6.</td></tr>
   </tbody>
 </table>
 

@@ -155,9 +155,9 @@ covers the scode-native testable feature surface.
 
 ## Case study: first run of the standing rule
 
-The first design document produced under this rule —
-[`plans/active/bash-mode-design.md`](./plans/active/bash-mode-design.md)
-— made the value concrete:
+The first design write-up under this rule — the `!` bash mode
+section inside [`../ROADMAP.md`](../ROADMAP.md) Goal 3 — made the
+value concrete:
 
 - Validated that our `Stdio::null()` choice for the bash spawn path is
   functionally equivalent to CC's `pipe` choice for the current scope,
@@ -171,7 +171,7 @@ The first design document produced under this rule —
   we should revisit them.
 
 None of these would have surfaced from the CHANGELOG entries alone.
-Every design document for a feature with parity intent goes through
+Every design write-up for a feature with parity intent goes through
 the same loop.
 
 ## Quick reference: where each source enters a parity decision

@@ -34,11 +34,12 @@ the content.
   deterministic mock backend and the harness that exercises the parity
   scenarios.
 
-## Plans
+## Plan
 
-- [`plans/active/`](./plans/active/) — in-flight design plans.
-- [`plans/archive/`](./plans/archive/) — landed and superseded plans.
-- [`plans/README.md`](./plans/README.md) — index of both.
+- [`../ROADMAP.md`](../ROADMAP.md) — single SSOT plan file. Project
+  goals plus the active design detail for each goal (e2e coverage
+  inventory under Goal 1, `!` bash mode + TUI enhancement under
+  Goal 3, etc.). All plan content lives here.
 
 ## See also
 

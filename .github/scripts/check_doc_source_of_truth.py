@@ -8,7 +8,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 FILES = [
     ROOT / 'README.md',
-    ROOT / 'README_zh.md',
     ROOT / 'ROADMAP.html',
     ROOT / 'CLAUDE.md',
     ROOT / 'CONTRIBUTING.md',

@@ -596,259 +596,6 @@ the feature lands here as a committed item.</p>
   </tbody>
 </table>
 
-<h3><code>!</code> bash mode — design</h3>
-
-<p>The standing rule on parity work (every parity decision opens CCB and
-confirms what CC actually does, documented in
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> and
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>) was first run for this
-feature against CCB <code>@91cffe16</code> on 2026-06-13.</p>
-
-<h4>What <code>!</code> bash mode is</h4>
-
-<p>A prompt that starts with <code>!</code> bypasses the LLM round-trip
-and dispatches the rest of the line directly to a shell — <code>!ls</code>,
-<code>!git status</code>, <code>!cd path</code>, and so on. Muscle-memory
-parity with claude-code plus two scode-specific guarantees:</p>
-
-<ul>
-  <li>The resolved <code>pwd</code> is displayed on every bash-mode prompt redraw.</li>
-  <li><code>!cd</code> updates the session <code>cwd</code>; subsequent
-  prompt-driven and LLM-driven tool calls share the same working
-  directory.</li>
-  <li>Every <code>!</code> command routes through the same validators
-  as the LLM-driven <code>bash</code> tool path, so the active
-  permission mode applies identically.</li>
-</ul>
-
-<h4>CCB validation — concrete findings</h4>
-
-<h4>stdin handling: <code>Stdio::null()</code> vs <code>pipe</code> — landing on <code>pipe</code></h4>
-
-<p>CCB uses <code>child_process.spawn({ stdio: ['pipe', ...] })</code> for
-the bash tool path. PR #192 landed <code>Stdio::null()</code> on our
-side. The two are functionally equivalent for the current LLM-driven
-bash tool — reading stdin in the child closes/EOFs immediately under
-both — and the original <code>null</code> decision was made to minimise
-surface.</p>
-
-<p>Ethan's call on 2026-06-13 overrides: mirror CCB and move to
-<code>Stdio::piped()</code>. Reasoning:</p>
-
-<ul>
-  <li>The <code>pipe</code> choice is forward-compatible. Keystroke
-  relay for a future interactive <code>!</code>-mode v2 (passing user
-  input through to <code>!python</code>, <code>!ssh</code>,
-  <code>!vim</code>-style commands) does not need a re-architecture —
-  only a parent-side writer.</li>
-  <li>Mirroring CCB at the spawn site keeps the standing rule's
-  invariant clean.</li>
-  <li>Pairing <code>pipe</code> with the rearranger below preserves
-  the hang-prevention behaviour PR #192 was about.</li>
-</ul>
-
-<div class="callout">
-  <strong>Decision:</strong> switch <code>prepare_tokio_command</code>
-  in <code>runtime::bash</code> from <code>Stdio::null()</code> to
-  <code>Stdio::piped()</code> for stdin. The parent side closes its
-  writer end immediately for the current scope — the child still sees
-  EOF, exactly as today — but the spawn shape is now CCB-aligned.
-</div>
-
-<h4><code>&lt; /dev/null</code> injection for piped commands — adopting the rearranger</h4>
-
-<p>CCB's <code>bashProvider.ts:152-154</code> rearranges piped commands
-to inject <code>&lt; /dev/null</code> after the first command (e.g.
-transforming <code>rg foo | wc -l</code> into
-<code>rg foo &lt; /dev/null | wc -l</code>). The CCB inline comment
-captures the failure mode: when the spawn-level stdin is a
-<code>pipe</code>, piped commands inside <code>eval</code> inherit the
-spawn pipe on the first command's stdin, and a no-path <code>rg</code>
-waits on that pipe forever.</p>
-
-<p>Because the stdin decision above moves us to <code>pipe</code>, the
-rearranger ships with it. Without the rearranger, <code>pipe</code>
-regresses the hang behaviour that PR #192 fixed.</p>
-
-<div class="callout">
-  <strong>Decision:</strong> port <code>rearrangePipeCommand</code>
-  into <code>runtime::bash</code>. The function inspects the command,
-  detects the first <code>|</code> outside quoted segments, and
-  inserts <code>&lt; /dev/null</code> before it. Re-implement in Rust
-  from understanding, no TS lift. Cover the cases CCB covers — quoted
-  pipes (<code>echo "a|b"</code>) stay untouched, heredocs
-  (<code>&lt;&lt;EOF</code>) and process substitution
-  (<code>&lt;( ... )</code>) keep their semantics.
-</div>
-
-<h4>Why we are not switching the underlying pipe to nexus-vfs DT_PIPE</h4>
-
-<p><code>nexus-vfs/rust/kernel/benches/syscall_bench.rs</code> records
-DT_PIPE at ~246 ns round-trip versus host OS pipe at ~1–2 µs —
-roughly 4–8× faster — for <strong>in-process Rust ↔ Rust</strong>
-byte handoffs.</p>
-
-<p>That win does not transfer to bash subprocess stdin, for two
-structural reasons:</p>
-
-<ul>
-  <li>bash is a foreign OS process. Its <code>read(stdin_fd)</code>
-  is an honest host syscall against an fd the kernel gave it. There
-  is no path for bash to call <code>kernel.pipe_read_nowait()</code>
-  directly.</li>
-  <li>The only way to expose DT_PIPE bytes to a foreign process is
-  via nexus-fuse mount or LD_PRELOAD. Both add a userspace round-trip
-  on top of host pipe — strictly slower than a direct host pipe.</li>
-</ul>
-
-<p><code>nexus/rust/services/src/acp/subprocess.rs</code> matches this
-reasoning in practice: it spawns its ACP CLI subprocess with normal
-host OS pipes, then <code>dup</code>s the parent-side fds and hands
-the duplicates to the kernel as stdio-backed DT_PIPE entries. The
-DT_PIPE wrapping is for <strong>VFS observability of the ACP
-traffic</strong>, not for raw throughput. The child still uses host
-pipes.</p>
-
-<div class="callout">
-  <strong>Decision:</strong> the bash subprocess pipe is host OS pipe.
-  The DT_PIPE optionality is reserved for two future scopes:
-  <ul>
-    <li>ACP-style stdio observability for <code>!</code>-mode commands
-    (parent-side wrap, child unchanged) — only when we want audit /
-    replay / cross-session inspection of bash output.</li>
-    <li>Any future Rust ↔ Rust in-process pipe inside sudocode that
-    does not cross a process boundary — there DT_PIPE is the right
-    default.</li>
-  </ul>
-</div>
-
-<p>A regression benchmark for the host pipe path lives in
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/crates/runtime/benches/bash_pipe_throughput.rs"><code>rust/crates/runtime/benches/bash_pipe_throughput.rs</code></a>
-so any change to the spawn shape surfaces in CI.</p>
-
-<h4>cwd persistence: the <code>pwd -P &gt;| &lt;track_file&gt;</code> pattern</h4>
-
-<p>CCB tracks cwd by appending <code>pwd -P &gt;| ${shellCwdFilePath}</code>
-to the command string and reading the file back from the host side
-after the command completes (<code>src/utils/bootstrap/state.ts</code>
-exposes <code>setCwdState</code>). This is the same problem
-<code>!cd</code> persistence solves for us, and CCB's pattern is the
-blueprint:</p>
-
-<ul>
-  <li>Each bash-mode command appends a <code>pwd -P</code> write to a
-  per-session temp file.</li>
-  <li>After the command returns, the host reads the file, parses the
-  cwd, and updates the session state used to launch the next
-  command.</li>
-  <li>The next launch picks up the new cwd as its
-  <code>current_dir</code>.</li>
-</ul>
-
-<div class="callout">
-  <strong>Decision:</strong> port this pattern into our
-  <code>runtime::bash</code> extension for <code>!</code>-mode.
-  Re-implement in Rust from understanding; do not lift TS.
-</div>
-
-<div class="callout callout-warn">
-  <strong>Verification gap</strong> (please test on macOS / Linux when
-  convenient): the user reports that CC's <code>!cd</code> does not
-  actually persist cwd in their daily use. CCB's source suggests it
-  does. The discrepancy may be that CC routes <code>!</code>-mode
-  through a different code path, or there is a platform-specific
-  regression. Confirm before declaring the pattern shipped.
-</div>
-
-<h4>CCB extras observed on the bash spawn path</h4>
-
-<p>Six patterns CCB applies on the bash spawn path that we have not yet
-adopted. Each is real and well-motivated; none is on the critical
-path for shipping <code>!</code>-mode v1. Captured here so the
-corresponding trigger surfaces the question at the right time.</p>
-
-<table>
-  <thead><tr><th>Pattern</th><th>Why CCB does it</th><th>When we revisit</th></tr></thead>
-  <tbody>
-    <tr>
-      <td>Snapshot file <code>source</code> on every command</td>
-      <td>Preserve user aliases and environment so commands behave like the user's interactive shell</td>
-      <td>When users report "this works in my terminal but not in scode" alias/env divergence</td>
-    </tr>
-    <tr>
-      <td>Session env hook script (<code>getSessionEnvironmentScript</code>)</td>
-      <td>Apply env vars set by session-start hooks before each command</td>
-      <td>When we land session-start hooks</td>
-    </tr>
-    <tr>
-      <td>Tmux socket isolation (<code>TMUX</code> env override)</td>
-      <td>Prevent the LLM from reading/writing the user's tmux session</td>
-      <td>When we ship multi-session / agents-in-tmux features</td>
-    </tr>
-    <tr>
-      <td>Extended glob disable (<code>shopt -u extglob</code> style)</td>
-      <td>Reduce attack surface for glob-based injection</td>
-      <td>When we land a permission tightening pass</td>
-    </tr>
-    <tr>
-      <td><code>CLAUDE_CODE_SHELL_PREFIX</code> env wrapper</td>
-      <td>Let users wrap every command (e.g. <code>nice -n 19 &lt;cmd&gt;</code>, sudo policy injection)</td>
-      <td>When users ask for cross-cutting command wrappers</td>
-    </tr>
-    <tr>
-      <td><code>pwd -P &gt;| &lt;track_file&gt;</code> written by command</td>
-      <td>Persist cwd across commands</td>
-      <td><strong>Now</strong> — directly informs <code>!cd</code> persistence above</td>
-    </tr>
-  </tbody>
-</table>
-
-<h4>PowerShell side: already aligned</h4>
-
-<p>CCB's PowerShell provider invokes pwsh with
-<code>-NoProfile -NonInteractive -Command &lt;cmd&gt;</code>. Our
-<code>tools::execute_shell_command</code> already uses the same flag
-set (<code>-NoProfile -NonInteractive</code>) plus
-<code>Stdio::null()</code> on the stdin handle. No gap.</p>
-
-<h4>Implementation steps for <code>!</code>-mode v1</h4>
-
-<ol>
-  <li>Prompt parser: treat <code>!</code>-prefix lines specially in the REPL input path.</li>
-  <li>Bash dispatch: <code>runtime::bash</code> entry that takes the
-  rest of the line, applies the cwd from session state, and appends
-  the CCB-style <code>pwd -P &gt;| &lt;track_file&gt;</code> to the
-  command.</li>
-  <li>cwd persistence: read the track file after each
-  <code>!</code>-command, update <code>Session::cwd</code>, surface
-  the resolved <code>pwd</code> in the prompt redraw.</li>
-  <li>Permission gating: route every <code>!</code>-command through
-  the same validator chain as the LLM-driven <code>bash</code> tool
-  path. No permission shortcut for <code>!</code>.</li>
-  <li>PTY-level acceptance test in <code>pty-expect</code> driving
-  <code>!ls</code> / <code>!cd /tmp</code> / <code>!pwd</code> and
-  asserting the rendered prompt shows the new pwd.</li>
-</ol>
-
-<h4>Reference</h4>
-
-<ul>
-  <li>Tier 2 source:
-  <code>claude-code-best/claude-code @ 91cffe16e23fc886f6860a7edfe8754d74a4abbf</code>
-  (recorded in <code>LAST_CCB_REF_VERSION</code>).</li>
-  <li>Files read for this design:
-    <ul>
-      <li><code>src/utils/Shell.ts</code> (spawn site, stdio config)</li>
-      <li><code>src/utils/ShellCommand.ts</code> (wrapSpawn wrapper)</li>
-      <li><code>src/utils/shell/bashProvider.ts</code> (bash command assembly, pwd tracking, pipe rearrangement)</li>
-      <li><code>src/utils/shell/powershellProvider.ts</code> (pwsh flags)</li>
-    </ul>
-  </li>
-  <li>Our current state: <code>rust/crates/runtime/src/bash.rs</code>,
-  <code>rust/crates/tools/src/lib.rs</code> (around
-  <code>execute_shell_command</code>, <code>run_powershell</code>).</li>
-</ul>
-
 <h3>Inline rendering polish</h3>
 
 <p>Improvements to how <code>rusty-sudocode-cli</code> draws its
@@ -1112,7 +859,33 @@ externally" / "publish my plan" / "give me a shareable link".</p>
 
 <p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
 published by hand. The exact curl call is documented in
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md"><code>CONTRIBUTING.md</code> § Publishing the roadmap to ShareOne</a>.</p>
+
+<h3>Deferred · <code>!</code> bash mode</h3>
+
+<p>An earlier active design write-up for a CC-style <code>!cmd</code>
+prefix that bypasses the LLM round-trip and dispatches the rest of
+the line to a shell (e.g. <code>!ls</code>, <code>!git status</code>,
+<code>!cd path</code>) lived here in full detail (~250 lines covering
+Bash provider abstraction, pipe rearrangement under <code>!</code>,
+permission validator behavior, ConPTY handling, CCB validation
+against <code>@91cffe16</code>). Removed and deferred indefinitely
+on 2026-06-14.</p>
+
+<p><strong>Why deferred.</strong> Empirically, <code>!cmd</code>
+shortcuts don't pay productivity for the audience this ROADMAP
+serves (see <a
+href="https://github.com/sudoprivacy/sudocode/blob/main/README.md#who-this-is-for">README
+§ Who this is for</a>). Heavy users <em>bundle</em>: a single long
+prompt to the agent covering multiple needs, with the agent doing
+the shell calls inside its tool loop. Inserting an <code>!ls</code>
+shortcut as a one-off interaction breaks that rhythm — the user
+pays the cost of leaving the agent thread to run one command, then
+returns to the prompt. The savings are negative.</p>
+
+<p>The full design lives in git history (preserved by the
+no-squash merge policy). Reopen if a real heavy user asks — same
+friction gate as <code>publish_to_shareone</code> above.</p>
 
 <h2 id="goal-4">Goal 4 · Be a good unit in the copilot-worker topology</h2>
 

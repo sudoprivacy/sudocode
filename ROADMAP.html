@@ -861,6 +861,47 @@ externally" / "publish my plan" / "give me a shareable link".</p>
 published by hand. The exact curl call is documented in
 <a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md"><code>CONTRIBUTING.md</code> § Publishing the roadmap to ShareOne</a>.</p>
 
+<h3>Candidate · Plan mode as active compaction</h3>
+
+<p>Product-owner insight surfaced during the README rewrite
+(2026-06-14): <strong>entering plan mode IS the gesture of "I want a
+clean context to think".</strong> <code>/compact</code> is passive,
+retrospective summarization — the agent decides what to keep and
+what to lose. Plan mode is active, prospective context reset — the
+user has decided to bound the next thought. They are semantically
+distinct primitives and we should treat them that way.</p>
+
+<p><strong>Sketch (needs CCB validation pass + design write-up
+before priority):</strong></p>
+
+<ul>
+  <li><strong>One session = one plan.</strong> Fixed file path per
+  session (e.g. <code>&lt;session-id&gt;.plan.md</code> on the
+  session-scoped filesystem). No slug, no per-plan identity
+  confusion — CC's slug-based plan files cause the LLM to ask
+  "which plan?" mid-conversation, which the bounded
+  one-per-session model eliminates.</li>
+  <li><strong>Entering plan mode triggers active compaction.</strong>
+  Agent reads the current plan, the runtime drops history below the
+  plan + system prompt, plan becomes the focused context. The plan
+  IS the summary, so no summarization loss the way
+  <code>/compact</code> introduces.</li>
+  <li><strong>Inside plan mode, the agent edits the plan
+  incrementally.</strong> Delete items marked 100% done. Append new
+  items as they're decided. Revise pending items (don't delete
+  future items — can re-word, can re-scope, can re-order). The
+  agent does this work; the user supervises.</li>
+  <li><strong>Multiple plans = multiple sessions.</strong> No
+  "switch plan within one session" UI — that's how CC's plan-file
+  confusion happens. Session-bounded plans stay unambiguous.</li>
+</ul>
+
+<p>This is a candidate, not active work. CCB validation against
+CC's plan mode comes first (per the
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md#parity-work--standing-rule">parity
+standing rule</a>), then a design write-up, then a priority decision.
+Logged here so the insight isn't lost to discussion-only memory.</p>
+
 <h3>Deferred · <code>!</code> bash mode</h3>
 
 <p>An earlier active design write-up for a CC-style <code>!cmd</code>

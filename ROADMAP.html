@@ -107,7 +107,19 @@
   a { color: var(--accent); }
   a:hover { text-decoration: underline; }
   footer { margin-top: 80px; color: var(--muted); font-size: 13px; text-align: center; }
+  pre.mermaid {
+    background: none;
+    border: none;
+    text-align: center;
+    padding: 20px 0;
+    visibility: hidden;
+  }
+  pre.mermaid[data-processed] { visibility: visible; }
 </style>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
 </head>
 <body>
 
@@ -1118,34 +1130,106 @@ orchestrator.</p>
 
 <h3>Where the collaboration plane lives</h3>
 
-<p>The shared plane is the nexus VFS. Agents (sudocode, other
-ACP-speaking agents, humans) communicate by writing to each other's
-<code>chat-with-me</code> DT_STREAM mailboxes; workspaces live under
-<code>/proc/{pid}/workspace/</code>; identity, audit, and replication
-are kernel concerns. The full mechanism is documented in <a
-href="https://github.com/nexi-lab/nexus/blob/develop/docs/architecture/nexus-integration-architecture.md">nexus
-integration architecture</a> (public, Apache-2.0, joint-owned with
-the nexus team). That document is the SSOT for the protocol.
-sudocode's repo does <strong>not</strong> vendor it — the protocol
-lives upstream, sudocode declares its implementation contract here.</p>
+<p>Shared plane = nexus VFS. Agents (sudocode, other ACP agents,
+humans) talk by writing each other's <code>chat-with-me</code>
+DT_STREAM mailboxes. Protocol SSOT upstream in <a
+href="https://github.com/nexi-lab/nexus/blob/develop/docs/architecture/nexus-integration-architecture.md">nexi-lab/nexus
+integration architecture</a> (public, Apache-2.0, joint-owned).
+sudocode does <strong>not</strong> vendor it — protocol evolves
+there; sudocode declares its implementation contract here.</p>
+
+<pre class="mermaid">
+flowchart LR
+    subgraph Orch["Orchestrator — NOT sudocode<br/>(sudowork main · hydra UI)"]
+      O["ManagedAgentService<br/>start_session_v1 · cancel · get_session"]
+    end
+
+    subgraph Units["Agent units — sudocode is one of these"]
+      direction TB
+      H["👤 human Ethan"]
+      SC["scode pid<br/>copilot OR worker role"]
+      CL["claude pid (via ACP)"]
+      CX["codex pid (via ACP)"]
+    end
+
+    subgraph Plane["nexus VFS plane"]
+      MB["chat-with-me DT_STREAMs<br/>/agents/{name}/chat-with-me<br/>/proc/{pid}/chat-with-me<br/><br/>sys_watch + sys_write<br/>kernel stamps 'from' field"]
+    end
+
+    O -. spawn .-> SC
+    O -. spawn .-> CL
+    O -. spawn .-> CX
+
+    H <--> MB
+    SC <--> MB
+    CL <--> MB
+    CX <--> MB
+</pre>
+
+<p>sudocode is one box in "Agent units" — interchangeable with
+claude / codex / human at the mailbox primitive. It does not sit
+in the orchestrator box.</p>
 
 <h3>Why this matters for sudocode's shape</h3>
 
-<p>Once sudocode runs as a managed agent inside
-<code>sudocode-host</code> (the binary that links <code>kernel</code>
-+ <code>services</code> + the sudocode runtime), the same scode
-process can be a copilot in one workspace, a worker in another, and
-a standalone CLI on a developer's laptop — all by routing
-<code>FsBackend</code> to <code>KernelFsBackend</code> /
-<code>NexusVfsFsBackend</code> / <code>StdFsBackend</code>. Hydra
-(<a href="https://github.com/sudoprivacy/hydra">github.com/sudoprivacy/hydra</a>),
-today a VS Code extension that spawns Claude / Gemini / Codex
-workers through tmux + git worktrees, gets thin once this lands: the
-worker spawn surface becomes
-<code>ManagedAgentService.start_session_v1</code>, the worktree
-isolation becomes <code>WorkspaceBoundaryHook</code>, tmux
-persistence becomes the <code>chat-with-me</code> DT_STREAM. The
-agent unit underneath is sudocode.</p>
+<p>Same scode binary is a copilot, a worker, or a standalone CLI —
+chosen by which <code>FsBackend</code> impl the runtime routes
+through:</p>
+
+<pre class="mermaid">
+flowchart TB
+    subgraph Runtime["sudocode runtime (Rust)"]
+      direction LR
+      SES["SessionStore"]
+      CFG["ConfigLoader"]
+      FOPS["file_ops helpers"]
+    end
+
+    TRAIT["FsBackend trait<br/>(one trait · three impls)"]
+
+    SES --> TRAIT
+    CFG --> TRAIT
+    FOPS --> TRAIT
+
+    TRAIT --> B1["StdFsBackend<br/>host std::fs"]
+    TRAIT --> B2["NexusVfsFsBackend<br/>gRPC → remote kernel"]
+    TRAIT --> B3["KernelFsBackend&lt;Kernel&gt;<br/>in-process syscalls"]
+
+    B1 -.deployed in.-> M1["standalone CLI<br/>(scode on hacker's laptop)"]
+    B2 -.deployed in.-> M2["edge / dev CLI<br/>(scode → remote nexus)"]
+    B3 -.deployed in.-> M3["sudocode-host binary<br/>(prod managed agent)"]
+</pre>
+
+<p>And <a href="https://github.com/sudoprivacy/hydra">hydra</a> —
+today a TS VS Code extension shelling out to tmux + git worktrees
+to spawn Claude / Gemini / Codex — gets thin once sudocode-host
+lands:</p>
+
+<pre class="mermaid">
+flowchart LR
+    subgraph Today["Today — hydra is a hack on system tools"]
+      direction TB
+      T1["VS Code extension<br/>(TypeScript)"]
+      T2["tmux pane persistence"]
+      T3["git worktree isolation"]
+      T4["spawned claude / gemini / codex<br/>via shell"]
+      T1 --> T2 --> T3 --> T4
+    end
+
+    subgraph Future["After sudocode-on-nexus-vfs ships"]
+      direction TB
+      F1["VS Code sidebar<br/>(thin — UI only)"]
+      F2["ManagedAgentService<br/>start_session_v1()"]
+      F3["WorkspaceBoundaryHook<br/>(VFS-enforced isolation)"]
+      F4["scode / claude / codex<br/>as agent units"]
+      F5["chat-with-me DT_STREAM<br/>(persistence + raft replication)"]
+      F1 --> F2 --> F3 --> F4 --> F5
+    end
+
+    Today ==>|"hydra 底层改, becomes thin"| Future
+</pre>
+
+<p>sudocode is the agent unit underneath that whole future picture.</p>
 
 <h3>What sudocode commits to — implementation contract</h3>
 

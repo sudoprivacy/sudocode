@@ -116,8 +116,8 @@
 
 <div class="callout">
   Project goals plus the active design detail for each goal live here.
-  Reference docs that explain mechanism — <a href="./docs/parity.md"><code>docs/parity.md</code></a>,
-  <a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a> —
+  Reference docs that explain mechanism — <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>,
+  <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a> —
   remain separate and are linked from this file. Day-to-day work
   (tasks, sprint boards, schedules) lives in PRs, issues, and 1:1 notes.
 </div>
@@ -194,7 +194,7 @@ of the scode-native testable feature surface, green on every
       API integration / tool dispatch / streaming regressions without
       any TTY.</td>
       <td>No — it is a CI gate, not an e2e measure.</td>
-      <td><a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
+      <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
     </tr>
   </tbody>
 </table>
@@ -475,9 +475,9 @@ iteration. Cancel needs to flow through to the streaming response path
 "CHANGELOG → grep CCB → align understanding" loop, and the two sync
 markers (<code>LAST_PARITY_SYNC_COMMIT</code> for claw-code,
 <code>LAST_CCB_REF_VERSION</code> for CCB) all live in
-<a href="./docs/parity.md"><code>docs/parity.md</code></a>. The current
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>. The current
 sync cycle report is at
-<a href="./docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
 
 <h2 id="goal-3">Goal 3 · Ship features real users miss</h2>
 
@@ -499,8 +499,8 @@ the feature lands here as a committed item.</p>
 
 <p>The standing rule on parity work (every parity decision opens CCB and
 confirms what CC actually does, documented in
-<a href="./docs/parity.md"><code>docs/parity.md</code></a> and
-<a href="./CLAUDE.md"><code>CLAUDE.md</code></a>) was first run for this
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> and
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>) was first run for this
 feature against CCB <code>@91cffe16</code> on 2026-06-13.</p>
 
 <h4>What <code>!</code> bash mode is</h4>
@@ -622,7 +622,7 @@ pipes.</p>
 </div>
 
 <p>A regression benchmark for the host pipe path lives in
-<a href="./rust/crates/runtime/benches/bash_pipe_throughput.rs"><code>rust/crates/runtime/benches/bash_pipe_throughput.rs</code></a>
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/crates/runtime/benches/bash_pipe_throughput.rs"><code>rust/crates/runtime/benches/bash_pipe_throughput.rs</code></a>
 so any change to the spawn shape surfaces in CI.</p>
 
 <h4>cwd persistence: the <code>pwd -P &gt;| &lt;track_file&gt;</code> pattern</h4>
@@ -964,7 +964,7 @@ externally" / "publish my plan" / "give me a shareable link".</p>
 
 <p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
 published by hand. The exact curl call is documented in
-<a href="./CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
 
 <h2 id="working-agreement">Working agreement on this document</h2>
 
@@ -977,16 +977,16 @@ PR — the roadmap tracks the live state, not history.</p>
 <h2 id="references">Reference docs (mechanism, not plan)</h2>
 
 <ul>
-  <li><a href="./docs/parity.md"><code>docs/parity.md</code></a> — what
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> — what
   claude-code parity means, the three-tier reference model, the
   standing rule, the sync markers.</li>
-  <li><a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>
   — the in-process mock backend layer.</li>
-  <li><a href="./docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>
   — current cycle's 614-commit triage report.</li>
-  <li><a href="./README.md"><code>README.md</code></a> — project entry,
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/README.md"><code>README.md</code></a> — project entry,
   install, quick start.</li>
-  <li><a href="./rust/README.md"><code>rust/README.md</code></a> —
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/README.md"><code>rust/README.md</code></a> —
   Cargo workspace map.</li>
   <li><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a>
   — PTY harness crate, source of human-fidelity e2e tests.</li>

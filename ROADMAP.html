@@ -1116,120 +1116,22 @@ published by hand. The exact curl call is documented in
 
 <h2 id="goal-4">Goal 4 · Be a good unit in the copilot-worker topology</h2>
 
-<p id="collaboration-as-unit">sudocode is one of several agent units
-that plug into a larger collaboration plane. The audience
-(see <a href="#what-sudo-code-is">What sudo code is</a>) is the
-1% — hackers who already work inside larger workflows: copilot-worker
-fleets, hydra-style worktree armies, sudowork's Feishu / Telegram
-agent surfaces, peers running other agents (Claude Code, Codex,
-Codebuddy) on the same plane. sudocode's job in that world is to be
-a <strong>good unit</strong>: small, addressable, scriptable, honest
-about its workspace boundary, and reachable through the same
-primitive everyone else uses. Not a hub. Not a dashboard. Not the
-orchestrator.</p>
+<p id="collaboration-as-unit">The positioning — sudocode as one
+agent unit among peers on the nexus VFS chat-with-me plane,
+interchangeable with Claude / Codex / humans at the mailbox
+primitive — and the three diagrams (topology · one-binary-three-modes
+· hydra evolution) live in <a
+href="https://github.com/sudoprivacy/sudocode/blob/main/README.md#position-in-the-larger-picture"><code>README.md</code>
+§ Position in the larger picture</a>. That's where a hacker should
+first encounter the framing, alongside the rest of the philosophy.</p>
 
-<h3>Where the collaboration plane lives</h3>
-
-<p>Shared plane = nexus VFS. Agents (sudocode, other ACP agents,
-humans) talk by writing each other's <code>chat-with-me</code>
-DT_STREAM mailboxes. Protocol SSOT upstream in <a
+<p>This goal section holds the engineering plan: what sudocode
+commits to implementing against the nexus protocol, what is
+deliberately not in scope, and the work sequencing. The protocol
+SSOT itself lives upstream in <a
 href="https://github.com/nexi-lab/nexus/blob/develop/docs/architecture/nexus-integration-architecture.md">nexi-lab/nexus
-integration architecture</a> (public, Apache-2.0, joint-owned).
-sudocode does <strong>not</strong> vendor it — protocol evolves
-there; sudocode declares its implementation contract here.</p>
-
-<pre class="mermaid">
-flowchart LR
-    subgraph Orch["Orchestrator — NOT sudocode<br/>(sudowork main · hydra UI)"]
-      O["ManagedAgentService<br/>start_session_v1 · cancel · get_session"]
-    end
-
-    subgraph Units["Agent units — sudocode is one of these"]
-      direction TB
-      H["👤 human Ethan"]
-      SC["scode pid<br/>copilot OR worker role"]
-      CL["claude pid (via ACP)"]
-      CX["codex pid (via ACP)"]
-    end
-
-    subgraph Plane["nexus VFS plane"]
-      MB["chat-with-me DT_STREAMs<br/>/agents/{name}/chat-with-me<br/>/proc/{pid}/chat-with-me<br/><br/>sys_watch + sys_write<br/>kernel stamps 'from' field"]
-    end
-
-    O -. spawn .-> SC
-    O -. spawn .-> CL
-    O -. spawn .-> CX
-
-    H <--> MB
-    SC <--> MB
-    CL <--> MB
-    CX <--> MB
-</pre>
-
-<p>sudocode is one box in "Agent units" — interchangeable with
-claude / codex / human at the mailbox primitive. It does not sit
-in the orchestrator box.</p>
-
-<h3>Why this matters for sudocode's shape</h3>
-
-<p>Same scode binary is a copilot, a worker, or a standalone CLI —
-chosen by which <code>FsBackend</code> impl the runtime routes
-through:</p>
-
-<pre class="mermaid">
-flowchart TB
-    subgraph Runtime["sudocode runtime (Rust)"]
-      direction LR
-      SES["SessionStore"]
-      CFG["ConfigLoader"]
-      FOPS["file_ops helpers"]
-    end
-
-    TRAIT["FsBackend trait<br/>(one trait · three impls)"]
-
-    SES --> TRAIT
-    CFG --> TRAIT
-    FOPS --> TRAIT
-
-    TRAIT --> B1["StdFsBackend<br/>host std::fs"]
-    TRAIT --> B2["NexusVfsFsBackend<br/>gRPC → remote kernel"]
-    TRAIT --> B3["KernelFsBackend&lt;Kernel&gt;<br/>in-process syscalls"]
-
-    B1 -.deployed in.-> M1["standalone CLI<br/>(scode on hacker's laptop)"]
-    B2 -.deployed in.-> M2["edge / dev CLI<br/>(scode → remote nexus)"]
-    B3 -.deployed in.-> M3["sudocode-host binary<br/>(prod managed agent)"]
-</pre>
-
-<p>And <a href="https://github.com/sudoprivacy/hydra">hydra</a> —
-today a TS VS Code extension shelling out to tmux + git worktrees
-to spawn Claude / Gemini / Codex — gets thin once sudocode-host
-lands:</p>
-
-<pre class="mermaid">
-flowchart LR
-    subgraph Today["Today — hydra is a hack on system tools"]
-      direction TB
-      T1["VS Code extension<br/>(TypeScript)"]
-      T2["tmux pane persistence"]
-      T3["git worktree isolation"]
-      T4["spawned claude / gemini / codex<br/>via shell"]
-      T1 --> T2 --> T3 --> T4
-    end
-
-    subgraph Future["After sudocode-on-nexus-vfs ships"]
-      direction TB
-      F1["VS Code sidebar<br/>(thin — UI only)"]
-      F2["ManagedAgentService<br/>start_session_v1()"]
-      F3["WorkspaceBoundaryHook<br/>(VFS-enforced isolation)"]
-      F4["scode / claude / codex<br/>as agent units"]
-      F5["chat-with-me DT_STREAM<br/>(persistence + raft replication)"]
-      F1 --> F2 --> F3 --> F4 --> F5
-    end
-
-    Today ==>|"hydra 底层改, becomes thin"| Future
-</pre>
-
-<p>sudocode is the agent unit underneath that whole future picture.</p>
+integration architecture</a> (public, Apache-2.0, joint-owned with
+the nexus team). sudocode does not vendor it.</p>
 
 <h3>What sudocode commits to — implementation contract</h3>
 

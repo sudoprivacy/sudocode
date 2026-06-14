@@ -853,7 +853,7 @@ externally" / "publish my plan" / "give me a shareable link".</p>
     <tr><td>Implementation</td><td>~100 lines of Rust hitting <code>POST /api/v1/pages</code> (new) and <code>PUT /api/v1/pages/{share_id}</code> (update) on the public ShareOne HTTP API. No skill dependency, no <code>npm</code>, no vendored client. Reads <code>SHAREONE_API_KEY</code> from env. Requires no infra change beyond adding the tool entry to <code>runtime::tools</code> registry.</td></tr>
     <tr><td>Permission</td><td>Routes through the same permission validator chain as <code>WebFetch</code>: <code>read-only</code> and <code>workspace-write</code> reject the call (publishing is a privileged side effect, like a network write); <code>danger-full-access</code> and explicit user approval pass.</td></tr>
     <tr><td>License hygiene</td><td>Our own Rust implementation against the public API, independent of the internal shareone-skill repo. No vendor, no drift, no LICENSE-of-someone-else concerns.</td></tr>
-    <tr><td>When we ship</td><td>When a real user (internal or external) asks for it. Same friction-driven gate as <code>!</code> bash mode. Today's flow (maintainer + curl) is enough for the team-internal use case.</td></tr>
+    <tr><td>When we ship</td><td>When a real user (internal or external) asks for it. Today's flow (maintainer + curl, recipe in <a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md#publishing-the-roadmap-to-shareone-interim-manual">CONTRIBUTING.md</a>) is enough for the team-internal use case. Friction-driven gate: real ask, then ship — same door we apply to the Deferred <code>!</code> bash mode below.</td></tr>
   </tbody>
 </table>
 

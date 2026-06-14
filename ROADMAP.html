@@ -219,6 +219,50 @@ real-Chromium + real-mouse stance for sudowork: the only way to
 catch the failure modes a human will hit is to exercise the same
 surface the human exercises.</p>
 
+<h4>Coverage metric ≠ what tests we write</h4>
+
+<p>Important to keep these two questions separated, because conflating
+them would push us into bad engineering. Only PTY-fidelity tests
+count toward the 90% number — but unit tests and integration tests
+continue to carry their weight inside <code>cargo test --workspace</code>:</p>
+
+<table>
+  <thead>
+    <tr><th></th><th>Unit</th><th>Integration (mock harness)</th><th>PTY (pty-expect)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Run time per test</td><td>µs</td><td>ms</td><td>seconds (spawn + PTY + parse)</td></tr>
+    <tr><td>Failure attribution</td><td>line number</td><td>function boundary</td><td>"the REPL is wrong somewhere"</td></tr>
+    <tr><td>Determinism</td><td>very high</td><td>high</td><td>medium — ConPTY quirks, scheduling flake</td></tr>
+    <tr><td>Error-path reachability</td><td>100% (direct inject)</td><td>high</td><td>low (rare branches hard to hit through the REPL)</td></tr>
+    <tr><td>Refactor feedback</td><td>immediate</td><td>immediate</td><td>slow</td></tr>
+    <tr><td>Counts toward the 90% e2e coverage metric</td><td>no</td><td>no</td><td><strong>yes</strong></td></tr>
+    <tr><td>Required on every PR (CI gate)</td><td><strong>yes</strong></td><td><strong>yes</strong></td><td><strong>yes</strong></td></tr>
+  </tbody>
+</table>
+
+<p>If we wrote only PTY tests:</p>
+
+<ul>
+  <li><code>cargo test</code> would slow from sub-second to minutes,
+  destroying the inner-loop feedback that makes Rust pleasant to work
+  in.</li>
+  <li>Flake rate would rise sharply (PTY tests carry timing, ANSI
+  decode, and OS-level signal behaviour that unit tests do not).</li>
+  <li>Internal refactors that preserve behaviour would be unverifiable
+  at a fine grain — every change would route through the full REPL.</li>
+  <li>Rare error branches (parse errors, panic recovery, edge-case
+  config) would be hard to reach through the REPL surface, so they
+  would silently rot.</li>
+</ul>
+
+<p>So: <strong>the 90% number is a user-friction reliability metric, not
+a directive on test composition.</strong> Unit and integration tests
+stay required for engineering health; PTY tests are the slice that
+answers "does this feature actually work for a human at a terminal".
+The metric only measures the latter because that is what the goal is
+about.</p>
+
 <h3>Feature inventory</h3>
 
 <p>Mirrored from the original sudowork-side coverage tracker

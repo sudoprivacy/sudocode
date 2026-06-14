@@ -50,7 +50,7 @@ fork, your call.
 |---|---|
 | The 1% by daily agent token-burn | First-time coders looking for tutorials |
 | Engineers who live in `tmux`, `ssh`, `vscode terminal` | Anyone who wants a GUI |
-| Directs the agent — briefings, traces, checkpoints, verification | Trusts the agent — single prompt, click approve, no inspection |
+| Engineers the system, not the steps — roles, DoD, reviewers; scales 1 → 10 → 100 agents | Drives one agent at a time, prompt by prompt |
 | Wants the process fully exposed — "reading `src/auth.rs:42-89`" not "reading file" — to scan-and-catch | Wants the agent to handle details and surface only the result |
 | Anyone who already runs a coding agent and feels the friction | Anyone hoping AI replaces engineering judgment |
 
@@ -60,6 +60,19 @@ interaction**; the right column saves cognitive load by **trusting
 the tool**. Sudo Code optimizes the first axis — which is why we
 expose full process by default. Not for staring. For scan-and-catch
 when something is off, and zero ceremony when it's not.
+
+The end-state of this workflow is one heavy user shipping at the
+productivity of a small team. The arc looks like **1 session →
+7-10 parallel sessions → copilot-worker fleets of 100+ agents**.
+At stage 1 you drive one agent. At stage 2 you parallelise long
+unattended tasks — until mental bandwidth caps around ten. At
+stage 3 a copilot agent reviews worker agents; you supervise the
+copilot, the copilot does the per-agent direction, and the fleet
+scales past anything one person could track. Sudo Code is the
+agent unit at every stage. The collaboration plane that makes
+stage 3 real is described in
+[Position in the larger picture](#position-in-the-larger-picture)
+below.
 
 If the right column is you, this isn't your tool — and that's not a
 problem to solve. **Claude Code, Cursor, GitHub Copilot are excellent

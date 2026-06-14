@@ -21,13 +21,19 @@ use common::spawn_scode;
 ///
 /// 1. `env!("CARGO_BIN_EXE_scode")` resolves to a real binary path.
 /// 2. `pty-expect`/`portable-pty` allocates a PTY and spawns the
-///    child under it (this is the Windows ConPTY path on Windows).
+///    child under it.
 /// 3. The child writes clap's help text through the PTY back to us.
 /// 4. `expect(r"Usage:")` matches against the raw byte stream.
 /// 5. The child exits, `expect_eof` reaps and reports the code.
 ///
 /// Anything broken in the framework breaks this test loudly. Every
 /// other PTY test inherits the same wiring.
+///
+/// `#[cfg(unix)]` because pty-expect's Windows ConPTY runtime is
+/// deferred to v0.2 (the Windows code path in pty-expect itself is
+/// gated the same way). On the Windows compile-check builds this
+/// test still type-checks; it just doesn't run.
+#[cfg(unix)]
 #[test]
 fn scode_help_prints_usage_and_exits_cleanly() {
     let mut sess = spawn_scode(&["--help"]).expect("spawn scode --help");

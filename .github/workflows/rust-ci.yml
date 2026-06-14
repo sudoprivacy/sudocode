@@ -13,7 +13,7 @@ on:
       - .github/FUNDING.yml
       - README.md
       - README_zh.md
-      - ROADMAP.md
+      - ROADMAP.html
       - CLAUDE.md
       - CONTRIBUTING.md
       - LAST_PARITY_SYNC_COMMIT
@@ -30,7 +30,7 @@ on:
       - .github/FUNDING.yml
       - README.md
       - README_zh.md
-      - ROADMAP.md
+      - ROADMAP.html
       - CLAUDE.md
       - CONTRIBUTING.md
       - LAST_PARITY_SYNC_COMMIT

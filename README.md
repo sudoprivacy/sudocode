@@ -50,9 +50,16 @@ fork, your call.
 |---|---|
 | The 1% by daily agent token-burn | First-time coders looking for tutorials |
 | Engineers who live in `tmux`, `ssh`, `vscode terminal` | Anyone who wants a GUI |
-| Users who file issues and expect responses | Anyone who wants AI to "figure it out" for them |
-| Users who pipe everything through `jq` instinctively | Anyone scared of a config file |
+| Directs the agent — briefings, traces, checkpoints, verification | Trusts the agent — single prompt, click approve, no inspection |
+| Wants the process fully exposed — "reading `src/auth.rs:42-89`" not "reading file" — to scan-and-catch | Wants the agent to handle details and surface only the result |
 | Anyone who already runs a coding agent and feels the friction | Anyone hoping AI replaces engineering judgment |
+
+Every row is a productivity differentiator, not a status one. The
+left column pushes productivity further by **engineering the
+interaction**; the right column saves cognitive load by **trusting
+the tool**. Sudo Code optimizes the first axis — which is why we
+expose full process by default. Not for staring. For scan-and-catch
+when something is off, and zero ceremony when it's not.
 
 If the right column is you, this isn't your tool — and that's not a
 problem to solve. **Claude Code, Cursor, GitHub Copilot are excellent

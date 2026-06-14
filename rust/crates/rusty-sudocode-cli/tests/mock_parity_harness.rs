@@ -1,3 +1,12 @@
+// `#![cfg(unix)]` because this harness spawns mock services and
+// helper scripts that rely on POSIX shebangs + `chmod +x` via
+// `std::os::unix::fs::PermissionsExt::set_mode`. Windows doesn't
+// honour shebangs, doesn't have file mode bits, and `set_mode`
+// is not exposed by Windows std. Cross-platform mock-parity
+// coverage is a follow-up — same shape as the gates landed in
+// `runtime`'s mcp_tool_bridge + mcp_stdio test modules.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;

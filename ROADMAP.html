@@ -424,7 +424,42 @@ iteration. Cancel needs to flow through to the streaming response path
 (e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
 <code>sleep 999</code> + API call is truly interruptible.</p>
 
-<!-- Goal 2, Goal 3, working agreement, references land in follow-up commits. -->
+<h2 id="goal-2">Goal 2 · claude-code parity</h2>
+
+<p>Every feature gap between <code>scode</code> and
+<code>anthropics/claude-code</code> carries a written resolution —
+<code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> /
+<code>[N/A]</code> / <code>[OBSERVE]</code> — with a one-line rationale.</p>
+
+<p>Three reference sources, with distinct roles:</p>
+
+<ul>
+  <li><strong>Source of truth</strong> —
+  <code>anthropics/claude-code</code> itself. The source is private;
+  the signal comes from the public CHANGELOG, the npm bundle's tool
+  and slash surfaces, and the official docs.</li>
+  <li><strong>Behavioral reference</strong> —
+  <code>claude-code-best/claude-code</code> (CCB), a TypeScript
+  reconstruction of Claude Code that aims for high source-level
+  fidelity. We <strong>always</strong> open CCB while making a parity
+  decision: it converts CHANGELOG entries into readable source so we
+  can confirm what CC actually does. We read it; we do not lift its
+  TypeScript into our Rust tree.</li>
+  <li><strong>Cherry-pick source</strong> —
+  <code>ultraworkers/claw-code</code>, a Rust port we can lift
+  commits from when the feature shape overlaps. Optional input, not
+  upstream-of-truth.</li>
+</ul>
+
+<p>The mechanism, the standing assumption about CCB, the mandatory
+"CHANGELOG → grep CCB → align understanding" loop, and the two sync
+markers (<code>LAST_PARITY_SYNC_COMMIT</code> for claw-code,
+<code>LAST_CCB_REF_VERSION</code> for CCB) all live in
+<a href="./docs/parity.md"><code>docs/parity.md</code></a>. The current
+sync cycle report is at
+<a href="./docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+
+<!-- Goal 3, working agreement, references land in follow-up commits. -->
 
 <footer>
   Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.

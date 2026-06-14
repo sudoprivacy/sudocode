@@ -130,6 +130,7 @@
     <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
     <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
     <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
+    <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
     <li><a href="#working-agreement">Working agreement</a></li>
     <li><a href="#references">Reference docs</a></li>
   </ol>
@@ -1100,6 +1101,166 @@ externally" / "publish my plan" / "give me a shareable link".</p>
 <p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
 published by hand. The exact curl call is documented in
 <a href="https://github.com/sudoprivacy/sudocode/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a>.</p>
+
+<h2 id="goal-4">Goal 4 · Be a good unit in the copilot-worker topology</h2>
+
+<p id="collaboration-as-unit">sudocode is one of several agent units
+that plug into a larger collaboration plane. The audience
+(see <a href="#what-sudo-code-is">What sudo code is</a>) is the
+1% — hackers who already work inside larger workflows: copilot-worker
+fleets, hydra-style worktree armies, sudowork's Feishu / Telegram
+agent surfaces, peers running other agents (Claude Code, Codex,
+Codebuddy) on the same plane. sudocode's job in that world is to be
+a <strong>good unit</strong>: small, addressable, scriptable, honest
+about its workspace boundary, and reachable through the same
+primitive everyone else uses. Not a hub. Not a dashboard. Not the
+orchestrator.</p>
+
+<h3>Where the collaboration plane lives</h3>
+
+<p>The shared plane is the nexus VFS. Agents (sudocode, other
+ACP-speaking agents, humans) communicate by writing to each other's
+<code>chat-with-me</code> DT_STREAM mailboxes; workspaces live under
+<code>/proc/{pid}/workspace/</code>; identity, audit, and replication
+are kernel concerns. The full mechanism is documented in <a
+href="https://github.com/nexi-lab/nexus/blob/develop/docs/architecture/nexus-integration-architecture.md">nexus
+integration architecture</a> (public, Apache-2.0, joint-owned with
+the nexus team). That document is the SSOT for the protocol.
+sudocode's repo does <strong>not</strong> vendor it — the protocol
+lives upstream, sudocode declares its implementation contract here.</p>
+
+<h3>Why this matters for sudocode's shape</h3>
+
+<p>Once sudocode runs as a managed agent inside
+<code>sudocode-host</code> (the binary that links <code>kernel</code>
++ <code>services</code> + the sudocode runtime), the same scode
+process can be a copilot in one workspace, a worker in another, and
+a standalone CLI on a developer's laptop — all by routing
+<code>FsBackend</code> to <code>KernelFsBackend</code> /
+<code>NexusVfsFsBackend</code> / <code>StdFsBackend</code>. Hydra
+(<a href="https://github.com/sudoprivacy/hydra">github.com/sudoprivacy/hydra</a>),
+today a VS Code extension that spawns Claude / Gemini / Codex
+workers through tmux + git worktrees, gets thin once this lands: the
+worker spawn surface becomes
+<code>ManagedAgentService.start_session_v1</code>, the worktree
+isolation becomes <code>WorkspaceBoundaryHook</code>, tmux
+persistence becomes the <code>chat-with-me</code> DT_STREAM. The
+agent unit underneath is sudocode.</p>
+
+<h3>What sudocode commits to — implementation contract</h3>
+
+<ol>
+  <li><strong>Spawn surface.</strong> A sudocode session may be
+  started by an external orchestrator through
+  <code>ManagedAgentService.start_session_v1({agent_id, repos, model,
+  owner_id, zone_id})</code>. The returned <code>session_id</code>
+  IS the AgentRegistry pid; sudocode does not invent its own. The
+  same binary stays runnable as a standalone CLI without nexus —
+  the <code>FsBackend</code> trait abstracts this.</li>
+
+  <li><strong>FsBackend trait.</strong> All filesystem access in
+  the sudocode runtime routes through one
+  <code>FsBackend</code> trait with three impls:
+  <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
+  syscalls when running inside <code>sudocode-host</code>),
+  <code>StdFsBackend</code> (host <code>std::fs</code> for the
+  standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
+  kernel from an edge / dev CLI). No code path bypasses the trait —
+  not session jsonl, not config, not the workspace-bounded
+  <code>file_ops</code> helpers.</li>
+
+  <li><strong>Mailbox read / write.</strong> A sudocode session
+  watches its own <code>/proc/{self_pid}/chat-with-me</code> via
+  <code>sys_watch</code> for incoming prompts; it writes responses
+  to the conversation peer's <code>chat-with-me</code> using
+  <code>sys_write</code>. The on-disk envelope's <code>from</code>
+  field is stamped by the kernel (<code>MailboxStampingHook</code>);
+  sudocode does not forge it.</li>
+
+  <li><strong>Peer addressing inside a workspace.</strong> An
+  agent staged at <code>/proc/{pid}/workspace/...</code> writes
+  <code>chat-with-me</code> relative to its cwd — that path is a
+  DT_LINK back to the workspace owner's mailbox. sudocode honours
+  the convention; it does not bypass the link to find the owner
+  pid out-of-band.</li>
+
+  <li><strong>Workspace boundary.</strong> A write into another
+  agent's <code>workspace/</code> returns EPERM from
+  <code>WorkspaceBoundaryHook</code> with a structured payload
+  telling the LLM where to write instead (the
+  <code>chat-with-me</code> link). sudocode surfaces this EPERM
+  verbatim back to the LLM rather than catching and retrying — the
+  path layout is the SSOT for permissions and the error message
+  is the teaching channel.</li>
+
+  <li><strong>Session state placement.</strong> Inside
+  <code>sudocode-host</code>, session jsonl transcripts live at
+  <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
+  on the kernel VFS, not on the host filesystem. Booting a worker
+  reads its profile + the requested <code>--session-id</code>
+  transcript from that VFS path; the same path supports resume.</li>
+
+  <li><strong>Lifecycle.</strong> Out-of-band termination
+  (SIGTERM / SIGKILL / orphan reap from <code>AgentRegistry</code>)
+  must drop the session cleanly — flush in-flight chat-with-me
+  writes, close streams, release locks. No long-running
+  in-memory state that doesn't survive a host restart; the
+  <code>--session-id</code> transcript is the SSOT.</li>
+</ol>
+
+<h3>What is NOT sudocode's job here</h3>
+
+<ul>
+  <li><strong>Orchestration.</strong> Deciding which workers exist,
+  when to spawn, when to cancel — that is the orchestrator
+  (sudowork / hydra / a script). sudocode receives spawn calls; it
+  does not invent them.</li>
+  <li><strong>Multi-agent UI.</strong> Dashboards, worker-vital
+  sidebars, attach buttons — sudowork (Feishu / web) and hydra (VS
+  Code sidebar) own that surface. sudocode stays the unit. This is
+  the deepest reason the alternate-screen TUI rule (Goal 3) is
+  bright-line: a dashboard inside the unit is a category error.</li>
+  <li><strong>Cross-instance transport.</strong> Raft replication of
+  DT_STREAM, federation Raft cluster topology, Matrix C-S adapter
+  for stock chat clients — all kernel / nexus-services concerns.
+  sudocode reads and writes through <code>FsBackend</code> and
+  doesn't care whether the stream is same-host or replicated.</li>
+  <li><strong>Audit.</strong> <code>AuditHook</code> is a kernel
+  POST-write hook fired by every <code>sys_write</code>; sudocode
+  needs to do nothing to participate.</li>
+</ul>
+
+<h3>Sequencing</h3>
+
+<p>The work falls into a few sequenced chunks; each ships its own
+PR. None of this depends on Goal 3 inline polish; the two streams
+proceed in parallel.</p>
+
+<ol>
+  <li><strong>FsBackend trait + StdFsBackend.</strong> Audit every
+  <code>std::fs</code> call site in the sudocode runtime, route
+  through the trait. No behavioural change to standalone CLI;
+  this is a refactor that opens the door for the other two
+  backends.</li>
+  <li><strong>NexusVfsFsBackend.</strong> gRPC client against the
+  nexus <code>NexusVFSService.Call</code> surface. First end-to-end
+  validation: a standalone scode pointing at a remote nexus serves
+  its session jsonl from the kernel.</li>
+  <li><strong>KernelFsBackend + <code>sudocode-host</code>
+  binary.</strong> The binary edge that links nexus
+  <code>kernel</code> + <code>services</code> in-process and
+  monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
+  the dependency edge sudocode → nexus is realised.</li>
+  <li><strong>Mailbox read/write loop.</strong> Inside the managed
+  runtime, replace stdin/stdout prompts with
+  <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
+  and <code>sys_write</code> on the peer's mailbox. The runtime
+  surface to the LLM stays the same.</li>
+  <li><strong>WorkspaceBoundaryHook EPERM round-trip.</strong>
+  Surface the kernel's structured EPERM verbatim into the LLM
+  conversation; confirm by PTY scenario that the LLM learns the
+  <code>chat-with-me</code> redirect without system-prompt edits.</li>
+</ol>
 
 <h2 id="working-agreement">Working agreement on this document</h2>
 

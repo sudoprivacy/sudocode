@@ -78,8 +78,12 @@ jobs:
         run: cargo fmt --all --check
 
   test-workspace:
-    name: cargo test --workspace
-    runs-on: ubuntu-latest
+    name: cargo test --workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -90,8 +94,12 @@ jobs:
         run: cargo test --workspace
 
   bench-compile:
-    name: cargo bench --no-run
-    runs-on: ubuntu-latest
+    name: cargo bench --no-run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -102,8 +110,12 @@ jobs:
         run: cargo bench --workspace --no-run
 
   clippy-workspace:
-    name: cargo clippy --workspace
-    runs-on: ubuntu-latest
+    name: cargo clippy --workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

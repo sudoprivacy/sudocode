@@ -170,34 +170,54 @@ safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
 of the scode-native testable feature surface, green on every
 <code>main</code> commit of sudocode CI.</p>
 
-<h3>Test infrastructure — two layers</h3>
+<h3>Test infrastructure — two layers, one of them counts</h3>
 
 <table>
   <thead>
-    <tr><th>Layer</th><th>Purpose</th><th>Source</th></tr>
+    <tr><th>Layer</th><th>Purpose</th><th>Counts toward 90%?</th><th>Source</th></tr>
   </thead>
   <tbody>
     <tr>
-      <td>Mock parity harness</td>
-      <td>Fast, in-process; scripts a mock Anthropic backend and asserts
-      on the byte stream <code>scode</code> produces. Catches API
-      integration / tool dispatch / streaming regressions without any TTY.</td>
-      <td><a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
+      <td><code>pty-expect</code> PTY harness</td>
+      <td>Human-fidelity. Drives <code>scode</code> through a real PTY
+      (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
+      either the raw stream or a VT100-rendered view. Catches what a
+      real user sees: REPL UX, signals, tab completion, ANSI redraw,
+      cursor placement.</td>
+      <td><strong>Yes — this is the coverage measure.</strong></td>
+      <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
     </tr>
     <tr>
-      <td><code>pty-expect</code> PTY harness</td>
-      <td>Human-fidelity; drives <code>scode</code> through a real PTY
-      (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
-      either the raw stream or a VT100-rendered view. Catches REPL UX,
-      signals, tab completion, ANSI redraw.</td>
-      <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
+      <td>Mock parity harness</td>
+      <td>Fast, in-process. Scripts a mock Anthropic backend and
+      asserts on the byte stream <code>scode</code> produces. Catches
+      API integration / tool dispatch / streaming regressions without
+      any TTY.</td>
+      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td><a href="./docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
     </tr>
   </tbody>
 </table>
 
-<p>Coverage is measured as: a feature is <em>Covered</em> when <strong>at
-least one</strong> of the two harnesses exercises it end-to-end on
-<code>main</code> CI.</p>
+<div class="callout">
+  <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
+  when <code>pty-expect</code> exercises it end-to-end on
+  <code>main</code> CI. The mock parity harness still runs on every
+  PR as a required gate and catches API / dispatch / streaming
+  regressions early — but it tests the lower half of the stack
+  ("does <code>scode</code> dispatch and stream correctly?") and
+  not the upper half a user actually sees ("does the REPL render it
+  correctly, does Ctrl+C interrupt cleanly, does the prompt redraw
+  without flicker?"). Those upper-half failures are what the 90%
+  goal is about, so only the PTY layer earns coverage credit.
+</div>
+
+<p>This makes the 90% target a strictly higher bar than the previous
+"at least one harness exercises it" rule. It mirrors the same
+anthropomorphic-fidelity argument that drives ai-dev-browser's
+real-Chromium + real-mouse stance for sudowork: the only way to
+catch the failure modes a human will hit is to exercise the same
+surface the human exercises.</p>
 
 <h3>Feature inventory</h3>
 

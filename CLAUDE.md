@@ -45,6 +45,42 @@ cargo test --workspace
 `scripts/fmt.sh` from the repo root wraps `cd rust && cargo fmt` and
 forwards flags.
 
+## Publishing ROADMAP.html to ShareOne (interim, manual)
+
+`ROADMAP.html` is the SSOT plan file in this repo. Mirroring it to
+ShareOne for at-a-glance external viewing is currently a manual
+maintainer action. The long-term plan — exposing
+`publish_to_shareone` as an LLM tool that any `scode` agent can call
+— is tracked as a Goal 3 candidate inside ROADMAP.html itself and
+ships when a real user asks for it.
+
+Until that tool exists, the documented manual recipes are:
+
+**Create a new share** (each run yields a fresh URL):
+
+```bash
+curl -s -X POST https://shareone.app/api/v1/pages \
+  -H "X-API-Key: $SHAREONE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"filename\":\"ROADMAP.html\",\"html_content\":$(jq -Rs . < ROADMAP.html),\"allow_comments\":true}"
+```
+
+The response includes `share_url` — that is the page to share.
+
+**Update an existing share** (stable URL — pass the `share_id` you
+got back from a prior POST):
+
+```bash
+curl -s -X PUT "https://shareone.app/api/v1/pages/<share_id>" \
+  -H "X-API-Key: $SHAREONE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"filename\":\"ROADMAP.html\",\"html_content\":$(jq -Rs . < ROADMAP.html),\"allow_comments\":true}"
+```
+
+Get a `SHAREONE_API_KEY` from <https://shareone.app>. URL stability
+across re-publishes is optional; if you only want a one-off shareable
+link, the POST form is enough.
+
 ## Documentation map
 
 - [`README.md`](./README.md) — project entry, install, quick start.

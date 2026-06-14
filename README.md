@@ -52,7 +52,7 @@ fork, your call.
 | Engineers who live in `tmux`, `ssh`, `vscode terminal` | Anyone who wants a GUI |
 | Engineers the system, not the steps — roles, DoD, reviewers; scales 1 → 10 → 100 agents | Drives one agent at a time, prompt by prompt |
 | Wants the process fully exposed — "reading `src/auth.rs:42-89`" not "reading file" — to scan-and-catch | Wants the agent to handle details and surface only the result |
-| Anyone who already runs a coding agent and feels the friction | Anyone hoping AI replaces engineering judgment |
+| Owns the stack they run — pinned versions, readable sessions, forks when needed | Runs whatever the vendor pushes next |
 
 Every row is a productivity differentiator, not a status one. The
 left column pushes productivity further by **engineering the

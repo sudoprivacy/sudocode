@@ -104,7 +104,7 @@ mod unix_benches {
     }
 
     criterion_group!(
-        pub benches,
+        benches,
         bench_host_pipe_roundtrip,
         bench_bash_spawn_echo_roundtrip
     );

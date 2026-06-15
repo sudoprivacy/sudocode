@@ -344,14 +344,29 @@ pub fn edit_file(
 /// Expands a glob pattern and returns matching filenames.
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
+    // Use `normalize_path_for_glob` (not `normalize_path`) here:
+    // `canonicalize()` returns Windows verbatim paths (`\\?\C:\…`),
+    // and the forward-slash rewrite below then produces `//?/C:/…`,
+    // which is not a Verbatim-prefixed path under Path::components
+    // semantics — `derive_glob_walk_root` then fails to recover the
+    // base directory and silently falls back to `current_dir()`,
+    // sending WalkDir off into the cwd of the test (the runtime
+    // crate, not the test's temp dir). Just absolutise without
+    // canonicalising.
     let base_dir = path
-        .map(normalize_path)
+        .map(normalize_path_for_glob)
         .transpose()?
         .unwrap_or(std::env::current_dir()?);
+    // The `glob` crate's pattern grammar reserves `\` as an escape
+    // character, so a Windows path like `C:\Users\...` would be
+    // misparsed (e.g. `\U` is treated as an escaped `U`, breaking
+    // every match). The crate's documented rule is to feed it
+    // forward-slash patterns regardless of host; it handles
+    // matching against backslash-separated entries internally.
     let search_pattern = if Path::new(pattern).is_absolute() {
-        pattern.to_owned()
+        pattern.replace('\\', "/")
     } else {
-        base_dir.join(pattern).to_string_lossy().into_owned()
+        base_dir.join(pattern).to_string_lossy().replace('\\', "/")
     };
 
     // The `glob` crate does not support brace expansion ({a,b,c}).
@@ -370,8 +385,15 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
             .filter_entry(|entry| !should_skip_glob_dir(entry));
         for entry in entries.flatten() {
             let candidate = entry.path();
+            // Compare against a forward-slash-normalised string so the
+            // forward-slash glob pattern (see the search_pattern
+            // construction above) matches the Windows-side
+            // backslash-separated WalkDir output. `matches_path` would
+            // walk OS-native Path components and mismatch the slash
+            // orientation.
+            let candidate_str = candidate.to_string_lossy().replace('\\', "/");
             if entry.file_type().is_file()
-                && compiled.matches_path(candidate)
+                && compiled.matches(&candidate_str)
                 && seen.insert(candidate.to_path_buf())
             {
                 matches.push(candidate.to_path_buf());
@@ -627,6 +649,19 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
         std::env::current_dir()?.join(path)
     };
     candidate.canonicalize()
+}
+
+/// Like [`normalize_path`] but without `canonicalize`. Required by
+/// `glob_search` on Windows: the verbatim prefix that
+/// `canonicalize()` adds (`\\?\C:\…`) breaks `derive_glob_walk_root`
+/// once the path is rewritten to forward slashes for the glob crate.
+fn normalize_path_for_glob(path: &str) -> io::Result<PathBuf> {
+    let candidate = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(candidate)
 }
 
 fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
@@ -1103,16 +1138,17 @@ mod tests {
             glob_search("**/AGENTS.md", Some(dir.to_str().unwrap())).expect("glob should succeed");
 
         assert_eq!(result.num_files, 2, "ignored dirs should be pruned");
-        assert!(result
+        // Normalise the OS-native path separator (`\` on Windows) to
+        // `/` so the suffix and substring asserts below stay
+        // cross-platform.
+        let normalised: Vec<String> = result
             .filenames
             .iter()
-            .any(|path| path.ends_with("src/AGENTS.md")));
-        assert!(result
-            .filenames
-            .iter()
-            .any(|path| path.ends_with("docs/AGENTS.md")));
-        assert!(!result
-            .filenames
+            .map(|p| p.replace('\\', "/"))
+            .collect();
+        assert!(normalised.iter().any(|path| path.ends_with("src/AGENTS.md")));
+        assert!(normalised.iter().any(|path| path.ends_with("docs/AGENTS.md")));
+        assert!(!normalised
             .iter()
             .any(|path| path.contains("node_modules")
                 || path.contains(".build")

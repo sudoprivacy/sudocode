@@ -2948,7 +2948,22 @@ fn env_lock() -> &'static std::sync::Mutex<()> {
     &ENV_LOCK
 }
 
-#[cfg(test)]
+// `#[cfg(unix)]` because every test in this module that exercises
+// the plugin lifecycle / tool execution paths (init.sh, shutdown.sh,
+// echo-json.sh, etc.) writes a POSIX shell script with `#!/bin/sh`
+// shebang and `chmod +x`'s it via
+// `std::os::unix::fs::PermissionsExt::set_mode`. Windows neither
+// honours shebangs nor exposes `set_mode`, and calls to
+// `registry.initialize()` / `shutdown()` / `execute()` hang on the
+// child-process wait when the "script" cannot be invoked. The
+// pure-data tests in this module (plugin_id_parse_*,
+// plugin_cache_dir_*, etc.) would pass on Windows, but gating the
+// entire module here is the same surgical move applied in
+// runtime::mcp_stdio + runtime::mcp_tool_bridge — the gain on
+// Windows is a 50-minute CI-job hang avoided, the cost is some
+// pure-data test coverage that is unique to Unix-side
+// configurations anyway.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -3,6 +3,16 @@
 //! These tests are gated on the `CLAUDE_CODE_OAUTH_TOKEN` environment variable.
 //! When the token is absent or empty the tests silently pass (return early).
 //! On CI they run only on main merges where the GitHub secret is available.
+//!
+//! `#![cfg(unix)]` for the same reason as `acp_integration.rs`: the ACP
+//! stdio server's subprocess handshake doesn't complete on Windows.
+//! Live API smoke runs only on `main` pushes through the
+//! `live-api-smoke` job, which is `runs-on: ubuntu-latest` and gated on
+//! the OAuth secret, so this gate has no effect on the actual smoke
+//! coverage — it just keeps the file from breaking the matrix
+//! `test-workspace (windows-latest)` job's compilation step.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;

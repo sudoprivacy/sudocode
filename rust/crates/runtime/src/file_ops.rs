@@ -1146,13 +1146,15 @@ mod tests {
             .iter()
             .map(|p| p.replace('\\', "/"))
             .collect();
-        assert!(normalised.iter().any(|path| path.ends_with("src/AGENTS.md")));
-        assert!(normalised.iter().any(|path| path.ends_with("docs/AGENTS.md")));
-        assert!(!normalised
+        assert!(normalised
             .iter()
-            .any(|path| path.contains("node_modules")
-                || path.contains(".build")
-                || path.contains("/target/")));
+            .any(|path| path.ends_with("src/AGENTS.md")));
+        assert!(normalised
+            .iter()
+            .any(|path| path.ends_with("docs/AGENTS.md")));
+        assert!(!normalised.iter().any(|path| path.contains("node_modules")
+            || path.contains(".build")
+            || path.contains("/target/")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

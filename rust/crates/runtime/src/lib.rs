@@ -51,6 +51,7 @@ pub mod spawn_task;
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;
+pub mod subagent;
 pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;

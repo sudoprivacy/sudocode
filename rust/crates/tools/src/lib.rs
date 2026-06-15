@@ -7382,7 +7382,9 @@ mod tests {
         assert_eq!(output["skill"], "help");
         assert!(output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with("/help/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("/help/SKILL.md"));
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
@@ -7400,7 +7402,9 @@ mod tests {
         assert_eq!(dollar_output["skill"], "$help");
         assert!(dollar_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with("/help/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("/help/SKILL.md"));
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -7442,7 +7446,9 @@ mod tests {
             serde_json::from_str(&skill_result).expect("valid json");
         assert!(skill_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".nexus/sudocode/skills/plan/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".nexus/sudocode/skills/plan/SKILL.md"));
 
         let command_result = execute_tool("Skill", &json!({ "skill": "/handoff" }))
             .expect("legacy command should resolve");
@@ -7450,7 +7456,9 @@ mod tests {
             serde_json::from_str(&command_result).expect("valid json");
         assert!(command_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".nexus/sudocode/commands/handoff.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".nexus/sudocode/commands/handoff.md"));
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
@@ -7567,7 +7575,9 @@ mod tests {
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert!(output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".claude/skills/trace/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".claude/skills/trace/SKILL.md"));
         assert_eq!(output["description"], "Project-local trace helper");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -7628,11 +7638,15 @@ mod tests {
             serde_json::from_str(&agents_result).expect("valid json");
         assert!(omc_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".omc/skills/hud/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".omc/skills/hud/SKILL.md"));
         assert_eq!(omc_output["description"], "Project-local OMC HUD helper");
         assert!(agents_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".agents/skills/trace/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".agents/skills/trace/SKILL.md"));
         assert_eq!(
             agents_output["description"],
             "Project-local agents compatibility helper"
@@ -7686,7 +7700,9 @@ mod tests {
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert!(output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with("skills/omc-learned/learned/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("skills/omc-learned/learned/SKILL.md"));
         assert_eq!(output["description"], "Learned OMC skill");
 
         match original_home {
@@ -7744,7 +7760,9 @@ mod tests {
             serde_json::from_str(&direct_skill).expect("valid skill json");
         assert!(direct_skill_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with("skills/statusline/SKILL.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("skills/statusline/SKILL.md"));
         assert_eq!(direct_skill_output["description"], "Claude config skill");
 
         let legacy_command =
@@ -7753,7 +7771,9 @@ mod tests {
             serde_json::from_str(&legacy_command).expect("valid command json");
         assert!(legacy_command_output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with("commands/doctor-check.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("commands/doctor-check.md"));
         assert_eq!(
             legacy_command_output["description"],
             "Claude config command"
@@ -7809,7 +7829,9 @@ mod tests {
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert!(output["path"]
             .as_str()
-            .expect("path").replace('\\', "/").ends_with(".claude/commands/team.md"));
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with(".claude/commands/team.md"));
         assert_eq!(output["description"], "Legacy team workflow");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -9355,7 +9377,9 @@ mod tests {
         assert_eq!(globbed_output["numFiles"], 1);
         assert!(globbed_output["filenames"][0]
             .as_str()
-            .expect("filename").replace('\\', "/").ends_with("nested/lib.rs"));
+            .expect("filename")
+            .replace('\\', "/")
+            .ends_with("nested/lib.rs"));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
             .expect_err("invalid glob should fail");

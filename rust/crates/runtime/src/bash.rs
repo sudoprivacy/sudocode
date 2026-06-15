@@ -423,7 +423,19 @@ pub fn execute_bash_with_tracking(
     })
 }
 
-#[cfg(test)]
+// `#[cfg(unix)]` because every test in this module exercises
+// `execute_bash`, which spawns `sh -c "..."` (see line 338/364
+// `Command::new("sh")`). On Windows `sh.exe` is not in PATH unless
+// the developer has installed Git Bash; CI's `windows-latest`
+// image does not. The production bash tool itself is therefore
+// Unix-only by design — making it cross-platform would mean
+// teaching `execute_bash` to detect platform and translate
+// commands (or refuse on Windows with a clear diagnostic), which
+// is a separate runtime-side product decision outside the scope of
+// this PR. Tests covered: simple `printf 'hello'`, sandbox-disable
+// path, stdin-redirect-to-null, abort-signal interrupt — all
+// require sh.
+#[cfg(all(test, unix))]
 mod tests {
     use super::{execute_bash, execute_bash_with_abort, BashCommandInput};
     use crate::hooks::HookAbortSignal;

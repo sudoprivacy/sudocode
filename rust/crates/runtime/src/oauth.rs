@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -475,8 +474,14 @@ fn whoami() -> String {
 }
 
 fn generate_random_token(bytes: usize) -> io::Result<String> {
+    // Cross-platform CSPRNG via the `getrandom` crate. The previous
+    // implementation read from `/dev/urandom` directly, which is a
+    // Unix-only path; on Windows it surfaced as
+    // `Os { code: 3, kind: NotFound, message: "The system cannot
+    // find the path specified." }` and broke every PKCE flow there.
     let mut buffer = vec![0_u8; bytes];
-    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    getrandom::getrandom(&mut buffer)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     Ok(base64url_encode(&buffer))
 }
 

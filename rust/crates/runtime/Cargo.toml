@@ -14,6 +14,14 @@ axum = { workspace = true }
 base64 = "0.22"
 chrono = "0.4"
 futures = "0.3"
+# Cross-platform CSPRNG. Replaces the historical Unix-only
+# `/dev/urandom` read in oauth::generate_random_token, which broke
+# every PKCE-derived test on Windows with `Os { code: 3, kind:
+# NotFound, message: "The system cannot find the path specified." }`.
+# Already a transitive dep through hyper / reqwest; making it a
+# direct dep ensures `runtime` stays compilable if those upstream
+# trees ever drop it.
+getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Nexus kernel rlib — provides `kernel::abi::KernelAbi` trait that
 # `runtime::spawn_task::<K>` is generic over. `default-features =

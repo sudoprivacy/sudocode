@@ -310,7 +310,13 @@ impl McpToolRegistry {
     }
 }
 
-#[cfg(test)]
+// `#[cfg(unix)]` because every test in this module builds a POSIX
+// shell script with `#!/bin/sh` shebang + `chmod +x` and spawns it
+// as a mock MCP stdio server. Windows doesn't honour shebangs,
+// doesn't have file mode bits, and `std::os::unix::fs::PermissionsExt::set_mode`
+// isn't exposed on Windows std at all. Windows-equivalent coverage
+// (cmd /c batch scripts, no shebangs, no chmod) is a follow-up.
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;

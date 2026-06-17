@@ -2,8 +2,8 @@
 """Triage claw-code commits since LAST_PARITY_SYNC_COMMIT.
 
 Categorizes each non-merge commit by pattern into the resolution buckets
-defined in docs/parity.md. Writes a UTF-8 Markdown report grouped by
-category.
+defined in ROADMAP.html (Goal 2 - Resolution taxonomy). Writes a
+UTF-8 Markdown report grouped by category.
 
 Run from sudocode repo root after cloning claw-code locally:
 

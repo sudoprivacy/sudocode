@@ -128,10 +128,11 @@
 
 <div class="callout">
   Project goals plus the active design detail for each goal live here.
-  Reference docs that explain mechanism — <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>,
-  <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a> —
-  remain separate and are linked from this file. Day-to-day work
-  (tasks, sprint boards, schedules) lives in PRs, issues, and 1:1 notes.
+  Parity mechanism is now inlined in <a href="#goal-2">Goal 2</a>;
+  the in-process harness reference is at
+  <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>.
+  Day-to-day work (tasks, sprint boards, schedules) lives in PRs,
+  issues, and 1:1 notes.
 </div>
 
 <div class="toc">
@@ -594,33 +595,142 @@ iteration. Cancel needs to flow through to the streaming response path
 <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> /
 <code>[N/A]</code> / <code>[OBSERVE]</code> — with a one-line rationale.</p>
 
-<p>Three reference sources, with distinct roles:</p>
+<h3>Parity scope</h3>
+<p>Four dimensions, ordered by visibility to a <code>scode</code> user:</p>
+<ol>
+  <li><strong>Tool surface</strong> — the set of tools the agent can call and the shape of their request / response payloads.</li>
+  <li><strong>Slash commands</strong> — the <code>/</code>-prefixed commands at the REPL and their behaviors.</li>
+  <li><strong>Behavioral semantics</strong> — output truncation, session compaction, token counting, cost tracking, retry strategy, permission enforcement.</li>
+  <li><strong>Configuration surface</strong> — <code>.scode.json</code> file layout, key names, precedence rules.</li>
+</ol>
 
+<h3>Reference sources</h3>
+
+<h4>Tier 1 — sources of truth (multiple, peer-priority)</h4>
+
+<p>Each Tier 1 source is a <em>partial truth</em>; none alone is enough. Cross-reference them.</p>
+
+<table>
+  <thead><tr><th>Source</th><th>Why peer-priority Tier 1</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Public surfaces of <code>anthropics/claude-code</code></td>
+      <td>Public CHANGELOG, the <code>@anthropic-ai/claude-code</code> npm bundle (live tool list, slash commands, bundled prompt resources), and the official docs at <code>docs.claude.com</code>. Feature-level signal — upstream source itself is private, so no commit-level fidelity.</td>
+    </tr>
+    <tr>
+      <td><code>sudoprivacy/claude-code</code> (private snapshot)</td>
+      <td>The CC source-leak snapshot, kept private per community rules. As of the snapshot date it <em>is</em> CC's source of truth; reading it inside the private repo is fine. <strong>Current alignment plan:</strong> walk the snapshot-date CC surface one entry at a time and checkpoint where <code>scode</code> matches and where we deliberately diverge.</td>
+    </tr>
+    <tr>
+      <td>Runtime-observation combo — locally-run CC + <code>cchistory</code> + <code>claude-trace</code></td>
+      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction), capture history with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>), and inspect tokens-in / tokens-out with <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> from <a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a>. Behavioral facts, not source-level — but observed truth nonetheless.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>Tier 2 — behavioral reference: <code>claude-code-best/claude-code</code> (CCB)</h4>
+
+<p>CCB is a TypeScript reconstruction of Claude Code that aims for high source-level fidelity. It is <strong>our running approximation of what CC actually does</strong> when CHANGELOG signal alone is too coarse.</p>
+
+<p><strong>Standing assumption.</strong> CCB is close enough to upstream that reading its source informs our understanding. The assumption is approximate, not absolute — when CCB and CHANGELOG diverge, CHANGELOG wins.</p>
+
+<p><strong>Mandatory workflow.</strong> Every parity decision based on a CHANGELOG entry <em>also</em> opens CCB on the relevant code path — including the entries that look obvious. The nuance is usually in the path we did not anticipate.</p>
+
+<pre><code>CC CHANGELOG entry
+        │
+        ▼
+  grep CCB source for the feature
+        │
+        ▼
+  align understanding ── any surprise? → revisit the resolution
+        │
+        ▼
+  pick resolution tag (see Resolution taxonomy below)</code></pre>
+
+<p><strong>Where to grep CCB</strong> (monorepo-shaped TypeScript):</p>
 <ul>
-  <li><strong>Source of truth</strong> —
-  <code>anthropics/claude-code</code> itself. The source is private;
-  the signal comes from the public CHANGELOG, the npm bundle's tool
-  and slash surfaces, and the official docs.</li>
-  <li><strong>Behavioral reference</strong> —
-  <code>claude-code-best/claude-code</code> (CCB), a TypeScript
-  reconstruction of Claude Code that aims for high source-level
-  fidelity. We <strong>always</strong> open CCB while making a parity
-  decision: it converts CHANGELOG entries into readable source so we
-  can confirm what CC actually does. We read it; we do not lift its
-  TypeScript into our Rust tree.</li>
-  <li><strong>Cherry-pick source</strong> —
-  <code>ultraworkers/claw-code</code>, a Rust port we can lift
-  commits from when the feature shape overlaps. Optional input, not
-  upstream-of-truth.</li>
+  <li><code>src/</code> — agent loop, REPL, tool dispatch, slash commands, system prompt.</li>
+  <li><code>packages/</code> — modular components (tool implementations, MCP, hooks).</li>
+  <li><code>docs/</code> — Mintlify-based feature documentation.</li>
 </ul>
 
-<p>The mechanism, the standing assumption about CCB, the mandatory
-"CHANGELOG → grep CCB → align understanding" loop, and the two sync
-markers (<code>LAST_PARITY_SYNC_COMMIT</code> for claw-code,
-<code>LAST_CCB_REF_VERSION</code> for CCB) all live in
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a>. The current
-sync cycle report is at
-<a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+<p>For a CHANGELOG entry like <em>"added <code>/cd</code> command to move a session to a new working directory,"</em> searches that work:</p>
+
+<pre><code># In a local CCB clone:
+grep -rn -E "/cd\b|case 'cd'|slash.*cd" src/ packages/
+grep -rn "working directory" docs/ src/</code></pre>
+
+<p><strong>What CCB is not.</strong> CCB ships under "learning / research only" terms. It is <strong>not</strong> a cherry-pick source for our Rust tree — citations in commit messages are welcome ("matches the behavior in CCB <code>src/...</code>"), but Rust code is re-implemented from understanding.</p>
+
+<p><strong>When CCB does not help.</strong> If CCB itself does not implement the feature (it lags upstream by some window), record that fact in the resolution — the gap stays anchored to the CC CHANGELOG entry and the resolution carries an <code>[OBSERVE]</code> tag pending more signal.</p>
+
+<h4>Tier 3 — optional cherry-pick source: <code>ultraworkers/claw-code</code></h4>
+
+<p><code>ultraworkers/claw-code</code> is a Rust port of the same family. Where its implementation of an overlapping feature fits <code>scode</code>'s shape, the commit can be cherry-picked. The relationship is <em>optional</em>: claw-code is a candidate Rust-side source, not upstream-of-truth. Methodology for cherry-pick triage lives in <code>scripts/triage_claw_code.py</code>; the current cycle report is at <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+
+<h3>Resolution taxonomy</h3>
+
+<p>Every parity gap carries a one-word tag and a short rationale.</p>
+
+<table>
+  <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>[BUILD]</code></td><td>The gap will be closed by implementing the feature in <code>scode</code>.</td></tr>
+    <tr><td><code>[CHERRY-PICK]</code></td><td>The gap will be closed by lifting a <code>claw-code</code> commit.</td></tr>
+    <tr><td><code>[SKIP]</code></td><td>Closed by intent — <code>scode</code> provides the capability differently, the feature is replaced upstream, or it does not apply.</td></tr>
+    <tr><td><code>[N/A]</code></td><td>The gap belongs to a layer <code>scode</code> does not implement (e.g. npm packaging).</td></tr>
+    <tr><td><code>[OBSERVE]</code></td><td>Left open while waiting on more signal — how <code>claw-code</code> ports the feature, whether CCB has implemented it yet, whether real users hit it.</td></tr>
+  </tbody>
+</table>
+
+<h3>Sync markers</h3>
+
+<p>Two marker files at the repo root anchor each source to a point in time:</p>
+
+<table>
+  <thead><tr><th>File</th><th>Source</th><th>What it records</th></tr></thead>
+  <tbody>
+    <tr><td><code>LAST_PARITY_SYNC_COMMIT</code></td><td><code>ultraworkers/claw-code</code> HEAD</td><td>The claw-code SHA the last cherry-pick cycle was triaged against.</td></tr>
+    <tr><td><code>LAST_CCB_REF_VERSION</code></td><td><code>claude-code-best/claude-code</code> HEAD</td><td>The CCB SHA our behavioral references currently point at. Bumped when we re-clone CCB for a new cycle.</td></tr>
+  </tbody>
+</table>
+
+<p>Sync markers are mechanical state used by tooling and triage scripts; the gap inventory and per-feature resolutions live alongside their owning issues, PRs, and design notes.</p>
+
+<h3>Comparison window</h3>
+
+<p>The comparison window for the current cycle starts at <code>anthropics/claude-code</code> releases shipped on or after <strong>2026-01-01</strong>.</p>
+
+<h3>Measurement</h3>
+
+<p>The e2e coverage half of parity (<a href="#goal-1">Goal 1</a>) is exercised by the mock parity harness described in <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>. The harness runs against the <code>scode</code> binary in a clean environment and covers the scode-native testable feature surface.</p>
+
+<h3>Tool repository</h3>
+
+<p><a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a> is a toolset around CC observation — <code>claude-trace</code> is one of its apps, but the rest of the monorepo is worth scanning for other tools we can fold into this workflow.</p>
+
+<h3>Case study: <code>!</code> bash mode</h3>
+
+<p>The first design write-up under this rule — the <code>!</code> bash mode section inside <a href="#goal-3">Goal 3</a> — made the value concrete:</p>
+<ul>
+  <li>Validated that our <code>Stdio::null()</code> choice for the bash spawn path is functionally equivalent to CC's <code>pipe</code> choice for the current scope, and recorded what the difference unlocks if we ever want interactive passthrough.</li>
+  <li>Identified CC's <code>pwd -P &gt;| &lt;track_file&gt;</code> pattern as the right blueprint for the <code>!cd</code> cwd-persistence requirement in <a href="#goal-3">Goal 3</a>.</li>
+  <li>Captured six adjacent CC patterns out of scope for the current cycle but each with a recorded trigger condition for when we should revisit them.</li>
+</ul>
+<p>None of these would have surfaced from CHANGELOG entries alone. Every design write-up for a feature with parity intent goes through the same loop.</p>
+
+<h3>Quick reference: where each source enters a parity decision</h3>
+
+<table>
+  <thead><tr><th>Step</th><th>Source</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>1. Identify the gap</td><td>Tier 1 — public CC surfaces / private snapshot / runtime combo</td><td>List the CHANGELOG entry, the snapshot-date surface delta, or the observed behavior.</td></tr>
+    <tr><td>2. Align understanding</td><td>Tier 2 (CCB grep)</td><td>Open CCB, read the actual implementation, confirm intent.</td></tr>
+    <tr><td>3. Pick the resolution</td><td>All tiers</td><td>Decide <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> / <code>[N/A]</code> / <code>[OBSERVE]</code>.</td></tr>
+    <tr><td>4. Execute</td><td>Tier 3 if <code>[CHERRY-PICK]</code>; otherwise hand-rolled</td><td>Apply the resolution.</td></tr>
+    <tr><td>5. Anchor</td><td><code>LAST_PARITY_SYNC_COMMIT</code> / <code>LAST_CCB_REF_VERSION</code></td><td>Update marker files when the cycle closes.</td></tr>
+  </tbody>
+</table>
 
 <h2 id="goal-3">Goal 3 · Ship features real users miss</h2>
 
@@ -1115,9 +1225,6 @@ PR — the roadmap tracks the live state, not history.</p>
 <h2 id="references">Reference docs (mechanism, not plan)</h2>
 
 <ul>
-  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity.md"><code>docs/parity.md</code></a> — what
-  claude-code parity means, the three-tier reference model, the
-  standing rule, the sync markers.</li>
   <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>
   — the in-process mock backend layer.</li>
   <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>

@@ -139,8 +139,11 @@ TypeScript behavioral reference — before settling the resolution.
 CHANGELOG entries are usually too coarse on their own; CCB
 converts them into readable source. CCB is **not** a cherry-pick
 source for our Rust tree; we read it for understanding only. The
-full triage flow, sync markers, and resolution taxonomy live in
-[`docs/parity.md`](./docs/parity.md).
+full triage flow, the Tier 1 source list (public CC surfaces,
+the private `sudoprivacy/claude-code` snapshot, the runtime-
+observation combo), the sync markers, and the resolution
+taxonomy now live in [`ROADMAP.html`](./ROADMAP.html) under
+Goal 2.
 
 Every design write-up for a feature with parity intent **leads**
 with a CCB validation section: which CCB files were read, what

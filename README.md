@@ -342,7 +342,7 @@ The Cargo workspace is described in
 - [`docs/models.md`](./docs/models.md) — aliases, provider-specific handling.
 - [`docs/plugins.md`](./docs/plugins.md) — authoring and using `scode` plugins.
 - [`docs/container.md`](./docs/container.md) — building and running inside a container.
-- [`docs/parity.md`](./docs/parity.md) — what claude-code parity means and how it is tracked.
+- [`ROADMAP.html`](./ROADMAP.html) Goal 2 — what claude-code parity means and how it is tracked (reference sources, resolution taxonomy, sync markers).
 - [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the deterministic mock backend and harness.
 - [`rust/README.md`](./rust/README.md) — Cargo workspace map.
 

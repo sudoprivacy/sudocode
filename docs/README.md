@@ -23,13 +23,12 @@ the content.
 
 ## Project mechanics
 
-- [`parity.md`](./parity.md) — what claude-code parity means for `scode`,
-  the three reference sources we work against (anthropics/claude-code
-  as source of truth, claude-code-best/claude-code as behavioral
-  reference, ultraworkers/claw-code as optional Rust cherry-pick
-  source), the mandatory "CHANGELOG → grep CCB → align understanding"
-  loop, and the sync markers (`LAST_PARITY_SYNC_COMMIT`,
-  `LAST_CCB_REF_VERSION`).
+- Parity mechanism — inlined in [`../ROADMAP.html`](../ROADMAP.html)
+  under Goal 2: reference sources (public CC surfaces, the private
+  `sudoprivacy/claude-code` snapshot, runtime-observation combos,
+  CCB, claw-code), the mandatory "CHANGELOG → grep CCB → align"
+  loop, resolution taxonomy, and the sync markers
+  (`LAST_PARITY_SYNC_COMMIT`, `LAST_CCB_REF_VERSION`).
 - [`mock-parity-harness.md`](./mock-parity-harness.md) — the
   deterministic mock backend and the harness that exercises the parity
   scenarios.

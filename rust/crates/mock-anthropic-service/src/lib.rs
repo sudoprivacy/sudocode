@@ -101,6 +101,8 @@ enum Scenario {
     PluginToolRoundtrip,
     AutoCompactTriggered,
     TokenCostReporting,
+    SingleTurnText,
+    MultiTurnContext,
 }
 
 impl Scenario {
@@ -119,6 +121,8 @@ impl Scenario {
             "plugin_tool_roundtrip" => Some(Self::PluginToolRoundtrip),
             "auto_compact_triggered" => Some(Self::AutoCompactTriggered),
             "token_cost_reporting" => Some(Self::TokenCostReporting),
+            "single_turn_text" => Some(Self::SingleTurnText),
+            "multi_turn_context" => Some(Self::MultiTurnContext),
             _ => None,
         }
     }
@@ -138,6 +142,8 @@ impl Scenario {
             Self::PluginToolRoundtrip => "plugin_tool_roundtrip",
             Self::AutoCompactTriggered => "auto_compact_triggered",
             Self::TokenCostReporting => "token_cost_reporting",
+            Self::SingleTurnText => "single_turn_text",
+            Self::MultiTurnContext => "multi_turn_context",
         }
     }
 }
@@ -503,6 +509,15 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::TokenCostReporting => {
             final_text_sse_with_usage("token cost reporting parity complete.", 1_000, 500)
         }
+        Scenario::SingleTurnText => final_text_sse("The answer is 4"),
+        Scenario::MultiTurnContext => {
+            let turn_count = request.messages.iter().filter(|m| m.role == "user").count();
+            if turn_count <= 1 {
+                final_text_sse("Hello, Alice! Nice to meet you.")
+            } else {
+                final_text_sse("Your name is Alice.")
+            }
+        }
     }
 }
 
@@ -688,6 +703,20 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             1_000,
             500,
         ),
+        Scenario::SingleTurnText => {
+            text_message_response("msg_single_turn_text", "The answer is 4")
+        }
+        Scenario::MultiTurnContext => {
+            let turn_count = request.messages.iter().filter(|m| m.role == "user").count();
+            if turn_count <= 1 {
+                text_message_response(
+                    "msg_multi_turn_context_1",
+                    "Hello, Alice! Nice to meet you.",
+                )
+            } else {
+                text_message_response("msg_multi_turn_context_2", "Your name is Alice.")
+            }
+        }
     }
 }
 
@@ -706,6 +735,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::PluginToolRoundtrip => "req_plugin_tool_roundtrip",
         Scenario::AutoCompactTriggered => "req_auto_compact_triggered",
         Scenario::TokenCostReporting => "req_token_cost_reporting",
+        Scenario::SingleTurnText => "req_single_turn_text",
+        Scenario::MultiTurnContext => "req_multi_turn_context",
     }
 }
 

@@ -535,12 +535,15 @@ pub fn load_system_prompt_with(
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-    Ok(SystemPromptBuilder::new()
-        .with_os(os_name, os_version)
-        .with_model_family(model_family)
-        .with_project_context(project_context)
-        .with_runtime_config(config)
-        .build())
+    let builder = crate::memory::append_to_builder(
+        SystemPromptBuilder::new()
+            .with_os(os_name, os_version)
+            .with_model_family(model_family)
+            .with_project_context(project_context)
+            .with_runtime_config(config),
+        None,
+    );
+    Ok(builder.build())
 }
 
 fn render_config_section(config: &RuntimeConfig) -> String {

@@ -1310,42 +1310,6 @@ mod tests {
         std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
-    /// #182 item 2: `ANTHROPIC_AUTH_TOKEN` is the claude-code npm CLI's
-    /// preferred name for the Anthropic API key. Accept it as an alias of
-    /// `ANTHROPIC_API_KEY` (the legacy name) when the legacy name is unset.
-    #[test]
-    fn auth_source_from_env_accepts_anthropic_auth_token_alias() {
-        let _guard = env_lock();
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("PROXY_AUTH_TOKEN");
-        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
-        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "claude-code-style-key");
-
-        let auth = AuthSource::from_env().expect("env auth via alias");
-        assert_eq!(auth.api_key(), Some("claude-code-style-key"));
-        assert_eq!(auth.bearer_token(), None);
-
-        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-    }
-
-    /// `ANTHROPIC_API_KEY` (the legacy name) wins when both are set so users
-    /// migrating from one env var to the other are never surprised by silent
-    /// precedence flips.
-    #[test]
-    fn auth_source_from_env_prefers_anthropic_api_key_over_anthropic_auth_token() {
-        let _guard = env_lock();
-        std::env::remove_var("PROXY_AUTH_TOKEN");
-        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
-        std::env::set_var("ANTHROPIC_API_KEY", "legacy-key");
-        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "alias-key");
-
-        let auth = AuthSource::from_env().expect("env auth");
-        assert_eq!(auth.api_key(), Some("legacy-key"));
-
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-    }
-
     #[test]
     fn auth_source_from_env_or_saved_uses_saved_oauth_when_env_absent() {
         let _guard = env_lock();

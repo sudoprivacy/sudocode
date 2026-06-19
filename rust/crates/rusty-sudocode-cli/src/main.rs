@@ -191,20 +191,6 @@ impl ModelProvenance {
     }
 }
 
-/// Test-only process-wide lock that serializes env-var mutation across
-/// modules. The doctor, args, and any other unit tests that read env state
-/// or set `SUDO_CODE_CONFIG_HOME` should acquire this guard before touching
-/// the environment so cargo's parallel test runner can't interleave their
-/// setup/teardown.
-#[cfg(test)]
-pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// Single source of truth for the env-or-config default model lookup. Returns
 /// `(resolved, raw, source)` when env or config wins, `None` to defer to the
 /// compiled-in default.

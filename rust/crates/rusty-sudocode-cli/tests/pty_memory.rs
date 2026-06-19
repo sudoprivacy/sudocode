@@ -1,0 +1,306 @@
+//! PTY tests for the persistent memory system (`runtime::memory`).
+//!
+//! Three scenarios exercised end-to-end through `scode system-prompt`:
+//!
+//! 1. Happy path: memory files with valid frontmatter are injected into
+//!    the system prompt.
+//! 2. Resilience: malformed and non-markdown files are skipped without
+//!    crashing; valid entries still surface.
+//! 3. Budget enforcement: when total rendered memory exceeds the
+//!    16 000-char cap, excess entries are dropped with a notice.
+//!
+//! All tests set `SUDOCODE_MEMORY_DIR` to a temp directory, avoiding
+//! any interaction with the user's real `~/.scode/memory/`.
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "scode-pty-mem-{label}-{}-{millis}-{counter}",
+        std::process::id()
+    ))
+}
+
+/// Write a valid memory entry file.
+fn write_entry(dir: &Path, slug: &str, entry_type: &str, description: &str, body: &str) {
+    let content = format!(
+        "---\nname: {slug}\ndescription: {description}\nmetadata:\n  type: {entry_type}\n---\n\n{body}\n"
+    );
+    fs::write(dir.join(format!("{slug}.md")), content).expect("write entry");
+}
+
+/// Run `scode system-prompt` with the given env vars and return the output.
+fn run_system_prompt(cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(cwd);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.arg("system-prompt");
+    cmd.output().expect("scode binary should launch")
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 1. Happy path: entries injected into system prompt
+// ──────────────────────────────────────────────────────────────────────
+
+/// Create two valid memory files and an index, verify the rendered
+/// system prompt contains their content.
+#[test]
+fn memory_entries_injected_into_system_prompt() {
+    let root = unique_temp_dir("inject");
+    let memory_dir = root.join("memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    write_entry(
+        &memory_dir,
+        "feedback_testing",
+        "feedback",
+        "Testing best practices",
+        "Always run tests before committing",
+    );
+    write_entry(
+        &memory_dir,
+        "user_role",
+        "user",
+        "Who the user is",
+        "Senior Rust developer",
+    );
+    fs::write(
+        memory_dir.join("MEMORY.md"),
+        "# Key Learnings\n\n\
+         - [Testing](feedback_testing.md) — testing best practices\n\
+         - [Role](user_role.md) — who the user is\n",
+    )
+    .expect("write MEMORY.md");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8"))],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    // The memory section header must be present.
+    assert!(
+        text.contains("# Persistent memory"),
+        "system-prompt missing '# Persistent memory' section;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // The MEMORY.md index content is passed through.
+    assert!(
+        text.contains("Key Learnings"),
+        "system-prompt missing MEMORY.md index content;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // Both entry names appear.
+    assert!(
+        text.contains("name: feedback_testing"),
+        "system-prompt missing feedback_testing entry;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+    assert!(
+        text.contains("name: user_role"),
+        "system-prompt missing user_role entry;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // Both bodies appear.
+    assert!(
+        text.contains("Always run tests before committing"),
+        "system-prompt missing feedback_testing body;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+    assert!(
+        text.contains("Senior Rust developer"),
+        "system-prompt missing user_role body;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // Type annotations appear.
+    assert!(
+        text.contains("type: feedback"),
+        "system-prompt missing type: feedback;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+    assert!(
+        text.contains("type: user"),
+        "system-prompt missing type: user;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 2. Resilience: malformed / non-markdown files are skipped
+// ──────────────────────────────────────────────────────────────────────
+
+/// Mix valid, malformed (unterminated frontmatter), and non-markdown files.
+/// The command must exit 0, include the valid entry, and silently skip the rest.
+#[test]
+fn memory_resilient_on_missing_or_malformed() {
+    let root = unique_temp_dir("resilient");
+    let memory_dir = root.join("memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    // Valid entry.
+    write_entry(
+        &memory_dir,
+        "valid_entry",
+        "project",
+        "A valid memory entry",
+        "This entry should survive",
+    );
+
+    // Malformed entry: missing closing `---`.
+    fs::write(
+        memory_dir.join("malformed.md"),
+        "---\nname: broken\ndescription: bad entry\nmetadata:\n  type: feedback\nThis has no closing delimiter\n",
+    )
+    .expect("write malformed entry");
+
+    // Non-markdown file: should be ignored entirely.
+    fs::write(memory_dir.join("notes.txt"), "plain text, not markdown")
+        .expect("write non-markdown file");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8"))],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0 even with malformed files; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    // The valid entry must still appear.
+    assert!(
+        text.contains("name: valid_entry"),
+        "valid entry missing after malformed sibling;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+    assert!(
+        text.contains("This entry should survive"),
+        "valid entry body missing after malformed sibling;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // The malformed entry must NOT appear.
+    assert!(
+        !text.contains("name: broken"),
+        "malformed entry should be skipped;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // The non-markdown file must NOT appear.
+    assert!(
+        !text.contains("plain text, not markdown"),
+        "non-markdown file should be ignored;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 3. Budget enforcement: large entries get dropped
+// ──────────────────────────────────────────────────────────────────────
+
+/// Create many large memory files whose total exceeds the 16 000-char
+/// budget. Verify the output stays within budget and includes a
+/// "dropped" notice.
+#[test]
+fn memory_budget_truncates_large_entries() {
+    let root = unique_temp_dir("budget");
+    let memory_dir = root.join("memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    // Each entry body is ~1900 chars. With the preamble, index, and
+    // per-entry overhead, 12 entries will exceed the 16 000-char cap.
+    let large_body = "x".repeat(1_900);
+    for i in 0..12 {
+        write_entry(
+            &memory_dir,
+            &format!("entry_{i:02}"),
+            "project",
+            &format!("Large entry number {i}"),
+            &large_body,
+        );
+    }
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8"))],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0 with budget overflow; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    // The memory section must be present (some entries rendered).
+    assert!(
+        text.contains("# Persistent memory"),
+        "system-prompt missing memory section under budget pressure;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // At least one entry rendered (the first ones fit the budget).
+    assert!(
+        text.contains("name: entry_"),
+        "no entries rendered under budget pressure;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // The budget-drop notice must appear.
+    assert!(
+        text.contains("dropped"),
+        "missing 'dropped' budget notice;\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    // The notice mentions the 16000-char budget.
+    assert!(
+        text.contains("16000-char budget"),
+        "budget notice should mention '16000-char budget';\nstdout tail:\n{}",
+        tail(&text, 40)
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────
+
+/// Return the last `n` lines of `s`, useful for assertion messages.
+fn tail(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}

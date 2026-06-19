@@ -1268,6 +1268,28 @@ proceed in parallel.</p>
   <code>chat-with-me</code> redirect without system-prompt edits.</li>
 </ol>
 
+<h2 id="feature-parity">Feature-parity standing rule: sudocode &harr; sudowork dedup</h2>
+
+<div class="callout-warn callout">
+  <strong>When adding a feature to sudocode, decide whether to remove it from sudowork.</strong>
+  If both products expose the same capability (file operations, git workflow,
+  session management, tool execution), UX consistency becomes impossible to
+  maintain across two codebases in two languages. The standing rule:
+  <ol style="margin:8px 0 0">
+    <li>Before shipping a feature in sudocode, check whether sudowork already
+    has it (renderer-side or worker-side).</li>
+    <li>If yes, decide <strong>now</strong> — not later — which product owns
+    it going forward. "Both" is the wrong answer unless they serve
+    genuinely different user journeys (e.g. sudowork's GUI file tree vs
+    sudocode's CLI <code>read_file</code>).</li>
+    <li>If sudocode becomes the owner, open a sudowork PR to deprecate or
+    remove the duplicate. Ship both PRs in the same cycle.</li>
+    <li>If sudowork keeps it, don't add it to sudocode — route through
+    sudowork's existing surface instead.</li>
+  </ol>
+  The goal is one SSOT per feature, not two implementations that drift.
+</div>
+
 <h2 id="working-agreement">Working agreement on this document</h2>
 
 <p>Scope changes update this document in the same PR. External

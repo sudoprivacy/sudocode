@@ -9,11 +9,11 @@ and AI agents follow the same rules in here.** Read it once before
 your first contribution.
 
 > **Before you write code, read [`README.md`](./README.md) and
-> [`ROADMAP.html`](./ROADMAP.html).** Sudo Code has a small but
+> [`sudo-code-roadmap.html`](./sudo-code-roadmap.html).** Sudo Code has a small but
 > bright-line set of design rules; PRs that contradict them are
 > declined regardless of code quality. The fast summary lives in
 > [Design principles you must respect](#design-principles-you-must-respect)
-> below; the full statement is in `ROADMAP.html`.
+> below; the full statement is in `sudo-code-roadmap.html`.
 
 ## Table of Contents
 
@@ -42,7 +42,7 @@ personal or off-topic.
 
 These are bright-line rules. PRs that introduce any of the items
 below will be asked to remove them or are closed. Reopening any rule
-requires a separate `ROADMAP.html` edit before the code lands — not
+requires a separate `sudo-code-roadmap.html` edit before the code lands — not
 the code first.
 
 **Hard NOs (the ones contributors trip on most):**
@@ -101,10 +101,10 @@ themselves in caught bugs. The PTY layer plus structured-log trace
 quality is our substitute for fine-grained failure attribution.
 
 **Reopening this rule** requires a concrete bug a unit test would
-have caught and a PTY scenario would not, plus a `ROADMAP.html` edit
+have caught and a PTY scenario would not, plus a `sudo-code-roadmap.html` edit
 to change the rule before the unit test lands.
 
-(See `ROADMAP.html` § Goal 1 → "Test layer policy" for the long form.)
+(See `sudo-code-roadmap.html` § Goal 1 → "Test layer policy" for the long form.)
 
 ### Running tests
 
@@ -142,16 +142,16 @@ source for our Rust tree; we read it for understanding only. The
 full triage flow, the Tier 1 source list (public CC surfaces,
 the private `sudoprivacy/claude-code` snapshot, the runtime-
 observation combo), the sync markers, and the resolution
-taxonomy now live in [`ROADMAP.html`](./ROADMAP.html) under
+taxonomy now live in [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) under
 Goal 2.
 
 Every design write-up for a feature with parity intent **leads**
 with a CCB validation section: which CCB files were read, what
 behavior was confirmed, what surprises were found, and what
 decisions follow. Design write-ups live in
-[`ROADMAP.html`](./ROADMAP.html) under the goal they belong to.
+[`sudo-code-roadmap.html`](./sudo-code-roadmap.html) under the goal they belong to.
 When a plan ships or is superseded, remove its content from
-`ROADMAP.html` in the same PR; ROADMAP tracks the live state, not
+`sudo-code-roadmap.html` in the same PR; ROADMAP tracks the live state, not
 history.
 
 ## Project Layout
@@ -368,11 +368,11 @@ syncing your feature branch onto the latest `main` —
 
 ## Publishing the roadmap to ShareOne (interim, manual)
 
-`ROADMAP.html` is the SSOT plan file. Mirroring it to ShareOne for
+`sudo-code-roadmap.html` is the SSOT plan file. Mirroring it to ShareOne for
 at-a-glance external viewing is currently a manual maintainer step
 — both human and AI contributors can run it. The long-term plan
 exposes `publish_to_shareone` as an LLM tool that any `scode` agent
-can call, tracked as a Goal 3 candidate inside `ROADMAP.html`; it
+can call, tracked as a Goal 3 candidate inside `sudo-code-roadmap.html`; it
 ships when a real user asks for it.
 
 Until that tool exists, the documented manual recipes are:
@@ -383,7 +383,7 @@ Until that tool exists, the documented manual recipes are:
 curl -s -X POST https://shareone.app/api/v1/pages \
   -H "X-API-Key: $SHAREONE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"filename\":\"ROADMAP.html\",\"html_content\":$(jq -Rs . < ROADMAP.html),\"allow_comments\":true}"
+  -d "{\"filename\":\"sudo-code-roadmap.html\",\"html_content\":$(jq -Rs . < sudo-code-roadmap.html),\"allow_comments\":true}"
 ```
 
 The response includes `share_url` — that is the page to share.
@@ -395,7 +395,7 @@ got back from a prior POST):
 curl -s -X PUT "https://shareone.app/api/v1/pages/<share_id>" \
   -H "X-API-Key: $SHAREONE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"filename\":\"ROADMAP.html\",\"html_content\":$(jq -Rs . < ROADMAP.html),\"allow_comments\":true}"
+  -d "{\"filename\":\"sudo-code-roadmap.html\",\"html_content\":$(jq -Rs . < sudo-code-roadmap.html),\"allow_comments\":true}"
 ```
 
 Get a `SHAREONE_API_KEY` from <https://shareone.app>. URL stability

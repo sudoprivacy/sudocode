@@ -2530,9 +2530,43 @@ impl HookAbortMonitor {
                 return;
             };
 
+            // Enable raw mode so crossterm can detect ESC keypresses
+            // during streaming / tool execution (CC parity). The
+            // rendering layer uses ANSI cursor control (not println!)
+            // during a turn, so raw mode is safe here. Restored when
+            // the monitor stops.
+            let is_tty = io::stdin().is_terminal();
+            let raw_enabled = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
+
             runtime.block_on(async move {
-                let wait_for_stop = tokio::task::spawn_blocking(move || {
-                    let _ = stop_rx.recv();
+                let esc_abort = abort_signal.clone();
+                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || {
+                    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+                    loop {
+                        if stop_rx.try_recv().is_ok() {
+                            return;
+                        }
+                        if !raw_enabled {
+                            match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                                Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                                Err(RecvTimeoutError::Timeout) => continue,
+                            }
+                        }
+                        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                            if let Ok(Event::Key(key)) = event::read() {
+                                if key.kind != KeyEventKind::Press {
+                                    continue;
+                                }
+                                let is_esc = key.code == KeyCode::Esc;
+                                let is_ctrl_c = key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(event::KeyModifiers::CONTROL);
+                                if is_esc || is_ctrl_c {
+                                    esc_abort.abort();
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 });
 
                 tokio::select! {
@@ -2541,9 +2575,13 @@ impl HookAbortMonitor {
                             abort_signal.abort();
                         }
                     }
-                    _ = wait_for_stop => {}
+                    _ = wait_for_esc_or_stop => {}
                 }
             });
+
+            if raw_enabled {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
         })
     }
 

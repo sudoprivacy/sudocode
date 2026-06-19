@@ -254,3 +254,49 @@ fn sigint_cancels_streaming() {
         .expect_eof()
         .expect("scode should exit after Ctrl+C, not hang");
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// 6. ESC key cancels mid-execution (CC parity)
+// ──────────────────────────────────────────────────────────────────────
+
+/// ESC key during a long-running bash tool exits cleanly — same
+/// behavior as Ctrl+C but triggered by the Escape key (CC parity).
+///
+/// Steps with causal data flow:
+/// 1. Spawn scode with a bash scenario that sleeps 30s.
+/// 2. Expect "bash" — proves the tool call started.
+/// 3. Send ESC byte (0x1B) — simulates the user pressing Escape.
+/// 4. expect_eof — proves the process handled ESC and exited.
+///
+/// Catches: ESC not detected during streaming, raw mode not enabled,
+/// process hanging after ESC.
+#[test]
+#[cfg(unix)]
+fn esc_cancels_streaming() {
+    let env = TestEnv::new("esc-cancel");
+    let prompt = env.prompt(
+        "Run this exact bash command: printf 'esc-start'; sleep 30; printf 'esc-done'",
+        "bash_interrupt_long_running",
+    );
+
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "danger-full-access",
+        "--allowedTools",
+        "bash",
+        &prompt,
+    ]);
+
+    // Wait until the bash tool call starts executing.
+    sess.expect("bash").expect("should see bash tool call");
+
+    // Let the command start, then send ESC.
+    std::thread::sleep(Duration::from_millis(500));
+    sess.send("\x1b").expect("send ESC");
+
+    // Process should exit — the assertion is that it does NOT hang.
+    sess.set_default_timeout(Duration::from_secs(15));
+    let _exit = sess
+        .expect_eof()
+        .expect("scode should exit after ESC, not hang");
+}

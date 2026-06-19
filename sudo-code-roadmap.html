@@ -337,6 +337,25 @@ coverage starts fresh and is tracked here as the single source.</p>
   <li><strong>N/A</strong> — out of scope for <code>scode</code> itself.</li>
 </ul>
 
+<p><strong>Platform</strong> (new column):</p>
+<ul>
+  <li><strong>all</strong> — Unix (macOS + Linux) and Windows.</li>
+  <li><strong>unix</strong> — macOS + Linux only (e.g. <code>bash</code>, <code>/dev/pty</code>).</li>
+  <li><strong>win</strong> — Windows only (e.g. PowerShell, ConPTY).</li>
+</ul>
+<p>CI runs <code>cargo test --workspace</code> on all three platforms
+(ubuntu-latest, macos-latest, windows-latest). PTY tests use
+<code>pty-expect</code> which abstracts Unix PTY vs Windows ConPTY, so a
+single test file runs cross-platform unless explicitly
+<code>#[cfg]</code>-gated.</p>
+
+<p><strong>Integration</strong> (new column):</p>
+<ul>
+  <li>Names the integration test file(s) that already cover this feature at the protocol/dispatch layer.</li>
+  <li>Integration tests are an <strong>optional debug accelerator</strong> per the test policy — they do not count toward the 90% PTY target, but help triage PTY failures faster.</li>
+  <li>Once PTY covers a feature, no new integration test is needed for it (DRY). Existing integration tests stay as-is for triage value.</li>
+</ul>
+
 <p><strong>Hacker priority</strong> (the new column):</p>
 <ul>
   <li><strong>must-have</strong> — the hacker workflow blocks without it: invocation, streaming feedback, mid-flight cancel, bash/edit/grep, <code>/commit</code>, <code>/pr</code>, <code>/resume</code>, <code>--output-format json</code>.</li>
@@ -348,167 +367,167 @@ coverage starts fresh and is tracked here as the single source.</p>
 
 <h4>1. Core conversation</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Single-turn prompt</td><td>must-have</td><td>Gap</td><td>—</td><td>Non-interactive, invocation-driven: <code>scode -p "…"</code> starts, streams the assistant turn, then exits. PTY verifies the process truly exits without TTY input.</td></tr>
-    <tr><td>Multi-turn context</td><td>must-have</td><td>Gap</td><td>—</td><td>Follow-up references prior turn</td></tr>
-    <tr><td>Streaming response</td><td>must-have</td><td>Gap</td><td>—</td><td>LLM-API streaming: assistant tokens render incrementally as they arrive. Pairing requirement for cancel-mid below.</td></tr>
-    <tr><td>Multi-tool turn roundtrip</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — multiple tools in one assistant turn, each result feeds the next</td></tr>
-    <tr><td>Graceful cancel mid-execution</td><td>must-have</td><td>Gap</td><td>—</td><td>User presses ESC during streaming output (LLM tokens or tool call) — scode stops the in-flight turn and no further iterations issue. Integration-covered by <code>interrupt_e2e.rs</code>; PTY pending — SIGINT during bash, verify interrupted envelope and no continuation.</td></tr>
+    <tr><td>Single-turn prompt</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td><code>scode -p "…"</code> starts, streams the assistant turn, then exits. PTY verifies the process truly exits without TTY input.</td></tr>
+    <tr><td>Multi-turn context</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Follow-up references prior turn</td></tr>
+    <tr><td>Streaming response</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Assistant tokens render incrementally. Pairing requirement for cancel-mid below.</td></tr>
+    <tr><td>Multi-tool turn roundtrip</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Multiple tools in one assistant turn, each result feeds the next</td></tr>
+    <tr><td>Graceful cancel mid-execution</td><td>unix</td><td>must-have</td><td>Gap</td><td><code>interrupt_e2e.rs</code></td><td>—</td><td>ESC/SIGINT during streaming — scode stops the in-flight turn. Windows ConPTY signal path differs.</td></tr>
   </tbody>
 </table>
 
 <h4>1b. Transport (ACP)</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>ACP stdio transport</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; **kept as integration** — protocol-level surface, not REPL-fidelity, PTY adds no fidelity</td></tr>
-    <tr><td>ACP WebSocket transport</td><td>must-have</td><td>Gap</td><td>—</td><td>Same as above — protocol-level, integration is the right layer</td></tr>
-    <tr><td>ACP session lifecycle (EOF / orphan)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; tests that host stdin EOF makes the agent exit cleanly without orphans</td></tr>
-    <tr><td>Live API smoke (real Anthropic)</td><td>N/A</td><td>N/A</td><td>—</td><td>Covered by <code>acp_live_smoke.rs</code>; runs only on main with <code>CLAUDE_CODE_OAUTH_TOKEN</code>; live-gate, not a coverage-denominator concern</td></tr>
+    <tr><td>ACP stdio transport</td><td>all</td><td>must-have</td><td>Gap</td><td><code>acp_integration.rs</code></td><td>—</td><td>Kept as integration — protocol-level surface, PTY adds no fidelity</td></tr>
+    <tr><td>ACP WebSocket transport</td><td>all</td><td>must-have</td><td>Gap</td><td><code>acp_integration.rs</code></td><td>—</td><td>Protocol-level, integration is the right layer</td></tr>
+    <tr><td>ACP session lifecycle (EOF / orphan)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>acp_integration.rs</code></td><td>—</td><td>Host stdin EOF → agent exits cleanly without orphans</td></tr>
+    <tr><td>Live API smoke (real Anthropic)</td><td>all</td><td>N/A</td><td>N/A</td><td><code>acp_live_smoke.rs</code></td><td>—</td><td>Runs only on main with <code>CLAUDE_CODE_OAUTH_TOKEN</code>; not a coverage-denominator concern</td></tr>
   </tbody>
 </table>
 
 <h4>2. Tool usage — file operations</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>read_file</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>write_file</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>edit_file</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Write → edit → read back</td></tr>
-    <tr><td><code>glob_search</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>grep_search</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>read_file</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td></td></tr>
+    <tr><td><code>write_file</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td></td></tr>
+    <tr><td><code>edit_file</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Write → edit → read back</td></tr>
+    <tr><td><code>glob_search</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>grep_search</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td></td></tr>
   </tbody>
 </table>
 
 <h4>3. Tool usage — execution</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>bash</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Run script, echo, sleep</td></tr>
-    <tr><td>REPL (persistent Python/JS subprocess)</td><td>must-have</td><td>Gap</td><td>—</td><td>Different from one-shot bash</td></tr>
-    <tr><td>PowerShell</td><td>must-have</td><td>Gap</td><td>—</td><td>Windows-only path</td></tr>
-    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td>must-have</td><td>Gap</td><td>—</td><td>Needs <code>.ipynb</code> fixture</td></tr>
+    <tr><td><code>bash</code></td><td>unix</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Run script, echo, sleep</td></tr>
+    <tr><td>REPL (persistent Python/JS subprocess)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Different from one-shot bash</td></tr>
+    <tr><td>PowerShell</td><td>win</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Windows-only path</td></tr>
+    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Needs <code>.ipynb</code> fixture</td></tr>
   </tbody>
 </table>
 
 <h4>4. Tool usage — search &amp; web</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>WebSearch</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Searches current info, verifies results</td></tr>
-    <tr><td><code>WebFetch</code> (URL → extract)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>WebSearch</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Searches current info, verifies results</td></tr>
+    <tr><td><code>WebFetch</code> (URL → extract)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
   </tbody>
 </table>
 
 <h4>5. Tool usage — code intelligence</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>LSP <code>goToDefinition</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Needs mock language server</td></tr>
-    <tr><td>LSP <code>findReferences</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td></td></tr>
-    <tr><td>LSP <code>hover</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td></td></tr>
-    <tr><td>LSP <code>documentSymbol</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td></td></tr>
-    <tr><td><code>ToolSearch</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Search for tools by keyword</td></tr>
+    <tr><td>LSP <code>goToDefinition</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Needs mock language server</td></tr>
+    <tr><td>LSP <code>findReferences</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>hover</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>documentSymbol</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>ToolSearch</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Search for tools by keyword</td></tr>
   </tbody>
 </table>
 
 <h4>6. Tool usage — planning &amp; structured</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
-    <tr><td><code>TodoWrite</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Task list management</td></tr>
-    <tr><td><code>AskUserQuestion</code></td><td>must-have</td><td>Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
-    <tr><td><code>StructuredOutput</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Return structured data</td></tr>
-    <tr><td><code>Sleep</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Low priority</td></tr>
+    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
+    <tr><td><code>TodoWrite</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Task list management</td></tr>
+    <tr><td><code>AskUserQuestion</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>scode prompts for clarification</td></tr>
+    <tr><td><code>StructuredOutput</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Return structured data</td></tr>
+    <tr><td><code>Sleep</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Low priority</td></tr>
   </tbody>
 </table>
 
 <h4>7. Tool usage — background &amp; parallel</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>Agent</code> (sub-agents)</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Launch parallel sub-agents</td></tr>
-    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Background task management</td></tr>
-    <tr><td>Workers (boot, trust, prompt)</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Worker lifecycle</td></tr>
-    <tr><td>Teams (parallel sub-agents)</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Team coordination</td></tr>
-    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Needs wall-clock or fake timer</td></tr>
+    <tr><td><code>Agent</code> (sub-agents)</td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Launch parallel sub-agents</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Background task management</td></tr>
+    <tr><td>Workers (boot, trust, prompt)</td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Worker lifecycle</td></tr>
+    <tr><td>Teams (parallel sub-agents)</td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Team coordination</td></tr>
+    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Needs wall-clock or fake timer</td></tr>
   </tbody>
 </table>
 
 <h4>8. Git workflow</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/commit</code> (generate + create)</td><td>must-have</td><td>Gap</td><td>—</td><td>Init repo → write → commit → verify log</td></tr>
-    <tr><td><code>/pr</code> (draft / create PR)</td><td>must-have</td><td>Gap</td><td>—</td><td><strong>P0</strong> — core workflow</td></tr>
-    <tr><td><code>/diff</code> (show changes)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/issue</code> (create GitHub issue)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/review</code> (code review)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/commit</code> (generate + create)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Init repo → write → commit → verify log</td></tr>
+    <tr><td><code>/pr</code> (draft / create PR)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td><strong>P0</strong> — core workflow</td></tr>
+    <tr><td><code>/diff</code> (show changes)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>/issue</code> (create GitHub issue)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>/review</code> (code review)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
   </tbody>
 </table>
 
 <h4>9. Session management</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Session auto-save</td><td>must-have</td><td>Gap</td><td>—</td><td>Persists across turns</td></tr>
-    <tr><td>Session JSONL persistence (model + transcript)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>acp_live_smoke.rs</code> + <code>resume_slash_commands.rs</code>; PTY pending — assistant messages carry model field, transcript replayable</td></tr>
-    <tr><td><code>/resume</code> (load saved session)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — send → close → resume → verify</td></tr>
-    <tr><td><code>--resume latest</code> shortcut</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — restores most-recent managed session without an explicit id</td></tr>
-    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/export</code> (session to markdown)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON + plaintext modes</td></tr>
-    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>undo_e2e.rs</code>; PTY pending — restore after edit, delete created file, nothing-to-undo, hook-feedback robustness, JSON output</td></tr>
-    <tr><td><code>/compact</code> (compress history)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td>Auto-compact trigger</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — runtime-initiated compaction when context fills, distinct from manual <code>/compact</code></td></tr>
+    <tr><td>Session auto-save</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Persists across turns</td></tr>
+    <tr><td>Session JSONL persistence (model + transcript)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>acp_live_smoke.rs</code>, <code>resume_slash_commands.rs</code></td><td>—</td><td>Assistant messages carry model field, transcript replayable</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>resume_slash_commands.rs</code></td><td>—</td><td>Send → close → resume → verify</td></tr>
+    <tr><td><code>--resume latest</code> shortcut</td><td>all</td><td>must-have</td><td>Gap</td><td><code>resume_slash_commands.rs</code></td><td>—</td><td>Restores most-recent managed session without explicit id</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>resume_slash_commands.rs</code>, <code>output_format_contract.rs</code></td><td>—</td><td>JSON + plaintext modes</td></tr>
+    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>undo_e2e.rs</code></td><td>—</td><td>Restore after edit, delete created file, nothing-to-undo, JSON output</td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td>Auto-compact trigger</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Runtime-initiated compaction when context fills</td></tr>
   </tbody>
 </table>
 
 <h4>10. Configuration &amp; discovery</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/model</code> (switch model)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
-    <tr><td><code>/permissions</code> (switch mode)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
-    <tr><td>Permission prompt flow (approve / deny)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
-    <tr><td><code>/auth</code> (switch auth mode)</td><td>N/A</td><td>N/A</td><td>—</td><td>sudowork credential injection concern</td></tr>
-    <tr><td>Informational commands bypass credential check</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
-    <tr><td><code>/skills</code> (list / invoke)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/agents</code> (list)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
-    <tr><td><code>/mcp</code> (list / show servers)</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Plugin lifecycle</td></tr>
-    <tr><td><code>/plugins</code> (manage)</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Plugin install/enable/disable</td></tr>
-    <tr><td>Plugin → system-prompt injection</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Was unit-covered by deleted <code>plugin_prompt_injection.rs</code>; also exercised by <code>system_prompt_command.rs</code>; PTY pending — enabled plugin lands in dynamic sections, disabled does not</td></tr>
-    <tr><td>Plugin tool roundtrip</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — plugin-defined tool executes through the agent loop</td></tr>
-    <tr><td><code>/config</code> (inspect)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON section access + standard-location loading</td></tr>
-    <tr><td><code>--output-format json</code> (universal flag)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered extensively by <code>output_format_contract.rs</code>; PTY pending — applies across help, version, status, sandbox, inventory, agents, bootstrap, system-prompt, dump-manifests, init, doctor, resume-status, config, export-help</td></tr>
-    <tr><td><code>--compact</code> output flag</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
-    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
-    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td>must-have</td><td>Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code> + <code>system_prompt_command.rs</code>; PTY pending — each subcommand has both plaintext and structured-JSON modes</td></tr>
+    <tr><td><code>/model</code> (switch model)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>cli_flags_and_config_defaults.rs</code></td><td>—</td><td><code>--model X</code> wiring + persisted in resumed status</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>cli_flags_and_config_defaults.rs</code></td><td>—</td><td>read-only / workspace-write / danger</td></tr>
+    <tr><td>Permission prompt flow (approve / deny)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Interactive approval at the boundary</td></tr>
+    <tr><td><code>/auth</code> (switch auth mode)</td><td>all</td><td>N/A</td><td>N/A</td><td>—</td><td>—</td><td>sudowork credential injection concern</td></tr>
+    <tr><td>Informational commands bypass credential check</td><td>all</td><td>must-have</td><td>Gap</td><td><code>cli_flags_and_config_defaults.rs</code></td><td>—</td><td>help / version / config / status / sandbox succeed without auth</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>/agents</code> (list)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code></td><td>—</td><td>Structured-JSON agent entries</td></tr>
+    <tr><td><code>/mcp</code> (list / show servers)</td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Plugin lifecycle</td></tr>
+    <tr><td><code>/plugins</code> (manage)</td><td>all</td><td>nice</td><td>Gap (L2)</td><td>—</td><td>—</td><td>Plugin install/enable/disable</td></tr>
+    <tr><td>Plugin → system-prompt injection</td><td>all</td><td>nice</td><td>Gap (L2)</td><td><code>system_prompt_command.rs</code></td><td>—</td><td>Enabled plugin lands in dynamic sections, disabled does not</td></tr>
+    <tr><td>Plugin tool roundtrip</td><td>all</td><td>nice</td><td>Gap (L2)</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td>Plugin-defined tool executes through the agent loop</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>cli_flags_and_config_defaults.rs</code>, <code>output_format_contract.rs</code></td><td>—</td><td>JSON section access + standard-location loading</td></tr>
+    <tr><td><code>--output-format json</code> (universal flag)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code></td><td>—</td><td>Applies across help, version, status, sandbox, inventory, agents, bootstrap, system-prompt, dump-manifests, init, doctor, resume-status, config, export-help</td></tr>
+    <tr><td><code>--compact</code> output flag</td><td>all</td><td>must-have</td><td>Gap</td><td><code>compact_output.rs</code></td><td>—</td><td>Final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
+    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>cli_flags_and_config_defaults.rs</code></td><td>—</td><td>Typo'd slash shows nearest match; OMC-namespaced commands surface compat hint</td></tr>
+    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code>, <code>system_prompt_command.rs</code></td><td>—</td><td>Each subcommand has plaintext and structured-JSON modes</td></tr>
   </tbody>
 </table>
 
 <h4>11. Diagnostics</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/doctor</code></td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/status</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Model, permissions, usage</td></tr>
-    <tr><td><code>/sandbox</code></td><td>must-have</td><td>Gap</td><td>—</td><td>Isolation status</td></tr>
-    <tr><td><code>/cost</code> (token usage)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td>Prompt-response token usage</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/doctor</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code></td><td>—</td><td></td></tr>
+    <tr><td><code>/status</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code></td><td>—</td><td>Model, permissions, usage</td></tr>
+    <tr><td><code>/sandbox</code></td><td>all</td><td>must-have</td><td>Gap</td><td><code>output_format_contract.rs</code></td><td>—</td><td>Isolation status</td></tr>
+    <tr><td><code>/cost</code> (token usage)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td></td></tr>
+    <tr><td>Prompt-response token usage</td><td>all</td><td>must-have</td><td>Gap</td><td><code>mock_parity_harness.rs</code></td><td>—</td><td></td></tr>
   </tbody>
 </table>
 
 <h4>12. Auth</h4>
 <table>
-  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Feature</th><th>Platform</th><th>Hacker Priority</th><th>Status</th><th>Integration</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Subscription auth (CC OAuth)</td><td>must-have</td><td>Gap</td><td>—</td><td>Uses injected <code>CLAUDE_CODE_OAUTH_TOKEN</code></td></tr>
-    <tr><td>Proxy auth (sudorouter)</td><td>must-have</td><td>Gap</td><td>—</td><td>Via <code>ANTHROPIC_API_KEY</code> injection</td></tr>
-    <tr><td>API key auth</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>scode login</code> (CLI)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>scode logout</code> (CLI)</td><td>must-have</td><td>Gap</td><td>—</td><td></td></tr>
+    <tr><td>Subscription auth (CC OAuth)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td>Uses injected <code>CLAUDE_CODE_OAUTH_TOKEN</code></td></tr>
+    <tr><td>Proxy auth (sudorouter)</td><td>all</td><td>must-have</td><td>Gap</td><td><code>proxy_integration.rs</code></td><td>—</td><td>Via <code>ANTHROPIC_API_KEY</code> injection</td></tr>
+    <tr><td>API key auth</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>scode login</code> (CLI)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
+    <tr><td><code>scode logout</code> (CLI)</td><td>all</td><td>must-have</td><td>Gap</td><td>—</td><td>—</td><td></td></tr>
   </tbody>
 </table>
 

@@ -25,3 +25,9 @@ browser tab list --json                               # list open tabs
 ```
 
 When stdout is not a TTY, `--json` mode is auto-enabled so output is always pipe-safe.
+
+Every CLI command has an identical Python function in `ai_dev_browser.core` — explore interactively with CLI, then script with the same functions:
+
+```python
+from ai_dev_browser.core import page_goto, click_by_text, page_discover
+```

@@ -507,7 +507,20 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
     <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
     <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code> + <code>system_prompt_command.rs</code>; PTY pending — each subcommand has both plaintext and structured-JSON modes</td></tr>
-    <tr><td>Memory system (<code>~/.scode/memory/</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_entries_injected_into_system_prompt</code>, <code>pty_memory::memory_resilient_on_missing_or_malformed</code>, <code>pty_memory::memory_budget_truncates_large_entries</code></td><td>CC parity: file-based persistent memory with 4 entry types (user, feedback, project, reference), MEMORY.md index, SystemPromptBuilder integration. PR #216 (supersedes #205). Read-only; write path pending.</td></tr>
+  </tbody>
+</table>
+
+<h4>13. Memory system</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Memory read + system prompt injection</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_entries_injected_into_system_prompt</code></td><td>4 entry types (user, feedback, project, reference), MEMORY.md index, SystemPromptBuilder integration</td></tr>
+    <tr><td>Memory resilience (missing / malformed)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_resilient_on_missing_or_malformed</code></td><td>Graceful fallback on bad frontmatter, missing files</td></tr>
+    <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
+    <tr><td>Memory write path ("remember X")</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM writes memory files via Write tool; responds to "remember X" / "forget X"</td></tr>
+    <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shows loaded memory entries in the REPL</td></tr>
+    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: currently global <code>~/.scode/memory/</code></td></tr>
+    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Detailed instructions for when/how to save/update/delete. Current preamble ~300 chars vs CC's ~3000</td></tr>
   </tbody>
 </table>
 
@@ -550,15 +563,16 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>5</td><td>0</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
-    <tr><td>Config &amp; Discovery</td><td>17</td><td>1</td><td>4</td><td>12</td><td><strong>1</strong></td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>1</td><td>4</td><td>11</td><td>0</td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><th>Total</th><th>76</th><th>2</th><th>13</th><th>61</th><th>11</th></tr>
+    <tr><td>Memory System</td><td>7</td><td>0</td><td>0</td><td>7</td><td><strong>3</strong></td></tr>
+    <tr><th>Total</th><th>82</th><th>2</th><th>13</th><th>67</th><th>13</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 55 features covered</strong> out of the 61 in-denominator
-features. <strong>Current coverage: 11 / 61 (18%).</strong>
+<p><strong>90% target = 60 features covered</strong> out of the 67 in-denominator
+features. <strong>Current coverage: 13 / 67 (19%).</strong>
 <code>L2 deferred</code> items are real surface but need heavier
 setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
 but do not count toward the Q2 number.</p>

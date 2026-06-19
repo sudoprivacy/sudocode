@@ -1208,6 +1208,10 @@ impl McpServerManager {
 
             let server = self.server_mut(server_name)?;
             server.initialized = true;
+            // A successful initialize proves the server can start — reset
+            // the spawn counter so a later transport-drop + respawn does
+            // not inherit stale attempts from a prior lifecycle.
+            server.spawn_attempts = 0;
             return Ok(());
         }
     }

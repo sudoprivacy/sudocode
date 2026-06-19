@@ -1000,7 +1000,7 @@ externally" / "publish my plan" / "give me a shareable link".</p>
 <table>
   <thead><tr><th></th><th>Detail</th></tr></thead>
   <tbody>
-    <tr><td>Source signal</td><td>Maintainers currently publish <code>ROADMAP.html</code> by hand via the shareone-skill or by curling the API. As the agent surface grows, users will start asking <code>scode</code> directly to share files; needing them to know about an external skill defeats the "scode is the agent" framing.</td></tr>
+    <tr><td>Source signal</td><td>Maintainers currently publish <code>sudo-code-roadmap.html</code> by hand via the shareone-skill or by curling the API. As the agent surface grows, users will start asking <code>scode</code> directly to share files; needing them to know about an external skill defeats the "scode is the agent" framing.</td></tr>
     <tr><td>Tool shape</td><td>Single tool: <code>publish_to_shareone(file_path, options)</code>. Options include <code>filename</code> (defaults to file basename), <code>allow_comments</code> (default true), <code>share_id</code> (optional — passing this PUT-updates an existing share so the URL stays stable; omitting it POSTs a new share). Returns the resulting <code>share_url</code>.</td></tr>
     <tr><td>Implementation</td><td>~100 lines of Rust hitting <code>POST /api/v1/pages</code> (new) and <code>PUT /api/v1/pages/{share_id}</code> (update) on the public ShareOne HTTP API. No skill dependency, no <code>npm</code>, no vendored client. Reads <code>SHAREONE_API_KEY</code> from env. Requires no infra change beyond adding the tool entry to <code>runtime::tools</code> registry.</td></tr>
     <tr><td>Permission</td><td>Routes through the same permission validator chain as <code>WebFetch</code>: <code>read-only</code> and <code>workspace-write</code> reject the call (publishing is a privileged side effect, like a network write); <code>danger-full-access</code> and explicit user approval pass.</td></tr>
@@ -1009,7 +1009,7 @@ externally" / "publish my plan" / "give me a shareable link".</p>
   </tbody>
 </table>
 
-<p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
+<p>For now, while the tool does not exist, <code>sudo-code-roadmap.html</code> is
 published by hand. The exact curl call is documented in
 <a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md"><code>CONTRIBUTING.md</code> § Publishing the roadmap to ShareOne</a>.</p>
 
@@ -1238,7 +1238,7 @@ PR — the roadmap tracks the live state, not history.</p>
 </ul>
 
 <footer>
-  Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.
+  Sudo Code Roadmap — <code>sudo-code-roadmap.html</code> is the single SSOT plan file.
 </footer>
 
 </body>

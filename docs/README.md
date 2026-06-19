@@ -23,7 +23,7 @@ the content.
 
 ## Project mechanics
 
-- Parity mechanism — inlined in [`../ROADMAP.html`](../ROADMAP.html)
+- Parity mechanism — inlined in [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html)
   under Goal 2: reference sources (public CC surfaces, the private
   `sudoprivacy/claude-code` snapshot, runtime-observation combos,
   CCB, claw-code), the mandatory "CHANGELOG → grep CCB → align"
@@ -35,7 +35,7 @@ the content.
 
 ## Plan
 
-- [`../ROADMAP.html`](../ROADMAP.html) — single SSOT plan file. Project
+- [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html) — single SSOT plan file. Project
   goals plus the active design detail for each goal (e2e coverage
   inventory under Goal 1, `!` bash mode + TUI enhancement under
   Goal 3, etc.). All plan content lives here.
@@ -43,7 +43,7 @@ the content.
 ## See also
 
 - [`../README.md`](../README.md) — project entry, install, quick start.
-- [`../ROADMAP.html`](../ROADMAP.html) — project goals.
+- [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html) — project goals.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — contributor setup and PR
   workflow.
 - [`../rust/README.md`](../rust/README.md) — Cargo workspace map.

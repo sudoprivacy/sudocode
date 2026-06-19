@@ -1,7 +1,7 @@
 <!--
   Rust-native CLI coding agent for hackers — terminal-native,
   pipe-composable, scrollback-safe. Built because Claude Code chose
-  non-coders. This README is the canonical voice; ROADMAP.html holds
+  non-coders. This README is the canonical voice; sudo-code-roadmap.html holds
   the engineering plan; docs/ holds mechanism-level reference.
 -->
 
@@ -226,7 +226,7 @@ flowchart LR
 
 Sudo Code is the agent unit underneath that whole future picture.
 For the engineering plan to get there, see
-[`ROADMAP.html` § Goal 4](./ROADMAP.html).
+[`sudo-code-roadmap.html` § Goal 4](./sudo-code-roadmap.html).
 
 ---
 
@@ -334,7 +334,7 @@ The Cargo workspace is described in
 
 ## Documentation
 
-- [`ROADMAP.html`](./ROADMAP.html) — goals, design notes, engineering sequencing.
+- [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) — goals, design notes, engineering sequencing.
 - [`docs/usage.md`](./docs/usage.md) — REPL, one-shot, JSON output, resume, doctor.
 - [`docs/authentication.md`](./docs/authentication.md) — auth modes and credentials.
 - [`docs/permissions-and-sandbox.md`](./docs/permissions-and-sandbox.md) — permission modes, Linux sandbox.
@@ -342,7 +342,7 @@ The Cargo workspace is described in
 - [`docs/models.md`](./docs/models.md) — aliases, provider-specific handling.
 - [`docs/plugins.md`](./docs/plugins.md) — authoring and using `scode` plugins.
 - [`docs/container.md`](./docs/container.md) — building and running inside a container.
-- [`ROADMAP.html`](./ROADMAP.html) Goal 2 — what claude-code parity means and how it is tracked (reference sources, resolution taxonomy, sync markers).
+- [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) Goal 2 — what claude-code parity means and how it is tracked (reference sources, resolution taxonomy, sync markers).
 - [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the deterministic mock backend and harness.
 - [`rust/README.md`](./rust/README.md) — Cargo workspace map.
 

@@ -27,10 +27,14 @@
 
 #![allow(dead_code)] // each test file uses a subset
 
+use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pty_expect::{PtySession, Result};
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Default PTY-test timeout for `expect` operations.
 ///
@@ -83,4 +87,108 @@ pub fn spawn_scode_with_timeout(args: &[&str], timeout: Duration) -> Result<PtyS
     let mut sess = PtySession::spawn(&bin_str, args)?;
     sess.set_default_timeout(timeout);
     Ok(sess)
+}
+
+/// Isolated workspace for PTY tests that talk to a mock Anthropic
+/// service. Mirrors the workspace layout from `mock_parity_harness.rs`
+/// but owns its own temp directory.
+pub struct HarnessWorkspace {
+    pub root: PathBuf,
+    pub config_home: PathBuf,
+    pub home: PathBuf,
+}
+
+impl HarnessWorkspace {
+    /// Create a new workspace under a unique temp directory.
+    pub fn new(label: &str) -> Self {
+        let root = unique_temp_dir(label);
+        let config_home = root.join("config-home");
+        let home = root.join("home");
+        fs::create_dir_all(&root).expect("workspace root should be created");
+        fs::create_dir_all(&config_home).expect("config home should be created");
+        fs::create_dir_all(&home).expect("home should be created");
+        Self {
+            root,
+            config_home,
+            home,
+        }
+    }
+
+    /// Write `sudocode.json` pointing at the given mock server URL.
+    pub fn write_config(&self, mock_base_url: &str) {
+        let sample = runtime::SAMPLE_SUDOCODE_JSON
+            .replace("https://api.anthropic.com", mock_base_url)
+            .replace("<YOUR_ANTHROPIC_API_KEY>", "test-pty-key");
+        fs::write(self.config_home.join("sudocode.json"), sample)
+            .expect("sudocode.json should be written");
+    }
+}
+
+impl Drop for HarnessWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Spawn `scode` under a PTY with the given environment variable
+/// overrides.
+///
+/// Launches via `env VAR=val ... scode <args>` so that the specified
+/// variables override the inherited environment. This is necessary
+/// because `pty-expect`'s `PtySession::spawn` does not expose
+/// `CommandBuilder::env`.
+pub fn spawn_scode_with_env(
+    args: &[&str],
+    env_vars: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<PtySession> {
+    let bin = scode_bin();
+    let bin_str = bin.to_string_lossy().to_string();
+
+    let mut env_args: Vec<String> = Vec::new();
+    for (key, value) in env_vars {
+        env_args.push(format!("{key}={value}"));
+    }
+    env_args.push(bin_str);
+    for arg in args {
+        env_args.push((*arg).to_string());
+    }
+
+    let arg_refs: Vec<&str> = env_args.iter().map(|s| s.as_str()).collect();
+    let mut sess = PtySession::spawn("env", &arg_refs)?;
+    sess.set_default_timeout(timeout);
+    Ok(sess)
+}
+
+/// Spawn `scode` under a PTY pre-configured to talk to a mock
+/// Anthropic service via the given workspace.
+pub fn spawn_scode_mock(workspace: &HarnessWorkspace, extra_args: &[&str]) -> Result<PtySession> {
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    let config_home = workspace.config_home.display().to_string();
+    let home = workspace.home.display().to_string();
+
+    let env_vars: Vec<(&str, &str)> = vec![
+        ("SUDO_CODE_CONFIG_HOME", &config_home),
+        ("HOME", &home),
+        ("NO_COLOR", "1"),
+        ("PATH", &path),
+        ("TERM", "xterm"),
+    ];
+
+    let mut args = vec!["--auth", "api-key", "--model", "sonnet"];
+    args.extend_from_slice(extra_args);
+
+    spawn_scode_with_env(&args, &env_vars, DEFAULT_TIMEOUT)
+}
+
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_millis();
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "scode-pty-{label}-{}-{millis}-{counter}",
+        std::process::id()
+    ))
 }

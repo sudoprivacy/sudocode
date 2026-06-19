@@ -464,6 +464,44 @@ pub(crate) fn format_internal_prompt_progress_line(
     }
 }
 
+/// Render the REPL echo for a submitted user input. Each line is on its own
+/// row, padded out to `term_width` and wrapped in the gray-background SGR pair
+/// the REPL uses for echoed input.
+///
+/// `lines_consumed` is the number of `\n`-delimited input lines so callers
+/// know how many rows of rustyline output to clear before printing the echo.
+///
+/// #182 item 3: multi-line input used to collapse to a single line because
+/// the call site did `replace('\n', " ")`. We now preserve every line so the
+/// echo matches what the user actually typed.
+pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+    let trimmed = input.trim();
+    // `split('\n')` (not `lines()`) so an input that ends with `\n` still
+    // contributes a trailing empty echo row — rustyline drew one for it.
+    let raw_lines: Vec<&str> = if trimmed.is_empty() {
+        vec![""]
+    } else {
+        trimmed.split('\n').collect()
+    };
+    let mut rendered = String::new();
+    for (idx, line) in raw_lines.iter().enumerate() {
+        let prefix = if idx == 0 { " › " } else { "   " };
+        let body = format!("{prefix}{line}");
+        let visible = body.chars().count();
+        let pad = term_width.saturating_sub(visible);
+        if idx > 0 {
+            rendered.push('\n');
+        }
+        rendered.push_str("\x1b[48;5;236m");
+        rendered.push_str(&body);
+        if pad > 0 {
+            rendered.push_str(&" ".repeat(pad));
+        }
+        rendered.push_str("\x1b[0m");
+    }
+    (rendered, raw_lines.len())
+}
+
 pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -704,6 +742,7 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
             "bash" | "Bash" => format_bash_result(icon, &parsed),
+            "repl" | "REPL" => format_repl_result(icon, &parsed),
             "read_file" | "Read" => format_read_result(icon, &parsed),
             "write_file" | "Write" => format_write_result(icon, &parsed),
             "edit_file" | "Edit" => format_edit_result(icon, &parsed),
@@ -815,10 +854,60 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(|value| value.as_str())
         .unwrap_or_default();
 
-    // Collect all output lines.
-    let all_output: Vec<&str> = stdout_text
+    render_stdout_stderr_block(header, stdout_text, stderr_text)
+}
+
+/// #182 item 4: the REPL tool returns `{language, stdout, stderr, exitCode,
+/// durationMs}`. Going through `format_generic_tool_result` would
+/// pretty-print the whole object as JSON, embedding stdout as a single
+/// string with literal `\n` escapes — the per-tool truncation cap added in
+/// #179 §2 #7 never triggered for it. Mirror `format_bash_result`'s
+/// stdout/stderr unwrap so the line cap applies and the output looks like
+/// the other shell-style tools.
+pub(crate) fn format_repl_result(icon: &str, parsed: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
+    let language = parsed
+        .get("language")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let mut header = if language.is_empty() {
+        format!("{icon} \x1b[38;5;245mREPL\x1b[0m")
+    } else {
+        format!("{icon} \x1b[38;5;245mREPL\x1b[0m({language})")
+    };
+
+    if let Some(exit_code) = parsed
+        .get("exitCode")
+        .or_else(|| parsed.get("exit_code"))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|code| *code != 0)
+    {
+        write!(&mut header, " exit {exit_code}").expect("write to string");
+    }
+
+    let stdout_text = parsed
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let stderr_text = parsed
+        .get("stderr")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    render_stdout_stderr_block(header, stdout_text, stderr_text)
+}
+
+/// Shared stdout/stderr rendering used by `format_bash_result` and
+/// `format_repl_result`. Combines the two streams, drops blank lines, and
+/// applies the per-tool line cap from `TOOL_OUTPUT_DISPLAY_MAX_LINES`.
+fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> String {
+    use std::fmt::Write as _;
+
+    let all_output: Vec<&str> = stdout
         .lines()
-        .chain(stderr_text.lines())
+        .chain(stderr.lines())
         .filter(|line| !line.trim().is_empty())
         .collect();
 

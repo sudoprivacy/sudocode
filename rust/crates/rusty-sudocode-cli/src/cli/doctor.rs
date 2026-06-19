@@ -240,31 +240,43 @@ pub(crate) fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn s
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn check_auth_health() -> DiagnosticCheck {
-    let api_key_present = env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let proxy_token_present = env::var("PROXY_AUTH_TOKEN")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let env_present = |key: &str| {
+        env::var(key)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let anthropic_api_key_present = env_present("ANTHROPIC_API_KEY");
+    // #182 item 2: `ANTHROPIC_AUTH_TOKEN` is the claude-code npm CLI's preferred
+    // name for the same secret. Accept it as an alias so doctor reports
+    // "present" when only the alias is set.
+    let anthropic_auth_token_present = env_present("ANTHROPIC_AUTH_TOKEN");
+    let api_key_present = anthropic_api_key_present || anthropic_auth_token_present;
+    let proxy_token_present = env_present("PROXY_AUTH_TOKEN");
+    let claude_code_oauth_token_present = env_present("CLAUDE_CODE_OAUTH_TOKEN");
+    let supported_auth_env_present =
+        api_key_present || proxy_token_present || claude_code_oauth_token_present;
+    let state = |present: bool| if present { "present" } else { "absent" };
+    // #182 item 2: spell out every env var the doctor probed so users don't
+    // have to read the source to find out which names map to "api_key" /
+    // "proxy_token" in the summary line.
     let env_details = format!(
-        "Environment       api_key={} proxy_token={}",
-        if api_key_present { "present" } else { "absent" },
-        if proxy_token_present {
-            "present"
-        } else {
-            "absent"
-        }
+        "Environment       ANTHROPIC_API_KEY={api_key} ANTHROPIC_AUTH_TOKEN={auth_token} \
+         PROXY_AUTH_TOKEN={proxy} CLAUDE_CODE_OAUTH_TOKEN={oauth}",
+        api_key = state(anthropic_api_key_present),
+        auth_token = state(anthropic_auth_token_present),
+        proxy = state(proxy_token_present),
+        oauth = state(claude_code_oauth_token_present),
     );
 
     match load_oauth_credentials() {
         Ok(Some(token_set)) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || proxy_token_present {
+            if supported_auth_env_present {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || proxy_token_present {
+            if supported_auth_env_present {
                 "supported auth env vars are configured; legacy saved OAuth is ignored"
             } else {
                 "legacy saved OAuth credentials are present but unsupported"
@@ -293,8 +305,20 @@ pub(crate) fn check_auth_health() -> DiagnosticCheck {
         .with_data(Map::from_iter([
             ("api_key_present".to_string(), json!(api_key_present)),
             (
+                "anthropic_api_key_present".to_string(),
+                json!(anthropic_api_key_present),
+            ),
+            (
+                "anthropic_auth_token_present".to_string(),
+                json!(anthropic_auth_token_present),
+            ),
+            (
                 "proxy_token_present".to_string(),
                 json!(proxy_token_present),
+            ),
+            (
+                "claude_code_oauth_token_present".to_string(),
+                json!(claude_code_oauth_token_present),
             ),
             ("legacy_saved_oauth_present".to_string(), json!(true)),
             (
@@ -309,12 +333,12 @@ pub(crate) fn check_auth_health() -> DiagnosticCheck {
         ])),
         Ok(None) => DiagnosticCheck::new(
             "Auth",
-            if api_key_present || proxy_token_present {
+            if supported_auth_env_present {
                 DiagnosticLevel::Ok
             } else {
                 DiagnosticLevel::Warn
             },
-            if api_key_present || proxy_token_present {
+            if supported_auth_env_present {
                 "supported auth env vars are configured"
             } else {
                 "no supported auth env vars were found"
@@ -324,8 +348,20 @@ pub(crate) fn check_auth_health() -> DiagnosticCheck {
         .with_data(Map::from_iter([
             ("api_key_present".to_string(), json!(api_key_present)),
             (
+                "anthropic_api_key_present".to_string(),
+                json!(anthropic_api_key_present),
+            ),
+            (
+                "anthropic_auth_token_present".to_string(),
+                json!(anthropic_auth_token_present),
+            ),
+            (
                 "proxy_token_present".to_string(),
                 json!(proxy_token_present),
+            ),
+            (
+                "claude_code_oauth_token_present".to_string(),
+                json!(claude_code_oauth_token_present),
             ),
             ("legacy_saved_oauth_present".to_string(), json!(false)),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
@@ -340,8 +376,20 @@ pub(crate) fn check_auth_health() -> DiagnosticCheck {
         .with_data(Map::from_iter([
             ("api_key_present".to_string(), json!(api_key_present)),
             (
+                "anthropic_api_key_present".to_string(),
+                json!(anthropic_api_key_present),
+            ),
+            (
+                "anthropic_auth_token_present".to_string(),
+                json!(anthropic_auth_token_present),
+            ),
+            (
                 "proxy_token_present".to_string(),
                 json!(proxy_token_present),
+            ),
+            (
+                "claude_code_oauth_token_present".to_string(),
+                json!(claude_code_oauth_token_present),
             ),
             ("legacy_saved_oauth_present".to_string(), Value::Null),
             ("legacy_saved_oauth_expires_at".to_string(), Value::Null),

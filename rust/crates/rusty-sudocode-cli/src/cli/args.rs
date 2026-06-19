@@ -17,7 +17,7 @@ use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 use tools::GlobalToolRegistry;
 
 use super::session::LATEST_SESSION_REFERENCE;
-use crate::{normalize_permission_mode, DEFAULT_MODEL};
+use crate::{lookup_default_model, normalize_permission_mode, DEFAULT_MODEL};
 
 pub(crate) type AllowedToolSet = BTreeSet<String>;
 
@@ -1193,17 +1193,9 @@ pub(crate) fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;
     }
-    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    {
-        return resolve_model_alias_with_config(&env_model);
-    }
-    if let Some(config_model) = config_model_for_current_dir() {
-        return resolve_model_alias_with_config(&config_model);
-    }
-    cli_model
+    lookup_default_model()
+        .map(|(resolved, _, _)| resolved)
+        .unwrap_or(cli_model)
 }
 
 #[cfg(test)]

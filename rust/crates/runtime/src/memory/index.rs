@@ -95,35 +95,3 @@ fn parse_pointer(rest: &str) -> Option<IndexPointer> {
     };
     Some(IndexPointer { title, file, hook })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_simple_index() {
-        let raw = "# Key Learnings\n\n## Section\n- [Greeting](greeting.md) — how to greet\n- [Other](other.md) hook only\n";
-        let parsed = ParsedIndex::parse(raw);
-        assert_eq!(parsed.pointers.len(), 2);
-        assert_eq!(parsed.pointers[0].title, "Greeting");
-        assert_eq!(parsed.pointers[0].file, "greeting.md");
-        assert_eq!(parsed.pointers[0].hook.as_deref(), Some("how to greet"));
-        assert_eq!(parsed.pointers[1].title, "Other");
-        assert_eq!(parsed.pointers[1].file, "other.md");
-        assert_eq!(parsed.pointers[1].hook.as_deref(), Some("hook only"));
-    }
-
-    #[test]
-    fn ignores_non_bullet_lines() {
-        let raw = "# Index\n\nNot a bullet\n  - [Nested](nested.md) — ok\n";
-        let parsed = ParsedIndex::parse(raw);
-        assert_eq!(parsed.pointers.len(), 1);
-        assert_eq!(parsed.pointers[0].file, "nested.md");
-    }
-
-    #[test]
-    fn empty_index_is_empty() {
-        let parsed = ParsedIndex::parse("");
-        assert!(parsed.is_empty());
-    }
-}

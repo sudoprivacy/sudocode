@@ -20,8 +20,6 @@
 //! # Local — real API (sudorouter proxy)
 //! SCODE_TEST_BACKEND=live cargo test --test pty_core_conversation
 //! ```
-#![cfg(unix)]
-
 mod common;
 
 use std::time::Duration;
@@ -227,6 +225,7 @@ fn multi_tool_roundtrip() {
 /// - Mock: bash sleeps 30s → interrupted by Ctrl+C.
 /// - Live: model runs `sleep 30` → interrupted by Ctrl+C.
 #[test]
+#[cfg(unix)] // ConPTY does not propagate Ctrl+C to the bash subprocess the same way
 fn sigint_cancels_streaming() {
     let env = TestEnv::new("sigint-cancel");
     let prompt = env.prompt(

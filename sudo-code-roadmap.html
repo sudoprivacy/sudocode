@@ -395,11 +395,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Write → edit → read back</td></tr>
-    <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write_file → read_file → disk verify</td></tr>
+    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk</td></tr>
+    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved</td></tr>
+    <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Create 3 files → glob *.txt → grep 'parity' → response references matches</td></tr>
+    <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Same workflow as glob — both tools exercised in one multi-step test</td></tr>
   </tbody>
 </table>
 
@@ -542,7 +542,7 @@ coverage starts fresh and is tracked here as the single source.</p>
   <tbody>
     <tr><td>Core Conversation</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
     <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>0</td><td>3</td><td>0</td></tr>
-    <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td>0</td></tr>
     <tr><td>Search &amp; Web</td><td>2</td><td>0</td><td>0</td><td>2</td><td>0</td></tr>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
@@ -553,12 +553,12 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Config &amp; Discovery</td><td>17</td><td>1</td><td>4</td><td>12</td><td><strong>1</strong></td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><th>Total</th><th>76</th><th>2</th><th>13</th><th>61</th><th>6</th></tr>
+    <tr><th>Total</th><th>76</th><th>2</th><th>13</th><th>61</th><th>11</th></tr>
   </tbody>
 </table>
 
 <p><strong>90% target = 55 features covered</strong> out of the 61 in-denominator
-features. <strong>Current coverage: 6 / 61 (10%).</strong>
+features. <strong>Current coverage: 11 / 61 (18%).</strong>
 <code>L2 deferred</code> items are real surface but need heavier
 setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
 but do not count toward the Q2 number.</p>

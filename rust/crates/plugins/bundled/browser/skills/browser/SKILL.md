@@ -41,7 +41,7 @@ browser page discover --json
 
 # 4. Click / type
 browser click text --text "Sign in" --json
-browser type text --text "hello" --selector "#search" --json
+browser type text --text "hello" --name "Search" --json
 
 # 5. List sessions / tabs
 browser session list --json

@@ -103,6 +103,8 @@ enum Scenario {
     TokenCostReporting,
     SingleTurnText,
     MultiTurnContext,
+    EditFileRoundtrip,
+    GlobSearchRoundtrip,
 }
 
 impl Scenario {
@@ -123,6 +125,8 @@ impl Scenario {
             "token_cost_reporting" => Some(Self::TokenCostReporting),
             "single_turn_text" => Some(Self::SingleTurnText),
             "multi_turn_context" => Some(Self::MultiTurnContext),
+            "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
+            "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
             _ => None,
         }
     }
@@ -144,6 +148,8 @@ impl Scenario {
             Self::TokenCostReporting => "token_cost_reporting",
             Self::SingleTurnText => "single_turn_text",
             Self::MultiTurnContext => "multi_turn_context",
+            Self::EditFileRoundtrip => "edit_file_roundtrip",
+            Self::GlobSearchRoundtrip => "glob_search_roundtrip",
         }
     }
 }
@@ -518,6 +524,27 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 final_text_sse("Your name is Alice.")
             }
         }
+        Scenario::EditFileRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "edit_file roundtrip complete: {}",
+                extract_file_path(&tool_output)
+            )),
+            None => tool_use_sse(
+                "toolu_edit_fixture",
+                "edit_file",
+                &[r#"{"path":"fixture.txt","old_string":"alpha","new_string":"omega"}"#],
+            ),
+        },
+        Scenario::GlobSearchRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("glob_search roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_glob_fixture",
+                "glob_search",
+                &[r#"{"pattern":"*.txt"}"#],
+            ),
+        },
     }
 }
 
@@ -717,6 +744,33 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 text_message_response("msg_multi_turn_context_2", "Your name is Alice.")
             }
         }
+        Scenario::EditFileRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_edit_file_final",
+                &format!(
+                    "edit_file roundtrip complete: {}",
+                    extract_file_path(&tool_output)
+                ),
+            ),
+            None => tool_message_response(
+                "msg_edit_file_tool",
+                "toolu_edit_fixture",
+                "edit_file",
+                json!({"path": "fixture.txt", "old_string": "alpha", "new_string": "omega"}),
+            ),
+        },
+        Scenario::GlobSearchRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_glob_final",
+                &format!("glob_search roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_glob_tool",
+                "toolu_glob_fixture",
+                "glob_search",
+                json!({"pattern": "*.txt"}),
+            ),
+        },
     }
 }
 
@@ -737,6 +791,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TokenCostReporting => "req_token_cost_reporting",
         Scenario::SingleTurnText => "req_single_turn_text",
         Scenario::MultiTurnContext => "req_multi_turn_context",
+        Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
+        Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
     }
 }
 

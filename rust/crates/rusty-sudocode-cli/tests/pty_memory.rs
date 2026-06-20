@@ -424,31 +424,51 @@ fn memory_write_read_forget_workflow() {
     // Pre-create AGENTS.md so /memory has something to list.
     fs::write(root.join("AGENTS.md"), "# Project rules\n").expect("write AGENTS.md");
 
-    // Spawn the REPL in auto mode (allows writes).
-    let mut sess = env.spawn_with_env(&["--permission-mode", "auto"], &[("EDITOR", "true")]);
+    // Spawn the REPL in danger-full-access mode (permits all writes).
+    // The memory write carve-out also works with workspace-write, but
+    // danger-full-access avoids prompt escalation for non-memory tools.
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("EDITOR", "true")],
+    );
     sess.set_default_timeout(Duration::from_secs(60));
 
     // Wait for the REPL prompt.
-    sess.expect("❯").expect("should see initial REPL prompt");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see initial REPL prompt: {e}\nPTY screen:\n{screen}");
+    });
 
     // ── Step 1: Write memory ─────────────────────────────────────────
     sess.send("Remember this: my favorite programming language is Rust. Save it to memory now.\r")
         .expect("send remember request");
 
-    // The model should use write_file to create a memory entry.
-    sess.expect("(?i)(write_file|saved|remembered|memory)")
-        .expect("should see write activity");
+    // Wait for the model to call write_file (proves the API responded).
+    sess.expect("write_file").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see write_file tool call: {e}\nPTY screen:\n{screen}");
+    });
 
-    // Wait for the REPL to return.
-    sess.expect("❯").expect("prompt after write");
+    // Wait for the turn to complete (REPL prompt returns).
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after write: {e}\nPTY screen:\n{screen}");
+    });
 
     // Verify a .md file appeared in the memory directory.
-    let home = std::env::var("HOME").unwrap_or_default();
-    let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
-    assert!(
-        has_memory_files(&projects_dir),
-        "expected memory files after 'remember' command"
-    );
+    // TestEnv sets HOME to workspace/home, so memory lands there.
+    let workspace_home = root.join("home");
+    let projects_dir = workspace_home.join(".scode").join("projects");
+    if !has_memory_files(&projects_dir) {
+        let screen = sess.render(|s| s.contents());
+        panic!(
+            "expected memory files after 'remember' command\n\
+             projects_dir: {}\n\
+             PTY screen:\n{}",
+            projects_dir.display(),
+            screen
+        );
+    }
 
     // ── Step 2: /memory shows instruction files ──────────────────────
     sess.send("/memory\r").expect("send /memory");
@@ -460,10 +480,18 @@ fn memory_write_read_forget_workflow() {
     sess.send("Forget my favorite programming language. Remove that memory entry.\r")
         .expect("send forget request");
 
-    // The model should delete / remove the entry.
-    sess.expect("(?i)(delet|remov|forgot|bash|write_file|rm)")
-        .expect("should see delete/remove activity");
-    sess.expect("❯").expect("prompt after forget");
+    // Wait for the model to use a tool (bash rm, write_file, etc.).
+    sess.expect("(?i)(bash|write_file|read_file|glob|grep)")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("should see tool call for forget: {e}\nPTY screen:\n{screen}");
+        });
+
+    // Wait for the turn to complete.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after forget: {e}\nPTY screen:\n{screen}");
+    });
 
     // ── Step 4: Verify memory file is gone ───────────────────────────
     // Count .md files in memory dirs — should be fewer or zero.

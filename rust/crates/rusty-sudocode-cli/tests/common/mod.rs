@@ -195,6 +195,11 @@ impl TestEnv {
     /// `extra_args` are appended after the backend-specific flags
     /// (e.g. `&["--permission-mode", "read-only", &prompt]`).
     pub fn spawn(&self, extra_args: &[&str]) -> PtySession {
+        self.spawn_with_env(extra_args, &[])
+    }
+
+    /// Like [`spawn`] but with additional environment variables.
+    pub fn spawn_with_env(&self, extra_args: &[&str], env_vars: &[(&str, &str)]) -> PtySession {
         match &self.backend {
             Backend::Mock { workspace, .. } => spawn_with_workspace(
                 workspace,
@@ -202,6 +207,7 @@ impl TestEnv {
                 &["--auth", "api-key", "--model", "sonnet"],
                 extra_args,
                 DEFAULT_TIMEOUT,
+                env_vars,
             ),
             Backend::Live {
                 workspace,
@@ -212,6 +218,7 @@ impl TestEnv {
                 &["--auth", "proxy", "--model", "auto"],
                 extra_args,
                 LIVE_TIMEOUT,
+                env_vars,
             ),
         }
     }
@@ -304,6 +311,7 @@ fn spawn_with_workspace(
     base_args: &[&str],
     extra_args: &[&str],
     timeout: Duration,
+    env_vars: &[(&str, &str)],
 ) -> PtySession {
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy().to_string();
@@ -330,6 +338,9 @@ fn spawn_with_workspace(
     cmd.push_str(" NO_COLOR=1");
     cmd.push_str(&format!(" PATH={}", shell_quote(&path)));
     cmd.push_str(" TERM=xterm");
+    for (k, v) in env_vars {
+        cmd.push_str(&format!(" {}={}", k, shell_quote(v)));
+    }
     cmd.push_str(&format!(" {}", shell_quote(&bin_str)));
     for arg in base_args {
         cmd.push_str(&format!(" {}", shell_quote(arg)));

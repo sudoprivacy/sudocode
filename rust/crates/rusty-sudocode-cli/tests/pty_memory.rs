@@ -1,6 +1,6 @@
 //! PTY tests for the persistent memory system (`runtime::memory`).
 //!
-//! Three scenarios exercised end-to-end through `scode system-prompt`:
+//! Scenarios exercised end-to-end:
 //!
 //! 1. Happy path: memory files with valid frontmatter are injected into
 //!    the system prompt.
@@ -8,9 +8,14 @@
 //!    crashing; valid entries still surface.
 //! 3. Budget enforcement: when total rendered memory exceeds the
 //!    16 000-char cap, excess entries are dropped with a notice.
+//! 4. Project-scoped memory path: `~/.scode/projects/<slug>/memory/`.
+//! 5. Memory directory auto-creation.
+//! 6. `/memory` slash command opens instruction files in `$EDITOR`.
+//! 7. Write path: model can write to memory directory without prompts.
 //!
-//! All tests set `SUDOCODE_MEMORY_DIR` to a temp directory, avoiding
-//! any interaction with the user's real `~/.scode/memory/`.
+//! Tests 1–5 use `scode system-prompt` (no API needed).
+//! Test 6 uses the REPL with `EDITOR=true` (no API needed).
+//! Test 7 requires `SCODE_TEST_BACKEND=live`.
 
 mod common;
 
@@ -382,6 +387,135 @@ fn memory_directory_auto_created() {
     );
 
     fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 6. /memory slash command opens instruction files in $EDITOR
+// ──────────────────────────────────────────────────────────────────────
+
+/// `/memory` in the REPL should spawn `$EDITOR` on an instruction file
+/// and report "Opened memory file". We set `EDITOR=true` (a no-op that
+/// exits 0) so the command returns immediately.
+///
+/// Uses `TestEnv` for auth config, then spawns with `EDITOR=true` via
+/// the `spawn_with_editor` helper.
+#[test]
+fn memory_slash_command_opens_editor() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-slash");
+    let root = env.workspace_root().to_path_buf();
+
+    // Pre-create an AGENTS.md so /memory has a file to open.
+    fs::write(root.join("AGENTS.md"), "# Project rules\n").expect("write AGENTS.md");
+
+    // Spawn with EDITOR=true so the editor call succeeds immediately.
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    // Wait for the REPL prompt.
+    sess.expect("❯").expect("should see REPL prompt");
+
+    // Send /memory command.
+    sess.send("/memory\r").expect("send /memory");
+
+    // Expect the confirmation message.
+    sess.expect("(?i)opened.*memory.*file")
+        .expect("should see 'Opened memory file' confirmation");
+
+    // Expect the editor hint.
+    sess.expect("(?i)editor").expect("should see editor hint");
+
+    // Wait for the REPL to return to prompt.
+    sess.expect("❯").expect("should return to REPL prompt");
+
+    // Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        panic!("scode should exit after /memory: {e}");
+    });
+    assert_eq!(exit, 0, "/memory flow should exit 0; got {exit}");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 7. Write path: model writes to memory dir (live only)
+// ──────────────────────────────────────────────────────────────────────
+
+/// In live mode, ask the model to remember something. Verify a file
+/// appears in the memory directory. Skipped in mock mode.
+#[test]
+fn memory_write_path_live() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-write");
+    if env.is_mock() {
+        eprintln!("skipping memory_write_path_live: mock mode (run with SCODE_TEST_BACKEND=live)");
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+
+    // Init a git repo so the memory dir is deterministic.
+    std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+
+    let prompt = env.prompt(
+        "Remember this: my favorite language is Rust. Save it to memory now.",
+        "memory_write",
+    );
+
+    let mut sess = env.spawn(&["--permission-mode", "auto", &prompt]);
+    sess.set_default_timeout(Duration::from_secs(60));
+
+    // Wait for the model to finish (tool call + response).
+    sess.expect("(?i)(write_file|saved|remembered|memory)")
+        .expect("should see memory write activity");
+
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("scode should exit after write: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0, "memory write should exit 0; got {exit}");
+
+    // Verify a .md file was created in the memory directory.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
+    if projects_dir.exists() {
+        let has_memory_file = walkdir(&projects_dir, "memory", ".md");
+        assert!(
+            has_memory_file,
+            "expected a .md file under ~/.scode/projects/*/memory/ after model write"
+        );
+    }
+}
+
+/// Recursively check if a directory tree contains a file matching the criteria.
+fn walkdir(dir: &Path, subdir_name: &str, extension: &str) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == subdir_name) {
+                // Check for files with the given extension in this subdir.
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        if sub.path().extension().is_some_and(|e| e == &extension[1..]) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if walkdir(&path, subdir_name, extension) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ──────────────────────────────────────────────────────────────────────

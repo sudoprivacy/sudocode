@@ -95,7 +95,10 @@ fn sanitize_path(name: &str) -> String {
 fn simple_hash(s: &str) -> String {
     let mut hash: i32 = 0;
     for c in s.chars() {
-        hash = hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(c as i32);
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(c as i32);
     }
     let abs = (hash as i64).unsigned_abs();
     format_radix_36(abs)

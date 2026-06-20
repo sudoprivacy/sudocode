@@ -303,6 +303,16 @@ fn memory_budget_truncates_large_entries() {
 /// `~/.scode/projects/<slug>/memory/`.
 #[test]
 fn memory_project_scoped_path() {
+    // HOME is not set on Windows; the loader falls back to a relative
+    // path in that case so we can only verify this on Unix-like systems.
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("skipping memory_project_scoped_path: HOME not set (Windows)");
+            return;
+        }
+    };
+
     let root = unique_temp_dir("proj-scope");
     fs::create_dir_all(&root).expect("create root");
 
@@ -323,8 +333,6 @@ fn memory_project_scoped_path() {
     );
 
     // The memory directory auto-created should be under projects/<slug>/memory.
-    // We can verify by checking that the ~/.scode/projects/ dir was populated.
-    let home = std::env::var("HOME").expect("HOME should be set");
     let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
     assert!(
         projects_dir.exists(),

@@ -456,7 +456,7 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::bash_stdout_roundtrip</code>, <code>bash_creates_file_and_disk_verify</code></td><td>LLM tool. Agent trigger + stdout roundtrip + disk verify (live: LLM generates command, file created on disk).</td></tr>
+    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::bash_stdout_roundtrip</code>, <code>bash_creates_file_and_disk_verify</code></td><td>LLM tool. Agent trigger + stdout roundtrip + disk verify (live: LLM generates command, file created on disk). <strong>+error</strong>: <code>bash_denied_in_read_only</code>, <code>bash_command_fails_gracefully</code></td></tr>
     <tr><td>REPL (persistent Python/JS subprocess)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Persistent subprocess, different from one-shot bash.</td></tr>
     <tr><td>PowerShell</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Windows-only path.</td></tr>
     <tr><td><code>NotebookEdit</code> (Jupyter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC has <code>NotebookEditTool</code>. Needs <code>.ipynb</code> fixture.</td></tr>

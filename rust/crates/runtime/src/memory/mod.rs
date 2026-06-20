@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 pub use entry::{MemoryEntry, MemoryParseError, MemoryType};
 pub use index::{IndexPointer, ParsedIndex};
-pub use loader::{default_memory_dir, MEMORY_DIR_ENV, MEMORY_INDEX_FILE};
+pub use loader::{default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV, MEMORY_INDEX_FILE};
 
 use crate::prompt::SystemPromptBuilder;
 
@@ -131,18 +131,27 @@ impl MemoryIndex {
 /// Helper that appends the rendered memory section onto a
 /// [`SystemPromptBuilder`]. No-op when there's nothing to render or when
 /// loading fails.
+///
+/// When `memory_dir` is `None`, the directory is derived from `cwd`
+/// (project-scoped path under `~/.scode/projects/<slug>/memory/`).
+/// When `cwd` is also `None`, falls back to `default_memory_dir()`.
 #[must_use]
 pub fn append_to_builder(
     builder: SystemPromptBuilder,
     memory_dir: Option<&Path>,
+    cwd: Option<&Path>,
 ) -> SystemPromptBuilder {
     let owned;
     let dir = if let Some(d) = memory_dir {
         d
+    } else if let Some(cwd) = cwd {
+        owned = default_memory_dir_for(cwd);
+        owned.as_path()
     } else {
         owned = default_memory_dir();
         owned.as_path()
     };
+    loader::ensure_memory_dir_exists(dir);
     match MemoryIndex::load(dir) {
         Ok(idx) if !idx.is_empty() => builder.append_section(idx.render_for_prompt()),
         _ => builder,
@@ -289,6 +298,7 @@ mod tests {
         let appended = append_to_builder(
             SystemPromptBuilder::new().with_os("linux", "test"),
             Some(&dir),
+            None,
         )
         .render();
         assert!(!appended.contains("# Persistent memory"));
@@ -313,6 +323,7 @@ mod tests {
         let prompt = append_to_builder(
             SystemPromptBuilder::new().with_os("linux", "test"),
             Some(&dir),
+            None,
         )
         .render();
 

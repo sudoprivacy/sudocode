@@ -564,8 +564,12 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
     <tr><td>Memory write path ("remember X")</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM writes memory files via Write tool; responds to "remember X" / "forget X"</td></tr>
     <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shows loaded memory entries in the REPL</td></tr>
-    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: currently global <code>~/.scode/memory/</code></td></tr>
+    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_project_scoped_path</code>, <code>pty_memory::memory_directory_auto_created</code></td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: <code>~/.scode/projects/&lt;slug&gt;/memory/</code>. PR #229.</td></tr>
     <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Detailed instructions for when/how to save/update/delete. Current preamble ~300 chars vs CC's ~3000</td></tr>
+    <tr><td>Session memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: background subagent extracts structured notes per-session. Behind <code>tengu_session_memory</code> flag. Requires forked-agent infra.</td></tr>
+    <tr><td>Background extract-memories agent</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: separate post-sampling subagent proactively mines conversation for memory-worthy facts. Behind <code>tengu_passport_quail</code>.</td></tr>
+    <tr><td>Team memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: <code>&lt;autoMemPath&gt;/team/</code> subdirectory with per-type scope guidance. Behind <code>tengu_herring_clock</code>. Enterprise feature.</td></tr>
+    <tr><td>Agent memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: spawned subagents auto-read/write their own memory dirs. Depends on Agent tool infra.</td></tr>
   </tbody>
 </table>
 
@@ -889,7 +893,12 @@ injection, 3 PTY tests). The following gaps remain for full CC parity:</p>
     <tr><td><code>/memory</code> slash command</td><td>Shows loaded memory entries in the REPL</td><td>Gap — needs main.rs wiring</td></tr>
     <tr><td>Write path</td><td>LLM writes memory files via the <code>Write</code> tool; also responds to "remember X" / "forget X"</td><td>Gap — PR #205 deferred this to follow-up</td></tr>
     <tr><td>System prompt instructions</td><td>Detailed instructions telling the LLM when/how to save, update, and delete memory</td><td>Partial — <code>PROMPT_PREAMBLE</code> exists but is minimal (~300 chars vs CC's ~3000 chars)</td></tr>
-    <tr><td>Project-scoped memory</td><td><code>~/.claude/projects/&lt;slug&gt;/memory/</code> — isolated per workspace</td><td>Gap — current path is global <code>~/.scode/memory/</code></td></tr>
+    <tr><td>Project-scoped memory</td><td><code>~/.claude/projects/&lt;slug&gt;/memory/</code> — isolated per workspace</td><td>Done — <code>~/.scode/projects/&lt;slug&gt;/memory/</code>, PTY tests <code>memory_project_scoped_path</code> + <code>memory_directory_auto_created</code> (PR #229)</td></tr>
+    <tr><td>Session memory</td><td>Background subagent extracts structured notes per-session into <code>summary.md</code> (9 sections, fires after token/tool-call thresholds). Used for compaction. Behind <code>tengu_session_memory</code> flag.</td><td>Gap — requires forked-agent infrastructure</td></tr>
+    <tr><td>Background extract-memories agent</td><td>Separate post-sampling subagent with Read/Grep/Glob/Edit/Write tools, parallelized 2-turn strategy. Behind <code>tengu_passport_quail</code> flag.</td><td>Gap — proactively mines conversation for memory-worthy facts</td></tr>
+    <tr><td>Team memory</td><td><code>&lt;autoMemPath&gt;/team/</code> subdirectory with combined prompt and per-type scope guidance. Behind <code>tengu_herring_clock</code> flag.</td><td>Gap — enterprise feature, low priority</td></tr>
+    <tr><td>Agent memory</td><td>Spawned subagents auto-read/write their own memory dirs (<code>/agent-memory/</code>, <code>/agent-memory-local/</code>)</td><td>Gap — depends on Agent tool infra</td></tr>
+    <tr><td>Memory prefetch via attachments</td><td>Behind <code>tengu_moth_copse</code> — memory files surfaced as attachments instead of system prompt injection</td><td>Gap — optimization, not functional</td></tr>
   </tbody>
 </table>
 

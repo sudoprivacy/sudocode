@@ -295,6 +295,96 @@ fn memory_budget_truncates_large_entries() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// 4. Project-scoped memory path
+// ──────────────────────────────────────────────────────────────────────
+
+/// When run inside a git repo without `SUDOCODE_MEMORY_DIR`, the
+/// resolved memory path should be project-scoped under
+/// `~/.scode/projects/<slug>/memory/`.
+#[test]
+fn memory_project_scoped_path() {
+    // HOME is not set on Windows; the loader falls back to a relative
+    // path in that case so we can only verify this on Unix-like systems.
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("skipping memory_project_scoped_path: HOME not set (Windows)");
+            return;
+        }
+    };
+
+    let root = unique_temp_dir("proj-scope");
+    fs::create_dir_all(&root).expect("create root");
+
+    // Init a git repo so `find_git_root` succeeds.
+    std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+
+    // Run without SUDOCODE_MEMORY_DIR so it falls through to the
+    // project-scoped default.
+    let output = run_system_prompt(&root, &[]);
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The memory directory auto-created should be under projects/<slug>/memory.
+    let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
+    assert!(
+        projects_dir.exists(),
+        "~/.scode/projects/ should exist after system-prompt runs"
+    );
+
+    // There should be at least one slug directory under projects/.
+    let entries: Vec<_> = fs::read_dir(&projects_dir)
+        .expect("read projects dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "~/.scode/projects/ should have at least one slug directory"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 5. Memory directory auto-creation
+// ──────────────────────────────────────────────────────────────────────
+
+/// When `SUDOCODE_MEMORY_DIR` points to a non-existent directory,
+/// running `scode system-prompt` should auto-create it.
+#[test]
+fn memory_directory_auto_created() {
+    let root = unique_temp_dir("auto-create");
+    fs::create_dir_all(&root).expect("create root");
+
+    let memory_dir = root.join("does-not-exist-yet").join("memory");
+    assert!(!memory_dir.exists(), "precondition: dir should not exist");
+
+    let output = run_system_prompt(
+        &root,
+        &[("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8"))],
+    );
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        memory_dir.exists(),
+        "SUDOCODE_MEMORY_DIR should be auto-created after system-prompt runs"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
 

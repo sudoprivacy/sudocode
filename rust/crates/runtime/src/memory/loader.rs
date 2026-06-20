@@ -1,9 +1,11 @@
 //! Filesystem discovery for memory entries.
 //!
-//! The default location is `~/.scode/memory/`, but `SUDOCODE_MEMORY_DIR`
+//! The default location is `~/.scode/projects/<slug>/memory/`, where
+//! `<slug>` is derived from the git root (or cwd). `SUDOCODE_MEMORY_DIR`
 //! takes precedence when set.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use super::entry::MemoryEntry;
 use super::index::ParsedIndex;
@@ -11,21 +13,111 @@ use super::index::ParsedIndex;
 pub const MEMORY_DIR_ENV: &str = "SUDOCODE_MEMORY_DIR";
 pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
 
-/// Resolve the default memory directory.
+/// Resolve the default memory directory for a given working directory.
 ///
 /// Lookup order:
 /// 1. `SUDOCODE_MEMORY_DIR` environment variable (primary override).
-/// 2. `$HOME/.scode/memory/`.
-/// 3. Relative `.scode/memory/` if neither is available.
+/// 2. `~/.scode/projects/<slug>/memory/` where slug is derived from
+///    the git root (or `cwd` if not in a git repo).
+/// 3. Relative `.scode/projects/<slug>/memory/` if `$HOME` is unavailable.
 #[must_use]
-pub fn default_memory_dir() -> PathBuf {
+pub fn default_memory_dir_for(cwd: &Path) -> PathBuf {
     if let Some(dir) = std::env::var_os(MEMORY_DIR_ENV) {
         return PathBuf::from(dir);
     }
+    let base = find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let slug = sanitize_path(&base.to_string_lossy());
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".scode").join("memory");
+        return PathBuf::from(home)
+            .join(".scode")
+            .join("projects")
+            .join(&slug)
+            .join("memory");
     }
-    PathBuf::from(".scode").join("memory")
+    PathBuf::from(".scode")
+        .join("projects")
+        .join(&slug)
+        .join("memory")
+}
+
+/// Resolve the default memory directory using the process's current
+/// working directory. Convenience wrapper around [`default_memory_dir_for`].
+#[must_use]
+pub fn default_memory_dir() -> PathBuf {
+    default_memory_dir_for(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Ensure the memory directory exists, creating it (and parents) if needed.
+/// Errors are silently ignored — a missing directory simply means no
+/// memory will be loaded.
+pub fn ensure_memory_dir_exists(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+}
+
+/// Find the canonical git root for a directory by running
+/// `git rev-parse --show-toplevel`. Returns `None` when outside a
+/// git repository or if the command fails.
+fn find_git_root(cwd: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(root))
+}
+
+/// Sanitize a path string for use as a directory name, matching CC's
+/// `sessionStoragePortable.ts:sanitizePath`. Non-alphanumeric ASCII
+/// chars are replaced with `-`. If the result exceeds 200 chars, it is
+/// truncated and a hash suffix is appended for uniqueness.
+fn sanitize_path(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if sanitized.len() <= 200 {
+        return sanitized;
+    }
+    let hash = simple_hash(name);
+    format!("{}-{}", &sanitized[..200], hash)
+}
+
+/// Port of CC's `simpleHash` from `sessionStoragePortable.ts`.
+/// Produces a base-36 string of the absolute value of a Java-style
+/// `hashCode` (shift-5 multiply-add).
+fn simple_hash(s: &str) -> String {
+    let mut hash: i32 = 0;
+    for c in s.chars() {
+        hash = hash
+            .wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(c as i32);
+    }
+    let abs = (hash as i64).unsigned_abs();
+    format_radix_36(abs)
+}
+
+/// Format an unsigned 64-bit integer in base 36 (digits 0–9, a–z),
+/// matching JavaScript's `Number.prototype.toString(36)`.
+fn format_radix_36(mut n: u64) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut buf = Vec::new();
+    while n > 0 {
+        buf.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    buf.reverse();
+    String::from_utf8(buf).expect("base36 chars are valid utf8")
 }
 
 /// Load and parse `MEMORY.md` from the given directory, if present.
@@ -119,15 +211,16 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_home_when_env_missing() {
+    fn falls_back_to_project_scoped_path_when_env_missing() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cwd = temp_dir("fallback-cwd");
         let prior_env = std::env::var_os(MEMORY_DIR_ENV);
         let prior_home = std::env::var_os("HOME");
         std::env::remove_var(MEMORY_DIR_ENV);
         std::env::set_var("HOME", "/tmp/sudocode-test-home");
-        let resolved = default_memory_dir();
+        let resolved = default_memory_dir_for(&cwd);
         if let Some(value) = prior_env {
             std::env::set_var(MEMORY_DIR_ENV, value);
         } else {
@@ -138,10 +231,15 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
+        // The path should be under projects/<slug>/memory/
+        let slug = sanitize_path(&cwd.to_string_lossy());
         assert_eq!(
             resolved,
-            PathBuf::from("/tmp/sudocode-test-home/.scode/memory")
+            PathBuf::from("/tmp/sudocode-test-home/.scode/projects")
+                .join(&slug)
+                .join("memory")
         );
+        fs::remove_dir_all(cwd).ok();
     }
 
     #[test]

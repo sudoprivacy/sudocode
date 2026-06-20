@@ -542,6 +542,7 @@ pub fn load_system_prompt_with(
             .with_project_context(project_context)
             .with_runtime_config(config),
         None,
+        Some(&cwd),
     );
     Ok(builder.build())
 }

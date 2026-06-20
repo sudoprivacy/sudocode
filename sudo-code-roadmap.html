@@ -510,14 +510,29 @@ coverage starts fresh and is tracked here as the single source.</p>
 </table>
 
 <h4>8. Git workflow</h4>
+
+<div class="callout">
+  <strong>CC parity note:</strong> CC does NOT expose <code>/commit</code> or
+  <code>/pr</code> as public slash commands. They exist only as internal
+  Anthropic-employee Skills (gated on <code>USER_TYPE=ant</code>). For
+  external users, CC's system prompt teaches the LLM to use bash
+  <code>git commit</code> / <code>gh pr create</code> directly with
+  safety protocols (no force push, no amend, proper message format).
+  <br><br>
+  <strong>Decision for scode:</strong> The underlying git operations
+  (commit, PR, diff) are must-have because the LLM does them via bash.
+  Whether we also ship <code>/commit</code> as a user-facing Skill
+  shortcut is a separate UX decision — not required for CC parity.
+</div>
+
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/commit</code> (generate + create)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: this is a Skill (invoked via SkillTool), not a built-in slash command. LLM uses bash <code>git commit</code> underneath; <code>/commit</code> is a shortcut. Keep must-have — core hacker workflow.</td></tr>
-    <tr><td><code>/pr</code> (draft / create PR)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: Skill <code>/commit-push-pr</code>. LLM uses bash <code>gh pr create</code>. P0 core workflow.</td></tr>
-    <tr><td><code>/diff</code> (show changes)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git diff</code>. Skill shortcut.</td></tr>
-    <tr><td><code>/issue</code> (create GitHub issue)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>gh issue create</code>. Skill shortcut.</td></tr>
-    <tr><td><code>/review</code> (code review)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses tools to read code + produce review. Skill shortcut.</td></tr>
+    <tr><td>Git commit via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git commit</code>. Covered once bash tool PTY test lands. System prompt teaches safety protocols.</td></tr>
+    <tr><td>PR creation via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>gh pr create</code>. P0 core workflow.</td></tr>
+    <tr><td>Diff via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git diff</code>.</td></tr>
+    <tr><td><code>/commit</code> Skill shortcut</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Optional UX shortcut. CC has this only for internal users. Not required for parity.</td></tr>
+    <tr><td><code>/pr</code> Skill shortcut</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Optional UX shortcut. CC: <code>/commit-push-pr</code> (internal only).</td></tr>
   </tbody>
 </table>
 
@@ -616,7 +631,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
     <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
     <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td>0</td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>

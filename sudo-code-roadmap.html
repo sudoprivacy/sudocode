@@ -389,11 +389,18 @@ coverage drove features through the sudowork UI (mouse / Electron / ACP);
 the new infra exercises them inside the sudocode crate itself, so
 coverage starts fresh and is tracked here as the single source.</p>
 
-<p>Status values:</p>
+<p>Status values (use <code>data-status</code> attribute for programmatic access):</p>
 <ul>
-  <li><strong>Covered</strong> — at least one sudocode-side harness test exists on <code>main</code>.</li>
+  <li><strong>Covered</strong> — PTY test exists on <code>main</code> that passes in <strong>live mode</strong> (<code>SCODE_TEST_BACKEND=live</code>). Mock-only tests do not earn Covered status.</li>
   <li><strong>Gap</strong> — needs a test.</li>
   <li><strong>N/A</strong> — out of scope for <code>scode</code> itself.</li>
+</ul>
+
+<p>Additional <code>data-*</code> attributes on Status cells:</p>
+<ul>
+  <li><code>data-live-verified="yes"</code> — test has been run and passed in live mode against a real API. AI agents: when marking a feature Covered, also set this attribute after verifying live mode passes.</li>
+  <li><code>data-live-verified="no-api"</code> — test does not call an API (e.g. <code>system-prompt</code> subcommand), so live/mock distinction is N/A.</li>
+  <li>Absent — test exists but live mode not yet verified.</li>
 </ul>
 
 <p><strong>Hacker priority</strong> (the new column):</p>
@@ -409,12 +416,12 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Single-turn prompt</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::single_turn_exits_after_response</code></td><td>Non-interactive, invocation-driven: <code>scode "…"</code> starts, streams the assistant turn, then exits. PTY verifies the process truly exits without TTY input.</td></tr>
-    <tr><td>Multi-turn context</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_turn_references_prior</code></td><td>Follow-up references prior turn. REPL carries context across turns; mock returns different text on turn 2.</td></tr>
-    <tr><td>Streaming response</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::streaming_tokens_render_incrementally</code></td><td>LLM-API streaming: assistant tokens render incrementally as they arrive. Both SSE chunks verified in terminal.</td></tr>
-    <tr><td>Multi-tool turn roundtrip</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_tool_roundtrip</code></td><td>Also integration-covered by <code>mock_parity_harness.rs</code>. PTY: read_file + grep_search in one assistant turn, each result feeds the next.</td></tr>
-    <tr><td>Graceful cancel mid-execution (Ctrl+C)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::sigint_cancels_streaming</code></td><td>Also integration-covered by <code>interrupt_e2e.rs</code>. PTY: Ctrl+C during bash tool → process exits cleanly, no hang.</td></tr>
-    <tr><td>Graceful cancel mid-execution (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code></td><td>CC parity: ESC key cancels the current turn. PR #223. <strong>Tech debt:</strong> no <a href="#cancel-context">activation context guards</a> yet (will need them when VIM mode or overlays land).</td></tr>
+    <tr><td>Single-turn prompt</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::single_turn_exits_after_response</code></td><td><code>scode "What is 2+2?"</code> → response contains "4" → exit 0. Live: agent trigger verified.</td></tr>
+    <tr><td>Multi-turn context</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_turn_references_prior</code></td><td>REPL: send name "Alice" → response greets → ask name back → response recalls "Alice". Live: context preservation verified.</td></tr>
+    <tr><td>Streaming response</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::streaming_tokens_render_incrementally</code></td><td>Multi-word text appears in terminal before EOF — proves streaming flushed incrementally.</td></tr>
+    <tr><td>Multi-tool turn roundtrip</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_tool_roundtrip</code></td><td>read_file + grep_search in one turn → final response references results. Live: agent trigger — tool names verified in PTY output.</td></tr>
+    <tr><td>Graceful cancel (Ctrl+C)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::sigint_cancels_streaming</code></td><td>Ctrl+C during bash tool → process exits, no hang.</td></tr>
+    <tr><td>Graceful cancel (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code></td><td>ESC during bash tool → same abort as Ctrl+C. <strong>Tech debt:</strong> no <a href="#cancel-context">activation context guards</a>.</td></tr>
   </tbody>
 </table>
 
@@ -433,11 +440,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write_file → read_file → disk verify</td></tr>
-    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk. <strong>+error</strong>: <code>pty_error_paths::write_file_denied_in_read_only</code></td></tr>
-    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved. <strong>+error</strong>: <code>pty_error_paths::edit_file_not_found</code></td></tr>
-    <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Create 3 files → glob *.txt → grep 'parity' → response references matches</td></tr>
-    <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Same workflow as glob — both tools exercised in one multi-step test</td></tr>
+    <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write_file → read_file → disk verify</td></tr>
+    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk. <strong>+error</strong>: <code>pty_error_paths::write_file_denied_in_read_only</code></td></tr>
+    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved. <strong>+error</strong>: <code>pty_error_paths::edit_file_not_found</code></td></tr>
+    <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Create 3 files → glob *.txt → grep 'parity' → response references matches</td></tr>
+    <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Same workflow as glob — both tools exercised in one multi-step test</td></tr>
   </tbody>
 </table>
 
@@ -552,9 +559,9 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Memory read + system prompt injection</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_entries_injected_into_system_prompt</code></td><td>4 entry types (user, feedback, project, reference), MEMORY.md index, SystemPromptBuilder integration</td></tr>
-    <tr><td>Memory resilience (missing / malformed)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_resilient_on_missing_or_malformed</code></td><td>Graceful fallback on bad frontmatter, missing files</td></tr>
-    <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
+    <tr><td>Memory read + system prompt injection</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_entries_injected_into_system_prompt</code></td><td>4 entry types (user, feedback, project, reference), MEMORY.md index, SystemPromptBuilder integration</td></tr>
+    <tr><td>Memory resilience (missing / malformed)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_resilient_on_missing_or_malformed</code></td><td>Graceful fallback on bad frontmatter, missing files</td></tr>
+    <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
     <tr><td>Memory write path ("remember X")</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM writes memory files via Write tool; responds to "remember X" / "forget X"</td></tr>
     <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shows loaded memory entries in the REPL</td></tr>
     <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: currently global <code>~/.scode/memory/</code></td></tr>

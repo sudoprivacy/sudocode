@@ -242,18 +242,55 @@ catch the failure modes a human will hit is to exercise the same
 surface the human exercises.</p>
 
 <div class="callout">
-  <strong>TestEnv dual-mode (PR #212):</strong>
-  <code>tests/common/mod.rs</code> provides a <code>TestEnv</code>
-  harness that supports both <strong>mock</strong>
-  (<code>MockAnthropicService</code>, CI-safe, no API key) and
-  <strong>live</strong>
-  (<code>SCODE_TEST_BACKEND=live</code>, real API via proxy auth)
-  modes. All PTY tests MUST go through <code>TestEnv</code> — it
-  owns the mock server lifecycle, temp workspace, and prompt
-  construction (<code>PARITY_SCENARIO:</code> routing in mock mode).
-  This ensures every test automatically works in both modes and no
-  test can be accidentally mock-only.
+  <strong>TestEnv dual-mode:</strong>
+  <code>tests/common/mod.rs</code> provides <code>TestEnv</code>,
+  the single entry point for all PTY tests. It supports
+  <strong>mock</strong> (<code>MockAnthropicService</code>, CI-safe)
+  and <strong>live</strong> (<code>SCODE_TEST_BACKEND=live</code>,
+  real API). All PTY tests MUST go through <code>TestEnv</code>.
 </div>
+
+<h4>PTY test principles</h4>
+
+<ol>
+  <li><strong>Live quality first.</strong> Every assertion must be
+  meaningful against a real API. If an assertion only verifies the
+  mock's canned response (e.g. <code>expect("roundtrip complete")</code>),
+  it's testing the mock, not scode &mdash; delete it.</li>
+
+  <li><strong>DRY: one set of assertions for both modes.</strong>
+  <code>if env.is_mock()</code> should be rare. The same assertion
+  must pass whether the backend is mock or live. Mock is a CI
+  convenience (API key substitute), not a separate test suite.</li>
+
+  <li><strong>Mock does not count toward coverage.</strong> The 90%
+  target counts features exercised through real user journeys. A
+  mock-only test that never runs live is not coverage &mdash; it's a
+  unit test with extra steps. Every test MUST pass in live mode to
+  earn coverage credit.</li>
+
+  <li><strong>Agent trigger verification.</strong> In live mode,
+  verify the LLM selected the correct tools &mdash; not just that
+  scode can execute them. <code>expect("read_file")</code> in the
+  PTY output proves the model's tool-call decision, not just the
+  execution path.</li>
+
+  <li><strong>Disk verification is the strongest assertion.</strong>
+  After a write/edit, check the actual file on disk. This works
+  identically in both modes and catches real bugs that output
+  assertions miss.</li>
+
+  <li><strong>Live tests run serially.</strong>
+  <code>TestEnv</code> holds a <code>LIVE_SERIAL</code> mutex in
+  live mode &mdash; concurrent scode processes hitting the same API
+  key cause rate-limit failures. Mock tests stay parallel.</li>
+</ol>
+
+<p><strong>Test depth convention</strong> (in the Notes column of coverage tables):</p>
+<ul>
+  <li><strong>+error</strong> &mdash; error path also covered (permission denied, file not found, etc.).</li>
+  <li>No tag &mdash; happy path only. When adding tests, check if an error-path test exists; if not, add one.</li>
+</ul>
 
 <h4>Test layer policy: PTY is the bar, unit tests are forbidden</h4>
 
@@ -397,8 +434,8 @@ coverage starts fresh and is tracked here as the single source.</p>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write_file → read_file → disk verify</td></tr>
-    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk</td></tr>
-    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved</td></tr>
+    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk. <strong>+error</strong>: <code>pty_error_paths::write_file_denied_in_read_only</code></td></tr>
+    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved. <strong>+error</strong>: <code>pty_error_paths::edit_file_not_found</code></td></tr>
     <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Create 3 files → glob *.txt → grep 'parity' → response references matches</td></tr>
     <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Same workflow as glob — both tools exercised in one multi-step test</td></tr>
   </tbody>

@@ -377,7 +377,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Streaming response</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::streaming_tokens_render_incrementally</code></td><td>LLM-API streaming: assistant tokens render incrementally as they arrive. Both SSE chunks verified in terminal.</td></tr>
     <tr><td>Multi-tool turn roundtrip</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_tool_roundtrip</code></td><td>Also integration-covered by <code>mock_parity_harness.rs</code>. PTY: read_file + grep_search in one assistant turn, each result feeds the next.</td></tr>
     <tr><td>Graceful cancel mid-execution (Ctrl+C)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::sigint_cancels_streaming</code></td><td>Also integration-covered by <code>interrupt_e2e.rs</code>. PTY: Ctrl+C during bash tool → process exits cleanly, no hang.</td></tr>
-    <tr><td>Graceful cancel mid-execution (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code></td><td>CC parity: ESC key cancels the current turn during streaming/tool execution, same abort as Ctrl+C. PR #223.</td></tr>
+    <tr><td>Graceful cancel mid-execution (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code></td><td>CC parity: ESC key cancels the current turn. PR #223. <strong>Tech debt:</strong> no <a href="#cancel-context">activation context guards</a> yet (will need them when VIM mode or overlays land).</td></tr>
   </tbody>
 </table>
 
@@ -452,7 +452,7 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Launch parallel sub-agents</td></tr>
+    <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Launch parallel sub-agents. When implemented, also introduce <a href="#cancel-architecture">CancelDispatcher</a> (cancel semantic 3: kill sub-agent) and <a href="#cancel-context">ESC context guards</a>.</td></tr>
     <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Background task management</td></tr>
     <tr><td>Workers (boot, trust, prompt)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Worker lifecycle</td></tr>
     <tr><td>Teams (parallel sub-agents)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Team coordination</td></tr>
@@ -622,10 +622,57 @@ coverage measure waits on PTY.</p>
 coverage gap: today the runtime only checks
 <code>hook_abort_signal.is_aborted()</code> between API call iterations,
 so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
-not interrupt the request — it takes effect only on the next loop
+not interrupt the request &mdash; it takes effect only on the next loop
 iteration. Cancel needs to flow through to the streaming response path
 (e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
 <code>sleep 999</code> + API call is truly interruptible.</p>
+
+<h4 id="cancel-architecture">Cancel architecture &mdash; three semantics (CC parity)</h4>
+
+<p>CC's <code>useCancelRequest</code> dispatches three distinct cancel
+semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
+
+<table>
+  <thead><tr><th>Priority</th><th>Semantic</th><th>CC implementation</th><th>scode status</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><strong>Cancel running turn</strong> &mdash; abort streaming or in-flight tool</td><td><code>abortController.abort('user-cancel')</code></td><td><strong>Done</strong> (PR #223): <code>abort_signal.abort()</code> via crossterm event loop</td></tr>
+    <tr><td>2</td><td><strong>Pop command queue</strong> &mdash; cancel next queued command when idle</td><td><code>popCommandFromQueue()</code></td><td>Gap &mdash; scode has no command queue yet</td></tr>
+    <tr><td>3</td><td><strong>Kill sub-agent + exit view</strong> &mdash; in teammate view, kill background agents</td><td><code>killAllAgentsAndNotify(); exitTeammateView()</code></td><td>Gap &mdash; scode has no sub-agents yet</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Tech debt: CancelDispatcher.</strong>
+  Today scode hardcodes cancel semantic 1 (abort turn) in
+  <code>HookAbortMonitor</code>. When sub-agents or command queues land,
+  introduce a <code>CancelDispatcher</code> that receives the keypress
+  and dispatches to the right semantic based on runtime state (is a
+  turn running? is a command queued? are we in teammate view?). Ship
+  the dispatcher in the same PR as the first feature that needs it
+  &mdash; not before.
+</div>
+
+<h4 id="cancel-context">ESC vs Ctrl+C context guards (CC parity gap)</h4>
+
+<p>CC distinguishes two activation contexts for cancel keys:</p>
+
+<table>
+  <thead><tr><th>Key</th><th>CC context</th><th>CC guards (suppressed when)</th><th>scode current</th></tr></thead>
+  <tbody>
+    <tr><td>ESC</td><td>Chat context</td><td>VIM insert mode, overlay active, help open, transcript view, bash/background input with text</td><td>No guards &mdash; always fires during turn</td></tr>
+    <tr><td>Ctrl+C</td><td>Global context</td><td>Idle at prompt (double-press to exit instead)</td><td>No guards &mdash; always fires during turn</td></tr>
+  </tbody>
+</table>
+
+<div class="callout-warn callout">
+  <strong>Tech debt: activation context.</strong>
+  The current simplification (both keys equivalent, no guards) is correct
+  because scode has no VIM mode, overlays, or sub-agent views. When any
+  of these land, ESC must be suppressed in those contexts &mdash; otherwise
+  pressing ESC to exit VIM insert mode would cancel the turn. Add context
+  guards in the same PR as the first gated context (likely VIM edit mode
+  or interactive tool confirmation overlay).
+</div>
 
 <h2 id="goal-2">Goal 2 · claude-code parity</h2>
 

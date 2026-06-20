@@ -429,9 +429,9 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>ACP stdio transport</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; **kept as integration** — protocol-level surface, not REPL-fidelity, PTY adds no fidelity</td></tr>
-    <tr><td>ACP WebSocket transport</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Same as above — protocol-level, integration is the right layer</td></tr>
-    <tr><td>ACP session lifecycle (EOF / orphan)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code>; tests that host stdin EOF makes the agent exit cleanly without orphans</td></tr>
+    <tr><td>ACP stdio transport</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>ACP = Agent Client Protocol for hosting external agents (CC/Codex). Infra surface, not user-facing. Integration-covered by <code>acp_integration.rs</code>.</td></tr>
+    <tr><td>ACP WebSocket transport</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Protocol-level, integration is the right layer</td></tr>
+    <tr><td>ACP session lifecycle (EOF / orphan)</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code></td></tr>
     <tr><td>Live API smoke (real Anthropic)</td><td data-priority="na">N/A</td><td data-status="na">N/A</td><td>—</td><td>Covered by <code>acp_live_smoke.rs</code>; runs only on main with <code>CLAUDE_CODE_OAUTH_TOKEN</code>; live-gate, not a coverage-denominator concern</td></tr>
   </tbody>
 </table>
@@ -452,10 +452,10 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Run script, echo, sleep</td></tr>
-    <tr><td>REPL (persistent Python/JS subprocess)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Different from one-shot bash</td></tr>
-    <tr><td>PowerShell</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Windows-only path</td></tr>
-    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Needs <code>.ipynb</code> fixture</td></tr>
+    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Run script, echo, sleep. Agent trigger test: verify LLM selects bash for shell tasks.</td></tr>
+    <tr><td>REPL (persistent Python/JS subprocess)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Persistent subprocess, different from one-shot bash.</td></tr>
+    <tr><td>PowerShell</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Windows-only path.</td></tr>
+    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC has <code>NotebookEditTool</code>. Needs <code>.ipynb</code> fixture.</td></tr>
   </tbody>
 </table>
 
@@ -463,8 +463,9 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>WebSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Searches current info, verifies results</td></tr>
-    <tr><td><code>WebFetch</code> (URL → extract)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>WebSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Need to verify if CC's web search has an externally usable API or if we need our own provider.</td></tr>
+    <tr><td><code>WebFetch</code> (URL → extract)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Related to Browser (below) — WebFetch is headless fetch, Browser is full Chromium.</td></tr>
+    <tr><td>Browser (ai-dev-browser)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC parity with "Claude in Chrome". <code>ai-dev-browser</code> already integrated in sudowork; when sudocode integrates, remove duplicate from sudowork per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
   </tbody>
 </table>
 
@@ -496,11 +497,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Launch parallel sub-agents. When implemented, also introduce <a href="#cancel-architecture">CancelDispatcher</a> (cancel semantic 3: kill sub-agent) and <a href="#cancel-context">ESC context guards</a>.</td></tr>
-    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Background task management</td></tr>
-    <tr><td>Workers (boot, trust, prompt)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Worker lifecycle</td></tr>
-    <tr><td>Teams (parallel sub-agents)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Team coordination</td></tr>
-    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Needs wall-clock or fake timer</td></tr>
+    <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Strict CC parity required — study latest CC design. When implemented, also introduce <a href="#cancel-architecture">CancelDispatcher</a> and <a href="#cancel-context">ESC context guards</a>.</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Background task management. Strict CC parity.</td></tr>
+    <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Worker lifecycle. Strict CC parity.</td></tr>
+    <tr><td>Teams (parallel sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Team coordination. Strict CC parity.</td></tr>
+    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>sudowork has a cron implementation; when scode ships this, sudowork's becomes a wrapper/UI. Per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
   </tbody>
 </table>
 
@@ -508,11 +509,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/commit</code> (generate + create)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Init repo → write → commit → verify log</td></tr>
-    <tr><td><code>/pr</code> (draft / create PR)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td><strong>P0</strong> — core workflow</td></tr>
-    <tr><td><code>/diff</code> (show changes)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/issue</code> (create GitHub issue)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/review</code> (code review)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/commit</code> (generate + create)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven. Init repo → write → commit → verify log.</td></tr>
+    <tr><td><code>/pr</code> (draft / create PR)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven. P0 core workflow.</td></tr>
+    <tr><td><code>/diff</code> (show changes)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
+    <tr><td><code>/issue</code> (create GitHub issue)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
+    <tr><td><code>/review</code> (code review)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
   </tbody>
 </table>
 
@@ -539,14 +540,14 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
     <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
     <tr><td>Permission prompt flow (approve / deny)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
-    <tr><td><code>/auth</code> (switch auth mode)</td><td data-priority="na">N/A</td><td data-status="na">N/A</td><td>—</td><td>sudowork credential injection concern</td></tr>
+    <tr><td><code>/auth</code> (switch auth mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Switch between accounts (e.g. different CC accounts). Handy for hackers.</td></tr>
     <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
     <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
     <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
-    <tr><td><code>/mcp</code> (list / show servers)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Plugin lifecycle</td></tr>
-    <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Plugin install/enable/disable</td></tr>
-    <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Was unit-covered by deleted <code>plugin_prompt_injection.rs</code>; also exercised by <code>system_prompt_command.rs</code>; PTY pending — enabled plugin lands in dynamic sections, disabled does not</td></tr>
-    <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — plugin-defined tool executes through the agent loop</td></tr>
+    <tr><td><code>/mcp</code> (list / show servers)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. MCP may be approaching deprecation; keep nice. Add PTY tests if code is complete.</td></tr>
+    <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Plugin mechanism — a type of skill extension. Add PTY tests if code is complete.</td></tr>
+    <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Exercised by <code>system_prompt_command.rs</code>. Add PTY tests if code is complete.</td></tr>
+    <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Integration-covered by <code>mock_parity_harness.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON section access + standard-location loading</td></tr>
     <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered extensively by <code>output_format_contract.rs</code>; PTY pending — applies across help, version, status, sandbox, inventory, agents, bootstrap, system-prompt, dump-manifests, init, doctor, resume-status, config, export-help</td></tr>
     <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
@@ -564,11 +565,12 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
     <tr><td>Memory write path ("remember X")</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM writes memory files via Write tool; responds to "remember X" / "forget X"</td></tr>
     <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shows loaded memory entries in the REPL</td></tr>
-    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_project_scoped_path</code>, <code>pty_memory::memory_directory_auto_created</code></td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: <code>~/.scode/projects/&lt;slug&gt;/memory/</code>. PR #229.</td></tr>
-    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Detailed instructions for when/how to save/update/delete. Current preamble ~300 chars vs CC's ~3000</td></tr>
-    <tr><td>Session memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: background subagent extracts structured notes per-session. Behind <code>tengu_session_memory</code> flag. Requires forked-agent infra.</td></tr>
-    <tr><td>Background extract-memories agent</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: separate post-sampling subagent proactively mines conversation for memory-worthy facts. Behind <code>tengu_passport_quail</code>.</td></tr>
-    <tr><td>Team memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: <code>&lt;autoMemPath&gt;/team/</code> subdirectory with per-type scope guidance. Behind <code>tengu_herring_clock</code>. Enterprise feature.</td></tr>
+    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_project_scoped_path</code>, <code>pty_memory::memory_directory_auto_created</code></td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: <code>~/.scode/projects/&lt;slug&gt;/memory/</code>.</td></tr>
+    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Detailed instructions for when/how to save/update/delete. Current preamble ~300 chars vs CC's ~3000. First align with latest CC, then customize.</td></tr>
+    <tr><td>Context window management</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Study how CC manages context budget across system prompt + memory + conversation. Some models only have 200K — need discard policy when pre-loaded content exceeds budget.</td></tr>
+    <tr><td>Session memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: background subagent extracts structured notes per-session. Requires forked-agent infra.</td></tr>
+    <tr><td>Background extract-memories agent</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: separate post-sampling subagent proactively mines conversation for memory-worthy facts.</td></tr>
+    <tr><td>Team memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: per-type scope guidance. Enterprise feature.</td></tr>
     <tr><td>Agent memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: spawned subagents auto-read/write their own memory dirs. Depends on Agent tool infra.</td></tr>
   </tbody>
 </table>
@@ -577,11 +579,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/doctor</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>PR #184: doctor now enumerates all probed env vars (<code>ANTHROPIC_API_KEY</code>, <code>ANTHROPIC_AUTH_TOKEN</code>, <code>PROXY_AUTH_TOKEN</code>, <code>CLAUDE_CODE_OAUTH_TOKEN</code>) and accepts <code>ANTHROPIC_AUTH_TOKEN</code> as CC-parity alias.</td></tr>
-    <tr><td><code>/status</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Model, permissions, usage</td></tr>
-    <tr><td><code>/sandbox</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Isolation status</td></tr>
-    <tr><td><code>/cost</code> (token usage)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td>Prompt-response token usage</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/doctor</code></td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Diagnostic tool, not frequently used by hackers.</td></tr>
+    <tr><td><code>/status</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Model, permissions, usage — hackers check this often.</td></tr>
+    <tr><td><code>/sandbox</code></td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Isolation status, infrequently checked.</td></tr>
+    <tr><td><code>/cost</code> (token usage)</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td>Prompt-response token usage</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Visible after each turn — hackers track spend.</td></tr>
   </tbody>
 </table>
 
@@ -603,28 +605,27 @@ coverage starts fresh and is tracked here as the single source.</p>
   <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In denominator</th><th>Covered</th></tr></thead>
   <tbody>
     <tr><td>Core Conversation</td><td>6</td><td>0</td><td>0</td><td>6</td><td><strong>6</strong></td></tr>
-    <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>0</td><td>3</td><td>0</td></tr>
+    <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>3</td><td>0</td><td>0</td></tr>
     <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td>0</td></tr>
-    <tr><td>Search &amp; Web</td><td>2</td><td>0</td><td>0</td><td>2</td><td>0</td></tr>
+    <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>5</td><td>0</td><td>0</td></tr>
+    <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
-    <tr><td>Config &amp; Discovery</td><td>16</td><td>1</td><td>4</td><td>11</td><td>0</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td>0</td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><td>Memory System</td><td>7</td><td>0</td><td>0</td><td>7</td><td><strong>3</strong></td></tr>
-    <tr><th>Total</th><th>83</th><th>2</th><th>13</th><th>68</th><th>14</th></tr>
+    <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>5</strong></td></tr>
+    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>15</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 61 features covered</strong> out of the 68 in-denominator
-features. <strong>Current coverage: 14 / 68 (21%).</strong>
-<code>L2 deferred</code> items are real surface but need heavier
-setup (mock LSP server, wall-clock, plugin lifecycle); they are tracked
-but do not count toward the Q2 number.</p>
+<p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
+features. <strong>Current coverage: 15 / 80 (18%).</strong>
+<code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
+but do not count toward the 90% target.</p>
 
 <p>The numerator counts <strong>PTY-fidelity tests only</strong>, per the test
 policy: integration tests (kept for protocol-layer surface like ACP and

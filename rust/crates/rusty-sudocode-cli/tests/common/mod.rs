@@ -99,8 +99,16 @@ enum Backend {
 /// controls prompt construction and spawn args, both modes stay in
 /// sync automatically — you cannot accidentally write a mock-only
 /// test.
+/// Process-wide mutex that serialises live-mode tests. Multiple scode
+/// processes hitting the same API key concurrently causes rate-limit
+/// failures. In mock mode this lock is never acquired — tests run in
+/// parallel as usual.
+static LIVE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct TestEnv {
     backend: Backend,
+    /// Holds the live serial lock for the duration of the test.
+    _live_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 impl TestEnv {
@@ -127,10 +135,14 @@ impl TestEnv {
                 server,
                 workspace,
             },
+            _live_guard: None,
         }
     }
 
     fn new_live(label: &str) -> Self {
+        // Serialise live tests — rate-limit protection.
+        let guard = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
         let config_home = default_config_home();
         assert!(
             config_home.join("sudocode.json").exists(),
@@ -143,6 +155,7 @@ impl TestEnv {
                 workspace,
                 config_home,
             },
+            _live_guard: Some(guard),
         }
     }
 

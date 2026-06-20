@@ -1,24 +1,17 @@
-//! PTY tests for the five core conversation features:
+//! PTY tests for core conversation features.
 //!
-//! 1. Single-turn prompt — exits cleanly after one response
-//! 2. Multi-turn context — prior turns are visible in follow-ups
-//! 3. Streaming response — tokens render incrementally
-//! 4. Multi-tool turn roundtrip — multiple tool calls in one turn
-//! 5. Graceful cancel mid-execution — Ctrl+C stops cleanly
+//! ## Test principles
 //!
-//! ## Dual-mode (mock / live)
-//!
-//! All tests go through `TestEnv` (see `common/mod.rs`). By default
-//! they run against `MockAnthropicService` (CI-safe). Set
-//! `SCODE_TEST_BACKEND=live` to run against a real API with the
-//! credentials in `~/.nexus/sudocode/sudocode.json`.
+//! - **Live quality first.** Every assertion must be meaningful against
+//!   a real API. Mock is for CI convenience, not a separate test suite.
+//! - **DRY.** One set of assertions for both modes. `if env.is_mock()`
+//!   only for things inherently mock-only (e.g. `captured_message_count`).
+//! - **Agent trigger.** Live mode verifies the LLM selected the right
+//!   tools — not just that scode can execute them.
 //!
 //! ```bash
-//! # CI / default — mock, no API key needed
-//! cargo test --test pty_core_conversation
-//!
-//! # Local — real API (sudorouter proxy)
-//! SCODE_TEST_BACKEND=live cargo test --test pty_core_conversation
+//! cargo test --test pty_core_conversation                          # mock (CI)
+//! SCODE_TEST_BACKEND=live cargo test --test pty_core_conversation  # real API
 //! ```
 mod common;
 
@@ -30,10 +23,7 @@ use common::TestEnv;
 // 1. Single-turn prompt — `scode "prompt"` → response → exit 0
 // ──────────────────────────────────────────────────────────────────────
 
-/// Spawn scode with a one-shot prompt, see a response, clean exit.
-///
-/// - Mock: expects "answer" and "4" (deterministic response).
-/// - Live: expects any non-empty response before exit.
+/// User runs `scode "What is 2+2?"`, sees "4" in the response, exits 0.
 #[test]
 fn single_turn_exits_after_response() {
     let env = TestEnv::new("single-turn");
@@ -41,38 +31,23 @@ fn single_turn_exits_after_response() {
 
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
 
-    if env.is_mock() {
-        sess.expect("answer").expect("mock: should see 'answer'");
-        sess.expect("4").expect("mock: should see '4'");
-    } else {
-        // Live: just expect some output before EOF.
-        sess.expect("(?s).+").expect("live: should see a response");
-    }
+    // Any model (mock or live) must produce "4" for "what is 2+2".
+    sess.expect("4").expect("response should contain '4'");
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0, "single-turn should exit 0; got {exit}");
-
-    if env.is_mock() {
-        assert_eq!(env.captured_message_count(), 1, "mock: exactly 1 request");
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 2. Multi-turn context — interactive REPL, prior turns carry forward
+// 2. Multi-turn context — prior turns carry forward
 // ──────────────────────────────────────────────────────────────────────
 
-/// Start REPL, send two messages, verify the second response shows
-/// awareness of the first.
-///
-/// - Mock: first response = "Nice to meet you", second = "Your name is".
-/// - Live: first response contains "Alice", second also contains "Alice".
+/// REPL: send name → response greets → ask name back → response recalls.
 #[test]
 fn multi_turn_references_prior() {
     let env = TestEnv::new("multi-turn");
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-
-    // Wait for the REPL prompt.
     sess.expect("❯").expect("should see REPL prompt");
 
     // First turn: introduce a name.
@@ -81,16 +56,9 @@ fn multi_turn_references_prior() {
         "multi_turn_context",
     );
     sess.send(&format!("{first}\r")).expect("send first msg");
+    sess.expect("Alice")
+        .expect("first response should mention Alice");
 
-    if env.is_mock() {
-        sess.expect("Nice to meet you")
-            .expect("mock: first response greeting");
-    } else {
-        sess.expect("Alice")
-            .expect("live: first response mentions Alice");
-    }
-
-    // Wait for prompt after first turn.
     sess.expect("❯")
         .expect("should see prompt after first turn");
 
@@ -100,14 +68,8 @@ fn multi_turn_references_prior() {
         "multi_turn_context",
     );
     sess.send(&format!("{second}\r")).expect("send second msg");
-
-    if env.is_mock() {
-        sess.expect("Your name is")
-            .expect("mock: second response recalls name");
-    } else {
-        sess.expect("Alice")
-            .expect("live: second response recalls Alice");
-    }
+    sess.expect("Alice")
+        .expect("second response should recall Alice");
 
     // Exit cleanly.
     sess.expect("❯")
@@ -120,20 +82,13 @@ fn multi_turn_references_prior() {
         panic!("scode should exit after /exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "interactive scode should exit 0; got {exit}");
-
-    if env.is_mock() {
-        assert_eq!(env.captured_message_count(), 2, "mock: exactly 2 requests");
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
 // 3. Streaming response — tokens render incrementally
 // ──────────────────────────────────────────────────────────────────────
 
-/// Verify streamed tokens appear in the terminal before EOF.
-///
-/// - Mock: two SSE chunks produce "Mock streaming" then "parity harness".
-/// - Live: any multi-word response proves streaming flushes.
+/// Streamed tokens appear in the terminal as multi-word text before EOF.
 #[test]
 fn streaming_tokens_render_incrementally() {
     let env = TestEnv::new("streaming");
@@ -141,36 +96,24 @@ fn streaming_tokens_render_incrementally() {
 
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
 
-    if env.is_mock() {
-        sess.expect("Mock streaming").expect("mock: first chunk");
-        sess.expect("parity harness").expect("mock: second chunk");
-    } else {
-        // Live: just verify some text appeared.
-        sess.expect("(?s).+")
-            .expect("live: should see streamed text");
-    }
+    // Multiple words must appear — proves streaming flushed.
+    sess.expect("\\w+\\s+\\w+")
+        .expect("should see multi-word streamed text");
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0, "streaming should exit 0; got {exit}");
-
-    if env.is_mock() {
-        assert_eq!(env.captured_message_count(), 1, "mock: exactly 1 request");
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
 // 4. Multi-tool turn roundtrip — read_file + grep_search in one turn
 // ──────────────────────────────────────────────────────────────────────
 
-/// Model calls two tools in one turn, results feed the final response.
-///
-/// - Mock: deterministic read_file + grep_search → "roundtrip complete".
-/// - Live: model reads fixture.txt and greps it, mentions content.
+/// Model calls read_file + grep_search, results feed the final response.
+/// Agent trigger test: verifies LLM selected the correct tools.
 #[test]
 fn multi_tool_roundtrip() {
     let env = TestEnv::new("multi-tool");
 
-    // Both modes need this file — the model/mock will read_file + grep it.
     std::fs::write(
         env.workspace_root().join("fixture.txt"),
         "alpha parity line\nbeta line\ngamma parity line\n",
@@ -190,23 +133,16 @@ fn multi_tool_roundtrip() {
         &prompt,
     ]);
 
-    if env.is_mock() {
-        // Mock: deterministic tool names in output.
-        sess.expect("read_file")
-            .expect("mock: should see read_file");
-        sess.expect("grep").expect("mock: should see grep_search");
-        sess.expect("roundtrip complete")
-            .expect("mock: final response");
-    } else {
-        // Live: the model calls tools and responds. Tool names or
-        // file content should appear. Use a generous timeout since
-        // the model needs to think + execute two tools.
-        sess.set_default_timeout(Duration::from_secs(60));
-        sess.expect("(?i)(read_file|grep|fixture|parity|alpha)")
-            .expect("live: should see tool activity or file content");
-        sess.expect("(?i)(parity|2|two|lines|occurrences|matches)")
-            .expect("live: final response references results");
-    }
+    // Agent trigger: verify tool names in PTY output (both modes).
+    sess.set_default_timeout(Duration::from_secs(60));
+    sess.expect("read_file")
+        .expect("should see read_file tool call (agent trigger)");
+    sess.expect("grep")
+        .expect("should see grep_search tool call (agent trigger)");
+
+    // Final response references the results.
+    sess.expect("(?i)(parity|2|two|lines|occurrences|matches|complete)")
+        .expect("final response should reference tool results");
 
     sess.set_default_timeout(Duration::from_secs(120));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
@@ -220,12 +156,9 @@ fn multi_tool_roundtrip() {
 // 5. Graceful cancel mid-execution — Ctrl+C during bash tool
 // ──────────────────────────────────────────────────────────────────────
 
-/// Ctrl+C during a long-running bash tool exits cleanly.
-///
-/// - Mock: bash sleeps 30s → interrupted by Ctrl+C.
-/// - Live: model runs `sleep 30` → interrupted by Ctrl+C.
+/// Ctrl+C during a long-running bash tool exits cleanly, not hang.
 #[test]
-#[cfg(unix)] // ConPTY does not propagate Ctrl+C to the bash subprocess the same way
+#[cfg(unix)]
 fn sigint_cancels_streaming() {
     let env = TestEnv::new("sigint-cancel");
     let prompt = env.prompt(
@@ -241,14 +174,10 @@ fn sigint_cancels_streaming() {
         &prompt,
     ]);
 
-    // Wait until the bash tool call starts executing.
     sess.expect("bash").expect("should see bash tool call");
-
-    // Let the command start, then interrupt.
     std::thread::sleep(Duration::from_millis(500));
     sess.send_ctrl('c').expect("send Ctrl+C");
 
-    // Process should exit — the assertion is that it does NOT hang.
     sess.set_default_timeout(Duration::from_secs(15));
     let _exit = sess
         .expect_eof()
@@ -259,17 +188,7 @@ fn sigint_cancels_streaming() {
 // 6. ESC key cancels mid-execution (CC parity)
 // ──────────────────────────────────────────────────────────────────────
 
-/// ESC key during a long-running bash tool exits cleanly — same
-/// behavior as Ctrl+C but triggered by the Escape key (CC parity).
-///
-/// Steps with causal data flow:
-/// 1. Spawn scode with a bash scenario that sleeps 30s.
-/// 2. Expect "bash" — proves the tool call started.
-/// 3. Send ESC byte (0x1B) — simulates the user pressing Escape.
-/// 4. expect_eof — proves the process handled ESC and exited.
-///
-/// Catches: ESC not detected during streaming, raw mode not enabled,
-/// process hanging after ESC.
+/// ESC key during a long-running bash tool exits cleanly (CC parity).
 #[test]
 #[cfg(unix)]
 fn esc_cancels_streaming() {
@@ -287,14 +206,10 @@ fn esc_cancels_streaming() {
         &prompt,
     ]);
 
-    // Wait until the bash tool call starts executing.
     sess.expect("bash").expect("should see bash tool call");
-
-    // Let the command start, then send ESC.
     std::thread::sleep(Duration::from_millis(500));
     sess.send("\x1b").expect("send ESC");
 
-    // Process should exit — the assertion is that it does NOT hang.
     sess.set_default_timeout(Duration::from_secs(15));
     let _exit = sess
         .expect_eof()

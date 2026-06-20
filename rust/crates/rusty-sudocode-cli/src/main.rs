@@ -3104,7 +3104,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Memory => {
-                Self::print_memory()?;
+                Self::edit_memory()?;
                 false
             }
             SlashCommand::Init => {
@@ -3505,6 +3505,63 @@ impl LiveCli {
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
         print_with_pager(&render_memory_report()?);
         Ok(())
+    }
+
+    fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if !path.exists() {
+            fs::write(path, "")?;
+        }
+        let (editor, source) = if let Ok(v) = env::var("VISUAL") {
+            (v, "$VISUAL")
+        } else if let Ok(e) = env::var("EDITOR") {
+            (e, "$EDITOR")
+        } else {
+            ("vi".to_string(), "default")
+        };
+        let status = std::process::Command::new(&editor).arg(path).status()?;
+        if !status.success() {
+            return Err(format!("Editor '{}' exited with {}", editor, status).into());
+        }
+        println!("Opened memory file at {}", path.display());
+        if source == "default" {
+            println!(
+                "> To use a different editor, set the $EDITOR or $VISUAL environment variable."
+            );
+        } else {
+            println!(
+                "> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
+                source, editor
+            );
+        }
+        Ok(())
+    }
+
+    fn edit_memory() -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
+        let files = &project_context.instruction_files;
+        let target: PathBuf = if files.is_empty() {
+            // No instruction files found — default to AGENTS.md in cwd.
+            println!("No instruction files found. Creating AGENTS.md in the current directory.");
+            cwd.join("AGENTS.md")
+        } else if files.len() == 1 {
+            files[0].path.clone()
+        } else {
+            let labels: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
+            let selection = Select::new()
+                .with_prompt("Select memory file to edit")
+                .items(&labels)
+                .default(0)
+                .interact_opt()?;
+            match selection {
+                Some(idx) => files[idx].path.clone(),
+                None => return Ok(()),
+            }
+        };
+        Self::open_in_editor(&target)
     }
 
     fn print_agents(
@@ -4402,10 +4459,11 @@ fn build_runtime_for_cwd(
     let loader = ConfigLoader::default_for(cwd);
     let file_config = loader.load()?;
     let runtime_plugin_state = build_runtime_plugin_state_with_loader(cwd, &loader, &file_config)?;
-    build_runtime_with_plugin_state(session, session_id, config, runtime_plugin_state)
+    build_runtime_with_plugin_state(cwd, session, session_id, config, runtime_plugin_state)
 }
 
 fn build_runtime_with_plugin_state(
+    cwd: &Path,
     mut session: Session,
     session_id: &str,
     config: RuntimeConfig,
@@ -4422,13 +4480,14 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
-    let policy = match permission_policy(config.permission_mode, &feature_config, &tool_registry) {
-        Ok(policy) => policy,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
-        }
-    };
+    let policy =
+        match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
+            Ok(policy) => policy,
+            Err(error) => {
+                shutdown_mcp_state_best_effort(&mcp_state);
+                return Err(Box::new(std::io::Error::other(error)));
+            }
+        };
     let mut system_prompt = config.system_prompt.clone();
     if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
         system_prompt.dynamic_sections.push(section);

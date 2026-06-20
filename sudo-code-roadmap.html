@@ -456,7 +456,7 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Run script, echo, sleep. Agent trigger test: verify LLM selects bash for shell tasks.</td></tr>
+    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::bash_stdout_roundtrip</code>, <code>bash_creates_file_and_disk_verify</code></td><td>LLM tool. Agent trigger + stdout roundtrip + disk verify (live: LLM generates command, file created on disk).</td></tr>
     <tr><td>REPL (persistent Python/JS subprocess)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Persistent subprocess, different from one-shot bash.</td></tr>
     <tr><td>PowerShell</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Windows-only path.</td></tr>
     <tr><td><code>NotebookEdit</code> (Jupyter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC has <code>NotebookEditTool</code>. Needs <code>.ipynb</code> fixture.</td></tr>
@@ -528,7 +528,7 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Git commit via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git commit</code>. Covered once bash tool PTY test lands. System prompt teaches safety protocols.</td></tr>
+    <tr><td>Git commit via bash</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::git_init_write_commit_verify</code></td><td>LLM uses bash <code>git init</code> / <code>git add</code> / <code>git commit</code>. Live: disk verify .git/ + git log.</td></tr>
     <tr><td>PR creation via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>gh pr create</code>. P0 core workflow.</td></tr>
     <tr><td>Diff via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git diff</code>.</td></tr>
     <tr><td><code>/commit</code> Skill shortcut</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Optional UX shortcut. CC has this only for internal users. Not required for parity.</td></tr>
@@ -626,23 +626,23 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Core Conversation</td><td>6</td><td>0</td><td>0</td><td>6</td><td><strong>6</strong></td></tr>
     <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>3</td><td>0</td><td>0</td></tr>
     <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
-    <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td>0</td></tr>
+    <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td><strong>1</strong></td></tr>
     <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
-    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
+    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
     <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
     <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td>0</td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>5</strong></td></tr>
-    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>15</th></tr>
+    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>17</th></tr>
   </tbody>
 </table>
 
 <p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
-features. <strong>Current coverage: 15 / 80 (18%).</strong>
+features. <strong>Current coverage: 17 / 80 (21%).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 

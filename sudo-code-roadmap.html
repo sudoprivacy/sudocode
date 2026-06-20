@@ -513,11 +513,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/commit</code> (generate + create)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven. Init repo → write → commit → verify log.</td></tr>
-    <tr><td><code>/pr</code> (draft / create PR)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven. P0 core workflow.</td></tr>
-    <tr><td><code>/diff</code> (show changes)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
-    <tr><td><code>/issue</code> (create GitHub issue)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
-    <tr><td><code>/review</code> (code review)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM-driven.</td></tr>
+    <tr><td><code>/commit</code> (generate + create)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: this is a Skill (invoked via SkillTool), not a built-in slash command. LLM uses bash <code>git commit</code> underneath; <code>/commit</code> is a shortcut. Keep must-have — core hacker workflow.</td></tr>
+    <tr><td><code>/pr</code> (draft / create PR)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>CC: Skill <code>/commit-push-pr</code>. LLM uses bash <code>gh pr create</code>. P0 core workflow.</td></tr>
+    <tr><td><code>/diff</code> (show changes)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git diff</code>. Skill shortcut.</td></tr>
+    <tr><td><code>/issue</code> (create GitHub issue)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>gh issue create</code>. Skill shortcut.</td></tr>
+    <tr><td><code>/review</code> (code review)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses tools to read code + produce review. Skill shortcut.</td></tr>
   </tbody>
 </table>
 

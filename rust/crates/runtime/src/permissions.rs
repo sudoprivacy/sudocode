@@ -214,6 +214,27 @@ impl PermissionPolicy {
         self
     }
 
+    /// Inject synthetic allow rules for the auto-memory directory.
+    /// CC carve-out: writes to `~/.scode/projects/<slug>/memory/` are auto-allowed
+    /// regardless of permission mode (except ReadOnly and deny rules).
+    #[must_use]
+    pub fn with_memory_allow_rules(mut self, memory_dir: &std::path::Path) -> Self {
+        let prefix = memory_dir.to_string_lossy();
+        let dir_prefix = if prefix.ends_with('/') {
+            prefix.to_string()
+        } else {
+            format!("{}/", prefix)
+        };
+        for tool in &["write_file", "edit_file"] {
+            self.allow_rules.push(PermissionRule {
+                raw: format!("{tool}({dir_prefix}:*)"),
+                tool_name: tool.to_string(),
+                matcher: PermissionRuleMatcher::Prefix(dir_prefix.clone()),
+            });
+        }
+        self
+    }
+
     #[must_use]
     pub fn active_mode(&self) -> PermissionMode {
         self.active_mode
@@ -405,14 +426,14 @@ impl PermissionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PermissionRule {
-    raw: String,
-    tool_name: String,
-    matcher: PermissionRuleMatcher,
+pub(crate) struct PermissionRule {
+    pub(crate) raw: String,
+    pub(crate) tool_name: String,
+    pub(crate) matcher: PermissionRuleMatcher,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PermissionRuleMatcher {
+pub(crate) enum PermissionRuleMatcher {
     Any,
     Exact(String),
     Prefix(String),

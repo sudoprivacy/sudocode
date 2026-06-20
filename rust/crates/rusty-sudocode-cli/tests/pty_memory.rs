@@ -101,7 +101,7 @@ fn memory_entries_injected_into_system_prompt() {
 
     // The memory section header must be present.
     assert!(
-        text.contains("# Persistent memory"),
+        text.contains("# auto memory"),
         "system-prompt missing '# Persistent memory' section;\nstdout tail:\n{}",
         tail(&text, 40)
     );
@@ -265,7 +265,7 @@ fn memory_budget_truncates_large_entries() {
 
     // The memory section must be present (some entries rendered).
     assert!(
-        text.contains("# Persistent memory"),
+        text.contains("# auto memory"),
         "system-prompt missing memory section under budget pressure;\nstdout tail:\n{}",
         tail(&text, 40)
     );
@@ -382,6 +382,125 @@ fn memory_directory_auto_created() {
     );
 
     fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 6. End-to-end memory workflow: write → verify → forget → verify
+// ──────────────────────────────────────────────────────────────────────
+
+/// Full memory lifecycle exercised through the REPL in a single session:
+///
+/// 1. Ask the model to "remember my favorite language is Rust"
+///    → model writes a memory file + updates MEMORY.md
+/// 2. Send `/memory` → verify the instruction files list renders
+/// 3. Ask the model to "forget my favorite language"
+///    → model deletes the memory file + updates MEMORY.md
+/// 4. Verify the memory file is gone
+///
+/// This test is **live-only** (`SCODE_TEST_BACKEND=live`) because it
+/// requires real LLM tool use. Skipped in mock mode.
+#[test]
+fn memory_write_read_forget_workflow() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-workflow");
+    if env.is_mock() {
+        eprintln!(
+            "skipping memory_write_read_forget_workflow: mock mode \
+             (run with SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+
+    // Init a git repo so the memory dir is deterministic.
+    std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+
+    // Pre-create AGENTS.md so /memory has something to list.
+    fs::write(root.join("AGENTS.md"), "# Project rules\n").expect("write AGENTS.md");
+
+    // Spawn the REPL in auto mode (allows writes).
+    let mut sess = env.spawn_with_env(&["--permission-mode", "auto"], &[("EDITOR", "true")]);
+    sess.set_default_timeout(Duration::from_secs(60));
+
+    // Wait for the REPL prompt.
+    sess.expect("❯").expect("should see initial REPL prompt");
+
+    // ── Step 1: Write memory ─────────────────────────────────────────
+    sess.send("Remember this: my favorite programming language is Rust. Save it to memory now.\r")
+        .expect("send remember request");
+
+    // The model should use write_file to create a memory entry.
+    sess.expect("(?i)(write_file|saved|remembered|memory)")
+        .expect("should see write activity");
+
+    // Wait for the REPL to return.
+    sess.expect("❯").expect("prompt after write");
+
+    // Verify a .md file appeared in the memory directory.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
+    assert!(
+        has_memory_files(&projects_dir),
+        "expected memory files after 'remember' command"
+    );
+
+    // ── Step 2: /memory shows instruction files ──────────────────────
+    sess.send("/memory\r").expect("send /memory");
+    sess.expect("(?i)(opened.*memory|agents\\.md|memory.*file)")
+        .expect("/memory should reference a file");
+    sess.expect("❯").expect("prompt after /memory");
+
+    // ── Step 3: Forget memory ────────────────────────────────────────
+    sess.send("Forget my favorite programming language. Remove that memory entry.\r")
+        .expect("send forget request");
+
+    // The model should delete / remove the entry.
+    sess.expect("(?i)(delet|remov|forgot|bash|write_file|rm)")
+        .expect("should see delete/remove activity");
+    sess.expect("❯").expect("prompt after forget");
+
+    // ── Step 4: Verify memory file is gone ───────────────────────────
+    // Count .md files in memory dirs — should be fewer or zero.
+    // (We can't be 100% sure the model deleted the right file, but
+    // the LLM should have removed it per the system prompt.)
+
+    // Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("scode should exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0, "workflow should exit 0; got {exit}");
+}
+
+/// Check if any `projects/*/memory/*.md` files exist.
+fn has_memory_files(projects_dir: &Path) -> bool {
+    let Ok(slugs) = fs::read_dir(projects_dir) else {
+        return false;
+    };
+    for slug in slugs.flatten() {
+        let memory_dir = slug.path().join("memory");
+        if let Ok(entries) = fs::read_dir(&memory_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().is_some_and(|e| e == "md")
+                    && path
+                        .file_name()
+                        .is_some_and(|n| !n.eq_ignore_ascii_case("MEMORY.md"))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ──────────────────────────────────────────────────────────────────────

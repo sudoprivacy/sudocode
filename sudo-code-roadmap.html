@@ -573,8 +573,8 @@ coverage measure waits on PTY.</p>
       <td><strong>P0 — core differentiators</strong></td>
       <td><code>/commit</code>, <code>/pr</code> (git workflow);
       EnterPlanMode/ExitPlanMode → execute; <code>edit_file</code>
-      text-replace verification; <strong>true async cancel</strong>
-      (interrupt in-flight API mid-request, not only between iterations)</td>
+      text-replace verification; <strong>cancel turn</strong>
+      (Done — PR #223)</td>
     </tr>
     <tr>
       <td><strong>P1 — high-value tools</strong></td>
@@ -595,14 +595,16 @@ coverage measure waits on PTY.</p>
   </tbody>
 </table>
 
-<p>The async-cancel item under P0 is a <em>behavioural</em> P0, not just a
-coverage gap: today the runtime only checks
-<code>hook_abort_signal.is_aborted()</code> between API call iterations,
-so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
-not interrupt the request — it takes effect only on the next loop
-iteration. Cancel needs to flow through to the streaming response path
-(e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
-<code>sleep 999</code> + API call is truly interruptible.</p>
+<p><strong>Cancel architecture (Done — PR #223).</strong> The runtime uses
+<code>HookAbortSignal</code> — an atomic flag + tokio condvar — for
+cancellation. Ctrl-C calls <code>abort()</code>, which short-circuits
+the current turn at the next checkpoint, kills long-running hooks, and
+preserves partial progress. The signal is reset between turns. In
+managed-agent mode, the same signal gates the mailbox poll loop.
+Sub-agent lifecycle is the orchestrator's concern via SIGTERM/SIGKILL,
+not sudocode's. The earlier "pop queue" and "kill sub-agent" items
+noted here are orchestrator concerns (not sudocode's job), not
+implementation gaps.</p>
 
 <h2 id="goal-2">Goal 2 · claude-code parity</h2>
 
@@ -1224,25 +1226,30 @@ proceed in parallel.</p>
   <code>std::fs</code> call site in the sudocode runtime, route
   through the trait. No behavioural change to standalone CLI;
   this is a refactor that opens the door for the other two
-  backends.</li>
+  backends. <strong>DONE — PR #120.</strong></li>
   <li><strong>NexusVfsFsBackend.</strong> gRPC client against the
   nexus <code>NexusVFSService.Call</code> surface. First end-to-end
   validation: a standalone scode pointing at a remote nexus serves
-  its session jsonl from the kernel.</li>
+  its session jsonl from the kernel.
+  <strong>PARTIAL — code exists, lacks e2e validation.</strong></li>
   <li><strong>KernelFsBackend + <code>sudocode-host</code>
   binary.</strong> The binary edge that links nexus
   <code>kernel</code> + <code>services</code> in-process and
   monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
-  the dependency edge sudocode → nexus is realised.</li>
+  the dependency edge sudocode → nexus is realised.
+  <strong>PARTIAL — KernelFsBackend implemented,
+  <code>sudocode-host</code> binary not yet created.</strong></li>
   <li><strong>Mailbox read/write loop.</strong> Inside the managed
   runtime, replace stdin/stdout prompts with
   <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
   and <code>sys_write</code> on the peer's mailbox. The runtime
-  surface to the LLM stays the same.</li>
+  surface to the LLM stays the same.
+  <strong>DONE — PR #119, <code>sys_watch</code> condvar.</strong></li>
   <li><strong>WorkspaceBoundaryHook EPERM round-trip.</strong>
   Surface the kernel's structured EPERM verbatim into the LLM
   conversation; confirm by PTY scenario that the LLM learns the
-  <code>chat-with-me</code> redirect without system-prompt edits.</li>
+  <code>chat-with-me</code> redirect without system-prompt edits.
+  <strong>NOT STARTED.</strong></li>
 </ol>
 
 <h2 id="working-agreement">Working agreement on this document</h2>

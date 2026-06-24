@@ -567,11 +567,11 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Plugin mechanism — a type of skill extension. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Exercised by <code>system_prompt_command.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Integration-covered by <code>mock_parity_harness.rs</code>. Add PTY tests if code is complete.</td></tr>
-    <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON section access + standard-location loading</td></tr>
-    <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered extensively by <code>output_format_contract.rs</code>; PTY pending — applies across help, version, status, sandbox, inventory, agents, bootstrap, system-prompt, dump-manifests, init, doctor, resume-status, config, export-help</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::config_renders_json</code></td><td>cwd + config files in JSON output.</td></tr>
+    <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::output_format_json_contract</code></td><td>Contract test: status, doctor, version, sandbox all produce JSON with "kind" field.</td></tr>
     <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
     <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
-    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code> + <code>system_prompt_command.rs</code>; PTY pending — each subcommand has both plaintext and structured-JSON modes</td></tr>
+    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::help_shows_usage_and_subcommands</code>, <code>version_renders_json</code>, <code>system_prompt_renders</code></td><td>--help, version, system-prompt all verified via PTY.</td></tr>
   </tbody>
 </table>
 
@@ -598,9 +598,9 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/doctor</code></td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Diagnostic tool, not frequently used by hackers.</td></tr>
-    <tr><td><code>/status</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Model, permissions, usage — hackers check this often.</td></tr>
-    <tr><td><code>/sandbox</code></td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Isolation status, infrequently checked.</td></tr>
+    <tr><td><code>/doctor</code></td><td data-priority="nice">nice</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::doctor_renders_json</code></td><td>Diagnostic checks + API key probes in JSON.</td></tr>
+    <tr><td><code>/status</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::status_renders_json</code>, <code>status_renders_text</code></td><td>Model + permissions in both JSON and text output.</td></tr>
+    <tr><td><code>/sandbox</code></td><td data-priority="nice">nice</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::sandbox_renders_json</code></td><td>Isolation status in JSON.</td></tr>
     <tr><td><code>/cost</code> (token usage)</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
     <tr><td>Prompt-response token usage</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Visible after each turn — hackers track spend.</td></tr>
   </tbody>
@@ -633,16 +633,16 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
     <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
-    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td>0</td></tr>
-    <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>3</strong></td></tr>
+    <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>20</th></tr>
+    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>26</th></tr>
   </tbody>
 </table>
 
 <p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
-features. <strong>Current coverage: 20 / 80 (25%).</strong>
+features. <strong>Current coverage: 26 / 80 (32%).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 

@@ -922,6 +922,76 @@ injection, 3 PTY tests). The following gaps remain for full CC parity:</p>
   </tbody>
 </table>
 
+<h3>System prompt — CC alignment</h3>
+
+<p>The scode system prompt is assembled by <code>SystemPromptBuilder</code>
+(Rust, <code>runtime/src/prompt.rs</code>). CC's is assembled in TypeScript
+across <code>main.tsx</code>, <code>memdir.ts</code>,
+<code>memoryTypes.ts</code>, etc. The latest CC system prompt can be
+captured via <code>claude-trace</code> (Tier-1 runtime-observation source)
+and compared against <code>scode system-prompt</code> output.</p>
+
+<p><strong>Alignment methodology:</strong> capture CC prompt via
+<code>claude-trace</code> → diff against <code>scode system-prompt</code>
+→ track deltas per section. Each major section (intro, system, doing tasks,
+actions, tools, tone, output efficiency, auto memory, environment) gets its
+own row.</p>
+
+<table>
+  <thead><tr><th>Section</th><th>CC status (v2.1.87)</th><th>scode status</th></tr></thead>
+  <tbody>
+    <tr><td>Auto memory instructions</td><td>~3500 chars, 4-type taxonomy, write/forget, staleness verification</td><td>Done — ported 1:1 from claude-trace capture (PR #236)</td></tr>
+    <tr><td>Intro / identity</td><td>"You are Claude Code"</td><td>"You are Sudo Code" — aligned</td></tr>
+    <tr><td>System / tools / tasks / actions / tone / output</td><td>CC-specific sections</td><td>Gap — partially aligned, needs section-by-section diff</td></tr>
+    <tr><td>Environment context</td><td>Model family, cwd, date, platform, git status</td><td>Aligned — same structure</td></tr>
+  </tbody>
+</table>
+
+<h3>Nexus VFS migration — memory &amp; state paths</h3>
+
+<p>When scode runs inside nexusd as a linked Rust crate (not a subprocess),
+filesystem paths for memory and state should redirect to nexus VFS paths.
+The current path abstraction (<code>default_memory_dir_for</code>) is
+already clean enough to swap the backing store.</p>
+
+<table>
+  <thead><tr><th>Current (filesystem)</th><th>Nexus VFS target</th><th>Scope</th></tr></thead>
+  <tbody>
+    <tr><td><code>~/.scode/projects/&lt;slug&gt;/memory/</code></td><td><code>/agents/{name}/memory/</code></td><td>Static — persists across sessions, scoped to agent identity</td></tr>
+    <tr><td>Session state / session memory</td><td><code>/proc/{pid}/memory/</code></td><td>Dynamic — ephemeral per-run, dies with the process</td></tr>
+    <tr><td><code>AGENTS.md</code> instruction files</td><td><code>/agents/{name}/config/AGENTS.md</code></td><td>Static — agent profile</td></tr>
+    <tr><td><code>~/.nexus/sudocode/settings.json</code></td><td><code>/agents/{name}/config/settings.json</code></td><td>Static — agent config</td></tr>
+  </tbody>
+</table>
+
+<p>Not blocking — current filesystem paths work. Track as a nexus-integration
+future item. The <code>write_file</code> tool already goes through the tool
+registry which can be swapped to VFS-backed I/O.</p>
+
+<h3>Permission system — nexus rebac observation</h3>
+
+<p>The current permission system is two files, two structs:</p>
+<ul>
+  <li><code>PermissionPolicy</code> (<code>runtime/src/permissions.rs</code>) — rule evaluation: allow/deny/ask rules, mode comparison, prompter interface.</li>
+  <li><code>PermissionEnforcer</code> (<code>runtime/src/permission_enforcer.rs</code>) — tool-level gate: wraps policy, adds workspace boundary + bash command classification.</li>
+</ul>
+
+<p>This is ABAC-style (path-prefix matching: "this path is allowed for this
+tool"). It's correct and zero-overhead for single-user CLI. Nexus's rebac
+service is relationship-based ("agent A has write permission to resource R
+via role"). The two solve different problems:</p>
+
+<ul>
+  <li><strong>Current ABAC</strong> — sufficient for single-agent CLI. String prefix match at policy construction time, not per-call.</li>
+  <li><strong>Nexus rebac</strong> — needed when multi-agent federation lands (agent A can read agent B's memory, but not agent C's). Not worth migrating before that.</li>
+</ul>
+
+<p>Decision: keep current system until multi-agent use cases require
+relationship-based access control. At that point, evaluate whether nexus
+rebac can serve as the backing store for <code>PermissionPolicy</code> rules,
+or whether the two layers remain separate (rebac for cross-agent, ABAC for
+intra-agent tool gating).</p>
+
 <h3>Inline rendering polish</h3>
 
 <p>Improvements to how <code>rusty-sudocode-cli</code> draws its

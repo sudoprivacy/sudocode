@@ -2845,9 +2845,53 @@ mod tests {
         std::env::temp_dir().join(format!("runtime-conversation-{label}-{nanos}.json"))
     }
 
+    /// Same cross-platform translator as `hooks::tests::shell_snippet`.
+    /// See that copy for the full rationale. Duplicated here (rather than
+    /// extracted into a shared `test_util`) because `#[cfg(test)] mod tests`
+    /// in each file is the canonical place a test-only helper lives in
+    /// this codebase, and the function is ~50 lines — small enough that a
+    /// second copy is cheaper than a new module surface.
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
-        script.replace('\'', "\"")
+        use regex::Regex;
+        let mut s = script.to_string();
+
+        let printf_format = Regex::new(r"printf\s+'%s'\s+'([^']*)'(\s*>&2)?").unwrap();
+        s = printf_format
+            .replace_all(&s, |caps: &regex::Captures<'_>| {
+                let msg = &caps[1];
+                if caps.get(2).is_some() {
+                    format!("echo {msg}1>&2")
+                } else {
+                    format!("echo {msg}")
+                }
+            })
+            .into_owned();
+
+        let printf_simple = Regex::new(r"printf\s+'([^']*)'(\s*>&2)?").unwrap();
+        s = printf_simple
+            .replace_all(&s, |caps: &regex::Captures<'_>| {
+                let msg = &caps[1];
+                if caps.get(2).is_some() {
+                    format!("echo {msg}1>&2")
+                } else {
+                    format!("echo {msg}")
+                }
+            })
+            .into_owned();
+
+        let exit_chain = Regex::new(r";\s*exit\s+(\d+)").unwrap();
+        s = exit_chain.replace_all(&s, " && exit /b $1").into_owned();
+
+        let other_chain = Regex::new(r";\s*").unwrap();
+        s = other_chain.replace_all(&s, " & ").into_owned();
+
+        let sleep_re = Regex::new(r"\bsleep\s+(\d+)").unwrap();
+        s = sleep_re
+            .replace_all(&s, "timeout /t $1 /nobreak >NUL")
+            .into_owned();
+
+        s
     }
 
     #[cfg(not(windows))]

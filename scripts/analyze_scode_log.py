@@ -79,6 +79,10 @@ class SessionInfo:
     total_cache_creation_tokens: int = 0
     total_cache_read_tokens: int = 0
 
+    # Errors: prompt_error and stream_error events
+    prompt_errors: list[dict[str, Any]] = field(default_factory=list)
+    stream_errors: list[dict[str, Any]] = field(default_factory=list)
+
 
 def parse_timestamp(ts_str: str) -> datetime | None:
     """Parse ISO 8601 timestamp string."""
@@ -253,6 +257,26 @@ def analyze_log(log_path: Path) -> dict[str, SessionInfo]:
                     if header_name in headers:
                         req.provider_response_request_id = headers[header_name]
                         break
+
+            elif event == "prompt_error":
+                session.prompt_errors.append({
+                    "timestamp": timestamp,
+                    "error_type": attrs.get("error_type"),
+                    "error_message": attrs.get("error_message"),
+                })
+
+            elif event == "stream_error":
+                session.stream_errors.append({
+                    "timestamp": timestamp,
+                    "request_id": attrs.get("request_id"),
+                    "model": attrs.get("model"),
+                    "chunks_read": attrs.get("chunks_read"),
+                    "sse_events_read": attrs.get("sse_events_read"),
+                    "usage_seen": attrs.get("usage_seen"),
+                    "stream_finished": attrs.get("stream_finished"),
+                    "error_message": attrs.get("error_message"),
+                    "error_chain": attrs.get("error_chain"),
+                })
 
     return sessions
 
@@ -561,6 +585,43 @@ def print_report(sessions: dict[str, SessionInfo]) -> None:
                 if req.cache_read_input_tokens:
                     print(f"    Cache Read Tokens:         {req.cache_read_input_tokens:,}")
                 print()
+
+        # Errors section - prompt_error and stream_error
+        if session.prompt_errors or session.stream_errors:
+            print("-" * 80)
+            print("  ERRORS")
+            print("-" * 80)
+
+            if session.prompt_errors:
+                print(f"\n  Prompt Errors ({len(session.prompt_errors)}):")
+                for i, err in enumerate(session.prompt_errors, 1):
+                    ts = format_datetime(err.get("timestamp"))
+                    err_type = err.get("error_type") or "unknown"
+                    err_msg = err.get("error_message") or "N/A"
+                    print(f"    [{i}] {ts} - {err_type}: {err_msg[:200]}")
+
+            if session.stream_errors:
+                print(f"\n  Stream Errors ({len(session.stream_errors)}):")
+                for i, err in enumerate(session.stream_errors, 1):
+                    ts = format_datetime(err.get("timestamp"))
+                    req_id = err.get("request_id") or "unknown"
+                    model = err.get("model") or "unknown"
+                    chunks = err.get("chunks_read") or 0
+                    sse = err.get("sse_events_read") or 0
+                    usage_seen = err.get("usage_seen") or False
+                    finished = err.get("stream_finished") or False
+                    err_msg = err.get("error_message") or "N/A"
+                    err_chain = err.get("error_chain") or "N/A"
+                    print(f"    [{i}] {ts}")
+                    print(f"        Request ID: {req_id}")
+                    print(f"        Model: {model}")
+                    print(f"        Chunks read: {chunks}, SSE events: {sse}")
+                    print(f"        Usage seen: {usage_seen}, Stream finished: {finished}")
+                    print(f"        Error: {err_msg[:150]}")
+                    if err_chain and err_chain != err_msg:
+                        print(f"        Chain: {err_chain[:200]}")
+
+            print()
 
         # Session summary
         print("-" * 80)

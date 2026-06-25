@@ -38,7 +38,7 @@ pub enum AuthSource {
 
 impl AuthSource {
     pub fn from_env() -> Result<Self, ApiError> {
-        if let Some(api_key) = read_env_non_empty("ANTHROPIC_API_KEY")? {
+        if let Some(api_key) = read_anthropic_api_key()? {
             return Ok(Self::ApiKey(api_key));
         }
         if let Some(token) = read_env_non_empty("PROXY_AUTH_TOKEN")? {
@@ -577,7 +577,7 @@ impl AnthropicClient {
 
 impl AuthSource {
     pub fn from_env_or_saved() -> Result<Self, ApiError> {
-        if let Some(api_key) = read_env_non_empty("ANTHROPIC_API_KEY")? {
+        if let Some(api_key) = read_anthropic_api_key()? {
             return Ok(Self::ApiKey(api_key));
         }
         if let Some(bearer_token) = read_env_non_empty("PROXY_AUTH_TOKEN")? {
@@ -617,11 +617,12 @@ impl AuthSource {
                 Ok(Self::BearerToken(token))
             }
             super::AuthMode::ApiKey => {
-                // Try ANTHROPIC_API_KEY first.  When it is absent, return
-                // AuthSource::None — non-Anthropic providers (xai, openai)
-                // load their own keys via from_resolved, so the auth
-                // source from here is unused in those paths.
-                match read_env_non_empty("ANTHROPIC_API_KEY")? {
+                // Try ANTHROPIC_API_KEY (or its ANTHROPIC_AUTH_TOKEN alias)
+                // first.  When it is absent, return AuthSource::None —
+                // non-Anthropic providers (xai, openai) load their own keys
+                // via from_resolved, so the auth source from here is unused
+                // in those paths.
+                match read_anthropic_api_key()? {
                     Some(api_key) => Ok(Self::ApiKey(api_key)),
                     None => Ok(Self::None),
                 }
@@ -631,14 +632,11 @@ impl AuthSource {
 }
 
 /// Returns `true` when the active auth source comes from `CLAUDE_CODE_OAUTH_TOKEN`
-/// and no higher-priority auth env var (`ANTHROPIC_API_KEY`) takes precedence.
+/// and no higher-priority auth env var (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`)
+/// takes precedence.
 #[must_use]
 pub fn is_claude_code_oauth_token() -> bool {
-    if read_env_non_empty("ANTHROPIC_API_KEY")
-        .ok()
-        .flatten()
-        .is_some()
-    {
+    if read_anthropic_api_key().ok().flatten().is_some() {
         return false;
     }
     read_env_non_empty("CLAUDE_CODE_OAUTH_TOKEN")
@@ -647,13 +645,11 @@ pub fn is_claude_code_oauth_token() -> bool {
         .is_some()
 }
 
-/// Returns `true` when `ANTHROPIC_API_KEY` is set and non-empty.
+/// Returns `true` when `ANTHROPIC_API_KEY` (or its `ANTHROPIC_AUTH_TOKEN`
+/// alias) is set and non-empty.
 #[must_use]
 pub fn is_anthropic_api_key() -> bool {
-    read_env_non_empty("ANTHROPIC_API_KEY")
-        .ok()
-        .flatten()
-        .is_some()
+    read_anthropic_api_key().ok().flatten().is_some()
 }
 
 /// Returns `true` when `PROXY_AUTH_TOKEN` is set and non-empty.
@@ -683,7 +679,7 @@ pub fn resolve_startup_auth_source<F>(load_oauth_config: F) -> Result<AuthSource
 where
     F: FnOnce() -> Result<Option<OAuthConfig>, ApiError>,
 {
-    if let Some(api_key) = read_env_non_empty("ANTHROPIC_API_KEY")? {
+    if let Some(api_key) = read_anthropic_api_key()? {
         return Ok(AuthSource::ApiKey(api_key));
     }
     if let Some(bearer_token) = read_env_non_empty("PROXY_AUTH_TOKEN")? {
@@ -774,6 +770,16 @@ fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
         Ok(_) | Err(std::env::VarError::NotPresent) => Ok(super::dotenv_value(key)),
         Err(error) => Err(ApiError::from(error)),
     }
+}
+
+/// Read the Anthropic API key from `ANTHROPIC_API_KEY`, falling back to
+/// `ANTHROPIC_AUTH_TOKEN`. The alias matches the `claude-code` npm CLI
+/// convention so users coming from there don't have to rename their env var.
+fn read_anthropic_api_key() -> Result<Option<String>, ApiError> {
+    if let Some(value) = read_env_non_empty("ANTHROPIC_API_KEY")? {
+        return Ok(Some(value));
+    }
+    read_env_non_empty("ANTHROPIC_AUTH_TOKEN")
 }
 
 #[cfg(test)]
@@ -1232,6 +1238,8 @@ mod tests {
         let _guard = env_lock();
         std::env::remove_var("PROXY_AUTH_TOKEN");
         std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
         std::env::remove_var("SUDO_CODE_CONFIG_HOME");
         let error = super::read_api_key().expect_err("missing key should error");
         assert!(matches!(
@@ -1245,6 +1253,8 @@ mod tests {
         let _guard = env_lock();
         std::env::set_var("PROXY_AUTH_TOKEN", "");
         std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
         let error = super::read_api_key().expect_err("empty key should error");
         assert!(matches!(
             error,
@@ -1258,6 +1268,7 @@ mod tests {
         let _guard = env_lock();
         std::env::set_var("PROXY_AUTH_TOKEN", "auth-token");
         std::env::set_var("ANTHROPIC_API_KEY", "legacy-key");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
         assert_eq!(
             super::read_api_key().expect("api key should load"),
             "legacy-key"
@@ -1291,6 +1302,7 @@ mod tests {
         let _guard = env_lock();
         std::env::set_var("PROXY_AUTH_TOKEN", "proxy-token");
         std::env::set_var("ANTHROPIC_API_KEY", "api-key");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
         let auth = AuthSource::from_env().expect("env auth");
         assert_eq!(auth.api_key(), Some("api-key"));
         assert_eq!(auth.bearer_token(), None);
@@ -1305,6 +1317,12 @@ mod tests {
         std::env::set_var("SUDO_CODE_CONFIG_HOME", &config_home);
         std::env::remove_var("PROXY_AUTH_TOKEN");
         std::env::remove_var("ANTHROPIC_API_KEY");
+        // #182 item 2: from_env_or_saved now also reads the
+        // ANTHROPIC_AUTH_TOKEN alias and CLAUDE_CODE_OAUTH_TOKEN, so a host
+        // shell that exports either would short-circuit the saved-OAuth
+        // fallback the test is exercising.
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
 
         save_oauth_credentials(&runtime::OAuthTokenSet {
             access_token: "saved-access-token".to_string(),
@@ -1377,6 +1395,8 @@ mod tests {
         std::env::set_var("SUDO_CODE_CONFIG_HOME", &config_home);
         std::env::remove_var("PROXY_AUTH_TOKEN");
         std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
 
         save_oauth_credentials(&runtime::OAuthTokenSet {
             access_token: "saved-access-token".to_string(),

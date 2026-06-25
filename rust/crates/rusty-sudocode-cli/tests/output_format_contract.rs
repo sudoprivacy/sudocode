@@ -472,6 +472,22 @@ fn export_help_emits_bounded_json_when_requested() {
 }
 
 #[test]
+fn export_help_emits_json_when_output_format_precedes_subcommand() {
+    let root = unique_temp_dir("export-help-global-output-format-json");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(&root, &["--output-format", "json", "export", "--help"]);
+    assert_eq!(parsed["kind"], "help");
+    assert_eq!(parsed["topic"], "export");
+    assert_eq!(parsed["command"], "export");
+    assert_eq!(
+        parsed["usage"],
+        "scode export [--session <id|latest>] [--output <path>] [--output-format <format>]"
+    );
+    assert!(parsed.get("message").is_none());
+}
+
+#[test]
 fn export_help_preserves_plaintext_in_text_mode() {
     let root = unique_temp_dir("export-help-text");
     fs::create_dir_all(&root).expect("temp dir should exist");

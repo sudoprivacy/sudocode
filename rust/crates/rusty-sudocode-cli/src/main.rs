@@ -58,7 +58,7 @@ use cli::export::{
 use cli::format::{
     describe_tool_progress, first_visible_line, format_auth_report, format_auth_switch_report,
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
-    format_commit_skipped_report, format_compact_report, format_cost_report,
+    format_commit_skipped_report, format_compact_report, format_cost_report, format_input_echo,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
@@ -177,38 +177,43 @@ impl ModelProvenance {
         }
     }
 
-    fn from_env_or_config_or_default(cli_model: &str) -> Self {
-        // Only called when no --model flag was passed. Probe env first,
-        // then config, else fall back to default. Mirrors the logic in
-        // resolve_repl_model() but captures the source.
-        if cli_model != DEFAULT_MODEL {
-            // Already resolved from some prior path; treat as flag.
-            return Self {
-                resolved: cli_model.to_string(),
-                raw: Some(cli_model.to_string()),
-                source: ModelSource::Flag,
-            };
-        }
-        if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Self {
-                resolved: resolve_model_alias_with_config(&env_model),
-                raw: Some(env_model),
-                source: ModelSource::Env,
-            };
-        }
-        if let Some(config_model) = config_model_for_current_dir() {
-            return Self {
-                resolved: resolve_model_alias_with_config(&config_model),
-                raw: Some(config_model),
-                source: ModelSource::Config,
-            };
-        }
-        Self::default_fallback()
+    /// Look up the default model from env, then cwd config, then the compiled-in
+    /// fallback. Called when no `--model` flag was passed. Shares its primitive
+    /// (`lookup_default_model`) with `resolve_repl_model`, so the splash, the
+    /// one-shot Prompt action, and the status banner all agree on the active
+    /// model.
+    fn from_default_lookup() -> Self {
+        lookup_default_model().map_or_else(Self::default_fallback, |(resolved, raw, source)| Self {
+            resolved,
+            raw: Some(raw),
+            source,
+        })
     }
+}
+
+/// Single source of truth for the env-or-config default model lookup. Returns
+/// `(resolved, raw, source)` when env or config wins, `None` to defer to the
+/// compiled-in default.
+pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
+    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some((
+            resolve_model_alias_with_config(&env_model),
+            env_model,
+            ModelSource::Env,
+        ));
+    }
+    if let Some(config_model) = config_model_for_current_dir() {
+        return Some((
+            resolve_model_alias_with_config(&config_model),
+            config_model,
+            ModelSource::Config,
+        ));
+    }
+    None
 }
 
 // Build-time constants injected by build.rs (fall back to static values when
@@ -477,6 +482,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let session_start = Instant::now();
+            // Share the splash's env/config resolution so the one-shot prompt
+            // can't disagree with the REPL banner.
             let resolved_model = resolve_repl_model(model);
             let mut cli = LiveCli::new(
                 resolved_model,
@@ -1458,14 +1465,18 @@ fn run_repl(
             input::ReadOutcome::Submit(input) => {
                 // Clear pre-printed bottom sep + footer
                 print!("\x1b[J");
-                // Replace prompt line with gray-background echo of user input
+                // Replace prompt line with a gray-background echo of the user
+                // input.  Multi-line input renders one styled row per line so
+                // the echo matches what the user actually typed (#182 item 3).
                 let trimmed = input.trim().to_string();
-                let echo_display = format!(" › {}", trimmed.replace('\n', " "));
-                let pad = term_width.saturating_sub(echo_display.chars().count());
-                print!(
-                    "\x1b[1F\x1b[2K\x1b[48;5;236m{echo_display}{}\x1b[0m",
-                    " ".repeat(pad)
-                );
+                let (echo_block, line_count) = format_input_echo(&trimmed, term_width);
+                // Move the cursor up past every row rustyline rendered for the
+                // input and clear each one, then write the echo block in their
+                // place.
+                for _ in 0..line_count {
+                    print!("\x1b[1F\x1b[2K");
+                }
+                print!("{echo_block}");
                 println!();
                 println!("{separator}");
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
@@ -2519,9 +2530,43 @@ impl HookAbortMonitor {
                 return;
             };
 
+            // Enable raw mode so crossterm can detect ESC keypresses
+            // during streaming / tool execution (CC parity). The
+            // rendering layer uses ANSI cursor control (not println!)
+            // during a turn, so raw mode is safe here. Restored when
+            // the monitor stops.
+            let is_tty = io::stdin().is_terminal();
+            let raw_enabled = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
+
             runtime.block_on(async move {
-                let wait_for_stop = tokio::task::spawn_blocking(move || {
-                    let _ = stop_rx.recv();
+                let esc_abort = abort_signal.clone();
+                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || {
+                    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+                    loop {
+                        if stop_rx.try_recv().is_ok() {
+                            return;
+                        }
+                        if !raw_enabled {
+                            match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                                Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                                Err(RecvTimeoutError::Timeout) => continue,
+                            }
+                        }
+                        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                            if let Ok(Event::Key(key)) = event::read() {
+                                if key.kind != KeyEventKind::Press {
+                                    continue;
+                                }
+                                let is_esc = key.code == KeyCode::Esc;
+                                let is_ctrl_c = key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(event::KeyModifiers::CONTROL);
+                                if is_esc || is_ctrl_c {
+                                    esc_abort.abort();
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 });
 
                 tokio::select! {
@@ -2530,9 +2575,13 @@ impl HookAbortMonitor {
                             abort_signal.abort();
                         }
                     }
-                    _ = wait_for_stop => {}
+                    _ = wait_for_esc_or_stop => {}
                 }
             });
+
+            if raw_enabled {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
         })
     }
 
@@ -3055,7 +3104,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Memory => {
-                Self::print_memory()?;
+                Self::edit_memory()?;
                 false
             }
             SlashCommand::Init => {
@@ -3456,6 +3505,63 @@ impl LiveCli {
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
         print_with_pager(&render_memory_report()?);
         Ok(())
+    }
+
+    fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if !path.exists() {
+            fs::write(path, "")?;
+        }
+        let (editor, source) = if let Ok(v) = env::var("VISUAL") {
+            (v, "$VISUAL")
+        } else if let Ok(e) = env::var("EDITOR") {
+            (e, "$EDITOR")
+        } else {
+            ("vi".to_string(), "default")
+        };
+        let status = std::process::Command::new(&editor).arg(path).status()?;
+        if !status.success() {
+            return Err(format!("Editor '{}' exited with {}", editor, status).into());
+        }
+        println!("Opened memory file at {}", path.display());
+        if source == "default" {
+            println!(
+                "> To use a different editor, set the $EDITOR or $VISUAL environment variable."
+            );
+        } else {
+            println!(
+                "> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
+                source, editor
+            );
+        }
+        Ok(())
+    }
+
+    fn edit_memory() -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
+        let files = &project_context.instruction_files;
+        let target: PathBuf = if files.is_empty() {
+            // No instruction files found — default to AGENTS.md in cwd.
+            println!("No instruction files found. Creating AGENTS.md in the current directory.");
+            cwd.join("AGENTS.md")
+        } else if files.len() == 1 {
+            files[0].path.clone()
+        } else {
+            let labels: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
+            let selection = Select::new()
+                .with_prompt("Select memory file to edit")
+                .items(&labels)
+                .default(0)
+                .interact_opt()?;
+            match selection {
+                Some(idx) => files[idx].path.clone(),
+                None => return Ok(()),
+            }
+        };
+        Self::open_in_editor(&target)
     }
 
     fn print_agents(
@@ -4353,10 +4459,11 @@ fn build_runtime_for_cwd(
     let loader = ConfigLoader::default_for(cwd);
     let file_config = loader.load()?;
     let runtime_plugin_state = build_runtime_plugin_state_with_loader(cwd, &loader, &file_config)?;
-    build_runtime_with_plugin_state(session, session_id, config, runtime_plugin_state)
+    build_runtime_with_plugin_state(cwd, session, session_id, config, runtime_plugin_state)
 }
 
 fn build_runtime_with_plugin_state(
+    cwd: &Path,
     mut session: Session,
     session_id: &str,
     config: RuntimeConfig,
@@ -4373,13 +4480,14 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
-    let policy = match permission_policy(config.permission_mode, &feature_config, &tool_registry) {
-        Ok(policy) => policy,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
-        }
-    };
+    let policy =
+        match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
+            Ok(policy) => policy,
+            Err(error) => {
+                shutdown_mcp_state_best_effort(&mcp_state);
+                return Err(Box::new(std::io::Error::other(error)));
+            }
+        };
     let mut system_prompt = config.system_prompt.clone();
     if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
         system_prompt.dynamic_sections.push(section);

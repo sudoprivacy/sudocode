@@ -385,9 +385,14 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
 
 fn render_project_context(project_context: &ProjectContext) -> String {
     let mut lines = vec!["# Project context".to_string()];
+    let is_git_repo = project_context.git_context.is_some();
     let mut bullets = vec![
         format!("Today's date is {}.", project_context.current_date),
         format!("Working directory: {}", project_context.cwd.display()),
+        format!(
+            "Is a git repository: {}",
+            if is_git_repo { "yes" } else { "no" }
+        ),
     ];
     if !project_context.instruction_files.is_empty() {
         bullets.push(format!(
@@ -396,32 +401,6 @@ fn render_project_context(project_context: &ProjectContext) -> String {
         ));
     }
     lines.extend(prepend_bullets(bullets));
-    if let Some(status) = &project_context.git_status {
-        lines.push(String::new());
-        lines.push("Git status snapshot:".to_string());
-        lines.push(status.clone());
-    }
-    if let Some(ref gc) = project_context.git_context {
-        if !gc.recent_commits.is_empty() {
-            lines.push(String::new());
-            lines.push("Recent commits (last 5):".to_string());
-            for c in &gc.recent_commits {
-                lines.push(format!("  {} {}", c.hash, c.subject));
-            }
-        }
-    }
-    if let Some(diff) = &project_context.git_diff {
-        lines.push(String::new());
-        lines.push("Git diff snapshot:".to_string());
-        lines.push(diff.clone());
-    }
-    if let Some(git_context) = &project_context.git_context {
-        let rendered = git_context.render();
-        if !rendered.is_empty() {
-            lines.push(String::new());
-            lines.push(rendered);
-        }
-    }
     lines.join("\n")
 }
 
@@ -556,12 +535,16 @@ pub fn load_system_prompt_with(
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-    Ok(SystemPromptBuilder::new()
-        .with_os(os_name, os_version)
-        .with_model_family(model_family)
-        .with_project_context(project_context)
-        .with_runtime_config(config)
-        .build())
+    let builder = crate::memory::append_to_builder(
+        SystemPromptBuilder::new()
+            .with_os(os_name, os_version)
+            .with_model_family(model_family)
+            .with_project_context(project_context)
+            .with_runtime_config(config),
+        None,
+        Some(&cwd),
+    );
+    Ok(builder.build())
 }
 
 fn render_config_section(config: &RuntimeConfig) -> String {
@@ -580,8 +563,6 @@ fn render_config_section(config: &RuntimeConfig) -> String {
             .map(|entry| format!("Loaded {:?}: {}", entry.source, entry.path.display()))
             .collect(),
     ));
-    lines.push(String::new());
-    lines.push(config.as_json().render());
     lines.join("\n")
 }
 
@@ -838,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_with_git_includes_recent_commits_and_renders_them() {
+    fn discover_with_git_collects_recent_commits_but_omits_them_from_rendered_prompt() {
         // given: a git repo with three commits and a current branch
         let _guard = env_lock();
         ensure_valid_cwd();
@@ -911,16 +892,19 @@ mod tests {
         assert!(status.contains("## main"));
         assert!(status.contains("A  d.txt"));
 
-        assert!(rendered.contains("Recent commits (last 5):"));
-        assert!(rendered.contains("first commit"));
-        assert!(rendered.contains("Git status snapshot:"));
-        assert!(rendered.contains("## main"));
+        // but: the rendered system prompt no longer inlines that detail.
+        assert!(!rendered.contains("Recent commits (last 5):"));
+        assert!(!rendered.contains("Recent commits:"));
+        assert!(!rendered.contains("first commit"));
+        assert!(!rendered.contains("Git status snapshot:"));
+        assert!(!rendered.contains("## main"));
+        assert!(rendered.contains("Is a git repository: yes"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]
-    fn discover_with_git_includes_diff_snapshot_for_tracked_changes() {
+    fn discover_with_git_collects_diff_but_omits_it_from_rendered_prompt() {
         let _guard = env_lock();
         ensure_valid_cwd();
         let root = temp_dir();
@@ -956,9 +940,23 @@ mod tests {
         let context =
             ProjectContext::discover_with_git(&root, "2026-03-31").expect("context should load");
 
-        let diff = context.git_diff.expect("git diff should be present");
+        // The diff is still collected on `ProjectContext` for other consumers
+        // (e.g. doctor/status reporting)…
+        let diff = context
+            .git_diff
+            .clone()
+            .expect("git diff should be present");
         assert!(diff.contains("Unstaged changes:"));
         assert!(diff.contains("tracked.txt"));
+
+        // …but it must not be inlined into the rendered system prompt.
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_project_context(context)
+            .render();
+        assert!(!rendered.contains("Git diff snapshot:"));
+        assert!(!rendered.contains("Unstaged changes:"));
+        assert!(!rendered.contains("+world"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
@@ -1004,7 +1002,10 @@ mod tests {
         }
 
         assert!(prompt.contains("Project rules"));
-        assert!(prompt.contains("permissionMode"));
+        // The full settings JSON body is no longer inlined into the prompt;
+        // only the loaded config paths should appear.
+        assert!(!prompt.contains("permissionMode"));
+        assert!(prompt.contains("settings.json"));
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -1040,7 +1041,9 @@ mod tests {
         assert!(prompt.contains("# Project context"));
         assert!(prompt.contains("# Project instructions"));
         assert!(prompt.contains("Project rules"));
-        assert!(prompt.contains("permissionMode"));
+        // Loaded settings paths appear, but the full JSON body does not.
+        assert!(prompt.contains("settings.json"));
+        assert!(!prompt.contains("permissionMode"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
@@ -1071,6 +1074,73 @@ mod tests {
             .any(|file| file.path.ends_with(".nexus/sudocode/AGENTS.md")));
         assert!(render_instruction_files(&context.instruction_files)
             .contains("nexus agent instructions"));
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rendered_prompt_reports_git_repo_presence() {
+        use crate::git_context::GitContext;
+
+        // With a detected git context, the prompt should say "yes".
+        let with_git = ProjectContext {
+            cwd: PathBuf::from("/tmp/project"),
+            current_date: "2026-03-31".to_string(),
+            git_status: None,
+            git_diff: None,
+            git_context: Some(GitContext {
+                branch: Some("main".to_string()),
+                recent_commits: Vec::new(),
+                staged_files: Vec::new(),
+            }),
+            instruction_files: Vec::new(),
+        };
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_project_context(with_git)
+            .render();
+        assert!(rendered.contains("Is a git repository: yes"));
+        assert!(!rendered.contains("Is a git repository: no"));
+
+        // Without a detected git context, the prompt should say "no".
+        let without_git = ProjectContext {
+            cwd: PathBuf::from("/tmp/project"),
+            current_date: "2026-03-31".to_string(),
+            git_status: None,
+            git_diff: None,
+            git_context: None,
+            instruction_files: Vec::new(),
+        };
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_project_context(without_git)
+            .render();
+        assert!(rendered.contains("Is a git repository: no"));
+        assert!(!rendered.contains("Is a git repository: yes"));
+    }
+
+    #[test]
+    fn config_section_lists_paths_without_inlining_json_body() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
+        fs::write(
+            root.join(".nexus").join("sudocode").join("settings.json"),
+            r#"{"permissionMode":"acceptEdits"}"#,
+        )
+        .expect("write settings");
+
+        let config = ConfigLoader::new(&root, root.join("missing-home"))
+            .load()
+            .expect("config should load");
+        let rendered = super::render_config_section(&config);
+
+        assert!(rendered.contains("# Runtime config"));
+        assert!(rendered.contains("settings.json"));
+        // The settings JSON body must not be inlined.
+        assert!(!rendered.contains("permissionMode"));
+        assert!(!rendered.contains("acceptEdits"));
+        assert!(!rendered.contains('{'));
+        assert!(!rendered.contains('}'));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

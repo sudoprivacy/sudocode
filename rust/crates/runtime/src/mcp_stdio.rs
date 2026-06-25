@@ -1208,6 +1208,10 @@ impl McpServerManager {
 
             let server = self.server_mut(server_name)?;
             server.initialized = true;
+            // A successful initialize proves the server can start — reset
+            // the spawn counter so a later transport-drop + respawn does
+            // not inherit stale attempts from a prior lifecycle.
+            server.spawn_attempts = 0;
             return Ok(());
         }
     }
@@ -1482,7 +1486,14 @@ fn default_initialize_params() -> McpInitializeParams {
     }
 }
 
-#[cfg(test)]
+// `#[cfg(unix)]` because every test in this module builds a POSIX
+// shell or python script and spawns it as a mock MCP stdio server,
+// using `chmod +x` via `std::os::unix::fs::PermissionsExt::set_mode`.
+// Windows neither honours shebangs nor exposes `set_mode`, so the
+// entire module is Unix-only by design. Windows-equivalent
+// coverage (cmd /c batch scripts, native .exe shims, no shebangs,
+// no chmod) is a follow-up.
+#[cfg(all(test, unix))]
 mod tests {
     use super::MCP_SPAWN_ATTEMPT_LIMIT;
     use std::collections::BTreeMap;

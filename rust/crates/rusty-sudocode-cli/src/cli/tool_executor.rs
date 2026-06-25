@@ -395,9 +395,13 @@ pub(crate) fn permission_policy(
     mode: PermissionMode,
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,
+    cwd: &std::path::Path,
 ) -> Result<PermissionPolicy, String> {
+    let memory_dir = runtime::memory::default_memory_dir_for(cwd);
     Ok(tool_registry.permission_specs(None)?.into_iter().fold(
-        PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules()),
+        PermissionPolicy::new(mode)
+            .with_permission_rules(feature_config.permission_rules())
+            .with_memory_allow_rules(&memory_dir),
         |policy, (name, required_permission)| {
             policy.with_tool_requirement(name, required_permission)
         },

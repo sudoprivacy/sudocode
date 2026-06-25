@@ -354,20 +354,24 @@ fn prepare_tokio_command(
         prepare_sandbox_dirs(cwd);
     }
 
-    if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-        let mut prepared = TokioCommand::new(launcher.program);
-        prepared.args(launcher.args);
-        prepared.current_dir(cwd);
-        prepared.envs(launcher.env);
-        return prepared;
-    }
+    let mut prepared =
+        if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
+            let mut cmd = TokioCommand::new(launcher.program);
+            cmd.args(launcher.args);
+            cmd.envs(launcher.env);
+            cmd
+        } else {
+            let mut cmd = TokioCommand::new("sh");
+            cmd.arg("-lc").arg(command);
+            if sandbox_status.filesystem_active {
+                cmd.env("HOME", cwd.join(".sandbox-home"));
+                cmd.env("TMPDIR", cwd.join(".sandbox-tmp"));
+            }
+            cmd
+        };
 
-    let mut prepared = TokioCommand::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
-    if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
-    }
+    prepared.current_dir(cwd);
+    prepared.stdin(Stdio::null());
     prepared
 }
 
@@ -419,7 +423,19 @@ pub fn execute_bash_with_tracking(
     })
 }
 
-#[cfg(test)]
+// `#[cfg(unix)]` because every test in this module exercises
+// `execute_bash`, which spawns `sh -c "..."` (see line 338/364
+// `Command::new("sh")`). On Windows `sh.exe` is not in PATH unless
+// the developer has installed Git Bash; CI's `windows-latest`
+// image does not. The production bash tool itself is therefore
+// Unix-only by design — making it cross-platform would mean
+// teaching `execute_bash` to detect platform and translate
+// commands (or refuse on Windows with a clear diagnostic), which
+// is a separate runtime-side product decision outside the scope of
+// this PR. Tests covered: simple `printf 'hello'`, sandbox-disable
+// path, stdin-redirect-to-null, abort-signal interrupt — all
+// require sh.
+#[cfg(all(test, unix))]
 mod tests {
     use super::{execute_bash, execute_bash_with_abort, BashCommandInput};
     use crate::hooks::HookAbortSignal;
@@ -488,6 +504,27 @@ mod tests {
         assert_eq!(
             output.return_code_interpretation.as_deref(),
             Some("interrupted")
+        );
+    }
+
+    #[test]
+    fn prevents_stdin_hangs_by_redirecting_to_null() {
+        let output = execute_bash(BashCommandInput {
+            command: String::from("cat"),
+            timeout: Some(2_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(true),
+            namespace_restrictions: None,
+            isolate_network: None,
+            filesystem_mode: None,
+            allowed_mounts: None,
+        })
+        .expect("bash command should execute cleanly");
+
+        assert!(
+            !output.interrupted,
+            "Command hung and was cut off by the timeout!"
         );
     }
 }

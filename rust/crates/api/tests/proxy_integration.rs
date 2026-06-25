@@ -35,6 +35,13 @@ impl Drop for EnvVarGuard {
     }
 }
 
+// `#[cfg(unix)]` because Windows environment variables are
+// case-insensitive — `HTTPS_PROXY` and `https_proxy` are the same
+// variable on Windows, so a test that sets one and expects the
+// other to remain unset (or vice versa) fundamentally cannot work
+// there. The proxy_config_from_env code path itself is correct;
+// the test assumption is Unix-only.
+#[cfg(unix)]
 #[test]
 fn proxy_config_from_env_reads_uppercase_proxy_vars() {
     // given
@@ -154,6 +161,11 @@ fn build_client_with_proxy_url_config_succeeds() {
     assert!(result.is_ok());
 }
 
+// Same Windows case-insensitive-env-var rationale as the
+// uppercase-vars test above — the "uppercase wins over lowercase"
+// assumption is impossible to express on Windows where both names
+// reference one variable.
+#[cfg(unix)]
 #[test]
 fn proxy_config_from_env_prefers_uppercase_over_lowercase() {
     // given

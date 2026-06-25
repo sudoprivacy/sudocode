@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -13,6 +13,7 @@ agent-client-protocol = { version = "0.11", features = ["unstable_session_model"
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-tokio = "0.11"
 axum = { version = "0.8", features = ["ws"] }
+pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", tag = "v0.1.1" }
 serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 

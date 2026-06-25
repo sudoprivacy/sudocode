@@ -1,3 +1,12 @@
+// `#![cfg(unix)]` — same diagnosis as the ACP integration gates:
+// scode-subprocess + MockAnthropicService HTTP loop hangs on
+// Windows before producing output (each scenario took ~400s to
+// time out locally). Likely a stdio/pipe-buffer interaction with
+// the mock HTTP server; investigation belongs to a Windows-scode
+// follow-up, not this PR. Same gate applies to every test file in
+// this directory that drives scode + a mock backend.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};

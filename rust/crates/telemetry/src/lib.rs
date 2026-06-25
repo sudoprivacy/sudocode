@@ -1019,6 +1019,41 @@ impl SessionTracer {
         attributes.insert("error_message".to_string(), Value::String(error_message));
         self.record("prompt_error", attributes);
     }
+
+    /// Record a stream error that occurred while reading the response body.
+    pub fn record_stream_error(&self, error: StreamErrorTelemetry) {
+        let mut attributes = Map::new();
+        attributes.insert("request_id".to_string(), Value::String(error.request_id));
+        attributes.insert("model".to_string(), Value::String(error.model));
+        attributes.insert("chunks_read".to_string(), Value::from(error.chunks_read));
+        attributes.insert(
+            "sse_events_read".to_string(),
+            Value::from(error.sse_events_read),
+        );
+        attributes.insert("usage_seen".to_string(), Value::Bool(error.usage_seen));
+        attributes.insert(
+            "stream_finished".to_string(),
+            Value::Bool(error.stream_finished),
+        );
+        attributes.insert(
+            "error_message".to_string(),
+            Value::String(error.error_message),
+        );
+        attributes.insert("error_chain".to_string(), Value::String(error.error_chain));
+        self.record("stream_error", attributes);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamErrorTelemetry {
+    pub request_id: String,
+    pub model: String,
+    pub chunks_read: u64,
+    pub sse_events_read: u64,
+    pub usage_seen: bool,
+    pub stream_finished: bool,
+    pub error_message: String,
+    pub error_chain: String,
 }
 
 /// Mask sensitive header values for debug capture logs.

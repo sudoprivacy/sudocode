@@ -256,6 +256,8 @@ impl OpenAiCompatClient {
             usage_recorded: false,
             session_tracer: self.session_tracer().cloned(),
             state: StreamState::new(request.model.clone()),
+            chunks_read: 0,
+            sse_events_read: 0,
         })
     }
 
@@ -335,6 +337,10 @@ pub struct MessageStream {
     usage_recorded: bool,
     session_tracer: Option<telemetry::SessionTracer>,
     state: StreamState,
+    /// Number of HTTP chunks successfully read from the stream.
+    chunks_read: u64,
+    /// Number of SSE events successfully parsed from the stream.
+    sse_events_read: u64,
 }
 
 impl MessageStream {
@@ -358,14 +364,35 @@ impl MessageStream {
                 return Ok(None);
             }
 
-            match self.response.chunk().await? {
-                Some(chunk) => {
+            match self.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    self.chunks_read += 1;
                     for parsed in self.parser.push(&chunk)? {
+                        self.sse_events_read += 1;
                         self.pending.extend(self.state.ingest_chunk(parsed)?);
                     }
                 }
-                None => {
+                Ok(None) => {
                     self.done = true;
+                }
+                Err(error) => {
+                    if let Some(tracer) = &self.session_tracer {
+                        let error_chain = format_error_chain(&error);
+                        tracer.record_stream_error(telemetry::StreamErrorTelemetry {
+                            request_id: self
+                                .request_id
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            model: self.state.model.clone(),
+                            chunks_read: self.chunks_read,
+                            sse_events_read: self.sse_events_read,
+                            usage_seen: self.state.usage.is_some(),
+                            stream_finished: self.state.finished,
+                            error_message: error.to_string(),
+                            error_chain,
+                        });
+                    }
+                    return Err(ApiError::from(error));
                 }
             }
         }
@@ -1609,6 +1636,16 @@ fn normalize_finish_reason(value: &str) -> String {
         other => other,
     }
     .to_string()
+}
+
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut chain = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(err) = source {
+        chain.push(err.to_string());
+        source = err.source();
+    }
+    chain.join(" -> ")
 }
 
 trait StringExt {

@@ -23,22 +23,27 @@ the content.
 
 ## Project mechanics
 
-- [`parity.md`](./parity.md) — what claude-code parity means for `scode`
-  and how it is tracked.
+- Parity mechanism — inlined in [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html)
+  under Goal 2: reference sources (public CC surfaces, the private
+  `sudoprivacy/claude-code` snapshot, runtime-observation combos,
+  CCB, claw-code), the mandatory "CHANGELOG → grep CCB → align"
+  loop, resolution taxonomy, and the sync markers
+  (`LAST_PARITY_SYNC_COMMIT`, `LAST_CCB_REF_VERSION`).
 - [`mock-parity-harness.md`](./mock-parity-harness.md) — the
   deterministic mock backend and the harness that exercises the parity
   scenarios.
 
-## Plans
+## Plan
 
-- [`plans/active/`](./plans/active/) — in-flight design plans.
-- [`plans/archive/`](./plans/archive/) — landed and superseded plans.
-- [`plans/README.md`](./plans/README.md) — index of both.
+- [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html) — single SSOT plan file. Project
+  goals plus the active design detail for each goal (e2e coverage
+  inventory under Goal 1, `!` bash mode + TUI enhancement under
+  Goal 3, etc.). All plan content lives here.
 
 ## See also
 
 - [`../README.md`](../README.md) — project entry, install, quick start.
-- [`../ROADMAP.md`](../ROADMAP.md) — project goals.
+- [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html) — project goals.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — contributor setup and PR
   workflow.
 - [`../rust/README.md`](../rust/README.md) — Cargo workspace map.

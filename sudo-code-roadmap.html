@@ -1,0 +1,1528 @@
+<!DOCTYPE html>
+<!--
+  Sudo Code Roadmap — single SSOT plan file.
+  This is the canonical plan. Edit this file; publish to ShareOne with
+  the curl command in CLAUDE.md when you want to mirror it externally.
+  Self-contained: no build step, no JS bundler, no Markdown
+  transformation. Styled to render well both as `file://` open and as
+  a ShareOne-hosted page.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudo Code Roadmap</title>
+<style>
+  :root {
+    --bg: #0f172a;          /* page background — slate-900 */
+    --surface: #1e293b;     /* cards / TOC / table header — slate-800 */
+    --surface-alt: #172033; /* zebra row — between bg and surface */
+    --fg: #e2e8f0;          /* body text — slate-200 */
+    --muted: #94a3b8;       /* meta / footer — slate-400 */
+    --accent: #60a5fa;      /* links / h3 — blue-400 (softer than 600 on dark) */
+    --accent-dim: rgba(96, 165, 250, 0.12); /* callout fill */
+    --warn: rgba(251, 191, 36, 0.18);       /* callout-warn fill */
+    --warn-fg: #fcd34d;     /* amber-300 — readable on the tinted fill */
+    --code-bg: #1e293b;
+    --border: #334155;      /* slate-700 */
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 60px 28px 100px;
+    line-height: 1.65;
+    font-size: 16px;
+  }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  h2 {
+    font-size: 22px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 2px solid var(--border);
+    color: var(--fg);
+  }
+  h3 { font-size: 18px; margin-top: 32px; color: var(--accent); }
+  h4 { font-size: 16px; margin-top: 24px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .callout {
+    background: var(--accent-dim);
+    border-left: 4px solid var(--accent);
+    padding: 14px 20px;
+    margin: 20px 0;
+    border-radius: 4px;
+  }
+  .callout-warn { background: var(--warn); border-left-color: #f59e0b; color: var(--warn-fg); }
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; font-size: 13px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--surface); font-weight: 600; color: var(--fg); }
+  tbody tr:nth-child(even) td { background: var(--surface-alt); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+  ul li, ol li { margin: 4px 0; }
+  blockquote {
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+    padding: 4px 16px;
+    margin: 16px 0;
+  }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 24px 0 32px;
+  }
+  .toc ol { margin: 8px 0 0 16px; padding: 0; }
+  .toc li { margin: 4px 0; }
+  a { color: var(--accent); }
+  a:hover { text-decoration: underline; }
+  footer { margin-top: 80px; color: var(--muted); font-size: 13px; text-align: center; }
+  pre.mermaid {
+    background: none;
+    border: none;
+    text-align: center;
+    padding: 20px 0;
+    visibility: hidden;
+  }
+  pre.mermaid[data-processed] { visibility: visible; }
+  /* Coverage status badges — use data-status for programmatic access.
+     AI agents: when updating Gap → Covered, change BOTH the data-status
+     attribute AND the cell text. Use querySelectorAll('[data-status="gap"]')
+     to find features still needing tests. */
+  td[data-status="covered"] { color: #34d399; font-weight: 600; }
+  td[data-status="gap"]     { color: var(--warn-fg); }
+  td[data-status="gap-l2"]  { color: var(--muted); }
+  td[data-status="na"]      { color: var(--muted); font-style: italic; }
+  /* Priority badges */
+  td[data-priority="must-have"] { color: #f87171; font-weight: 600; }
+  td[data-priority="nice"]      { color: var(--muted); }
+  td[data-priority="na"]        { color: var(--muted); font-style: italic; }
+</style>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+
+<h1>Sudo Code Roadmap</h1>
+<div class="meta">Single SSOT plan file. Edit this file; publish to ShareOne when mirroring.</div>
+
+<div class="callout">
+  Project goals plus the active design detail for each goal live here.
+  Parity mechanism is now inlined in <a href="#goal-2">Goal 2</a>;
+  the in-process harness reference is at
+  <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>.
+  Day-to-day work (tasks, sprint boards, schedules) lives in PRs,
+  issues, and 1:1 notes.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#what-sudo-code-is">What sudo code is</a></li>
+    <li><a href="#north-star">North star</a></li>
+    <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
+    <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
+    <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
+    <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
+    <li><a href="#working-agreement">Working agreement</a></li>
+    <li><a href="#references">Reference docs</a></li>
+  </ol>
+</div>
+
+<h2 id="what-sudo-code-is">What sudo code is</h2>
+
+<p><code>sudocode</code> (binary: <code>scode</code>) is a Rust-native ACP engine
+for coding agents — the hacker-facing CLI half of the sudo* family.</p>
+
+<table>
+  <thead>
+    <tr><th></th><th>sudowork</th><th>sudocode</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Audience</td><td>Non-technical end users</td><td>Developers, hackers, machines</td></tr>
+    <tr><td>Surface</td><td>GUI / Electron</td><td>CLI / headless / ACP</td></tr>
+    <tr><td>Defaults</td><td>Safe, hand-held, friendly copy</td><td>Composable, terse, full power</td></tr>
+    <tr><td>Relationship</td><td colspan="2">sudowork uses sudocode as one of its execution engines</td></tr>
+  </tbody>
+</table>
+
+<p>The two are tuned for different audiences. The same capability can land
+safely-defaulted in sudowork and exposed as a full knob in sudocode.</p>
+
+<h2 id="north-star">North star</h2>
+
+<ul>
+  <li><strong>Rust-native</strong> — single binary, deterministic shutdown, lean footprint.</li>
+  <li><strong>Model-agnostic</strong> — Anthropic, OpenAI, xAI, Gemini, OAuth subscriptions, arbitrary proxy backends.</li>
+  <li><strong>Headless-first</strong> — ACP over stdio and WebSocket; embeddable as "agent as a service".</li>
+  <li><strong>Safe by design</strong> — explicit permission modes plus a Linux user-namespace sandbox.</li>
+</ul>
+
+<h2 id="goal-1">Goal 1 · Lock the baseline — e2e ≥ 90%</h2>
+
+<p><code>scode</code> CLI e2e coverage reaches and stays at <strong>≥ 90%</strong>
+of the scode-native testable feature surface, green on every
+<code>main</code> commit of sudocode CI.</p>
+
+<h3>Test infrastructure — two layers, one of them counts</h3>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Purpose</th><th>Counts toward 90%?</th><th>Source</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>pty-expect</code> PTY harness</td>
+      <td>Human-fidelity. Drives <code>scode</code> through a real PTY
+      (Unix <code>/dev/pty</code>, Windows ConPTY) and asserts against
+      either the raw stream or a VT100-rendered view. Catches what a
+      real user sees: REPL UX, signals, tab completion, ANSI redraw,
+      cursor placement.</td>
+      <td><strong>Yes — this is the coverage measure.</strong></td>
+      <td><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a></td>
+    </tr>
+    <tr>
+      <td>Mock parity harness</td>
+      <td>Fast, in-process. Scripts a mock Anthropic backend and
+      asserts on the byte stream <code>scode</code> produces. Catches
+      API integration / tool dispatch / streaming regressions without
+      any TTY.</td>
+      <td>No — it is a CI gate, not an e2e measure.</td>
+      <td><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Coverage rule:</strong> a feature is <em>Covered</em> only
+  when <code>pty-expect</code> exercises it end-to-end on
+  <code>main</code> CI. The mock parity harness still runs on every
+  PR as a required gate and catches API / dispatch / streaming
+  regressions early — but it tests the lower half of the stack
+  ("does <code>scode</code> dispatch and stream correctly?") and
+  not the upper half a user actually sees ("does the REPL render it
+  correctly, does Ctrl+C interrupt cleanly, does the prompt redraw
+  without flicker?"). Those upper-half failures are what the 90%
+  goal is about, so only the PTY layer earns coverage credit.
+</div>
+
+<p>This makes the 90% target a strictly higher bar than the previous
+"at least one harness exercises it" rule. It mirrors the same
+anthropomorphic-fidelity argument that drives ai-dev-browser's
+real-Chromium + real-mouse stance for sudowork: the only way to
+catch the failure modes a human will hit is to exercise the same
+surface the human exercises.</p>
+
+<div class="callout">
+  <strong>TestEnv dual-mode:</strong>
+  <code>tests/common/mod.rs</code> provides <code>TestEnv</code>,
+  the single entry point for all PTY tests. It supports
+  <strong>mock</strong> (<code>MockAnthropicService</code>, CI-safe)
+  and <strong>live</strong> (<code>SCODE_TEST_BACKEND=live</code>,
+  real API). All PTY tests MUST go through <code>TestEnv</code>.
+</div>
+
+<h4>PTY test principles</h4>
+
+<ol>
+  <li><strong>Live quality first.</strong> Every assertion must be
+  meaningful against a real API. If an assertion only verifies the
+  mock's canned response (e.g. <code>expect("roundtrip complete")</code>),
+  it's testing the mock, not scode &mdash; delete it.</li>
+
+  <li><strong>DRY: one set of assertions for both modes.</strong>
+  <code>if env.is_mock()</code> should be rare. The same assertion
+  must pass whether the backend is mock or live. Mock is a CI
+  convenience (API key substitute), not a separate test suite.</li>
+
+  <li><strong>Mock does not count toward coverage.</strong> The 90%
+  target counts features exercised through real user journeys. A
+  mock-only test that never runs live is not coverage &mdash; it's a
+  unit test with extra steps. Every test MUST pass in live mode to
+  earn coverage credit.</li>
+
+  <li><strong>Agent trigger verification.</strong> In live mode,
+  verify the LLM selected the correct tools &mdash; not just that
+  scode can execute them. <code>expect("read_file")</code> in the
+  PTY output proves the model's tool-call decision, not just the
+  execution path.</li>
+
+  <li><strong>Disk verification is the strongest assertion.</strong>
+  After a write/edit, check the actual file on disk. This works
+  identically in both modes and catches real bugs that output
+  assertions miss.</li>
+
+  <li><strong>Live tests run serially.</strong>
+  <code>TestEnv</code> holds a <code>LIVE_SERIAL</code> mutex in
+  live mode &mdash; concurrent scode processes hitting the same API
+  key cause rate-limit failures. Mock tests stay parallel.</li>
+</ol>
+
+<p><strong>Test depth convention</strong> (in the Notes column of coverage tables):</p>
+<ul>
+  <li><strong>+error</strong> &mdash; error path also covered (permission denied, file not found, etc.).</li>
+  <li>No tag &mdash; happy path only. When adding tests, check if an error-path test exists; if not, add one.</li>
+</ul>
+
+<h4>Test layer policy: PTY is the bar, unit tests are forbidden</h4>
+
+<p>Most engineering orgs reach for a three-layer pyramid by default
+(unit / integration / e2e). We deliberately do not. The product
+owner's empirical observation, drawn from a year of agent-driven
+development across multiple projects: <strong>unit tests have not
+caught a single real bug in that window</strong>. The bugs that
+shipped were caught either by the e2e harness or by humans using
+the product. Unit tests in this codebase have so far functioned as
+overhead — pure re-statements of the implementation, dragged
+alongside every refactor, paying for themselves in neither caught
+bugs nor refactor confidence.</p>
+
+<p>So the policy for sudocode is:</p>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Status</th><th>When to write</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>PTY (pty-expect)</strong></td>
+      <td><strong>Required CI gate; the only layer that counts toward the 90% e2e coverage metric</strong></td>
+      <td>Every user-facing feature</td>
+    </tr>
+    <tr>
+      <td>Integration (mock harness)</td>
+      <td>Optional — debug accelerator, not a gate</td>
+      <td>When a PTY failure's root cause sits behind a wide blast radius (LLM transport, runtime state machine, ACP wire) and shrinking the bisection distance is worth the file</td>
+    </tr>
+    <tr>
+      <td>Unit</td>
+      <td><strong>Forbidden by rule</strong></td>
+      <td>Don't write them. PRs that add unit tests will be asked to remove them. There is no "exceptional case" carve-out — the rule is the rule, intentionally bright-line so it doesn't erode case by case.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h5>Why we trust this — fast triage replaces fine-grained tests</h5>
+
+<p>The defense most often given for unit tests is failure
+attribution: "PTY tests just say <em>the REPL is wrong somewhere</em>;
+unit tests point at a line." That defense collapses if PTY failures
+are themselves fast to triage. Our substitute is <strong>trace
+quality</strong>:</p>
+
+<ul>
+  <li>Structured logs across runtime / API / tool dispatch so a PTY
+  failure carries enough breadcrumbs to walk back to the offending
+  layer in minutes, not unit-test-precision seconds.</li>
+  <li>Mock harness available on demand for the wide-blast-radius
+  cases (it stays opt-in, not a CI gate, but it lives in the repo).</li>
+  <li>The agent (sudocode itself) doing the debugging — the assumed
+  developer workflow on this project is agent-assisted, and an
+  agent reading a structured trace converges as fast on root cause
+  as a human reading a failing unit test name.</li>
+</ul>
+
+<h5>What we give up — explicit, not hidden</h5>
+
+<ul>
+  <li><code>cargo test --workspace</code> wall-clock no longer
+  benefits from a unit layer. The runtime is dominated by PTY
+  tests. We accept this; sub-second inner-loop feedback is not the
+  workflow we are optimising for.</li>
+  <li>Rare error branches (panic recovery, edge-case config parse
+  errors) get exercised only when a PTY scenario reaches them.
+  Branches the PTY scenarios never touch will silently rot. We
+  accept this; if those branches never trip in real use either,
+  the rot is harmless, and if they do trip we will see it as a
+  user-visible failure and write a PTY scenario.</li>
+  <li>Internal refactors lose fine-grained behaviour verification.
+  We accept this; PTY tests describe the contract the user actually
+  cares about, and refactors that don't move the user-visible
+  contract are exactly the ones unit tests would have re-stated
+  rather than verified.</li>
+</ul>
+
+<p>This is a deliberate, owner-blessed deviation from the standard
+testing pyramid, and the rule is bright-line on purpose. "We'll
+allow it just this once because the input space is combinatorial"
+is exactly how the unit layer reappears, accumulates, and starts
+costing refactor velocity again. So: no unit tests, no exceptions.
+If a future maintainer wants to reopen this, the burden is a
+concrete bug that a unit test would have caught and a PTY scenario
+would not — and a separate ROADMAP edit to change the rule before
+the test lands, not the test landing first.</p>
+
+<h3>Feature inventory</h3>
+
+<p>Mirrored from the original sudowork-side coverage tracker
+(<code>sudowork/docs/scode-e2e-coverage.md</code>) and <strong>status
+reset</strong> for the new sudocode-side harness. The previous sudowork-YAML
+coverage drove features through the sudowork UI (mouse / Electron / ACP);
+the new infra exercises them inside the sudocode crate itself, so
+coverage starts fresh and is tracked here as the single source.</p>
+
+<p>Status values (use <code>data-status</code> attribute for programmatic access):</p>
+<ul>
+  <li><strong>Covered</strong> — PTY test exists on <code>main</code> that passes in <strong>live mode</strong> (<code>SCODE_TEST_BACKEND=live</code>). Mock-only tests do not earn Covered status.</li>
+  <li><strong>Gap</strong> — needs a test.</li>
+  <li><strong>N/A</strong> — out of scope for <code>scode</code> itself.</li>
+</ul>
+
+<p>Additional <code>data-*</code> attributes on Status cells:</p>
+<ul>
+  <li><code>data-live-verified="yes"</code> — test has been run and passed in live mode against a real API. AI agents: when marking a feature Covered, also set this attribute after verifying live mode passes.</li>
+  <li><code>data-live-verified="no-api"</code> — test does not call an API (e.g. <code>system-prompt</code> subcommand), so live/mock distinction is N/A.</li>
+  <li>Absent — test exists but live mode not yet verified.</li>
+</ul>
+
+<p><strong>Hacker priority</strong> (the new column):</p>
+<ul>
+  <li><strong>must-have</strong> — the hacker workflow blocks without it: invocation, streaming feedback, mid-flight cancel, bash/edit/grep, <code>/commit</code>, <code>/pr</code>, <code>/resume</code>, <code>--output-format json</code>.</li>
+  <li><strong>nice</strong> — L2-deferred surface (LSP, sub-agents, cron, MCP plugins): real features, not on the critical path for e2e &ge; 90%.</li>
+  <li><strong>N/A</strong> — sudowork-UI / credential-injection concerns; never enters <code>scode</code>'s coverage denominator.</li>
+</ul>
+
+<p>The aggregated tier view (P0/P1/P2/P3 across categories) still lives in <a href="#priority-sequencing">Priority sequencing</a>; the per-row column above is the hacker-priority lens &mdash; one decision per feature, not one decision per tier.</p>
+
+<h4>1. Core conversation</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Single-turn prompt</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::single_turn_exits_after_response</code></td><td><code>scode "What is 2+2?"</code> → response contains "4" → exit 0. Live: agent trigger verified.</td></tr>
+    <tr><td>Multi-turn context</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_turn_references_prior</code></td><td>REPL: send name "Alice" → response greets → ask name back → response recalls "Alice". Live: context preservation verified.</td></tr>
+    <tr><td>Streaming response</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::streaming_tokens_render_incrementally</code></td><td>Multi-word text appears in terminal before EOF — proves streaming flushed incrementally.</td></tr>
+    <tr><td>Multi-tool turn roundtrip</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::multi_tool_roundtrip</code></td><td>read_file + grep_search in one turn → final response references results. Live: agent trigger — tool names verified in PTY output.</td></tr>
+    <tr><td>Graceful cancel (Ctrl+C)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::sigint_cancels_streaming</code></td><td>Ctrl+C during bash tool → process exits, no hang.</td></tr>
+    <tr><td>Graceful cancel (ESC)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_core_conversation::esc_cancels_streaming</code></td><td>ESC during bash tool → same abort as Ctrl+C. <strong>Tech debt:</strong> no <a href="#cancel-context">activation context guards</a>.</td></tr>
+  </tbody>
+</table>
+
+<h4>1b. Transport (ACP)</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>ACP stdio transport</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>ACP = Agent Client Protocol for hosting external agents (CC/Codex). Infra surface, not user-facing. Integration-covered by <code>acp_integration.rs</code>.</td></tr>
+    <tr><td>ACP WebSocket transport</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Protocol-level, integration is the right layer</td></tr>
+    <tr><td>ACP session lifecycle (EOF / orphan)</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_integration.rs</code></td></tr>
+    <tr><td>Live API smoke (real Anthropic)</td><td data-priority="na">N/A</td><td data-status="na">N/A</td><td>—</td><td>Covered by <code>acp_live_smoke.rs</code>; runs only on main with <code>CLAUDE_CODE_OAUTH_TOKEN</code>; live-gate, not a coverage-denominator concern</td></tr>
+  </tbody>
+</table>
+
+<h4>2. Tool usage — file operations</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>read_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write_file → read_file → disk verify</td></tr>
+    <tr><td><code>write_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::write_then_read_back</code></td><td>write content → verify on disk. <strong>+error</strong>: <code>pty_error_paths::write_file_denied_in_read_only</code></td></tr>
+    <tr><td><code>edit_file</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::edit_then_verify_on_disk</code></td><td>Pre-create → edit alpha→omega → verify old gone, new present, untouched lines preserved. <strong>+error</strong>: <code>pty_error_paths::edit_file_not_found</code></td></tr>
+    <tr><td><code>glob_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Create 3 files → glob *.txt → grep 'parity' → response references matches</td></tr>
+    <tr><td><code>grep_search</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_file_operations::glob_then_grep_discovery</code></td><td>Same workflow as glob — both tools exercised in one multi-step test</td></tr>
+  </tbody>
+</table>
+
+<h4>3. Tool usage — execution</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>bash</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::bash_stdout_roundtrip</code>, <code>bash_creates_file_and_disk_verify</code></td><td>LLM tool. Agent trigger + stdout roundtrip + disk verify (live: LLM generates command, file created on disk). <strong>+error</strong>: <code>bash_denied_in_read_only</code>, <code>bash_command_fails_gracefully</code></td></tr>
+    <tr><td>REPL (persistent Python/JS subprocess)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Persistent subprocess, different from one-shot bash.</td></tr>
+    <tr><td>PowerShell</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Windows-only path.</td></tr>
+    <tr><td><code>NotebookEdit</code> (Jupyter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC has <code>NotebookEditTool</code>. Needs <code>.ipynb</code> fixture.</td></tr>
+  </tbody>
+</table>
+
+<h4>4. Tool usage — search &amp; web</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>WebSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Need to verify if CC's web search has an externally usable API or if we need our own provider.</td></tr>
+    <tr><td><code>WebFetch</code> (URL → extract)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Related to Browser (below) — WebFetch is headless fetch, Browser is full Chromium.</td></tr>
+    <tr><td>Browser (ai-dev-browser)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC parity with "Claude in Chrome". <code>ai-dev-browser</code> already integrated in sudowork; when sudocode integrates, remove duplicate from sudowork per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
+  </tbody>
+</table>
+
+<h4>5. Tool usage — code intelligence</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>LSP <code>goToDefinition</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Needs mock language server</td></tr>
+    <tr><td>LSP <code>findReferences</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>hover</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td>LSP <code>documentSymbol</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
+    <tr><td><code>ToolSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Search for tools by keyword</td></tr>
+  </tbody>
+</table>
+
+<h4>6. Tool usage — planning &amp; structured</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
+    <tr><td><code>TodoWrite</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Task list management</td></tr>
+    <tr><td><code>AskUserQuestion</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
+    <tr><td><code>StructuredOutput</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Return structured data</td></tr>
+    <tr><td><code>Sleep</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Low priority</td></tr>
+  </tbody>
+</table>
+
+<h4>7. Tool usage — background &amp; parallel</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Strict CC parity required — study latest CC design. When implemented, also introduce <a href="#cancel-architecture">CancelDispatcher</a> and <a href="#cancel-context">ESC context guards</a>.</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Background task management. Strict CC parity.</td></tr>
+    <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Worker lifecycle. Strict CC parity.</td></tr>
+    <tr><td>Teams (parallel sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Team coordination. Strict CC parity.</td></tr>
+    <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>sudowork has a cron implementation; when scode ships this, sudowork's becomes a wrapper/UI. Per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
+  </tbody>
+</table>
+
+<h4>8. Git workflow</h4>
+
+<div class="callout">
+  <strong>CC parity note:</strong> CC does NOT expose <code>/commit</code> or
+  <code>/pr</code> as public slash commands. They exist only as internal
+  Anthropic-employee Skills (gated on <code>USER_TYPE=ant</code>). For
+  external users, CC's system prompt teaches the LLM to use bash
+  <code>git commit</code> / <code>gh pr create</code> directly with
+  safety protocols (no force push, no amend, proper message format).
+  <br><br>
+  <strong>Decision for scode:</strong> The underlying git operations
+  (commit, PR, diff) are must-have because the LLM does them via bash.
+  Whether we also ship <code>/commit</code> as a user-facing Skill
+  shortcut is a separate UX decision — not required for CC parity.
+</div>
+
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Git commit via bash</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_bash_execution::git_init_write_commit_verify</code></td><td>LLM uses bash <code>git init</code> / <code>git add</code> / <code>git commit</code>. Live: disk verify .git/ + git log.</td></tr>
+    <tr><td>PR creation via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>gh pr create</code>. P0 core workflow.</td></tr>
+    <tr><td>Diff via bash</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM uses bash <code>git diff</code>.</td></tr>
+    <tr><td><code>/commit</code> Skill shortcut</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Optional UX shortcut. CC has this only for internal users. Not required for parity.</td></tr>
+    <tr><td><code>/pr</code> Skill shortcut</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>Optional UX shortcut. CC: <code>/commit-push-pr</code> (internal only).</td></tr>
+  </tbody>
+</table>
+
+<h4>9. Session management</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Session auto-save</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Persists across turns</td></tr>
+    <tr><td>Session JSONL persistence (model + transcript)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_live_smoke.rs</code> + <code>resume_slash_commands.rs</code>; PTY pending — assistant messages carry model field, transcript replayable</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — send → close → resume → verify</td></tr>
+    <tr><td><code>--resume latest</code> shortcut</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — restores most-recent managed session without an explicit id</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON + plaintext modes</td></tr>
+    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>undo_e2e.rs</code>; PTY pending — restore after edit, delete created file, nothing-to-undo, hook-feedback robustness, JSON output</td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td>Auto-compact trigger</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — runtime-initiated compaction when context fills, distinct from manual <code>/compact</code></td></tr>
+  </tbody>
+</table>
+
+<h4>10. Configuration &amp; discovery</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
+    <tr><td>Permission prompt flow (approve / deny)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
+    <tr><td><code>/auth</code> (switch auth mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Switch between accounts (e.g. different CC accounts). Handy for hackers.</td></tr>
+    <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
+    <tr><td><code>/mcp</code> (list / show servers)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. MCP may be approaching deprecation; keep nice. Add PTY tests if code is complete.</td></tr>
+    <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Plugin mechanism — a type of skill extension. Add PTY tests if code is complete.</td></tr>
+    <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Exercised by <code>system_prompt_command.rs</code>. Add PTY tests if code is complete.</td></tr>
+    <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Integration-covered by <code>mock_parity_harness.rs</code>. Add PTY tests if code is complete.</td></tr>
+    <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::config_renders_json</code></td><td>cwd + config files in JSON output.</td></tr>
+    <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::output_format_json_contract</code></td><td>Contract test: status, doctor, version, sandbox all produce JSON with "kind" field.</td></tr>
+    <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
+    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
+    <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::help_shows_usage_and_subcommands</code>, <code>version_renders_json</code>, <code>system_prompt_renders</code></td><td>--help, version, system-prompt all verified via PTY.</td></tr>
+  </tbody>
+</table>
+
+<h4>13. Memory system</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Memory read + system prompt injection</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_entries_injected_into_system_prompt</code></td><td>4 entry types (user, feedback, project, reference), MEMORY.md index, SystemPromptBuilder integration</td></tr>
+    <tr><td>Memory resilience (missing / malformed)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_resilient_on_missing_or_malformed</code></td><td>Graceful fallback on bad frontmatter, missing files</td></tr>
+    <tr><td>Memory budget truncation</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_budget_truncates_large_entries</code></td><td>Large entries truncated to fit context budget</td></tr>
+    <tr><td>Memory write path ("remember X" / "forget X")</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="pending"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Permission carve-out auto-allows writes to memory dir (PR #231). Full auto-memory system prompt instructs model to write/delete directly (PR #236).</td></tr>
+    <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="pending"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Opens instruction files (AGENTS.md) in $EDITOR. CC parity. PR #231.</td></tr>
+    <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_memory::memory_project_scoped_path</code>, <code>pty_memory::memory_directory_auto_created</code></td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: <code>~/.scode/projects/&lt;slug&gt;/memory/</code>. PR #229.</td></tr>
+    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="pending"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Full CC auto-memory instructions (~3500 chars) ported from claude-trace capture of CC v2.1.87. PR #236.</td></tr>
+    <tr><td>Context window management</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Study how CC manages context budget across system prompt + memory + conversation. Some models only have 200K — need discard policy when pre-loaded content exceeds budget.</td></tr>
+    <tr><td>Session memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: background subagent extracts structured notes per-session. Requires forked-agent infra.</td></tr>
+    <tr><td>Background extract-memories agent</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: separate post-sampling subagent proactively mines conversation for memory-worthy facts.</td></tr>
+    <tr><td>Team memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: per-type scope guidance. Enterprise feature.</td></tr>
+    <tr><td>Agent memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: spawned subagents auto-read/write their own memory dirs. Depends on Agent tool infra.</td></tr>
+  </tbody>
+</table>
+
+<h4>11. Diagnostics</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>/doctor</code></td><td data-priority="nice">nice</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::doctor_renders_json</code></td><td>Diagnostic checks + API key probes in JSON.</td></tr>
+    <tr><td><code>/status</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::status_renders_json</code>, <code>status_renders_text</code></td><td>Model + permissions in both JSON and text output.</td></tr>
+    <tr><td><code>/sandbox</code></td><td data-priority="nice">nice</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::sandbox_renders_json</code></td><td>Isolation status in JSON.</td></tr>
+    <tr><td><code>/cost</code> (token usage)</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td>Prompt-response token usage</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Visible after each turn — hackers track spend.</td></tr>
+  </tbody>
+</table>
+
+<h4>12. Auth</h4>
+<table>
+  <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Subscription auth (CC OAuth)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Uses injected <code>CLAUDE_CODE_OAUTH_TOKEN</code></td></tr>
+    <tr><td>Proxy auth (sudorouter)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Via <code>ANTHROPIC_API_KEY</code> injection</td></tr>
+    <tr><td>API key auth</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>PR #184: <code>ANTHROPIC_AUTH_TOKEN</code> accepted as alias for <code>ANTHROPIC_API_KEY</code> (CC npm CLI convention), threaded through all auth read sites via <code>read_anthropic_api_key</code> helper.</td></tr>
+    <tr><td><code>scode login</code> (CLI)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+    <tr><td><code>scode logout</code> (CLI)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
+  </tbody>
+</table>
+
+<h3>Coverage denominator (the 90% target)</h3>
+
+<table>
+  <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In denominator</th><th>Covered</th></tr></thead>
+  <tbody>
+    <tr><td>Core Conversation</td><td>6</td><td>0</td><td>0</td><td>6</td><td><strong>6</strong></td></tr>
+    <tr><td>Transport (ACP)</td><td>4</td><td>1</td><td>3</td><td>0</td><td>0</td></tr>
+    <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
+    <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td><strong>1</strong></td></tr>
+    <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
+    <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
+    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
+    <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>3</strong></td></tr>
+    <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
+    <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
+    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>26</th></tr>
+  </tbody>
+</table>
+
+<p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
+features. <strong>Current coverage: 26 / 80 (32%).</strong>
+<code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
+but do not count toward the 90% target.</p>
+
+<p>The numerator counts <strong>PTY-fidelity tests only</strong>, per the test
+policy: integration tests (kept for protocol-layer surface like ACP and
+the mock parity harness) and live-API smoke do not count toward the
+90% — those are "Integration-covered" with the corresponding feature
+still marked <strong>Gap</strong> until a PTY test exists. This is how
+multiple Goal 1 rows show "Integration-covered by &lt;file.rs&gt;; PTY
+pending" — they are real feature surface a heavy user touches, but the
+coverage measure waits on PTY.</p>
+
+<h3 id="priority-sequencing">Priority sequencing</h3>
+
+<table>
+  <thead><tr><th>Tier</th><th>Items</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>P0 — core differentiators</strong></td>
+      <td><code>/commit</code>, <code>/pr</code> (git workflow);
+      EnterPlanMode/ExitPlanMode → execute; <code>edit_file</code>
+      text-replace verification; <strong>true async cancel</strong>
+      (interrupt in-flight API mid-request, not only between iterations)</td>
+    </tr>
+    <tr>
+      <td><strong>P1 — high-value tools</strong></td>
+      <td><code>WebFetch</code>, sub-agents (<code>Agent</code>),
+      background tasks (<code>TaskCreate</code> + <code>TaskGet</code>)
+      — these three are L2 deferred but earn early follow-up</td>
+    </tr>
+    <tr>
+      <td><strong>P2 — session &amp; config</strong></td>
+      <td><code>/resume</code>, permission modes, <code>/doctor</code>
+      through the REPL</td>
+    </tr>
+    <tr>
+      <td><strong>P3 — advanced (post-Q2)</strong></td>
+      <td>LSP code navigation, REPL persistent sessions, cron
+      scheduling, MCP / Skills / Plugins lifecycle</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The async-cancel item under P0 is a <em>behavioural</em> P0, not just a
+coverage gap: today the runtime only checks
+<code>hook_abort_signal.is_aborted()</code> between API call iterations,
+so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
+not interrupt the request &mdash; it takes effect only on the next loop
+iteration. Cancel needs to flow through to the streaming response path
+(e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
+<code>sleep 999</code> + API call is truly interruptible.</p>
+
+<h4 id="cancel-architecture">Cancel architecture &mdash; three semantics (CC parity)</h4>
+
+<p>CC's <code>useCancelRequest</code> dispatches three distinct cancel
+semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
+
+<table>
+  <thead><tr><th>Priority</th><th>Semantic</th><th>CC implementation</th><th>scode status</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><strong>Cancel running turn</strong> &mdash; abort streaming or in-flight tool</td><td><code>abortController.abort('user-cancel')</code></td><td><strong>Done</strong> (PR #223): <code>abort_signal.abort()</code> via crossterm event loop</td></tr>
+    <tr><td>2</td><td><strong>Pop command queue</strong> &mdash; cancel next queued command when idle</td><td><code>popCommandFromQueue()</code></td><td>Gap &mdash; scode has no command queue yet</td></tr>
+    <tr><td>3</td><td><strong>Kill sub-agent + exit view</strong> &mdash; in teammate view, kill background agents</td><td><code>killAllAgentsAndNotify(); exitTeammateView()</code></td><td>Gap &mdash; scode has no sub-agents yet</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Tech debt: CancelDispatcher.</strong>
+  Today scode hardcodes cancel semantic 1 (abort turn) in
+  <code>HookAbortMonitor</code>. When sub-agents or command queues land,
+  introduce a <code>CancelDispatcher</code> that receives the keypress
+  and dispatches to the right semantic based on runtime state (is a
+  turn running? is a command queued? are we in teammate view?). Ship
+  the dispatcher in the same PR as the first feature that needs it
+  &mdash; not before.
+</div>
+
+<h4 id="cancel-context">ESC vs Ctrl+C context guards (CC parity gap)</h4>
+
+<p>CC distinguishes two activation contexts for cancel keys:</p>
+
+<table>
+  <thead><tr><th>Key</th><th>CC context</th><th>CC guards (suppressed when)</th><th>scode current</th></tr></thead>
+  <tbody>
+    <tr><td>ESC</td><td>Chat context</td><td>VIM insert mode, overlay active, help open, transcript view, bash/background input with text</td><td>No guards &mdash; always fires during turn</td></tr>
+    <tr><td>Ctrl+C</td><td>Global context</td><td>Idle at prompt (double-press to exit instead)</td><td>No guards &mdash; always fires during turn</td></tr>
+  </tbody>
+</table>
+
+<div class="callout-warn callout">
+  <strong>Tech debt: activation context.</strong>
+  The current simplification (both keys equivalent, no guards) is correct
+  because scode has no VIM mode, overlays, or sub-agent views. When any
+  of these land, ESC must be suppressed in those contexts &mdash; otherwise
+  pressing ESC to exit VIM insert mode would cancel the turn. Add context
+  guards in the same PR as the first gated context (likely VIM edit mode
+  or interactive tool confirmation overlay).
+</div>
+
+<h2 id="goal-2">Goal 2 · claude-code parity</h2>
+
+<p>Every feature gap between <code>scode</code> and
+<code>anthropics/claude-code</code> carries a written resolution —
+<code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> /
+<code>[N/A]</code> / <code>[OBSERVE]</code> — with a one-line rationale.</p>
+
+<h3>Parity scope</h3>
+<p>Four dimensions, ordered by visibility to a <code>scode</code> user:</p>
+<ol>
+  <li><strong>Tool surface</strong> — the set of tools the agent can call and the shape of their request / response payloads.</li>
+  <li><strong>Slash commands</strong> — the <code>/</code>-prefixed commands at the REPL and their behaviors.</li>
+  <li><strong>Behavioral semantics</strong> — output truncation, session compaction, token counting, cost tracking, retry strategy, permission enforcement.</li>
+  <li><strong>Configuration surface</strong> — <code>.scode.json</code> file layout, key names, precedence rules.</li>
+</ol>
+
+<h3>Reference sources</h3>
+
+<h4>Tier 1 — sources of truth (multiple, peer-priority)</h4>
+
+<p>Each Tier 1 source is a <em>partial truth</em>; none alone is enough. Cross-reference them.</p>
+
+<table>
+  <thead><tr><th>Source</th><th>Why peer-priority Tier 1</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Public surfaces of <code>anthropics/claude-code</code></td>
+      <td>Public CHANGELOG, the <code>@anthropic-ai/claude-code</code> npm bundle (live tool list, slash commands, bundled prompt resources), and the official docs at <code>docs.claude.com</code>. Feature-level signal — upstream source itself is private, so no commit-level fidelity.</td>
+    </tr>
+    <tr>
+      <td><code>sudoprivacy/claude-code</code> (private snapshot)</td>
+      <td>The CC source-leak snapshot, kept private per community rules. As of the snapshot date it <em>is</em> CC's source of truth; reading it inside the private repo is fine. <strong>Current alignment plan:</strong> walk the snapshot-date CC surface one entry at a time and checkpoint where <code>scode</code> matches and where we deliberately diverge.</td>
+    </tr>
+    <tr>
+      <td>Runtime-observation combo — locally-run CC + <code>cchistory</code> + <code>claude-trace</code></td>
+      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction), capture history with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>), and inspect tokens-in / tokens-out with <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> from <a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a>. Behavioral facts, not source-level — but observed truth nonetheless.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>Tier 2 — behavioral reference: <code>claude-code-best/claude-code</code> (CCB)</h4>
+
+<p>CCB is a TypeScript reconstruction of Claude Code that aims for high source-level fidelity. It is <strong>our running approximation of what CC actually does</strong> when CHANGELOG signal alone is too coarse.</p>
+
+<p><strong>Standing assumption.</strong> CCB is close enough to upstream that reading its source informs our understanding. The assumption is approximate, not absolute — when CCB and CHANGELOG diverge, CHANGELOG wins.</p>
+
+<p><strong>Mandatory workflow.</strong> Every parity decision based on a CHANGELOG entry <em>also</em> opens CCB on the relevant code path — including the entries that look obvious. The nuance is usually in the path we did not anticipate.</p>
+
+<pre><code>CC CHANGELOG entry
+        │
+        ▼
+  grep CCB source for the feature
+        │
+        ▼
+  align understanding ── any surprise? → revisit the resolution
+        │
+        ▼
+  pick resolution tag (see Resolution taxonomy below)</code></pre>
+
+<p><strong>Where to grep CCB</strong> (monorepo-shaped TypeScript):</p>
+<ul>
+  <li><code>src/</code> — agent loop, REPL, tool dispatch, slash commands, system prompt.</li>
+  <li><code>packages/</code> — modular components (tool implementations, MCP, hooks).</li>
+  <li><code>docs/</code> — Mintlify-based feature documentation.</li>
+</ul>
+
+<p>For a CHANGELOG entry like <em>"added <code>/cd</code> command to move a session to a new working directory,"</em> searches that work:</p>
+
+<pre><code># In a local CCB clone:
+grep -rn -E "/cd\b|case 'cd'|slash.*cd" src/ packages/
+grep -rn "working directory" docs/ src/</code></pre>
+
+<p><strong>What CCB is not.</strong> CCB ships under "learning / research only" terms. It is <strong>not</strong> a cherry-pick source for our Rust tree — citations in commit messages are welcome ("matches the behavior in CCB <code>src/...</code>"), but Rust code is re-implemented from understanding.</p>
+
+<p><strong>When CCB does not help.</strong> If CCB itself does not implement the feature (it lags upstream by some window), record that fact in the resolution — the gap stays anchored to the CC CHANGELOG entry and the resolution carries an <code>[OBSERVE]</code> tag pending more signal.</p>
+
+<h4>Tier 3 — optional cherry-pick source: <code>ultraworkers/claw-code</code></h4>
+
+<p><code>ultraworkers/claw-code</code> is a Rust port of the same family. Where its implementation of an overlapping feature fits <code>scode</code>'s shape, the commit can be cherry-picked. The relationship is <em>optional</em>: claw-code is a candidate Rust-side source, not upstream-of-truth. Methodology for cherry-pick triage lives in <code>scripts/triage_claw_code.py</code>; the current cycle report is at <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
+
+<h3>Resolution taxonomy</h3>
+
+<p>Every parity gap carries a one-word tag and a short rationale.</p>
+
+<table>
+  <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>[BUILD]</code></td><td>The gap will be closed by implementing the feature in <code>scode</code>.</td></tr>
+    <tr><td><code>[CHERRY-PICK]</code></td><td>The gap will be closed by lifting a <code>claw-code</code> commit.</td></tr>
+    <tr><td><code>[SKIP]</code></td><td>Closed by intent — <code>scode</code> provides the capability differently, the feature is replaced upstream, or it does not apply.</td></tr>
+    <tr><td><code>[N/A]</code></td><td>The gap belongs to a layer <code>scode</code> does not implement (e.g. npm packaging).</td></tr>
+    <tr><td><code>[OBSERVE]</code></td><td>Left open while waiting on more signal — how <code>claw-code</code> ports the feature, whether CCB has implemented it yet, whether real users hit it.</td></tr>
+  </tbody>
+</table>
+
+<h3>Sync markers</h3>
+
+<p>Two marker files at the repo root anchor each source to a point in time:</p>
+
+<table>
+  <thead><tr><th>File</th><th>Source</th><th>What it records</th></tr></thead>
+  <tbody>
+    <tr><td><code>LAST_PARITY_SYNC_COMMIT</code></td><td><code>ultraworkers/claw-code</code> HEAD</td><td>The claw-code SHA the last cherry-pick cycle was triaged against.</td></tr>
+    <tr><td><code>LAST_CCB_REF_VERSION</code></td><td><code>claude-code-best/claude-code</code> HEAD</td><td>The CCB SHA our behavioral references currently point at. Bumped when we re-clone CCB for a new cycle.</td></tr>
+  </tbody>
+</table>
+
+<p>Sync markers are mechanical state used by tooling and triage scripts; the gap inventory and per-feature resolutions live alongside their owning issues, PRs, and design notes.</p>
+
+<h3>Comparison window</h3>
+
+<p>The comparison window for the current cycle starts at <code>anthropics/claude-code</code> releases shipped on or after <strong>2026-01-01</strong>.</p>
+
+<h3>Measurement</h3>
+
+<p>The e2e coverage half of parity (<a href="#goal-1">Goal 1</a>) is exercised by the mock parity harness described in <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>. The harness runs against the <code>scode</code> binary in a clean environment and covers the scode-native testable feature surface.</p>
+
+<h3>Tool repository</h3>
+
+<p><a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a> is a toolset around CC observation — <code>claude-trace</code> is one of its apps, but the rest of the monorepo is worth scanning for other tools we can fold into this workflow.</p>
+
+<h3>Case study: <code>!</code> bash mode</h3>
+
+<p>The first design write-up under this rule — the <code>!</code> bash mode section inside <a href="#goal-3">Goal 3</a> — made the value concrete:</p>
+<ul>
+  <li>Validated that our <code>Stdio::null()</code> choice for the bash spawn path is functionally equivalent to CC's <code>pipe</code> choice for the current scope, and recorded what the difference unlocks if we ever want interactive passthrough.</li>
+  <li>Identified CC's <code>pwd -P &gt;| &lt;track_file&gt;</code> pattern as the right blueprint for the <code>!cd</code> cwd-persistence requirement in <a href="#goal-3">Goal 3</a>.</li>
+  <li>Captured six adjacent CC patterns out of scope for the current cycle but each with a recorded trigger condition for when we should revisit them.</li>
+</ul>
+<p>None of these would have surfaced from CHANGELOG entries alone. Every design write-up for a feature with parity intent goes through the same loop.</p>
+
+<h3>Quick reference: where each source enters a parity decision</h3>
+
+<table>
+  <thead><tr><th>Step</th><th>Source</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>1. Identify the gap</td><td>Tier 1 — public CC surfaces / private snapshot / runtime combo</td><td>List the CHANGELOG entry, the snapshot-date surface delta, or the observed behavior.</td></tr>
+    <tr><td>2. Align understanding</td><td>Tier 2 (CCB grep)</td><td>Open CCB, read the actual implementation, confirm intent.</td></tr>
+    <tr><td>3. Pick the resolution</td><td>All tiers</td><td>Decide <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> / <code>[N/A]</code> / <code>[OBSERVE]</code>.</td></tr>
+    <tr><td>4. Execute</td><td>Tier 3 if <code>[CHERRY-PICK]</code>; otherwise hand-rolled</td><td>Apply the resolution.</td></tr>
+    <tr><td>5. Anchor</td><td><code>LAST_PARITY_SYNC_COMMIT</code> / <code>LAST_CCB_REF_VERSION</code></td><td>Update marker files when the cycle closes.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="goal-3">Goal 3 · Ship features real users miss</h2>
+
+<p>When an actual user — internal or external — hits a sharp edge in
+<code>scode</code> that <code>claude-code</code> has already smoothed,
+the feature lands here as a committed item.</p>
+
+<table>
+  <thead><tr><th>Feature</th><th>Source signal</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>!</code> bash mode (inline shell from prompt)</td>
+      <td>武鹏 — 2026-06-10 (内部用户)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Memory system — CC parity completion</h3>
+
+<p>PR #216 shipped the read-only foundation (loader, parser, prompt
+injection, 3 PTY tests). The following gaps remain for full CC parity:</p>
+
+<table>
+  <thead><tr><th>Gap</th><th>CC behavior</th><th>scode status</th></tr></thead>
+  <tbody>
+    <tr><td><code>/memory</code> slash command</td><td>Opens instruction files in <code>$EDITOR</code></td><td>Done — PR #231. Opens AGENTS.md via <code>$VISUAL</code> &gt; <code>$EDITOR</code> &gt; <code>vi</code>.</td></tr>
+    <tr><td>Write path</td><td>LLM writes memory files via the <code>Write</code> tool; also responds to "remember X" / "forget X"</td><td>Done — PR #231 (permission carve-out) + PR #236 (system prompt instructs model to write/delete directly).</td></tr>
+    <tr><td>System prompt instructions</td><td>Detailed instructions telling the LLM when/how to save, update, and delete memory</td><td>Done — PR #236. Full CC auto-memory instructions (~3500 chars) ported from claude-trace capture of CC v2.1.87.</td></tr>
+    <tr><td>Project-scoped memory</td><td><code>~/.claude/projects/&lt;slug&gt;/memory/</code> — isolated per workspace</td><td>Done — <code>~/.scode/projects/&lt;slug&gt;/memory/</code>, PTY tests <code>memory_project_scoped_path</code> + <code>memory_directory_auto_created</code> (PR #229)</td></tr>
+    <tr><td>Session memory</td><td>Background subagent extracts structured notes per-session into <code>summary.md</code> (9 sections, fires after token/tool-call thresholds). Used for compaction. Behind <code>tengu_session_memory</code> flag.</td><td>Gap — requires forked-agent infrastructure</td></tr>
+    <tr><td>Background extract-memories agent</td><td>Separate post-sampling subagent with Read/Grep/Glob/Edit/Write tools, parallelized 2-turn strategy. Behind <code>tengu_passport_quail</code> flag.</td><td>Gap — proactively mines conversation for memory-worthy facts</td></tr>
+    <tr><td>Team memory</td><td><code>&lt;autoMemPath&gt;/team/</code> subdirectory with combined prompt and per-type scope guidance. Behind <code>tengu_herring_clock</code> flag.</td><td>Gap — enterprise feature, low priority</td></tr>
+    <tr><td>Agent memory</td><td>Spawned subagents auto-read/write their own memory dirs (<code>/agent-memory/</code>, <code>/agent-memory-local/</code>)</td><td>Gap — depends on Agent tool infra</td></tr>
+    <tr><td>Memory prefetch via attachments</td><td>Behind <code>tengu_moth_copse</code> — memory files surfaced as attachments instead of system prompt injection</td><td>Gap — optimization, not functional</td></tr>
+  </tbody>
+</table>
+
+<h3>System prompt — CC alignment</h3>
+
+<p>The scode system prompt is assembled by <code>SystemPromptBuilder</code>
+(Rust, <code>runtime/src/prompt.rs</code>). CC's is assembled in TypeScript
+across <code>main.tsx</code>, <code>memdir.ts</code>,
+<code>memoryTypes.ts</code>, etc. The latest CC system prompt can be
+captured via <code>claude-trace</code> (Tier-1 runtime-observation source)
+and compared against <code>scode system-prompt</code> output.</p>
+
+<p><strong>Alignment methodology:</strong> capture CC prompt via
+<code>claude-trace</code> → diff against <code>scode system-prompt</code>
+→ track deltas per section. Each major section (intro, system, doing tasks,
+actions, tools, tone, output efficiency, auto memory, environment) gets its
+own row.</p>
+
+<table>
+  <thead><tr><th>Section</th><th>CC status (v2.1.87)</th><th>scode status</th></tr></thead>
+  <tbody>
+    <tr><td>Auto memory instructions</td><td>~3500 chars, 4-type taxonomy, write/forget, staleness verification</td><td>Done — ported 1:1 from claude-trace capture (PR #236)</td></tr>
+    <tr><td>Intro / identity</td><td>"You are Claude Code"</td><td>"You are Sudo Code" — aligned</td></tr>
+    <tr><td>System / tools / tasks / actions / tone / output</td><td>CC-specific sections</td><td>Gap — partially aligned, needs section-by-section diff</td></tr>
+    <tr><td>Environment context</td><td>Model family, cwd, date, platform, git status</td><td>Aligned — same structure</td></tr>
+  </tbody>
+</table>
+
+<h3>Nexus VFS migration — memory &amp; state paths</h3>
+
+<p>When scode runs inside nexusd as a linked Rust crate (not a subprocess),
+filesystem paths for memory and state should redirect to nexus VFS paths.
+The current path abstraction (<code>default_memory_dir_for</code>) is
+already clean enough to swap the backing store.</p>
+
+<table>
+  <thead><tr><th>Current (filesystem)</th><th>Nexus VFS target</th><th>Scope</th></tr></thead>
+  <tbody>
+    <tr><td><code>~/.scode/projects/&lt;slug&gt;/memory/</code></td><td><code>/agents/{name}/memory/</code></td><td>Static — persists across sessions, scoped to agent identity</td></tr>
+    <tr><td>Session state / session memory</td><td><code>/proc/{pid}/memory/</code></td><td>Dynamic — ephemeral per-run, dies with the process</td></tr>
+    <tr><td><code>AGENTS.md</code> instruction files</td><td><code>/agents/{name}/config/AGENTS.md</code></td><td>Static — agent profile</td></tr>
+    <tr><td><code>~/.nexus/sudocode/settings.json</code></td><td><code>/agents/{name}/config/settings.json</code></td><td>Static — agent config</td></tr>
+  </tbody>
+</table>
+
+<p>Not blocking — current filesystem paths work. Track as a nexus-integration
+future item. The <code>write_file</code> tool already goes through the tool
+registry which can be swapped to VFS-backed I/O.</p>
+
+<h3>Permission system — nexus rebac observation</h3>
+
+<p>The current permission system is two files, two structs:</p>
+<ul>
+  <li><code>PermissionPolicy</code> (<code>runtime/src/permissions.rs</code>) — rule evaluation: allow/deny/ask rules, mode comparison, prompter interface.</li>
+  <li><code>PermissionEnforcer</code> (<code>runtime/src/permission_enforcer.rs</code>) — tool-level gate: wraps policy, adds workspace boundary + bash command classification.</li>
+</ul>
+
+<p>This is ABAC-style (path-prefix matching: "this path is allowed for this
+tool"). It's correct and zero-overhead for single-user CLI. Nexus's rebac
+service is relationship-based ("agent A has write permission to resource R
+via role"). The two solve different problems:</p>
+
+<ul>
+  <li><strong>Current ABAC</strong> — sufficient for single-agent CLI. String prefix match at policy construction time, not per-call.</li>
+  <li><strong>Nexus rebac</strong> — needed when multi-agent federation lands (agent A can read agent B's memory, but not agent C's). Not worth migrating before that.</li>
+</ul>
+
+<p>Decision: keep current system until multi-agent use cases require
+relationship-based access control. At that point, evaluate whether nexus
+rebac can serve as the backing store for <code>PermissionPolicy</code> rules,
+or whether the two layers remain separate (rebac for cross-agent, ABAC for
+intra-agent tool gating).</p>
+
+<h3>Inline rendering polish</h3>
+
+<p>Improvements to how <code>rusty-sudocode-cli</code> draws its
+output inside the host terminal — colored diffs, syntax-highlighted
+tool results, post-turn timelines, box-drawn permission prompts,
+per-turn status lines. <strong>Inline only.</strong> sudocode stays
+a normal stream-to-stdout program; the terminal's scrollback,
+attach/detach, and pipe-composition stay intact. The bright-line
+against alternate-screen / <code>ratatui</code> is the next
+sub-section and applies to every entry below.</p>
+
+<h4>Architecture context</h4>
+
+<table>
+  <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>rusty-sudocode-cli</code></td><td>Main binary: REPL loop, arg parsing, rendering, API bridge</td></tr>
+    <tr><td><code>runtime</code></td><td>Session, conversation loop, config, permissions, compaction</td></tr>
+    <tr><td><code>api</code></td><td>Anthropic HTTP client + SSE streaming</td></tr>
+    <tr><td><code>commands</code></td><td>Slash command metadata, parsing, help</td></tr>
+    <tr><td><code>tools</code></td><td>Built-in tool implementations</td></tr>
+  </tbody>
+</table>
+
+<p>Current TUI components:</p>
+
+<table>
+  <thead><tr><th>Component</th><th>Source</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td>Input</td><td><code>input.rs</code></td><td><code>rustyline</code>-based line editor with slash-command tab completion, Shift+Enter newline, history</td></tr>
+    <tr><td>Rendering</td><td><code>render.rs</code></td><td>Markdown→terminal rendering (headings, lists, tables, code blocks with syntect highlighting, blockquotes); spinner widget</td></tr>
+    <tr><td>App/REPL loop</td><td><code>main.rs</code></td><td>The <code>LiveCli</code> struct: REPL loop, slash command handlers, streaming output, tool call display, permission prompting, session management</td></tr>
+  </tbody>
+</table>
+
+<p>Dependencies: <strong>crossterm 0.28</strong>,
+<strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
+<strong>rustyline 15</strong>, <strong>serde_json</strong>.</p>
+
+<h4>Phase 0 · Structural cleanup</h4>
+
+<p>Break <code>main.rs</code> into focused modules and establish the
+namespace for the new TUI work.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>0.1</td><td>Extract <code>LiveCli</code> into <code>app.rs</code>. Move the struct, its impl, and helpers (<code>format_*</code>, <code>render_*</code>, session management) into focused modules: <code>app.rs</code> (core), <code>format.rs</code> (report formatting), <code>session_manager.rs</code> (session CRUD).</td></tr>
+    <tr><td>0.2</td><td>Introduce module decomposition intentionally. Stream event handler patterns and other ideas from earlier prototypes land inside the active <code>LiveCli</code> extraction.</td></tr>
+    <tr><td>0.3</td><td>Extract <code>main.rs</code> arg parsing into a dedicated module when the work begins.</td></tr>
+    <tr><td>0.4</td><td>Create a <code>tui/</code> module at <code>crates/rusty-sudocode-cli/src/tui/mod.rs</code> as the namespace for new TUI components.</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 1 · Status bar and live HUD</h4>
+
+<p>Persistent information display during interaction.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>1.1</td><td>Terminal-size-aware status line. Use <code>crossterm::terminal::size()</code> to render a bottom-pinned status bar showing model name, permission mode, session ID, cumulative token count, estimated cost.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+    <tr><td>1.2</td><td>Live token counter. Update the status bar in real-time as <code>AssistantEvent::Usage</code> and <code>AssistantEvent::TextDelta</code> events arrive during streaming.</td><td>Planned</td></tr>
+    <tr><td>1.3</td><td>Turn duration timer. Show elapsed time for the current turn.</td><td>Planned</td></tr>
+    <tr><td>1.4</td><td>Git branch indicator. Display the current git branch in the status bar (parsed via <code>parse_git_status_metadata</code>).</td><td>Planned</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 2 · Enhanced streaming output</h4>
+
+<p>Make the main response stream visually rich and responsive.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>2.1</td><td>Live markdown rendering. Buffer text deltas and incrementally render Markdown as it arrives.</td><td>Planned</td></tr>
+    <tr><td>2.2</td><td>Thinking indicator. When extended thinking/reasoning is active, show a distinct animated indicator alongside the generic <code>🦀 Thinking...</code>.</td><td>Planned</td></tr>
+    <tr><td>2.3</td><td>Streaming progress bar. Optional horizontal indicator showing approximate completion.</td><td>Planned</td></tr>
+    <tr><td>2.4</td><td>Tune main-stream pacing. The current <code>stream_markdown</code> sleeps 8ms per chunk for tool results; make this immediate or configurable for the main response stream.</td><td>Planned</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 3 · Tool call visualization</h4>
+
+<p>Make tool execution legible and navigable.</p>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>3.1</td><td>Collapsible tool output. For tool results longer than N lines (default 15), show a summary with an <code>[+] Expand</code> hint.</td><td>Planned</td></tr>
+    <tr><td>3.2</td><td>Syntax-highlighted tool results. Apply syntect highlighting to bash stdout / <code>read_file</code> content / <code>REPL</code> output. PR #184 adds <code>format_repl_result</code> + <code>render_stdout_stderr_block</code> so REPL tool results also get proper formatting.</td><td><strong>Shipped</strong> (PR #180, #184)</td></tr>
+    <tr><td>3.3</td><td>Tool call timeline. Show a compact summary after all tool calls complete: <code>🔧 bash → ✓ | read_file → ✓ | edit_file → ✓ (3 tools, 1.2s)</code>.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+    <tr><td>3.4</td><td>Diff-aware <code>edit_file</code> display. Render a colored unified diff. The <code>EditFileOutput</code> schema already carries <code>original_file</code>, <code>old_string</code>, and <code>new_string</code>, so no schema change is needed; the CLI computes the diff in-process. Defensively strip any <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code> so hook fire does not silently disable the preview.</td><td>Planned</td></tr>
+    <tr><td>3.5</td><td>Permission prompt enhancement. Style the approval prompt with box drawing, color the tool name, show a one-line summary.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 4 · Slash commands and navigation</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>4.1</td><td>Colored <code>/diff</code> output.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+    <tr><td>4.2</td><td>Pager for long outputs (<code>/status</code>, <code>/config</code>, <code>/memory</code>, <code>/diff</code>).</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+    <tr><td>4.3</td><td><code>/search</code> command. Default scope: current-session messages only (linear scan over <code>Session.messages</code>, ~50 ms even on large sessions, no storage redesign). <code>--all</code> opts in to all persisted JSONL sessions in the workspace; <code>--tools</code> opts in to scanning tool-result bodies. Cross-session and tool-output scopes are deferred until the default is in use.</td><td>Planned</td></tr>
+    <tr><td>4.4</td><td><code>/undo</code> command. Walk <code>session.messages.iter().rev()</code> for the most recent <code>ToolResult</code> whose <code>tool_name == "edit_file" | "write_file"</code> and matching <code>file_path</code>, then apply its <code>original_file</code>. Pre-image survives a single round-trip on the active JSONL but can be erased by session rotation (256 KiB threshold, 3 rotated keepers) and by <code>/compact</code> (default keeps last 4 messages plus summary). Defensive parse strips <code>\n\nHook feedback:</code> suffix before <code>serde_json::from_str</code>.</td><td>Planned</td></tr>
+    <tr><td>4.5</td><td>Interactive session picker. Replace text-based <code>/session list</code> with a fuzzy list.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+    <tr><td>4.6</td><td>Tab completion for tool arguments.</td><td><strong>Shipped</strong> (PR #180)</td></tr>
+  </tbody>
+</table>
+
+<h4>Phase 5 · Color themes and configuration</h4>
+
+<table>
+  <thead><tr><th>Task</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>5.1</td><td>Named color themes (<code>dark</code>, <code>light</code>, <code>solarized</code>, <code>catppuccin</code>).</td></tr>
+    <tr><td>5.2</td><td>ANSI-256 / truecolor detection.</td></tr>
+    <tr><td>5.3</td><td>Configurable spinner style.</td></tr>
+    <tr><td>5.4</td><td>Banner customization.</td></tr>
+  </tbody>
+</table>
+
+<h4>No alternate-screen / full-screen TUI mode — by rule</h4>
+
+<p>Earlier drafts of this plan included a "Phase 6 — full-screen TUI"
+sub-goal: a <code>--tui</code> flag wired to <code>ratatui</code>
+behind a <code>full-tui</code> cargo feature, with split-pane layout,
+scrollable conversation view, mouse support. <strong>This is forbidden
+by rule.</strong> sudocode does not adopt an alternate-screen mode,
+does not depend on <code>ratatui</code>, and will not ship split-pane
+or in-CLI multi-agent dashboards.</p>
+
+<p>The reasoning lines up with sudocode's sole-audience positioning
+(hacker — see <a href="#what-sudo-code-is">What sudo code is</a>) and
+the copilot-worker topology sudocode plugs into (see <a
+href="#collaboration-as-unit">Collaboration as a unit</a> below):</p>
+
+<ul>
+  <li><strong>Hackers already have the TUI stack.</strong> VS Code
+  shows diffs and syntax. tmux owns status bars and pane splits.
+  lazygit / ranger own focused TUI nav. sudocode fighting tmux for
+  split-pane real estate is exactly what claude-code does to push
+  non-coders into coding — and exactly what pisses hackers off.</li>
+  <li><strong>Alternate-screen kills scrollback.</strong> Hackers run
+  scode in a VS Code terminal, in a tmux pane, in an SSH session.
+  Quitting an alternate-screen app wipes the buffer; the wheel /
+  <code>Ctrl+B [</code> / <code>Cmd+K</code> muscle memory dies. This
+  is one of the concrete things claude-code's pager / fullscreen
+  prompts do that hackers route around.</li>
+  <li><strong>Alternate-screen breaks copilot-worker attach.</strong>
+  In the copilot-worker topology, an operator (or hydra-style UI)
+  attaches to a worker's terminal to inspect live state. A worker
+  that ran in alternate-screen would hijack the operator's terminal
+  on attach and erase its scrollback on detach. Inline scrollback
+  IS the affordance that makes attach/detach safe.</li>
+  <li><strong>Pipe-friendliness is load-bearing.</strong> <code>scode
+  "plan X" | tee /proc/p_worker/chat-with-me</code> only works when
+  scode writes to a regular tty / pipe. Alternate-screen makes scode
+  a black-box program, breaking unix composition. The same primitive
+  that lets a hacker pipe scode output around is what lets sudocode
+  participate as a unit in nexus-vfs chat-with-me streams.</li>
+</ul>
+
+<p>What <strong>is</strong> in scope, and already shipped in PR #180
+(2026-06-05): inline ANSI polish — colored diffs, syntax-highlighted
+tool results, post-turn tool timeline, box-drawn permission prompts,
+per-turn status line, <code>$PAGER</code> shell-out, fuzzy session
+picker, tab completion. These are <em>inline</em> rendering
+improvements; they do not enter alternate-screen, do not break
+scrollback, do not require new dependencies, and are friendly to
+attach/detach workflows. Future inline polish welcome under the same
+constraints.</p>
+
+<p>Reopening this rule requires the same shape as the
+no-unit-tests rule (Goal 1, "Test layer policy"): a concrete
+collaboration scenario where inline rendering demonstrably fails to
+serve a hacker workflow, and a separate ROADMAP edit to change the
+rule before any <code>ratatui</code> / alternate-screen code lands.
+"It would be nicer" doesn't qualify.</p>
+
+<h4>Inline polish sequencing (Phase 0–5; most already shipped in PR #180)</h4>
+
+<p>Phase 0 first (foundation). Within the rest, highest user-facing
+impact, lowest implementation cost first:</p>
+
+<ol>
+  <li><strong>Phase 0</strong> — module decomposition</li>
+  <li><strong>Phase 1.1–1.2</strong> — status bar with live tokens</li>
+  <li><strong>Phase 2.4</strong> — main-stream pacing</li>
+  <li><strong>Phase 3.1</strong> — collapsible tool output</li>
+  <li><strong>Phase 2.1</strong> — live markdown rendering</li>
+  <li><del>Phase 3.2</del> — <strong>shipped</strong> (PR #180 + #184)</li>
+  <li><strong>Phase 3.4</strong> — diff-aware edit display</li>
+  <li><del>Phase 4.1</del> — <strong>shipped</strong> (PR #180)</li>
+  <li><strong>Phase 5</strong> — color themes (driven by user demand)</li>
+  <li><strong>Phase 4.2–4.6</strong> — enhanced navigation and commands (4.2, 4.5, 4.6 shipped in PR #180)</li>
+</ol>
+
+<h4>Inline polish progress</h4>
+
+<table>
+  <thead><tr><th>Phase</th><th>Tasks</th><th>Shipped</th><th>Remaining</th></tr></thead>
+  <tbody>
+    <tr><td>Phase 0 · Structural cleanup</td><td>4</td><td>0</td><td>4</td></tr>
+    <tr><td>Phase 1 · Status bar and live HUD</td><td>4</td><td>1</td><td>3</td></tr>
+    <tr><td>Phase 2 · Enhanced streaming output</td><td>4</td><td>0</td><td>4</td></tr>
+    <tr><td>Phase 3 · Tool call visualization</td><td>5</td><td>3</td><td>2</td></tr>
+    <tr><td>Phase 4 · Slash commands and navigation</td><td>6</td><td>4</td><td>2</td></tr>
+    <tr><td>Phase 5 · Color themes and configuration</td><td>4</td><td>0</td><td>4</td></tr>
+    <tr><th>Total</th><th>27</th><th>8</th><th>19</th></tr>
+  </tbody>
+</table>
+
+<h4>Inline rendering design principles</h4>
+
+<ol>
+  <li>Inline REPL only. <strong>No alternate-screen mode</strong> — see the bright-line rule above. Scrollback in the host terminal (VS Code, tmux, SSH) stays load-bearing.</li>
+  <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal, and so the same code path serves <code>--output-format json</code>, ACP, and pipe consumers.</li>
+  <li>Rendering works incrementally; the response stream renders as it arrives.</li>
+  <li>Terminal control goes through <code>crossterm</code> uniformly; raw ANSI escape codes stay out of the codepath.</li>
+  <li><strong>No <code>ratatui</code> dependency.</strong> Even behind a feature flag — its presence in <code>Cargo.lock</code> is itself the slippery slope toward the alternate-screen path the rule above forbids.</li>
+</ol>
+
+<h4>Module layout after Phase 0</h4>
+
+<pre><code>crates/rusty-sudocode-cli/src/
+├── main.rs              # Entrypoint, arg dispatch
+├── args.rs              # CLI argument parsing
+├── app.rs               # LiveCli struct, REPL loop, turn execution
+├── format.rs            # Report formatting (status, cost, model, permissions, …)
+├── session_mgr.rs       # Session CRUD: create, resume, list, switch, persist
+├── init.rs              # Repo initialization
+├── input.rs             # Line editor
+└── render.rs            # TerminalRenderer, Spinner, inline polish</code></pre>
+
+<p>The earlier draft included a <code>tui/</code> subdirectory holding
+<code>status_bar.rs</code> / <code>tool_panel.rs</code> /
+<code>diff_view.rs</code> / <code>pager.rs</code> / <code>theme.rs</code>
+as a namespace for Phase 6 components. Deleted: no Phase 6, no
+namespace. Status-bar / tool-panel / colored-diff logic lives in
+<code>format.rs</code> + <code>render.rs</code>; PR #180 already
+ships them there.</p>
+
+<h4>Risk and mitigation</h4>
+
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Refactor changes REPL behavior</td><td>Phase 0 stays a pure restructuring; existing test coverage as safety net.</td></tr>
+    <tr><td>Terminal compatibility (tmux, SSH, Windows)</td><td>Rely on <code>crossterm</code>'s abstraction; verify in degraded environments.</td></tr>
+    <tr><td>Rich rendering regresses performance</td><td>Profile before/after; keep the raw streaming path as a fast fallback.</td></tr>
+  </tbody>
+</table>
+
+<h3>Candidate · <code>publish_to_shareone</code> LLM tool</h3>
+
+<p>A future tool exposed to the LLM agent (alongside <code>bash</code>,
+<code>WebFetch</code>, <code>WebSearch</code>, etc.) that uploads a
+local HTML / PDF / PPTX file to ShareOne and returns the public share
+URL. <strong>Not a user-facing CLI command</strong> — the LLM agent
+inside <code>scode</code> calls it when the user asks "share this
+externally" / "publish my plan" / "give me a shareable link".</p>
+
+<table>
+  <thead><tr><th></th><th>Detail</th></tr></thead>
+  <tbody>
+    <tr><td>Source signal</td><td>Maintainers currently publish <code>ROADMAP.html</code> by hand via the shareone-skill or by curling the API. As the agent surface grows, users will start asking <code>scode</code> directly to share files; needing them to know about an external skill defeats the "scode is the agent" framing.</td></tr>
+    <tr><td>Tool shape</td><td>Single tool: <code>publish_to_shareone(file_path, options)</code>. Options include <code>filename</code> (defaults to file basename), <code>allow_comments</code> (default true), <code>share_id</code> (optional — passing this PUT-updates an existing share so the URL stays stable; omitting it POSTs a new share). Returns the resulting <code>share_url</code>.</td></tr>
+    <tr><td>Implementation</td><td>~100 lines of Rust hitting <code>POST /api/v1/pages</code> (new) and <code>PUT /api/v1/pages/{share_id}</code> (update) on the public ShareOne HTTP API. No skill dependency, no <code>npm</code>, no vendored client. Reads <code>SHAREONE_API_KEY</code> from env. Requires no infra change beyond adding the tool entry to <code>runtime::tools</code> registry.</td></tr>
+    <tr><td>Permission</td><td>Routes through the same permission validator chain as <code>WebFetch</code>: <code>read-only</code> and <code>workspace-write</code> reject the call (publishing is a privileged side effect, like a network write); <code>danger-full-access</code> and explicit user approval pass.</td></tr>
+    <tr><td>License hygiene</td><td>Our own Rust implementation against the public API, independent of the internal shareone-skill repo. No vendor, no drift, no LICENSE-of-someone-else concerns.</td></tr>
+    <tr><td>When we ship</td><td>When a real user (internal or external) asks for it. Today's flow (maintainer + curl, recipe in <a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md#publishing-the-roadmap-to-shareone-interim-manual">CONTRIBUTING.md</a>) is enough for the team-internal use case. Friction-driven gate: real ask, then ship — same door we apply to the Deferred <code>!</code> bash mode below.</td></tr>
+  </tbody>
+</table>
+
+<p>For now, while the tool does not exist, <code>ROADMAP.html</code> is
+published by hand. The exact curl call is documented in
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md"><code>CONTRIBUTING.md</code> § Publishing the roadmap to ShareOne</a>.</p>
+
+<h3>Candidate · Plan mode as active compaction</h3>
+
+<p>Product-owner insight surfaced during the README rewrite
+(2026-06-14): <strong>entering plan mode IS the gesture of "I want a
+clean context to think".</strong> <code>/compact</code> is passive,
+retrospective summarization — the agent decides what to keep and
+what to lose. Plan mode is active, prospective context reset — the
+user has decided to bound the next thought. They are semantically
+distinct primitives and we should treat them that way.</p>
+
+<p><strong>Sketch (needs CCB validation pass + design write-up
+before priority):</strong></p>
+
+<ul>
+  <li><strong>One session = one plan.</strong> Fixed file path per
+  session (e.g. <code>&lt;session-id&gt;.plan.md</code> on the
+  session-scoped filesystem). No slug, no per-plan identity
+  confusion — CC's slug-based plan files cause the LLM to ask
+  "which plan?" mid-conversation, which the bounded
+  one-per-session model eliminates.</li>
+  <li><strong>Entering plan mode triggers active compaction.</strong>
+  Agent reads the current plan, the runtime drops history below the
+  plan + system prompt, plan becomes the focused context. The plan
+  IS the summary, so no summarization loss the way
+  <code>/compact</code> introduces.</li>
+  <li><strong>Inside plan mode, the agent edits the plan
+  incrementally.</strong> Delete items marked 100% done. Append new
+  items as they're decided. Revise pending items (don't delete
+  future items — can re-word, can re-scope, can re-order). The
+  agent does this work; the user supervises.</li>
+  <li><strong>Multiple plans = multiple sessions.</strong> No
+  "switch plan within one session" UI — that's how CC's plan-file
+  confusion happens. Session-bounded plans stay unambiguous.</li>
+</ul>
+
+<p>This is a candidate, not active work. CCB validation against
+CC's plan mode comes first (per the
+<a href="https://github.com/sudoprivacy/sudocode/blob/main/CONTRIBUTING.md#parity-work--standing-rule">parity
+standing rule</a>), then a design write-up, then a priority decision.
+Logged here so the insight isn't lost to discussion-only memory.</p>
+
+<h3>Deferred · <code>!</code> bash mode</h3>
+
+<p>An earlier active design write-up for a CC-style <code>!cmd</code>
+prefix that bypasses the LLM round-trip and dispatches the rest of
+the line to a shell (e.g. <code>!ls</code>, <code>!git status</code>,
+<code>!cd path</code>) lived here in full detail (~250 lines covering
+Bash provider abstraction, pipe rearrangement under <code>!</code>,
+permission validator behavior, ConPTY handling, CCB validation
+against <code>@91cffe16</code>). Removed and deferred indefinitely
+on 2026-06-14.</p>
+
+<p><strong>Why deferred.</strong> Empirically, <code>!cmd</code>
+shortcuts don't pay productivity for the audience this ROADMAP
+serves (see <a
+href="https://github.com/sudoprivacy/sudocode/blob/main/README.md#who-this-is-for">README
+§ Who this is for</a>). Heavy users <em>bundle</em>: a single long
+prompt to the agent covering multiple needs, with the agent doing
+the shell calls inside its tool loop. Inserting an <code>!ls</code>
+shortcut as a one-off interaction breaks that rhythm — the user
+pays the cost of leaving the agent thread to run one command, then
+returns to the prompt. The savings are negative.</p>
+
+<p>The full design lives in git history (preserved by the
+no-squash merge policy). Reopen if a real heavy user asks — same
+friction gate as <code>publish_to_shareone</code> above.</p>
+
+<h2 id="goal-4">Goal 4 · Be a good unit in the copilot-worker topology</h2>
+
+<p id="collaboration-as-unit">The positioning — sudocode as one
+agent unit among peers on the nexus VFS chat-with-me plane,
+interchangeable with Claude / Codex / humans at the mailbox
+primitive — and the three diagrams (topology · one-binary-three-modes
+· hydra evolution) live in <a
+href="https://github.com/sudoprivacy/sudocode/blob/main/README.md#position-in-the-larger-picture"><code>README.md</code>
+§ Position in the larger picture</a>. That's where a hacker should
+first encounter the framing, alongside the rest of the philosophy.</p>
+
+<p>This goal section holds the engineering plan: what sudocode
+commits to implementing against the nexus protocol, what is
+deliberately not in scope, and the work sequencing. The protocol
+SSOT itself lives upstream in <a
+href="https://shareone.app/s/nexus-integration-architecture">nexus
+integration architecture</a> (public, Apache-2.0, joint-owned with
+the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architecture.html</code>). sudocode does not vendor it.</p>
+
+<h3>What sudocode commits to — implementation contract</h3>
+
+<ol>
+  <li><strong>Spawn surface.</strong> A sudocode session may be
+  started by an external orchestrator through
+  <code>ManagedAgentService.start_session_v1({agent_id, repos, model,
+  owner_id, zone_id})</code>. The returned <code>session_id</code>
+  IS the AgentRegistry pid; sudocode does not invent its own. The
+  same binary stays runnable as a standalone CLI without nexus —
+  the <code>FsBackend</code> trait abstracts this.</li>
+
+  <li><strong>FsBackend trait.</strong> All filesystem access in
+  the sudocode runtime routes through one
+  <code>FsBackend</code> trait with three impls:
+  <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
+  syscalls when running inside <code>sudocode-host</code>),
+  <code>StdFsBackend</code> (host <code>std::fs</code> for the
+  standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
+  kernel from an edge / dev CLI). No code path bypasses the trait —
+  not session jsonl, not config, not the workspace-bounded
+  <code>file_ops</code> helpers.</li>
+
+  <li><strong>Mailbox read / write.</strong> A sudocode session
+  watches its own <code>/proc/{self_pid}/chat-with-me</code> via
+  <code>sys_watch</code> for incoming prompts; it writes responses
+  to the conversation peer's <code>chat-with-me</code> using
+  <code>sys_write</code>. The on-disk envelope's <code>from</code>
+  field is stamped by the kernel (<code>MailboxStampingHook</code>);
+  sudocode does not forge it.</li>
+
+  <li><strong>Peer addressing inside a workspace.</strong> An
+  agent staged at <code>/proc/{pid}/workspace/...</code> writes
+  <code>chat-with-me</code> relative to its cwd — that path is a
+  DT_LINK back to the workspace owner's mailbox. sudocode honours
+  the convention; it does not bypass the link to find the owner
+  pid out-of-band.</li>
+
+  <li><strong>Workspace boundary.</strong> A write into another
+  agent's <code>workspace/</code> returns EPERM from
+  <code>WorkspaceBoundaryHook</code> with a structured payload
+  telling the LLM where to write instead (the
+  <code>chat-with-me</code> link). sudocode surfaces this EPERM
+  verbatim back to the LLM rather than catching and retrying — the
+  path layout is the SSOT for permissions and the error message
+  is the teaching channel.</li>
+
+  <li><strong>Session state placement.</strong> Inside
+  <code>sudocode-host</code>, session jsonl transcripts live at
+  <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
+  on the kernel VFS, not on the host filesystem. Booting a worker
+  reads its profile + the requested <code>--session-id</code>
+  transcript from that VFS path; the same path supports resume.</li>
+
+  <li><strong>Lifecycle.</strong> Out-of-band termination
+  (SIGTERM / SIGKILL / orphan reap from <code>AgentRegistry</code>)
+  must drop the session cleanly — flush in-flight chat-with-me
+  writes, close streams, release locks. No long-running
+  in-memory state that doesn't survive a host restart; the
+  <code>--session-id</code> transcript is the SSOT.</li>
+</ol>
+
+<h3>What is NOT sudocode's job here</h3>
+
+<ul>
+  <li><strong>Orchestration.</strong> Deciding which workers exist,
+  when to spawn, when to cancel — that is the orchestrator
+  (sudowork / hydra / a script). sudocode receives spawn calls; it
+  does not invent them.</li>
+  <li><strong>Multi-agent UI.</strong> Dashboards, worker-vital
+  sidebars, attach buttons — sudowork (Feishu / web) and hydra (VS
+  Code sidebar) own that surface. sudocode stays the unit. This is
+  the deepest reason the alternate-screen TUI rule (Goal 3) is
+  bright-line: a dashboard inside the unit is a category error.</li>
+  <li><strong>Cross-instance transport.</strong> Raft replication of
+  DT_STREAM, federation Raft cluster topology, Matrix C-S adapter
+  for stock chat clients — all kernel / nexus-services concerns.
+  sudocode reads and writes through <code>FsBackend</code> and
+  doesn't care whether the stream is same-host or replicated.</li>
+  <li><strong>Audit.</strong> <code>AuditHook</code> is a kernel
+  POST-write hook fired by every <code>sys_write</code>; sudocode
+  needs to do nothing to participate.</li>
+</ul>
+
+<h3>Sequencing</h3>
+
+<p>The work falls into a few sequenced chunks; each ships its own
+PR. None of this depends on Goal 3 inline polish; the two streams
+proceed in parallel.</p>
+
+<ol>
+  <li><strong>FsBackend trait + StdFsBackend.</strong> Audit every
+  <code>std::fs</code> call site in the sudocode runtime, route
+  through the trait. No behavioural change to standalone CLI;
+  this is a refactor that opens the door for the other two
+  backends.</li>
+  <li><strong>NexusVfsFsBackend.</strong> gRPC client against the
+  nexus <code>NexusVFSService.Call</code> surface. First end-to-end
+  validation: a standalone scode pointing at a remote nexus serves
+  its session jsonl from the kernel.</li>
+  <li><strong>KernelFsBackend + <code>sudocode-host</code>
+  binary.</strong> The binary edge that links nexus
+  <code>kernel</code> + <code>services</code> in-process and
+  monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
+  the dependency edge sudocode → nexus is realised.</li>
+  <li><strong>Mailbox read/write loop.</strong> Inside the managed
+  runtime, replace stdin/stdout prompts with
+  <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
+  and <code>sys_write</code> on the peer's mailbox. The runtime
+  surface to the LLM stays the same.</li>
+  <li><strong>WorkspaceBoundaryHook EPERM round-trip.</strong>
+  Surface the kernel's structured EPERM verbatim into the LLM
+  conversation; confirm by PTY scenario that the LLM learns the
+  <code>chat-with-me</code> redirect without system-prompt edits.</li>
+</ol>
+
+<h2 id="feature-parity">Feature-parity standing rule: sudocode &harr; sudowork dedup</h2>
+
+<div class="callout-warn callout">
+  <strong>When adding a feature to sudocode, decide whether to remove it from sudowork.</strong>
+  If both products expose the same capability (file operations, git workflow,
+  session management, tool execution), UX consistency becomes impossible to
+  maintain across two codebases in two languages. The standing rule:
+  <ol style="margin:8px 0 0">
+    <li>Before shipping a feature in sudocode, check whether sudowork already
+    has it (renderer-side or worker-side).</li>
+    <li>If yes, decide <strong>now</strong> — not later — which product owns
+    it going forward. "Both" is the wrong answer unless they serve
+    genuinely different user journeys (e.g. sudowork's GUI file tree vs
+    sudocode's CLI <code>read_file</code>).</li>
+    <li>If sudocode becomes the owner, open a sudowork PR to deprecate or
+    remove the duplicate. Ship both PRs in the same cycle.</li>
+    <li>If sudowork keeps it, don't add it to sudocode — route through
+    sudowork's existing surface instead.</li>
+  </ol>
+  The goal is one SSOT per feature, not two implementations that drift.
+</div>
+
+<h2 id="working-agreement">Working agreement on this document</h2>
+
+<p>Scope changes update this document in the same PR. External
+communications can mirror the current state into other surfaces; this
+document remains the canonical reference. When a feature ships or a
+section is superseded, remove its content from this file in the same
+PR — the roadmap tracks the live state, not history.</p>
+
+<h2 id="references">Reference docs (mechanism, not plan)</h2>
+
+<ul>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/mock-parity-harness.md"><code>docs/mock-parity-harness.md</code></a>
+  — the in-process mock backend layer.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>
+  — current cycle's 614-commit triage report.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/README.md"><code>README.md</code></a> — project entry,
+  install, quick start.</li>
+  <li><a href="https://github.com/sudoprivacy/sudocode/blob/main/rust/README.md"><code>rust/README.md</code></a> —
+  Cargo workspace map.</li>
+  <li><a href="https://github.com/sudoprivacy/pty-expect"><code>sudoprivacy/pty-expect</code></a>
+  — PTY harness crate, source of human-fidelity e2e tests.</li>
+</ul>
+
+<footer>
+  Sudo Code Roadmap — <code>ROADMAP.html</code> is the single SSOT plan file.
+</footer>
+
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"01647f0bf2284c1cab76d276d454730c","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+

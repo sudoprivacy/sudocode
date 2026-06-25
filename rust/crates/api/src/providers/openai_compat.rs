@@ -806,7 +806,9 @@ struct OpenAiUsage {
     completion_tokens: u32,
     /// OpenAI returns cached token counts inside `prompt_tokens_details`.
     /// Example: `{"prompt_tokens_details": {"cached_tokens": 1234}}`
-    #[serde(default)]
+    /// Some providers (e.g. DeepSeek) send an explicit `null` here, which
+    /// `#[serde(default)]` alone does not handle, so coerce null to default.
+    #[serde(default, deserialize_with = "null_to_default")]
     prompt_tokens_details: PromptTokensDetails,
     #[serde(default)]
     cost_units: Option<u64>,
@@ -849,6 +851,20 @@ impl OpenAiUsage {
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
+}
+
+/// Coerce an explicit JSON `null` into `T::default()`.
+///
+/// `#[serde(default)]` only applies when a field is absent, not when it is
+/// present with a `null` value. Some OpenAI-compatible providers send
+/// `"prompt_tokens_details": null`, so we deserialize through `Option` and
+/// fall back to the default.
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1789,6 +1805,21 @@ mod tests {
 
         assert_eq!(usage.cost_units, Some(43_700));
         assert_eq!(usage.cost_currency, None);
+    }
+
+    #[test]
+    fn usage_deserializes_with_explicit_null_prompt_tokens_details() {
+        // Some providers (e.g. DeepSeek) return an explicit `null` here, which
+        // `#[serde(default)]` alone does not handle.
+        let usage: super::OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":7458,"total_tokens":7467,"completion_tokens":9,"prompt_tokens_details":null}"#,
+        )
+        .expect("usage with null prompt_tokens_details should parse");
+
+        let usage = usage.to_api_usage();
+        assert_eq!(usage.input_tokens, 7458);
+        assert_eq!(usage.output_tokens, 9);
+        assert_eq!(usage.cache_read_input_tokens, 0);
     }
 
     #[test]

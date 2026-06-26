@@ -1006,6 +1006,28 @@ rebac can serve as the backing store for <code>PermissionPolicy</code> rules,
 or whether the two layers remain separate (rebac for cross-agent, ABAC for
 intra-agent tool gating).</p>
 
+<h3>Slash command typeahead — replace rustyline Tab completion</h3>
+
+<p>CC shows a dropdown suggestion list the moment the user types <code>/</code>,
+without requiring Tab. scode currently uses rustyline's <code>Completer</code>
+trait — functional (Tab shows options, partial prefix completes), but
+requires an explicit Tab press.</p>
+
+<p><strong>Plan:</strong> replace the current rustyline Tab completion with an
+inline typeahead that renders suggestions below the prompt as the user
+types. Delete the existing <code>SlashCommandHelper</code> /
+<code>Completer</code> implementation in <code>input.rs</code> — the new
+behavior fully supersedes it.</p>
+
+<p><strong>CC reference:</strong> <code>useTypeahead</code> hook
+(<code>src/hooks/useTypeahead.tsx</code>, 1384 lines). Heavy in code because
+it handles all input modes (slash commands, <code>@</code> file index, shell
+history, Slack channels, path completion, session resume). The slash-command
+portion is ~50 lines of string prefix matching — runtime overhead is
+negligible. The rest of the hook's scope is out of scode's current surface.</p>
+
+<p>Priority: polish. Current Tab behavior is adequate. Track for later.</p>
+
 <h3>Inline rendering polish</h3>
 
 <p>Improvements to how <code>rusty-sudocode-cli</code> draws its

@@ -1026,6 +1026,12 @@ history, Slack channels, path completion, session resume). The slash-command
 portion is ~50 lines of string prefix matching — runtime overhead is
 negligible. The rest of the hook's scope is out of scode's current surface.</p>
 
+<p><strong>PTY test impact:</strong> <code>memory_tab_completion</code> sends
+<code>/mem</code> + <code>\t</code> to trigger rustyline completion. When
+the typeahead replaces rustyline, this test must change: send <code>/mem</code>
+→ expect suggestions rendered inline → select → verify execution. The Tab
+send becomes irrelevant.</p>
+
 <p>Priority: polish. Current Tab behavior is adequate. Track for later.</p>
 
 <h3>Inline rendering polish</h3>

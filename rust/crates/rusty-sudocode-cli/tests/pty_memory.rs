@@ -385,7 +385,49 @@ fn memory_directory_auto_created() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 6. End-to-end memory workflow: write → verify → forget → verify
+// 6. /memory tab-completion
+// ──────────────────────────────────────────────────────────────────────
+
+/// Type `/mem` then Tab in the REPL → should auto-complete to `/memory`.
+#[test]
+fn memory_tab_completion() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-tab");
+    let root = env.workspace_root().to_path_buf();
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    // Wait for the REPL prompt.
+    sess.expect("❯").expect("should see REPL prompt");
+
+    // Type `/mem` then Tab.
+    sess.send("/mem\t").expect("send /mem + Tab");
+
+    // After Tab, the line should complete to `/memory`.
+    // Then press Enter to execute.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    sess.send("\r").expect("send Enter");
+
+    // `/memory` should execute — expect "Opened memory file" or
+    // "No instruction files found" (depending on whether AGENTS.md exists).
+    sess.expect("(?i)(opened.*memory|no instruction|memory)")
+        .expect("/memory should execute after tab completion");
+
+    // Wait for prompt, then exit.
+    sess.expect("❯").expect("prompt after /memory");
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should exit after tab test: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0, "tab completion test should exit 0; got {exit}");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 7. End-to-end memory workflow: write → verify → forget → verify
 // ──────────────────────────────────────────────────────────────────────
 
 /// Full memory lifecycle exercised through the REPL in a single session:

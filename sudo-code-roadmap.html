@@ -290,6 +290,20 @@ surface the human exercises.</p>
   key cause rate-limit failures. Mock tests stay parallel.</li>
 </ol>
 
+<h5>When to use mock vs live vs no-API</h5>
+
+<p>Not every PTY test needs an API call. Categorize by what the test exercises:</p>
+
+<table>
+  <thead><tr><th>Category</th><th>Backend</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td><strong>No-API</strong> — pure CLI behavior (slash commands, subcommands, tab completion, system-prompt output)</td><td>Mock is fine (provides auth config so the REPL starts, but never calls the API). No <code>SCODE_TEST_BACKEND=live</code> needed.</td><td><code>memory_tab_completion</code>, <code>memory_entries_injected_into_system_prompt</code></td></tr>
+    <tr><td><strong>LLM-dependent</strong> — model must choose tools, generate output, make decisions</td><td>Live required (<code>SCODE_TEST_BACKEND=live</code>). Mock mode: skip with message. These are the tests that earn coverage credit.</td><td><code>memory_write_read_forget_workflow</code>, <code>multi_tool_roundtrip</code></td></tr>
+  </tbody>
+</table>
+
+<p>Rule of thumb: if the test never waits for a model response (no <code>expect</code> after a user message that requires LLM tool use), it's no-API. Use mock. Don't force live mode for tests that don't touch the model — it wastes API tokens and adds serial-lock contention.</p>
+
 <p><strong>Test depth convention</strong> (in the Notes column of coverage tables):</p>
 <ul>
   <li><strong>+error</strong> &mdash; error path also covered (permission denied, file not found, etc.).</li>

@@ -36,6 +36,7 @@ pub mod mcp_server;
 mod mcp_stdio;
 pub mod mcp_tool_bridge;
 pub mod memory;
+pub mod model_capabilities;
 mod oauth;
 pub mod permission_enforcer;
 mod permissions;

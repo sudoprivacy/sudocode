@@ -402,6 +402,18 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
     format!("{prompt}\n\n{trimmed}")
 }
 
+/// Extract sudorouter base URL and API key from the sudocode config.
+fn extract_sudorouter_credentials(config: &api::SudoCodeConfig) -> Option<(String, String)> {
+    let proxy = config.auth_modes.get("proxy")?;
+    let sr = proxy.get("sudorouter")?;
+    let base_url = &sr.base_url;
+    let api_key = sr.api_key.as_deref()?;
+    if base_url.is_empty() || api_key.is_empty() {
+        return None;
+    }
+    Some((base_url.clone(), api_key.to_string()))
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let action = parse_args(&args)?;
@@ -2674,6 +2686,11 @@ impl LiveCli {
         let cwd = env::current_dir()?;
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+        // Load model capabilities SSOT (bundled fallback or cached from last refresh).
+        let config_home = runtime::default_config_home();
+        runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+
         let auth_mode = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
         tools::set_global_auth_mode(auth_mode);
         let config = RuntimeConfig {
@@ -2685,20 +2702,59 @@ impl LiveCli {
             permission_mode,
             progress_reporter: None,
             auth_mode,
-            sudocode_config,
+            sudocode_config: sudocode_config.clone(),
         };
         let runtime = build_runtime(
             session_state.with_persistence_path(session.path.clone()),
             &session.id,
             config.clone(),
         )?;
+        let tokio_runtime = tokio::runtime::Runtime::new()?;
+
+        // Fire-and-forget: refresh model capabilities from sudorouter if stale.
+        if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend)
+        {
+            if let Some((base_url, api_key)) = extract_sudorouter_credentials(&sudocode_config) {
+                let ch = config_home.clone();
+                tokio_runtime.spawn(async move {
+                    let client = match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    let url = format!("{}/models", base_url.trim_end_matches('/'));
+                    let resp = match client
+                        .get(&url)
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status().is_success() => r,
+                        _ => return,
+                    };
+                    let body: serde_json::Value = match resp.json().await {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    let entries = runtime::model_capabilities::parse_api_response(&body);
+                    let _ = runtime::model_capabilities::merge_and_write(
+                        &ch,
+                        &runtime::fs_backend::StdFsBackend,
+                        &entries,
+                    );
+                });
+            }
+        }
+
         let cli = Self {
             config,
             runtime,
             session,
             prompt_history: Vec::new(),
             undone_tool_use_ids: std::collections::HashSet::new(),
-            tokio_runtime: tokio::runtime::Runtime::new()?,
+            tokio_runtime,
         };
         cli.persist_session()?;
 

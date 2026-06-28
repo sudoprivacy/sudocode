@@ -3053,6 +3053,33 @@ mod tests {
         );
     }
 
+    // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is
+    // genuinely untestable from the public interface — the no-op
+    // condition requires compact_session to return removed=0 on three
+    // CONSECUTIVE turns, but the public run_turn() always appends 2
+    // messages per turn, and with the hardcoded
+    // CompactionConfig::default().preserve_recent_messages=4, the
+    // session naturally grows past the preserve floor on turn 3 (6
+    // messages → keep_from=2 → removed=2 → counter resets).
+    //
+    // Possible test paths considered + rejected:
+    //   1. Expose a builder for preserve_recent_messages on
+    //      ConversationRuntime → public API surface bloat just for
+    //      testing.
+    //   2. Make consecutive_auto_compact_noops pub or add a getter →
+    //      same problem (test-only surface).
+    //   3. Add a #[cfg(test)] backdoor → ok but couples the test to
+    //      implementation detail rather than behaviour.
+    //   4. PTY-test with a mock ApiClient that controls everything →
+    //      same as (1)/(2) at a different layer.
+    //
+    // Honest decision: the breaker's 5-line implementation is locally
+    // obvious (loop-counter + early-return); the value is structural
+    // (signal-floor for telemetry / ACP session events) more than
+    // user-visible; the cost of testability surfaces would exceed the
+    // value. Leaving uncovered with this comment block as the
+    // contract.
+
     #[tokio::test]
     async fn compaction_health_probe_blocks_turn_when_tool_executor_is_broken() {
         struct SimpleApi;

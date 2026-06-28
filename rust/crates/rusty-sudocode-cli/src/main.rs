@@ -2230,25 +2230,47 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
             runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
         })?;
-        for (data, mime_type) in images {
+        for (index, (data, mime_type)) in images.iter().enumerate() {
             // Preflight: downsample if oversized (>5MB or any dim >8000px). Without this,
             // a 25MB PNG attached in sudowork (or any ACP client) would transit ACP and
             // get rejected by the LLM as single_request_too_large. The CLI-direct paste
             // path already preflighted via ImageRegistry::register_rgba; ACP `push_images`
-            // was the gap. Decode failures fall through to the LLM unchanged — the LLM
-            // will reject with a less helpful error, but we never silently DROP an image
-            // here (would confuse user about which attachment got through).
-            let (final_data, final_mime) =
-                match runtime::image_registry::preflight_base64(data, mime_type) {
-                    Ok(pair) => pair,
-                    Err(_) => (data.clone(), mime_type.clone()),
-                };
-            let msg = runtime::ConversationMessage {
-                role: runtime::MessageRole::User,
-                blocks: vec![runtime::ContentBlock::Image {
+            // was the gap.
+            //
+            // Two failure modes are handled explicitly:
+            // 1. ImageTooLargeError: pathological input (100MB+ photo where even
+            //    400x400@q30 still exceeds the cap). Substitute a `ContentBlock::Text`
+            //    placeholder so the conversation continues and the model sees a note
+            //    explaining the missing image — matches CC's `getImageTooLargeErrorMessage`
+            //    inline-message UX (errors.ts catches ImageResizeError at the API boundary
+            //    and substitutes a friendly assistant message).
+            // 2. Generic decode failure: bytes the client claimed were an image but
+            //    aren't decodable. Fall through to the LLM unchanged — we never silently
+            //    DROP a presumed-valid image (would confuse user about which attachment
+            //    got through). The LLM will reject with a less helpful error, but the
+            //    request itself doesn't crash.
+            let block = match runtime::image_registry::preflight_base64(data, mime_type) {
+                Ok((final_data, final_mime)) => runtime::ContentBlock::Image {
                     data: final_data,
                     mime_type: final_mime,
-                }],
+                },
+                Err(err) if runtime::image_registry::is_image_too_large(&err) => {
+                    // Index is 0-based; humans count from 1.
+                    let human_idx = index + 1;
+                    runtime::ContentBlock::Text {
+                        text: format!(
+                            "[Image #{human_idx} was too large to send even after compression — please resize and try again. ({err})]"
+                        ),
+                    }
+                }
+                Err(_) => runtime::ContentBlock::Image {
+                    data: data.clone(),
+                    mime_type: mime_type.clone(),
+                },
+            };
+            let msg = runtime::ConversationMessage {
+                role: runtime::MessageRole::User,
+                blocks: vec![block],
                 usage: None,
                 model: None,
             };

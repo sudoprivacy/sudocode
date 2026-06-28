@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,50 @@ use crate::fs_backend::{FsBackend, StdFsBackend};
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum image dimension (width or height) before downsampling.
 const MAX_IMAGE_DIMENSION: u32 = 8000;
+
+/// Typed error returned by [`downsample_image`] / [`maybe_downsample_raw`] /
+/// [`preflight_base64`] when even the most aggressively compressed JPEG (400px
+/// short-edge, quality 30 hard floor — see `downsample_image`) still exceeds
+/// [`MAX_IMAGE_BYTES`]. Pathological inputs only: 100 MB+ photos, bitmap-style
+/// PNGs of unusual structure, etc.
+///
+/// Threaded through [`io::Error::other`] so callers that want to substitute a
+/// friendlier placeholder (e.g. ACP `push_images` swapping `ContentBlock::Image`
+/// for a `ContentBlock::Text` notice) can detect this specific failure via
+/// `err.get_ref().and_then(|e| e.downcast_ref::<ImageTooLargeError>())` instead
+/// of pattern-matching on the message string.
+///
+/// Matches CC's split-of-concerns: the compressor still hard-fails (it can't
+/// honestly say "compressed" if it's still over the cap), but the boundary
+/// caller catches and substitutes — so the conversation continues without the
+/// image instead of crashing the whole request.
+#[derive(Debug, Clone)]
+pub struct ImageTooLargeError {
+    pub final_bytes: usize,
+    pub cap_bytes: usize,
+}
+
+impl fmt::Display for ImageTooLargeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "image still {} bytes after max compression (cap {} bytes)",
+            self.final_bytes, self.cap_bytes,
+        )
+    }
+}
+
+impl std::error::Error for ImageTooLargeError {}
+
+/// Returns true iff `err` wraps an [`ImageTooLargeError`]. Helper for callers
+/// that want to handle the "even ultra-compression failed" case differently
+/// from generic I/O failures (e.g. substitute a text placeholder).
+#[must_use]
+pub fn is_image_too_large(err: &io::Error) -> bool {
+    err.get_ref()
+        .and_then(|e| e.downcast_ref::<ImageTooLargeError>())
+        .is_some()
+}
 
 /// On-disk cache for pasted images, keyed by their SHA-256 content hash.
 ///
@@ -236,10 +281,20 @@ fn downsample_image(img: image::DynamicImage) -> io::Result<(Vec<u8>, String)> {
             .map_err(io::Error::other)?;
         let encoded = buf.into_inner();
 
-        if encoded.len() <= MAX_IMAGE_BYTES || quality <= 30 {
+        if encoded.len() <= MAX_IMAGE_BYTES {
             return Ok((encoded, "image/jpeg".to_string()));
         }
-
+        if quality <= 30 {
+            // Ultra-compressed still exceeds cap. Pathological input — let the
+            // boundary caller decide UX (substitute a text placeholder, drop
+            // the image with a warning, etc). Pre-2026-06-28 this returned the
+            // oversized buffer anyway; the LLM would reject downstream with a
+            // less actionable error. Mirrors CC's `ImageResizeError` throw.
+            return Err(io::Error::other(ImageTooLargeError {
+                final_bytes: encoded.len(),
+                cap_bytes: MAX_IMAGE_BYTES,
+            }));
+        }
         // Reduce quality and try again.
         quality = quality.saturating_sub(15);
     }

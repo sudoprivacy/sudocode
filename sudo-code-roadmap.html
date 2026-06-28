@@ -156,6 +156,8 @@
     <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
     <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
     <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
+    <li><a href="#deployment-modes">Deployment Modes</a></li>
+    <li><a href="#model-capabilities-service">Model Capabilities Service</a></li>
     <li><a href="#working-agreement">Working agreement</a></li>
     <li><a href="#references">Reference docs</a></li>
   </ol>
@@ -682,8 +684,10 @@ coverage measure waits on PTY.</p>
       <td><strong>P0 — core differentiators</strong></td>
       <td><code>/commit</code>, <code>/pr</code> (git workflow);
       EnterPlanMode/ExitPlanMode → execute; <code>edit_file</code>
-      text-replace verification; <strong>true async cancel</strong>
-      (interrupt in-flight API mid-request, not only between iterations)</td>
+      text-replace verification; <strong>true async cancel —
+      Done (PR #223)</strong>: <code>HookAbortSignal</code> is the
+      implementation; pop-queue and kill-sub-agent are orchestrator
+      concerns (see <a href="#cancel-architecture">cancel architecture</a>)</td>
     </tr>
     <tr>
       <td><strong>P1 — high-value tools</strong></td>
@@ -704,14 +708,14 @@ coverage measure waits on PTY.</p>
   </tbody>
 </table>
 
-<p>The async-cancel item under P0 is a <em>behavioural</em> P0, not just a
-coverage gap: today the runtime only checks
-<code>hook_abort_signal.is_aborted()</code> between API call iterations,
-so a cancel during a long-running API (e.g. <code>WebSearch</code>) does
-not interrupt the request &mdash; it takes effect only on the next loop
-iteration. Cancel needs to flow through to the streaming response path
-(e.g. <code>tokio::time::timeout</code> or per-call abort checking) so
-<code>sleep 999</code> + API call is truly interruptible.</p>
+<p>The async-cancel item under P0 is <strong>Done</strong> (PR #223).
+<code>HookAbortSignal</code> is the implementation: <code>abort_signal.abort()</code>
+fires from the crossterm event loop on ESC / Ctrl+C and propagates through
+the streaming response path so in-flight API requests are truly
+interruptible. The remaining cancel semantics (pop-queue, kill-sub-agent)
+are orchestrator concerns that land with the features that need them
+(command queue and sub-agents respectively) &mdash; see the
+<a href="#cancel-architecture">cancel architecture</a> table below.</p>
 
 <h4 id="cancel-architecture">Cancel architecture &mdash; three semantics (CC parity)</h4>
 
@@ -1498,25 +1502,25 @@ proceed in parallel.</p>
   <code>std::fs</code> call site in the sudocode runtime, route
   through the trait. No behavioural change to standalone CLI;
   this is a refactor that opens the door for the other two
-  backends.</li>
+  backends. <strong>DONE — PR #120.</strong></li>
   <li><strong>NexusVfsFsBackend.</strong> gRPC client against the
   nexus <code>NexusVFSService.Call</code> surface. First end-to-end
   validation: a standalone scode pointing at a remote nexus serves
-  its session jsonl from the kernel.</li>
+  its session jsonl from the kernel. <strong>PARTIAL — code exists, lacks e2e validation.</strong></li>
   <li><strong>KernelFsBackend + <code>sudocode-host</code>
   binary.</strong> The binary edge that links nexus
   <code>kernel</code> + <code>services</code> in-process and
   monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
-  the dependency edge sudocode → nexus is realised.</li>
+  the dependency edge sudocode → nexus is realised. <strong>PARTIAL — KernelFsBackend implemented, <code>sudocode-host</code> binary not yet created.</strong></li>
   <li><strong>Mailbox read/write loop.</strong> Inside the managed
   runtime, replace stdin/stdout prompts with
   <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
   and <code>sys_write</code> on the peer's mailbox. The runtime
-  surface to the LLM stays the same.</li>
+  surface to the LLM stays the same. <strong>DONE — PR #119, <code>sys_watch</code> condvar.</strong></li>
   <li><strong>WorkspaceBoundaryHook EPERM round-trip.</strong>
   Surface the kernel's structured EPERM verbatim into the LLM
   conversation; confirm by PTY scenario that the LLM learns the
-  <code>chat-with-me</code> redirect without system-prompt edits.</li>
+  <code>chat-with-me</code> redirect without system-prompt edits. <strong>NOT STARTED.</strong></li>
 </ol>
 
 <h2 id="feature-parity">Feature-parity standing rule: sudocode &harr; sudowork dedup</h2>
@@ -1539,6 +1543,65 @@ proceed in parallel.</p>
     sudowork's existing surface instead.</li>
   </ol>
   The goal is one SSOT per feature, not two implementations that drift.
+</div>
+
+<h2 id="deployment-modes">Deployment Modes</h2>
+
+<p>sudocode runs in three modes, selected by which <code>FsBackend</code>
+implementation is wired at the binary edge. Application code writes one
+path; the backend determines where bytes land.</p>
+
+<table>
+  <thead><tr><th>Mode</th><th>Binary</th><th>FsBackend</th><th>Scenario</th><th>Production status</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Standalone CLI</strong></td><td><code>scode</code></td><td><code>StdFsBackend</code></td><td>Developer laptop, direct filesystem</td><td>Current production path</td></tr>
+    <tr><td><strong>Edge / Dev CLI</strong></td><td><code>scode</code></td><td><code>NexusVfsFsBackend</code></td><td>CLI connecting to remote nexus kernel via gRPC</td><td>Code exists, lacks e2e validation</td></tr>
+    <tr><td><strong>Managed agent</strong></td><td><code>sudocode-host</code></td><td><code>KernelFsBackend&lt;Kernel&gt;</code></td><td>In-process inside nexus, direct Rust syscalls</td><td>Target production path; binary not yet created</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Migration note:</strong> The target production path is <code>sudocode-host</code>
+  (managed agent mode). Current production runs standalone <code>scode</code> with
+  <code>StdFsBackend</code>. Migration requires: (1) create <code>sudocode-host</code> binary
+  crate, (2) validate session/config/cache paths work identically on <code>KernelFsBackend</code>,
+  (3) coordinate with sudowork for gRPC client wiring. Track in Goal&nbsp;4 sequencing PR&nbsp;#3.
+</div>
+
+<h2 id="model-capabilities-service">Model Capabilities Service</h2>
+
+<p>sudocode needs model metadata (context window, max output tokens) for
+preflight checks and <code>max_tokens</code> request parameters. Today these are
+hardcoded in <code>MODEL_SPECS</code> (<code>registry.rs</code>) covering ~18 models;
+sudorouter serves 177+. New models require code changes.</p>
+
+<h3>Design</h3>
+
+<p>A single SSOT file per agent type, updated from sudorouter's
+<code>/v1/models</code> API, read by <code>model_token_limit()</code>.</p>
+
+<table>
+  <thead><tr><th>Aspect</th><th>Decision</th></tr></thead>
+  <tbody>
+    <tr><td><strong>SSOT</strong></td><td><code>/agents/scode-standard/cache/model-capabilities.json</code> via <code>FsBackend</code></td></tr>
+    <tr><td><strong>Scope</strong></td><td>Per agent type &mdash; different agents may connect to different router endpoints</td></tr>
+    <tr><td><strong>Storage</strong></td><td>VFS path (everything-is-a-file); nexusd-cluster runs PAS, files readable directly</td></tr>
+    <tr><td><strong>Initial value</strong></td><td>Bundled <code>model-capabilities.json</code> shipped with release (replaces hardcoded <code>MODEL_SPECS</code>)</td></tr>
+    <tr><td><strong>Refresh trigger</strong></td><td>Startup (async fire-and-forget) + <code>/model</code> command</td></tr>
+    <tr><td><strong>Refresh method</strong></td><td>Fetch <code>/v1/models</code> &rarr; atomic overwrite SSOT file</td></tr>
+    <tr><td><strong>TTL</strong></td><td>24h &mdash; <code>updated_at</code> inside file; stale triggers background refresh</td></tr>
+    <tr><td><strong>No API key</strong></td><td>Skip fetch, use SSOT file as-is (bundled or last successful pull)</td></tr>
+    <tr><td><strong>File missing</strong></td><td>Heuristic fallback (opus 32k, others 64k)</td></tr>
+  </tbody>
+</table>
+
+<p>Fallback chain: <strong>SSOT file</strong> (last pull or bundled) &rarr; <strong>heuristic default</strong>. No separate hardcoded table in Rust &mdash; the bundled JSON IS the initial fallback, same file format, same read path.</p>
+
+<div class="callout">
+  <strong>Future optimization:</strong> When CacheStore lands in nexusd-cluster,
+  model capabilities can be promoted to CacheStore for sub-microsecond reads.
+  Current VFS path reads (~14&mu;s metastore, or OS file cache for StdFs) are
+  fast enough &mdash; API request latency dominates.
 </div>
 
 <h2 id="working-agreement">Working agreement on this document</h2>

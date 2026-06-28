@@ -201,7 +201,12 @@ fn maybe_downsample(png_bytes: &[u8]) -> io::Result<(Vec<u8>, String)> {
 pub fn preflight_base64(b64_data: &str, mime_type: &str) -> io::Result<(String, String)> {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(b64_data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("base64 decode failed: {e}")))?;
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("base64 decode failed: {e}"),
+            )
+        })?;
     let (final_bytes, final_mime) = maybe_downsample_raw(&decoded, mime_type)?;
     let re_b64 = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
     Ok((re_b64, final_mime))

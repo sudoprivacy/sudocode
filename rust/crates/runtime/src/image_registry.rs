@@ -157,7 +157,21 @@ fn encode_rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> io::Result<Vec<u8
 }
 
 /// Downsample an already-encoded image if it exceeds size or dimension limits.
-fn maybe_downsample_raw(bytes: &[u8], mime_type: &str) -> io::Result<(Vec<u8>, String)> {
+///
+/// Returns `(final_bytes, final_mime_type)`. When the input is already within
+/// `MAX_IMAGE_BYTES` AND its decoded dimensions are within `MAX_IMAGE_DIMENSION`,
+/// the bytes pass through unchanged. Otherwise the image is decoded, resized to
+/// fit the dimension cap (Lanczos3), and re-encoded as JPEG at progressively
+/// lower quality (85→70→55→40→25→10) until it fits the byte cap.
+///
+/// Made `pub` so the ACP `push_images` path can preflight client-supplied
+/// images (e.g. base64 attachments coming through from sudowork) before they
+/// enter the conversation and get shipped to the LLM. Without this, a 25 MB
+/// PNG pasted into sudowork → sudocode → Anthropic API would surface as a
+/// `single_request_too_large` error to the user (the bug 进二 hit 2026-06-28).
+/// The CLI-direct paste path already used this indirectly via `register_rgba`
+/// / `register_bytes`; ACP path was the gap.
+pub fn maybe_downsample_raw(bytes: &[u8], mime_type: &str) -> io::Result<(Vec<u8>, String)> {
     if bytes.len() <= MAX_IMAGE_BYTES {
         let img = image::load_from_memory(bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -174,6 +188,23 @@ fn maybe_downsample_raw(bytes: &[u8], mime_type: &str) -> io::Result<(Vec<u8>, S
 /// Downsample a PNG-encoded buffer if needed.
 fn maybe_downsample(png_bytes: &[u8]) -> io::Result<(Vec<u8>, String)> {
     maybe_downsample_raw(png_bytes, "image/png")
+}
+
+/// Convenience: preflight an image supplied as a base64 string (ACP transport
+/// format). Decodes the base64, runs `maybe_downsample_raw`, and re-encodes
+/// the result. Returns `(final_base64, final_mime_type)`.
+///
+/// Callers (e.g. ACP `push_images`) should treat decode failure as a fatal
+/// error — a base64 the client claimed was an image but isn't decodable shouldn't
+/// silently pass through to the LLM (it would just be rejected there with a
+/// less helpful error message).
+pub fn preflight_base64(b64_data: &str, mime_type: &str) -> io::Result<(String, String)> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("base64 decode failed: {e}")))?;
+    let (final_bytes, final_mime) = maybe_downsample_raw(&decoded, mime_type)?;
+    let re_b64 = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
+    Ok((re_b64, final_mime))
 }
 
 /// Resize an image so that neither dimension exceeds `MAX_IMAGE_DIMENSION` and

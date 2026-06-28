@@ -2231,11 +2231,23 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
         })?;
         for (data, mime_type) in images {
+            // Preflight: downsample if oversized (>5MB or any dim >8000px). Without this,
+            // a 25MB PNG attached in sudowork (or any ACP client) would transit ACP and
+            // get rejected by the LLM as single_request_too_large. The CLI-direct paste
+            // path already preflighted via ImageRegistry::register_rgba; ACP `push_images`
+            // was the gap. Decode failures fall through to the LLM unchanged — the LLM
+            // will reject with a less helpful error, but we never silently DROP an image
+            // here (would confuse user about which attachment got through).
+            let (final_data, final_mime) =
+                match runtime::image_registry::preflight_base64(data, mime_type) {
+                    Ok(pair) => pair,
+                    Err(_) => (data.clone(), mime_type.clone()),
+                };
             let msg = runtime::ConversationMessage {
                 role: runtime::MessageRole::User,
                 blocks: vec![runtime::ContentBlock::Image {
-                    data: data.clone(),
-                    mime_type: mime_type.clone(),
+                    data: final_data,
+                    mime_type: final_mime,
                 }],
                 usage: None,
                 model: None,

@@ -23,6 +23,26 @@ use crate::usage::{TokenUsage, UsageAggregation, UsageTracker};
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 
+/// Stop attempting auto-compaction after this many consecutive turns where the
+/// compaction routine returned `removed_message_count == 0` (i.e. it ran but
+/// couldn't shrink the conversation any further — typically because the
+/// preserved-tail window already covers everything above the threshold, or
+/// the boundary heuristics walked the keep-from index all the way back).
+///
+/// Without this circuit-breaker, a session that's structurally pinned above
+/// `auto_compaction_input_tokens_threshold` retries compact_session() on
+/// every turn for the rest of the session. The work is local & cheap, but
+/// the user-visible auto-compaction event would also fire every turn with
+/// `removed_message_count: 0`, which is noise (and would spam future
+/// telemetry / ACP session events).
+///
+/// 3 matches CC's `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES` — CC observed
+/// 1,279 sessions hammering 50+ futile retry attempts (one session: 3,272)
+/// for a global 250K wasted API-call equivalent per day. sudocode's
+/// compact_session is purely local so the wasted work is bounded, but the
+/// noise-floor argument still applies.
+const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
+
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
 const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
@@ -203,6 +223,11 @@ pub struct ConversationRuntime<C, T> {
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     auto_compaction_input_tokens_threshold: u32,
+    /// Consecutive turns where `maybe_auto_compact` ran and returned a no-op
+    /// (compact_session removed zero messages). Reset to 0 on any successful
+    /// compaction. When this reaches `MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS`,
+    /// `maybe_auto_compact` short-circuits for the rest of the session.
+    consecutive_auto_compact_noops: u8,
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter + Send>>,
     session_tracer: Option<SessionTracer>,
@@ -267,6 +292,7 @@ where
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
             auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
+            consecutive_auto_compact_noops: 0,
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
             session_tracer: None,
@@ -1194,6 +1220,14 @@ where
             return None;
         }
 
+        // Circuit-breaker: once N consecutive turns have tried + no-op'd,
+        // stop attempting. See MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS docs for
+        // rationale (CC parity; bounds noise floor when session is
+        // structurally pinned above the threshold).
+        if self.consecutive_auto_compact_noops >= MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS {
+            return None;
+        }
+
         let result = compact_session(
             &self.session,
             CompactionConfig {
@@ -1203,9 +1237,14 @@ where
         );
 
         if result.removed_message_count == 0 {
+            self.consecutive_auto_compact_noops =
+                self.consecutive_auto_compact_noops.saturating_add(1);
             return None;
         }
 
+        // Success → reset the noop counter so the breaker only trips on
+        // SUSTAINED inability to shrink, not on transient threshold dance.
+        self.consecutive_auto_compact_noops = 0;
         self.session = result.compacted_session;
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,

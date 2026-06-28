@@ -67,174 +67,24 @@ pub struct ModelTokenLimit {
 }
 
 // ---------------------------------------------------------------------------
-// Hardcoded model specs (keyed by wire model ID)
-// ---------------------------------------------------------------------------
-
-/// Canonical model capabilities table. Wire model IDs referenced in
-/// `sudocode.json` provider mappings should appear here so that token-limit
-/// preflight checks and max-output-token defaults work correctly.
-const MODEL_SPECS: &[(&str, ModelTokenLimit)] = &[
-    // Anthropic
-    (
-        "claude-opus-4-6",
-        ModelTokenLimit {
-            max_output_tokens: 32_000,
-            context_window_tokens: 200_000,
-        },
-    ),
-    (
-        "claude-sonnet-4-6",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
-        },
-    ),
-    (
-        "claude-haiku-4-5-20251213",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
-        },
-    ),
-    // xAI
-    (
-        "grok-3",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 131_072,
-        },
-    ),
-    (
-        "grok-3-mini",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 131_072,
-        },
-    ),
-    (
-        "grok-2",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 131_072,
-        },
-    ),
-    // Moonshot / Kimi (via DashScope)
-    (
-        "kimi-k2.5",
-        ModelTokenLimit {
-            max_output_tokens: 16_384,
-            context_window_tokens: 256_000,
-        },
-    ),
-    (
-        "kimi-k1.5",
-        ModelTokenLimit {
-            max_output_tokens: 16_384,
-            context_window_tokens: 256_000,
-        },
-    ),
-    // OpenAI / Codex
-    (
-        "gpt-4.1",
-        ModelTokenLimit {
-            max_output_tokens: 32_768,
-            context_window_tokens: 1_047_576,
-        },
-    ),
-    (
-        "gpt-4.1-mini",
-        ModelTokenLimit {
-            max_output_tokens: 32_768,
-            context_window_tokens: 1_047_576,
-        },
-    ),
-    (
-        "gpt-4.1-nano",
-        ModelTokenLimit {
-            max_output_tokens: 32_768,
-            context_window_tokens: 1_047_576,
-        },
-    ),
-    (
-        "gpt-5.4",
-        ModelTokenLimit {
-            max_output_tokens: 128_000,
-            context_window_tokens: 1_000_000,
-        },
-    ),
-    (
-        "gpt-5.4-mini",
-        ModelTokenLimit {
-            max_output_tokens: 128_000,
-            context_window_tokens: 400_000,
-        },
-    ),
-    (
-        "gpt-5.4-nano",
-        ModelTokenLimit {
-            max_output_tokens: 128_000,
-            context_window_tokens: 400_000,
-        },
-    ),
-    // Qwen (via DashScope)
-    (
-        "qwen-plus",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 131_072,
-        },
-    ),
-    // Gemini (via proxy)
-    (
-        "gemini-3.1-pro-preview",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
-        },
-    ),
-    (
-        "gemini-3-flash-preview",
-        ModelTokenLimit {
-            max_output_tokens: 64_000,
-            context_window_tokens: 200_000,
-        },
-    ),
-    // Gemini
-    (
-        "gemini-3.1-pro-preview",
-        ModelTokenLimit {
-            max_output_tokens: 65_536,
-            context_window_tokens: 1_048_576,
-        },
-    ),
-    (
-        "gemini-3-flash-preview",
-        ModelTokenLimit {
-            max_output_tokens: 65_536,
-            context_window_tokens: 1_048_576,
-        },
-    ),
-];
-
-// ---------------------------------------------------------------------------
 // Model spec lookups
 // ---------------------------------------------------------------------------
 
 /// Look up token limits for a wire model ID.
 ///
-/// Handles provider-prefixed model IDs (e.g. `openai/gpt-4.1-mini`) by
-/// stripping the prefix before lookup.
+/// Queries the Model Capabilities Service SSOT file (populated from
+/// sudorouter `/v1/models` or the bundled fallback JSON). Handles
+/// provider-prefixed model IDs (e.g. `openai/gpt-4.1-mini`) by stripping
+/// the prefix before lookup.
 #[must_use]
 pub fn model_token_limit(model_id: &str) -> Option<ModelTokenLimit> {
-    let base_model = model_id.rsplit('/').next().unwrap_or(model_id);
-    MODEL_SPECS
-        .iter()
-        .find(|(id, _)| id.eq_ignore_ascii_case(base_model))
-        .map(|(_, limit)| *limit)
+    runtime::model_capabilities::lookup(model_id).map(|cap| ModelTokenLimit {
+        max_output_tokens: cap.max_output_tokens,
+        context_window_tokens: cap.context_window,
+    })
 }
 
-/// Look up token limits by resolving an alias through config first, then
-/// looking up the wire model ID in the hardcoded specs.
+/// Look up token limits by resolving an alias through config first.
 #[must_use]
 pub fn model_token_limit_from_config(
     config: &SudoCodeConfig,

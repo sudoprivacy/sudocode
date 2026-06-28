@@ -2712,8 +2712,7 @@ impl LiveCli {
         let tokio_runtime = tokio::runtime::Runtime::new()?;
 
         // Fire-and-forget: refresh model capabilities from sudorouter if stale.
-        if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend)
-        {
+        if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend) {
             if let Some((base_url, api_key)) = extract_sudorouter_credentials(&sudocode_config) {
                 let ch = config_home.clone();
                 tokio_runtime.spawn(async move {

@@ -1570,38 +1570,13 @@ path; the backend determines where bytes land.</p>
 
 <h2 id="model-capabilities-service">Model Capabilities Service</h2>
 
-<p>sudocode needs model metadata (context window, max output tokens) for
-preflight checks and <code>max_tokens</code> request parameters. Today these are
-hardcoded in <code>MODEL_SPECS</code> (<code>registry.rs</code>) covering ~18 models;
-sudorouter serves 177+. New models require code changes.</p>
-
-<h3>Design</h3>
-
-<p>A single SSOT file per agent type, updated from sudorouter's
-<code>/v1/models</code> API, read by <code>model_token_limit()</code>.</p>
-
-<table>
-  <thead><tr><th>Aspect</th><th>Decision</th></tr></thead>
-  <tbody>
-    <tr><td><strong>SSOT</strong></td><td><code>/agents/scode-standard/cache/model-capabilities.json</code> via <code>FsBackend</code></td></tr>
-    <tr><td><strong>Scope</strong></td><td>Per agent type &mdash; different agents may connect to different router endpoints</td></tr>
-    <tr><td><strong>Storage</strong></td><td>VFS path (everything-is-a-file); nexusd-cluster runs PAS, files readable directly</td></tr>
-    <tr><td><strong>Initial value</strong></td><td>Bundled <code>model-capabilities.json</code> shipped with release (replaces hardcoded <code>MODEL_SPECS</code>)</td></tr>
-    <tr><td><strong>Refresh trigger</strong></td><td>Startup (async fire-and-forget) + <code>/model</code> command</td></tr>
-    <tr><td><strong>Refresh method</strong></td><td>Fetch <code>/v1/models</code> &rarr; atomic overwrite SSOT file</td></tr>
-    <tr><td><strong>TTL</strong></td><td>24h &mdash; <code>updated_at</code> inside file; stale triggers background refresh</td></tr>
-    <tr><td><strong>No API key</strong></td><td>Skip fetch, use SSOT file as-is (bundled or last successful pull)</td></tr>
-    <tr><td><strong>File missing</strong></td><td>Heuristic fallback (opus 32k, others 64k)</td></tr>
-  </tbody>
-</table>
-
-<p>Fallback chain: <strong>SSOT file</strong> (last pull or bundled) &rarr; <strong>heuristic default</strong>. No separate hardcoded table in Rust &mdash; the bundled JSON IS the initial fallback, same file format, same read path.</p>
+<p><strong>Done.</strong> Hardcoded <code>MODEL_SPECS</code> replaced with file-backed SSOT
+at <code>{config_home}/cache/model-capabilities.json</code>. Bundled JSON (30 models)
+seeds first launch; async refresh from sudorouter <code>/v1/models</code> on startup
+when stale (24h TTL). New sudorouter models picked up automatically.</p>
 
 <div class="callout">
-  <strong>Future optimization:</strong> When CacheStore lands in nexusd-cluster,
-  model capabilities can be promoted to CacheStore for sub-microsecond reads.
-  Current VFS path reads (~14&mu;s metastore, or OS file cache for StdFs) are
-  fast enough &mdash; API request latency dominates.
+  <strong>Future:</strong> Promote to CacheStore when it lands in nexusd-cluster.
 </div>
 
 <h2 id="working-agreement">Working agreement on this document</h2>

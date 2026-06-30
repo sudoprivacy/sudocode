@@ -347,6 +347,39 @@ async fn scenario_initialize(client: &mut AcpTestClient) {
         result.get("agentCapabilities").is_some(),
         "response should include agentCapabilities"
     );
+
+    // Image-handling SSOT: assert the `_meta.sudocode.imageCapability` extension
+    // is advertised on every initialize response. Per the design doc
+    // `docs/design/image-handling-non-user-facing.html` (Decision 1), this is
+    // how sudowork (and any other ACP client) learns what byte limits sudocode
+    // accepts and whether sudocode handles oversized + wrong-model internally
+    // — without it the client would have to hardcode caps or wrap fallbacks
+    // unnecessarily (the original 进二 bug class).
+    let img_cap = result
+        .get("_meta")
+        .and_then(|m| m.get("sudocode"))
+        .and_then(|s| s.get("imageCapability"))
+        .expect("initialize response must carry _meta.sudocode.imageCapability");
+    for field in [
+        "maxBytes",
+        "maxDimension",
+        "downsampleTargetBytes",
+        "autoHandlesOversized",
+        "autoHandlesWrongModel",
+    ] {
+        assert!(
+            img_cap.get(field).is_some(),
+            "_meta.sudocode.imageCapability must include `{field}` (got: {img_cap})"
+        );
+    }
+    // Documented values from image_registry::capability() — guard against
+    // drift between source-of-truth (image_registry.rs constants) and what
+    // the wire actually carries.
+    assert_eq!(img_cap["maxBytes"].as_u64(), Some(5 * 1024 * 1024));
+    assert_eq!(img_cap["maxDimension"].as_u64(), Some(8000));
+    assert_eq!(img_cap["downsampleTargetBytes"].as_u64(), Some(512 * 1024));
+    assert_eq!(img_cap["autoHandlesOversized"].as_bool(), Some(true));
+    assert_eq!(img_cap["autoHandlesWrongModel"].as_bool(), Some(true));
 }
 
 async fn scenario_session_new(client: &mut AcpTestClient, cwd: &std::path::Path) -> String {

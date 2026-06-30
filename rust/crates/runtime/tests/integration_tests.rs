@@ -384,3 +384,28 @@ fn worker_provider_failure_flows_through_recovery_to_policy() {
         "post-recovery green+approved lane should be merge-ready"
     );
 }
+
+/// model_capabilities resolution end to end:
+/// a known wire model id returns its own context window from the SSOT table,
+/// and an unknown id falls back to the file's `default` entry — never a
+/// hardcoded constant. Also pins `claude-opus-4-8` at its 1M context window so
+/// a regression back to 200K (the old hardcoded default) is caught.
+#[test]
+fn context_window_resolves_from_ssot_with_default_fallback() {
+    use runtime::model_capabilities::{context_window_or_default, ModelCapabilitiesFile};
+
+    // The lazy snapshot is seeded from the bundled SSOT JSON.
+    let file_default = ModelCapabilitiesFile::default().default.context_window;
+    assert!(file_default > 0, "SSOT must define a non-zero default");
+
+    // unknown model → file's default (sourced from the SSOT, not code)
+    assert_eq!(
+        context_window_or_default("definitely-not-a-real-model-xyz"),
+        file_default
+    );
+
+    // known model → its own value; 1M for opus-4-8, distinct from the default
+    let opus = context_window_or_default("claude-opus-4-8");
+    assert_eq!(opus, 1_000_000);
+    assert_ne!(opus, file_default);
+}

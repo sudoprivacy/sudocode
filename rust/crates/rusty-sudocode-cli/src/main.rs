@@ -16,6 +16,7 @@ mod cli;
 mod init;
 mod input;
 mod render;
+mod vlm_describe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -1984,6 +1985,56 @@ struct AcpSdkDelegate {
     inner: AcpCliAgent,
 }
 
+/// Route an image through a VLM (via sudorouter) and return a
+/// `ContentBlock::Text` containing the description, or — if the VLM call
+/// fails for any reason (creds missing, network error, bad response) —
+/// fall back to the pre-existing static placeholder so the conversation
+/// still has *something* to reference for that slot.
+///
+/// `tokio_rt` is the cli's existing runtime; we just block_on the async
+/// describe call inside it. No new runtime is created per image.
+fn vlm_describe_block_or_placeholder(
+    tokio_rt: &tokio::runtime::Runtime,
+    image_b64: &str,
+    mime_type: &str,
+    index: usize,
+    sudorouter_creds: Option<&(String, String)>,
+) -> runtime::ContentBlock {
+    let human_idx = index + 1;
+    let Some((base_url, api_key)) = sudorouter_creds else {
+        // No sudorouter creds → fall back to the original static placeholder.
+        // This is the same UX the user would have seen before VLM-route landed;
+        // it preserves the "conversation continues" invariant without requiring
+        // a configured proxy.
+        return runtime::ContentBlock::Text {
+            text: format!(
+                "[Image #{human_idx} could not be sent (sudorouter not configured) — please configure proxy.sudorouter or use a vision-capable model.]"
+            ),
+        };
+    };
+    let result = tokio_rt.block_on(vlm_describe::describe_image_via_vlm(
+        base_url,
+        api_key,
+        vlm_describe::DEFAULT_VISION_MODEL,
+        image_b64,
+        mime_type,
+    ));
+    match result {
+        Ok(description) => runtime::ContentBlock::Text {
+            text: format!("[Image #{human_idx}: {description}]"),
+        },
+        Err(e) => {
+            // Log + degrade. Never abort the user's turn over a VLM failure.
+            eprintln!("[push_images] VLM describe failed for image #{human_idx}: {e}");
+            runtime::ContentBlock::Text {
+                text: format!(
+                    "[Image #{human_idx} could not be described automatically ({e}) — please retype your question with the image's key contents in text.]"
+                ),
+            }
+        }
+    }
+}
+
 impl AcpSdkDelegate {
     fn new(
         model: String,
@@ -2239,47 +2290,70 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         images: &[(String, String)],
     ) -> Result<(), runtime::AcpError> {
+        // Resolve everything that needs runtime-level state BEFORE taking the
+        // mutable session borrow: the tokio runtime (for blocking VLM calls),
+        // the active model, and sudorouter creds. This also keeps any VLM
+        // round-trips outside of the session-mut critical section.
+        let active_model = self.inner.model.clone();
+        let active_model_is_vision_capable =
+            runtime::model_capabilities::vision_capable(&active_model);
+        let sudocode_config = load_sudocode_config_for_current_dir();
+        let sudorouter_creds = extract_sudorouter_credentials(&sudocode_config);
+
+        // The push_images path now has THREE failure modes to recover from —
+        // each substitutes ContentBlock::Image → ContentBlock::Text so the
+        // conversation continues, the model gets something useful, and the
+        // user never sees a "model doesn't support images" / "image too large"
+        // tip leak through. Design:
+        // docs/design/image-handling-non-user-facing.html (Decision 2).
+        //
+        // 1. Active model is text-only → route via VLM (gemini-2.5-flash by
+        //    default), splice description text. Checked BEFORE preflight: no
+        //    point spending CPU on downsample if bytes aren't going natively.
+        // 2. preflight returns ImageTooLargeError (pathological input where
+        //    even 400×400 @ q30 exceeds the 5 MB cap) → route via VLM as
+        //    well; REPLACES the old static "[Image #N too large]" placeholder.
+        // 3. Generic decode failure → fall through with original bytes; never
+        //    silently DROP a presumed-valid image.
+        let mut blocks: Vec<runtime::ContentBlock> = Vec::with_capacity(images.len());
+        for (index, (data, mime_type)) in images.iter().enumerate() {
+            let block = if !active_model_is_vision_capable {
+                vlm_describe_block_or_placeholder(
+                    &self.inner.tokio_runtime,
+                    data,
+                    mime_type,
+                    index,
+                    sudorouter_creds.as_ref(),
+                )
+            } else {
+                match runtime::image_registry::preflight_base64(data, mime_type) {
+                    Ok((final_data, final_mime)) => runtime::ContentBlock::Image {
+                        data: final_data,
+                        mime_type: final_mime,
+                    },
+                    Err(err) if runtime::image_registry::is_image_too_large(&err) => {
+                        vlm_describe_block_or_placeholder(
+                            &self.inner.tokio_runtime,
+                            data,
+                            mime_type,
+                            index,
+                            sudorouter_creds.as_ref(),
+                        )
+                    }
+                    Err(_) => runtime::ContentBlock::Image {
+                        data: data.clone(),
+                        mime_type: mime_type.clone(),
+                    },
+                }
+            };
+            blocks.push(block);
+        }
+
+        // Single critical section: take the session mut and push all messages.
         let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
             runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
         })?;
-        for (index, (data, mime_type)) in images.iter().enumerate() {
-            // Preflight: downsample if oversized (>5MB or any dim >8000px). Without this,
-            // a 25MB PNG attached in sudowork (or any ACP client) would transit ACP and
-            // get rejected by the LLM as single_request_too_large. The CLI-direct paste
-            // path already preflighted via ImageRegistry::register_rgba; ACP `push_images`
-            // was the gap.
-            //
-            // Two failure modes are handled explicitly:
-            // 1. ImageTooLargeError: pathological input (100MB+ photo where even
-            //    400x400@q30 still exceeds the cap). Substitute a `ContentBlock::Text`
-            //    placeholder so the conversation continues and the model sees a note
-            //    explaining the missing image — matches CC's `getImageTooLargeErrorMessage`
-            //    inline-message UX (errors.ts catches ImageResizeError at the API boundary
-            //    and substitutes a friendly assistant message).
-            // 2. Generic decode failure: bytes the client claimed were an image but
-            //    aren't decodable. Fall through to the LLM unchanged — we never silently
-            //    DROP a presumed-valid image (would confuse user about which attachment
-            //    got through). The LLM will reject with a less helpful error, but the
-            //    request itself doesn't crash.
-            let block = match runtime::image_registry::preflight_base64(data, mime_type) {
-                Ok((final_data, final_mime)) => runtime::ContentBlock::Image {
-                    data: final_data,
-                    mime_type: final_mime,
-                },
-                Err(err) if runtime::image_registry::is_image_too_large(&err) => {
-                    // Index is 0-based; humans count from 1.
-                    let human_idx = index + 1;
-                    runtime::ContentBlock::Text {
-                        text: format!(
-                            "[Image #{human_idx} was too large to send even after compression — please resize and try again. ({err})]"
-                        ),
-                    }
-                }
-                Err(_) => runtime::ContentBlock::Image {
-                    data: data.clone(),
-                    mime_type: mime_type.clone(),
-                },
-            };
+        for block in blocks {
             let msg = runtime::ConversationMessage {
                 role: runtime::MessageRole::User,
                 blocks: vec![block],

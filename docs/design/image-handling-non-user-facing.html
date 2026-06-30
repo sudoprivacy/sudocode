@@ -297,6 +297,9 @@ ai-dev-browser: screenshot defaults are local-to-itself, not coupled to active L
   <li><strong>Sudowork tests</strong>: vitest unit tests for capability parsing + the fallback decision logic + the "no _meta = silent fallback" path.</li>
   <li><strong>E2E (per memory <code>pr_cadence</code> + acceptance bar)</strong>: extend <code>tests/e2e/acp-session-preserved-after-error.yaml</code> with a vision-fallback case (paste image in non-vision conv → expect description spliced + normal reply). Add a second e2e case driven via <code>ai-dev-browser</code> (screenshot of a large-image page → assert the screenshot is auto-capped, no error surfaces).</li>
   <li><strong>Roadmap update (per comment #15)</strong>: revise the <code>sudo-code-roadmap.html</code> §9 row to "Shipped" with PR link. Commit, merge, publish via <code>shareone</code> skill (PUT to the existing share_id, do not POST a new share). This is a hard checklist item, not a nice-to-have.</li>
+  <li><strong>ACP spec PR upstream</strong>: after code review passes, file PR on agentclientprotocol.com spec proposing <code>_meta.imageCapability</code> (+ <code>_meta.audioCapability</code> shape for forward-compat). Link in PR body.</li>
+  <li><strong>Upstream issues to Claude Code / Codex / Qwen</strong>: day-of-merge, 3 GH issues asking each project to handle oversized + wrong-model image natively. Link to design doc.</li>
+  <li><strong>VLM-route description cache</strong>: small LRU in sudocode runtime keyed by image sha256 → description string. Bounded memory (e.g. 64 entries). Saves a VLM round-trip when the same image is referenced across multiple turns.</li>
 </ol>
 
 <p>Commits 4+7 form the cap-unification subset. Commits 5+8 form the wrong-model-fallback subset. Could be split into two PRs if reviewers prefer; current plan is one PR for atomic review.</p>
@@ -315,18 +318,18 @@ ai-dev-browser: screenshot defaults are local-to-itself, not coupled to active L
   </tbody>
 </table>
 
-<h2 id="followups">Concrete followups (non-blocking, but tracked) <span class="revchip">comment #16</span></h2>
+<h2 id="extra-commits">Additional commits in this PR (was: "followups") <span class="revchip">comment #16, no deferrals</span></h2>
 
-<p>Per comment #16, nothing is "out of scope" — every item must be tracked + revisited. The items previously labelled "Out of scope" are reclassified as <strong>explicit followups</strong> with named owners and triggers:</p>
+<p>Per comment #16, nothing is deferred. The 5 items previously labelled "Out of scope" / "followups" are now classified as:</p>
 
 <table>
-  <thead><tr><th>Item</th><th>Trigger to do</th><th>Owner</th></tr></thead>
+  <thead><tr><th>Item</th><th>Disposition</th><th>Where</th></tr></thead>
   <tbody>
-    <tr><td>File ACP spec PR to standardise <code>_meta.imageCapability</code> upstream</td><td>After bilateral sudocode↔sudowork impl is merged + 1 release of soak time</td><td>sudowork-win-pc-{worktree#}</td></tr>
-    <tr><td>File upstream issues to Claude Code / Codex / Qwen asking for native auto-handling</td><td>Day-of merge — file the issues immediately, do not wait for "later"</td><td>sudowork-win-pc-{worktree#}</td></tr>
-    <tr><td>VLM-route description caching (same image bytes → cached description)</td><td>When telemetry shows >5% of VLM-route calls are duplicate-image (likely never, but a real trigger not a vibes-only "premature")</td><td>sudocode-AI-of-the-day</td></tr>
-    <tr><td>Audio / video modalities</td><td>When project_<code>f2_voice_transcription</code> lands its TranscriptionService — extend the same <code>_meta</code> shape to cover <code>audioCapability</code></td><td>jointly with the [[f2_voice_transcription]] owner</td></tr>
-    <tr><td>Remote-agent (Moss) integration of <code>_meta.imageCapability</code></td><td>When the next Moss feature touches the image surface</td><td>remote-agent owner of the day</td></tr>
+    <tr><td>File ACP spec PR upstream to standardise <code>_meta.imageCapability</code> (+ <code>_meta.audioCapability</code> shape as forward-compat precedent for [[f2_voice_transcription]])</td><td><strong>In this PR series</strong> as commit 12 — filed after sudocode/sudowork code review passes, before merge to <code>main</code>. No release-soak wait.</td><td>Spec repo on <a href="https://agentclientprotocol.com/">agentclientprotocol.com</a></td></tr>
+    <tr><td>File upstream issues to Claude Code / Codex / Qwen asking for native auto-handling</td><td><strong>In this PR series</strong> as commit 13 — filed on merge day (3 GH issues), do not let it slip.</td><td>Their respective GH repos</td></tr>
+    <tr><td>VLM-route description caching (same image bytes → cached description)</td><td><strong>In this PR series</strong> as commit 14 — small LRU keyed by image sha256 in sudocode runtime. Saves a VLM round-trip in multi-turn conversations that reference the same image.</td><td>Sudocode runtime</td></tr>
+    <tr><td>Audio / video modalities (<code>_meta.audioCapability</code> implementation)</td><td><strong>NOT a deferral — boundary clarification</strong>: this is owned by [[f2_voice_transcription]] project. The <em>shape</em> is standardised in this PR's commit 12 (spec PR) so f2 has a precedent; the <em>consumer</em> is f2's TranscriptionService work.</td><td>f2_voice_transcription project, not here</td></tr>
+    <tr><td>Remote-agent (Moss) integration of <code>_meta.imageCapability</code></td><td><strong>NOT a deferral — already covered automatically</strong>: sudowork's <code>_meta</code> parsing in step 7 is backend-agnostic. The moment Moss advertises <code>_meta.imageCapability</code>, sudowork consumes it; until then, silent fallback (Decision 1). No Moss-specific code here.</td><td>(automatic — this PR enables it)</td></tr>
   </tbody>
 </table>
 

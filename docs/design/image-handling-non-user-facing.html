@@ -242,19 +242,6 @@ Claude Code, Codex, Qwen: each has its own opaque-to-us caps.
   <li>Multi-modal beyond images (audio, video) — orthogonal.</li>
 </ul>
 
-<h2 id="audit">Audit (8 principles)</h2>
-
-<ol>
-  <li><strong>Simplify contract</strong> ✅ — single SSOT mechanism (ACP capability) replaces 4+ hardcoded constants across two repos</li>
-  <li><strong>No boundary leak</strong> ✅ — caps stay with the backend that enforces them; sudowork queries instead of guessing</li>
-  <li><strong>SSOT</strong> ✅ — each backend = own truth; ACP <code>_meta</code> is the bridge</li>
-  <li><strong>DRY</strong> ✅ — sudocode reuses its own <code>image_registry::preflight_base64</code>; sudowork reuses its own <code>callChatCompletionsWithImage</code>; only the routing decision is new</li>
-  <li><strong>Rust-first</strong> ✅ — sudocode-side VLM logic in Rust (<code>vlm_describe.rs</code>)</li>
-  <li><strong>Perf-first</strong> ✅ — VLM-route adds latency only when fallback path fires (oversized OR wrong-model); typical happy path unchanged</li>
-  <li><strong>Raft</strong> ✅ N/A</li>
-  <li><strong>Systemic</strong> ✅ — closes 3 user-facing surfaces simultaneously by addressing the underlying contract drift, not by adding a 5th cap layer</li>
-</ol>
-
 <div class="footer">
   In-repo source: <code>docs/design/image-handling-non-user-facing.html</code> (this file is the SSOT).
   ShareOne mirror: <a href="https://s.shareone.vip/s/image-handling-non-user-facing">https://s.shareone.vip/s/image-handling-non-user-facing</a> (share_id <code>vvO4GwZ0TgVUagJV</code>; update via PUT to keep URL stable). Sign external posts <code>sudowork-win-pc-0</code>.

@@ -660,6 +660,53 @@ async fn scenario_session_prompt_per_turn_usage(
     );
 }
 
+/// Push a small image (1×1 PNG) inline in `session/prompt`. Exercises the
+/// push_images path end-to-end: the cli must NOT crash on the new VLM-route
+/// branch even when the active model is happily vision-capable + the image
+/// is well under cap (i.e. the trivially-native path through the new
+/// 3-branch decision tree at main.rs:push_images).
+///
+/// Per the design doc (Decision 1 graceful-degradation hard rule), the
+/// response must always succeed; no image-related tip can leak through.
+async fn scenario_session_prompt_with_image_attachment(
+    client: &mut AcpTestClient,
+    session_id: &str,
+) {
+    // 67-byte 1×1 transparent PNG — smaller than every conceivable cap.
+    // Generated once, hardcoded for determinism.
+    const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
+
+    let prompt_text = format!("{SCENARIO_PREFIX}streaming_text");
+    let (_notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [
+                    {
+                        "type": "image",
+                        "data": TINY_PNG_BASE64,
+                        "mimeType": "image/png"
+                    },
+                    { "type": "text", "text": prompt_text }
+                ]
+            }),
+        )
+        .await;
+
+    let result = &resp["result"];
+    assert!(
+        result.get("stopReason").is_some(),
+        "image-attached prompt must complete with a stopReason (not error) \
+         — graceful degradation invariant per design Decision 1. Got: {resp}"
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "image-attached prompt must NOT return an error — sudocode must \
+         handle every image internally. Got: {resp}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario runner
 // ---------------------------------------------------------------------------
@@ -668,6 +715,7 @@ async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace
     scenario_initialize(client).await;
     let session_id = scenario_session_new(client, &workspace.root).await;
     scenario_session_prompt_streaming(client, &session_id).await;
+    scenario_session_prompt_with_image_attachment(client, &session_id).await;
     scenario_session_list(client, &session_id).await;
     scenario_session_load_not_supported(client).await;
     scenario_unknown_method(client).await;

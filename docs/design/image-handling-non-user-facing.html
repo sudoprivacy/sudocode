@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<!--
+  Image handling should be NON-user-facing — design draft.
+  Authoring + publishing follows the sudo-code-roadmap.html convention:
+  edit this HTML in-repo (SSOT) → commit + PR → after merge, publish to
+  ShareOne via the `shareone` skill (POST first time, PUT thereafter).
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image handling should be NON-user-facing — design</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-alt: #172033;
+    --fg: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #60a5fa;
+    --accent-dim: rgba(96, 165, 250, 0.12);
+    --warn: rgba(251, 191, 36, 0.18);
+    --warn-fg: #fcd34d;
+    --code-bg: #1e293b;
+    --border: #334155;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 60px 28px 100px;
+    line-height: 1.65;
+    font-size: 16px;
+  }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  h2 { font-size: 22px; margin-top: 56px; padding-top: 24px; border-top: 2px solid var(--border); }
+  h3 { font-size: 18px; margin-top: 32px; color: var(--accent); }
+  h4 { font-size: 16px; margin-top: 24px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .callout {
+    background: var(--accent-dim);
+    border-left: 4px solid var(--accent);
+    padding: 14px 20px;
+    margin: 20px 0;
+    border-radius: 4px;
+  }
+  .callout-warn { background: var(--warn); border-left-color: #f59e0b; color: var(--warn-fg); }
+  code { background: var(--code-bg); padding: 2px 6px; border-radius: 3px; font-family: "SF Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--code-bg); padding: 14px 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  pre code { background: transparent; padding: 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--surface); font-weight: 600; }
+  tbody tr:nth-child(even) td { background: var(--surface-alt); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+  ul, ol { margin: 12px 0; padding-left: 28px; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .footer { margin-top: 80px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>Image handling should be NON-user-facing</h1>
+<p class="meta">Design draft for review · 2026-06-29 · Owner: <code>sudowork-win-pc-0</code> · Tracking row: <a href="https://s.shareone.vip/s/sudo-code-roadmap">sudo-code-roadmap §9 "Image too large / wrong-model should be NON-user-facing"</a></p>
+
+<div class="callout">
+The user pastes an image in any sudowork conversation. The image <strong>always</strong> ends up handled — either as a real vision input or as a transparently-spliced text description. The user never sees:
+<ul>
+  <li><code>"图片太大了，请压缩后再发送"</code> — size errors</li>
+  <li><code>"当前模型不支持图片分析"</code> — wrong-model tips</li>
+  <li>A stuck processing spinner</li>
+  <li>A <code>"[Image #N was too large to send]"</code> placeholder</li>
+</ul>
+Any of those today is a leak from <em>infrastructure constraint</em> up to <em>user task interrupted</em>. This design closes them.
+</div>
+
+<h2 id="multi-backend">Today's reality — the multi-backend constraint drives the architecture</h2>
+
+<p>Sudowork is a <strong>client</strong> to multiple ACP backends. Different code paths per backend:</p>
+
+<table>
+  <thead><tr><th>Backend</th><th>Owner</th><th>Wrong-model tip today</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>scode</code> (sudocode)</td><td><strong>us</strong></td><td>Yes — sudowork-side at <code>AcpAgent.ts:986</code></td><td>Can fully control via ACP capability + Rust runtime</td></tr>
+    <tr><td><code>claude</code> (Claude Code)</td><td>Anthropic</td><td>No — Claude Code handles internally</td><td>Standard ACP; we cannot extend their protocol</td></tr>
+    <tr><td><code>codex</code> (OpenAI Codex)</td><td>OpenAI</td><td>No</td><td>Standard ACP</td></tr>
+    <tr><td><code>qwen</code> (Qwen CLI)</td><td>Alibaba</td><td>No</td><td>Standard ACP</td></tr>
+    <tr><td><code>remote-agent</code> (Moss)</td><td>sudowork</td><td>Depends on remote impl</td><td>Out of scope here</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Implication</strong>: the SSOT cannot live "in sudocode" because sudowork talks to backends sudocode knows nothing about. SSOT must be <strong>per-backend</strong>, mediated by the ACP capability mechanism.</p>
+
+<h2 id="cap-matrix">Cap matrix (today)</h2>
+
+<pre><code>Sudowork client (src/common/imageUtils.ts):
+  IMAGE_TARGET_RAW_SIZE = 512 KB                     ← default
+  LOW_IMAGE_TARGET_PATTERN /gemini|claude/i = 128 KB ← override for Claude/Gemini family
+  IMAGE_MAX_WIDTH/HEIGHT = 1280 × 1280
+  IMAGE_MAX_BASE64_SIZE  = 5 MB                      ← hard-limit fallback
+
+Sudocode runtime (rust/crates/runtime/src/image_registry.rs):
+  MAX_IMAGE_BYTES        = 5 MB
+  MAX_IMAGE_DIMENSION    = 8000 × 8000
+
+Claude Code, Codex, Qwen: each has its own opaque-to-us caps.
+</code></pre>
+
+<h2 id="surfaces">Three remaining user-facing surfaces</h2>
+
+<ol>
+  <li><strong>Wrong-model arm</strong> (sudowork-side <code>AcpAgent.ts:988</code>): <code>"当前模型 X 不支持图片分析"</code>. Only scode today; other backends handle internally.</li>
+  <li><strong>ImageTooLargeError fallback</strong> (sudocode PR-E): <code>"[Image #N was too large to send]"</code> text placeholder. Rare pathological inputs only.</li>
+  <li><strong>Sticky processing indicator</strong> if upstream resize errors silently and the request hangs at transport. Theoretical today; not observed.</li>
+</ol>
+
+<h2 id="decisions">Architecture decisions</h2>
+
+<h3>Decision 1 — Cap SSOT: ACP capability negotiation (per-backend)</h3>
+
+<p>Each ACP backend advertises its own preflight capability at session init. Sudowork queries; never hardcodes.</p>
+
+<pre><code>SessionInitialize response (ACP, extended via meta):
+  {
+    ...,
+    "_meta": {
+      "imageCapability": {
+        "maxBytes": 5242880,                  // 5 MB — per this backend's preflight
+        "maxDimension": 8000,                 // 8000 px
+        "downsampleTargetBytes": 524288,      // 512 KB — backend's recommended target
+        "autoHandlesOversized": true,         // backend will downsample on receive
+        "autoHandlesWrongModel": true         // backend will VLM-route for non-vision models
+      }
+    }
+  }
+</code></pre>
+
+<ul>
+  <li><strong>sudocode</strong>: implements + advertises <code>{maxBytes: 5MB, maxDim: 8000, downsampleTarget: 512KB, autoHandlesOversized: true, autoHandlesWrongModel: true}</code>.</li>
+  <li><strong>Claude Code / Codex / Qwen</strong>: do not advertise this <code>_meta</code> (standard ACP only). Sudowork treats absence as "backend doesn't handle these — sudowork must compensate".</li>
+</ul>
+
+<p><strong>Why this satisfies SSOT</strong>: each backend is its own authority on its caps + behaviour. Sudowork is a faithful client. No cross-repo hardcoded constants that drift.</p>
+
+<p><strong>Why ACP <code>_meta</code> (not a new method)</strong>: ACP spec discourages new methods for non-spec extensions. <code>_meta</code> field on initialize response is the canonical extension point.</p>
+
+<h3>Decision 2 — VLM-route logic in BOTH sudocode and sudowork (but only one fires per turn)</h3>
+
+<ul>
+  <li><strong>Sudocode</strong> (Rust, in <code>runtime</code> crate): new module <code>vlm_describe.rs</code>. When <code>push_images</code> decides not to ship the image as <code>ContentBlock::Image</code> (because: a) decoded image fails preflight at q25, or b) active model isn't vision-capable), it calls VLM endpoint → substitutes <code>ContentBlock::Text { "[Image #N: &lt;description&gt;]" }</code>. Sudocode owns its own behaviour; advertises <code>autoHandlesOversized=true</code>, <code>autoHandlesWrongModel=true</code>.</li>
+  <li><strong>Sudowork</strong> (TS, sudowork-side fallback): when active ACP backend advertises <code>autoHandlesWrongModel=false</code> (or omits the capability), sudowork keeps the existing <code>callChatCompletionsWithImage</code> flow but <strong>promotes it to transparent fallback</strong> — fires automatically when chat-attach image hits a non-vision chat model, splices text into the user message, dispatches normally.</li>
+</ul>
+
+<p><strong>Why both</strong>:</p>
+<ul>
+  <li>Sudocode-side keeps the fix close to the LLM call (smallest blast radius, smallest latency).</li>
+  <li>Sudowork-side keeps Claude/Codex/Qwen users covered — those backends won't add this fix for us.</li>
+  <li>Both reuse the same <code>callChatCompletionsWithImage</code>-style logic: VLM endpoint + credentials via existing sudorouter plumbing.</li>
+</ul>
+
+<p>The <code>_meta.autoHandles*</code> flags ensure only ONE fires per turn — sudowork checks the advertised flag before falling back. No double-VLM-call.</p>
+
+<h3>Decision 3 — Sudowork's hardcoded caps removed, replaced with ACP-advertised values</h3>
+
+<p>After Decision 1 lands:</p>
+<ul>
+  <li><code>IMAGE_TARGET_RAW_SIZE = 512 * 1024</code> → removed</li>
+  <li><code>LOW_IMAGE_TARGET_PATTERN</code> (128KB override) → removed</li>
+  <li><code>IMAGE_MAX_WIDTH/HEIGHT = 1280</code> → keep (this is sudowork's UX preference, not a transport cap; might also push to ACP later)</li>
+  <li>Sudowork's <code>tryReadAsImage</code> queries the ACP session's advertised <code>downsampleTargetBytes</code> and <code>maxDimension</code>. Falls back to current defaults if backend doesn't advertise.</li>
+</ul>
+
+<p><strong>Migration path</strong>: backwards-compatible. Backends that don't advertise → sudowork uses today's defaults. Sudocode advertises → sudowork uses sudocode's values.</p>
+
+<h3>Decision 4 — Keep dimension cap (1280 px) sudowork-side</h3>
+
+<p>Sudowork already constrains dim to 1280×1280 (<code>IMAGE_MAX_WIDTH/HEIGHT</code>). Smaller than sudocode's 8000. After unification: sudocode advertises 8000 in capability; sudowork applies <code>min(client default, advertised value)</code>. Pre-existing client-side latency optimisation kept.</p>
+
+<h2 id="open-questions">Open questions for review</h2>
+
+<ol>
+  <li><strong>Which VLM model for fallback?</strong> Per-provider? Hardcoded gemini-flash / claude-haiku? Use the active conversation model if vision-capable, else fall back?</li>
+  <li><strong>Cost</strong>: extra VLM round-trip per oversized/wrong-model image. ~0.5–2s latency + extra tokens charged. Worth it for the UX win?</li>
+  <li><strong>VLM quality loss</strong>: text description loses colour, layout, fine text positioning. Acceptable for fallback path only (vs the current "user re-uploads smaller" pain)?</li>
+  <li><strong>Sudowork-side <code>LOW_IMAGE_TARGET_PATTERN</code> (128KB for Claude/Gemini)</strong>: deliberate tightening from earlier commits (<code>1e52d407</code>, <code>938cbdd8</code>). Does the original empirical signal still hold after auto-VLM-route lands? If yes, sudocode should advertise <code>downsampleTargetBytes: 131072</code> for Claude/Gemini models. If no, drop the override.</li>
+  <li><strong><code>_meta.imageCapability</code> schema</strong>: agree on the field names + types here, or punt to a separate ACP-spec discussion?</li>
+  <li><strong>Claude Code / Codex / Qwen wrong-model handling</strong>: the sudowork-side fallback is needed for them today. Long-term: file upstream issues asking them to handle internally?</li>
+</ol>
+
+<h2 id="impl-plan">Implementation plan (this PR's commits)</h2>
+
+<ol>
+  <li><strong>Design doc</strong> (this file). Push first, get review.</li>
+  <li><strong>Sudocode capability</strong>: add <code>imageCapability</code> to <code>SessionInitializeResponse._meta</code>. Cap constants moved to a <code>image_capability::Capability</code> struct exposed as <code>pub fn capability() -&gt; Capability</code>. Reported in <code>initialize</code> handler.</li>
+  <li><strong>Sudocode VLM-route</strong>: new <code>runtime/src/vlm_describe.rs</code>. Wire into <code>push_images</code>:
+    <ul>
+      <li>On <code>ImageTooLargeError</code>: call <code>describe_image_via_vlm</code> → substitute <code>ContentBlock::Text</code>.</li>
+      <li>On "active model not vision-capable" (read from <code>session.current_model.vision_support</code>): same path.</li>
+    </ul>
+  </li>
+  <li><strong>Sudocode tests</strong>: integration test for capability advertisement + VLM-route fallback (mock VLM endpoint).</li>
+  <li><strong>Sudowork capability consumption</strong>: in <code>AcpAgent</code> init, store <code>_meta.imageCapability</code> on session. In <code>tryReadAsImage</code>, query advertised values; fall back to today's defaults if absent.</li>
+  <li><strong>Sudowork wrong-model fallback</strong>: replace <code>emitErrorMessage(tip); return {success: false}</code> at <code>AcpAgent.ts:988</code> with conditional VLM-route:
+    <ul>
+      <li>If <code>session.imageCapability.autoHandlesWrongModel === true</code>: hand off to backend (do nothing).</li>
+      <li>Else: call existing <code>callChatCompletionsWithImage</code> per image → splice <code>[Image #N: &lt;description&gt;]</code> into user message → continue.</li>
+    </ul>
+  </li>
+  <li><strong>Sudowork tests</strong>: unit tests for capability parsing + the fallback decision logic.</li>
+  <li><strong>E2E</strong>: extend the existing <code>acp-session-preserved-after-error.yaml</code> with a vision-fallback case (paste image in non-vision conv → expect description spliced + normal reply).</li>
+  <li><strong>Roadmap update</strong>: revise the <code>sudo-code-roadmap.html</code> row to "Shipped". Push to shareone post-merge.</li>
+</ol>
+
+<p>Out of order: commits 2+5 form the cap-unification subset. Commits 3+6 form the wrong-model-fallback subset. Could be split into two PRs if reviewers prefer; current plan is one PR for atomic review.</p>
+
+<h2 id="test-plan">Test plan</h2>
+
+<table>
+  <thead><tr><th>Layer</th><th>Test</th><th>Approach</th></tr></thead>
+  <tbody>
+    <tr><td>Sudocode capability</td><td>Unit</td><td><code>image_capability::capability()</code> returns documented values</td></tr>
+    <tr><td>Sudocode VLM-route</td><td>Integration</td><td>Mock VLM endpoint; assert text spliced when wrong-model OR ImageTooLargeError</td></tr>
+    <tr><td>Sudocode ACP init</td><td>PTY</td><td>Drive <code>scode acp</code> boot, assert <code>_meta.imageCapability</code> in initialize response</td></tr>
+    <tr><td>Sudowork capability consumption</td><td>Unit (vitest)</td><td>Parse various <code>_meta</code> shapes; fallback to defaults when absent</td></tr>
+    <tr><td>Sudowork wrong-model fallback</td><td>Integration</td><td>Mock ACP backend without <code>autoHandlesWrongModel</code> → assert sudowork VLM-route fires</td></tr>
+    <tr><td>End-to-end</td><td>YAML e2e (api)</td><td>Extend <code>acp-session-preserved-after-error.yaml</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="out-of-scope">Out of scope (followups)</h2>
+
+<ul>
+  <li>ACP spec PR to standardise <code>_meta.imageCapability</code> upstream — separate PR after the bilateral implementation proves the shape.</li>
+  <li>Upstream issues against Claude Code / Codex / Qwen asking for auto-handling — file post-merge.</li>
+  <li>VLM-route caching (same image asked twice → cached description) — premature optimisation.</li>
+  <li>Multi-modal beyond images (audio, video) — orthogonal.</li>
+</ul>
+
+<h2 id="audit">Audit (8 principles)</h2>
+
+<ol>
+  <li><strong>Simplify contract</strong> ✅ — single SSOT mechanism (ACP capability) replaces 4+ hardcoded constants across two repos</li>
+  <li><strong>No boundary leak</strong> ✅ — caps stay with the backend that enforces them; sudowork queries instead of guessing</li>
+  <li><strong>SSOT</strong> ✅ — each backend = own truth; ACP <code>_meta</code> is the bridge</li>
+  <li><strong>DRY</strong> ✅ — sudocode reuses its own <code>image_registry::preflight_base64</code>; sudowork reuses its own <code>callChatCompletionsWithImage</code>; only the routing decision is new</li>
+  <li><strong>Rust-first</strong> ✅ — sudocode-side VLM logic in Rust (<code>vlm_describe.rs</code>)</li>
+  <li><strong>Perf-first</strong> ✅ — VLM-route adds latency only when fallback path fires (oversized OR wrong-model); typical happy path unchanged</li>
+  <li><strong>Raft</strong> ✅ N/A</li>
+  <li><strong>Systemic</strong> ✅ — closes 3 user-facing surfaces simultaneously by addressing the underlying contract drift, not by adding a 5th cap layer</li>
+</ol>
+
+<div class="footer">
+  In-repo source: <code>docs/design/image-handling-non-user-facing.html</code> (this file is the SSOT). Mirror for review: ShareOne link assigned at first POST; subsequent edits use PUT to keep the URL stable. Sign external posts <code>sudowork-win-pc-0</code>.
+</div>
+
+</body>
+</html>

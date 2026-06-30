@@ -36,16 +36,23 @@ pub struct ModelCapability {
 pub struct ModelCapabilitiesFile {
     /// Unix timestamp (seconds) of the last successful refresh.
     pub updated_at: u64,
+    /// Fallback capability for models not present in `models`. This is the
+    /// single source of truth for the "unknown model" default — it lives in
+    /// the SSOT file (bundled seed, preserved across sudorouter refreshes),
+    /// never hardcoded in code.
+    pub default: ModelCapability,
     /// Wire model ID → capability metadata.
     pub models: BTreeMap<String, ModelCapability>,
 }
 
 impl Default for ModelCapabilitiesFile {
     fn default() -> Self {
-        parse_capabilities_json(BUNDLED_CAPABILITIES).unwrap_or_else(|| Self {
-            updated_at: 0,
-            models: BTreeMap::new(),
-        })
+        // The bundled JSON is compiled into the binary, so a parse failure is a
+        // build defect (malformed asset, or missing the required `default`
+        // entry) — fail fast rather than silently degrading to an empty,
+        // default-less table.
+        parse_capabilities_json(BUNDLED_CAPABILITIES)
+            .expect("bundled model-capabilities.json must parse and contain a 'default' entry")
     }
 }
 
@@ -69,6 +76,23 @@ pub fn lookup(model_id: &str) -> Option<ModelCapability> {
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
         .map(|(_, cap)| *cap)
+}
+
+/// Context window for a wire model ID, falling back to the SSOT file's
+/// `default` entry when the model is unknown. The single source of truth for
+/// both per-model values and the unknown-model default is this capabilities
+/// file (bundled seed or sudorouter refresh) — never a hardcoded constant.
+#[must_use]
+pub fn context_window_or_default(model_id: &str) -> u32 {
+    lookup(model_id).map_or_else(
+        || {
+            CAPABILITIES
+                .get_or_init(ModelCapabilitiesFile::default)
+                .default
+                .context_window
+        },
+        |cap| cap.context_window,
+    )
 }
 
 /// Load the SSOT file into the in-memory snapshot. Call once at startup.
@@ -218,6 +242,13 @@ mod tests {
         let file: ModelCapabilitiesFile =
             serde_json::from_str(BUNDLED_CAPABILITIES).expect("bundled JSON must parse");
         assert!(!file.models.is_empty(), "bundled JSON must have models");
+        // The `default` entry is the SSOT for the unknown-model fallback; guard
+        // that the bundled seed carries a sane value (no hardcoded fallback exists
+        // in code anymore, so a missing/zero default would be a real regression).
+        assert!(
+            file.default.context_window > 0,
+            "bundled JSON must define a non-zero default context window"
+        );
     }
 
     #[test]

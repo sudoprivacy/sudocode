@@ -1,5 +1,6 @@
 {
   "updated_at": 0,
+  "default": { "context_window": 200000, "max_output_tokens": 64000 },
   "models": {
     "claude-opus-4-6": { "context_window": 200000, "max_output_tokens": 32000 },
     "claude-opus-4-7": { "context_window": 200000, "max_output_tokens": 32000 },

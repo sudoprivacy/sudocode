@@ -1874,7 +1874,12 @@ impl AcpCliAgent {
         let previous = self.model.clone();
         let session = self.sessions.get(session_id).unwrap();
         let message_count = session.runtime.session().messages.len();
-        let cloned_session = session.runtime.session().clone();
+        let mut cloned_session = session.runtime.session().clone();
+        // Keep the session's own model in sync with the switch. `build_runtime_with_plugin_state`
+        // only fills `session.model` when it is None (correct for a brand-new session), so without
+        // this the resumed/switched session keeps its OLD model — which then drives the wrong
+        // context-window in the pre-turn auto-compaction and can wedge the session on overflow.
+        cloned_session.model = Some(resolved.clone());
         let cwd = session.cwd.clone();
         let handle_id = session.handle.id.clone();
 
@@ -2441,6 +2446,25 @@ impl AcpSdkDelegate {
                 if result.removed_message_count > 0 {
                     // Update session with compacted version
                     *session.runtime.session_mut() = result.compacted_session.clone();
+                    // Persist the compacted state immediately. The end-of-turn save_to_path is
+                    // skipped by the still-over-limit early return below (and by any later turn
+                    // error), which would otherwise leave the on-disk JSONL holding the full
+                    // uncompacted history — so the next resume reloads the pre-compaction session
+                    // and overflows again. Best-effort: a persist hiccup must not abort the turn.
+                    if let Err(persist_err) =
+                        session.runtime.session().save_to_path(&session.handle.path)
+                    {
+                        if let Some(tracer) = session.runtime.session_tracer() {
+                            tracer.record("auto_compact_persist_error", {
+                                let mut attrs = Map::new();
+                                attrs.insert(
+                                    "error".to_string(),
+                                    Value::String(persist_err.to_string()),
+                                );
+                                attrs
+                            });
+                        }
+                    }
                     if let Some(tracer) = session.runtime.session_tracer() {
                         tracer.record("auto_compact_result", {
                             let mut attrs = Map::new();
@@ -3424,7 +3448,11 @@ impl LiveCli {
         }
 
         let previous = self.config.model.clone();
-        let session = self.runtime.session().clone();
+        let mut session = self.runtime.session().clone();
+        // Keep the session's own model in sync with the switch (see handle_acp_model_switch): the
+        // runtime builder only fills `session.model` when None, so otherwise it would retain the
+        // old model and mis-compute the context window for auto-compaction.
+        session.model = Some(model.clone());
         let session_id = self.session.id.clone();
         let message_count = session.messages.len();
         let runtime = self.build_replacement_runtime(

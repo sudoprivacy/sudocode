@@ -3112,6 +3112,7 @@ dependencies = [
  "plugins",
  "pty-expect",
  "pulldown-cmark",
+ "reqwest",
  "runtime",
  "rustyline",
  "serde",

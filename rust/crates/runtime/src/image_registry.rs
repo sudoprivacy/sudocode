@@ -12,6 +12,51 @@ use crate::fs_backend::{FsBackend, StdFsBackend};
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum image dimension (width or height) before downsampling.
 const MAX_IMAGE_DIMENSION: u32 = 8000;
+/// Recommended downsample target: 512 KB. Mirrors sudowork's
+/// `IMAGE_TARGET_RAW_SIZE`. Advertised to clients so they can right-size
+/// the bytes they ship to us; sudocode itself still accepts anything ≤
+/// [`MAX_IMAGE_BYTES`] and downsamples if needed.
+const DOWNSAMPLE_TARGET_BYTES: u32 = 512 * 1024;
+
+/// Capability descriptor that sudocode advertises to ACP clients via the
+/// `_meta.sudocode.imageCapability` extension on the `initialize` response.
+///
+/// These values reflect what *sudocode itself* will accept and how it will
+/// behave; the per-model image cap (e.g. Claude vs Gemini accept different
+/// byte counts) is handled internally by sudocode's `push_images` path — the
+/// client does not need to track it. See `docs/design/image-handling-non-user-facing.html`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageCapability {
+    /// Hard upper bound for a single image's raw byte count. Anything above
+    /// this triggers [`ImageTooLargeError`] after the JPEG-quality loop fails.
+    pub max_bytes: u32,
+    /// Hard upper bound for either dimension (width or height) in pixels.
+    pub max_dimension: u32,
+    /// Recommended target byte count when the client pre-downsamples on its
+    /// side; sudocode will still accept up to [`Self::max_bytes`].
+    pub downsample_target_bytes: u32,
+    /// When `true`, sudocode handles oversized images internally (JPEG-quality
+    /// loop → VLM-describe fallback); the client should NOT pre-compress beyond
+    /// its own UX preferences.
+    pub auto_handles_oversized: bool,
+    /// When `true`, sudocode handles "active model is text-only but the
+    /// conversation has an image" internally by routing the image through a
+    /// designated VLM and splicing the description back into the prompt; the
+    /// client should NOT surface a "model doesn't support images" error.
+    pub auto_handles_wrong_model: bool,
+}
+
+/// Returns the capability descriptor sudocode advertises on session init.
+#[must_use]
+pub fn capability() -> ImageCapability {
+    ImageCapability {
+        max_bytes: MAX_IMAGE_BYTES as u32,
+        max_dimension: MAX_IMAGE_DIMENSION,
+        downsample_target_bytes: DOWNSAMPLE_TARGET_BYTES,
+        auto_handles_oversized: true,
+        auto_handles_wrong_model: true,
+    }
+}
 
 /// Typed error returned by [`downsample_image`] / [`maybe_downsample_raw`] /
 /// [`preflight_base64`] when even the most aggressively compressed JPEG (400px

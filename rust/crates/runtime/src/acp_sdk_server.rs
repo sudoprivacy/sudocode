@@ -388,6 +388,31 @@ pub struct CumulativeUsage {
     pub cached_write_tokens: Option<u64>,
 }
 
+/// Build the `_meta` map for the `initialize` response. Currently advertises
+/// sudocode's image-handling capability under `_meta.sudocode.imageCapability`
+/// so ACP clients (sudowork) can downsample / route around oversized + wrong-
+/// model image cases without surfacing a user-visible error.
+///
+/// See [`crate::image_registry::capability`] for the source of truth; design
+/// rationale in `docs/design/image-handling-non-user-facing.html`.
+fn initialize_meta() -> Map<String, serde_json::Value> {
+    let cap = crate::image_registry::capability();
+    let mut sudocode_ns = Map::new();
+    sudocode_ns.insert(
+        "imageCapability".to_string(),
+        json!({
+            "maxBytes": cap.max_bytes,
+            "maxDimension": cap.max_dimension,
+            "downsampleTargetBytes": cap.downsample_target_bytes,
+            "autoHandlesOversized": cap.auto_handles_oversized,
+            "autoHandlesWrongModel": cap.auto_handles_wrong_model,
+        }),
+    );
+    let mut meta = Map::new();
+    meta.insert("sudocode".to_string(), json!(sudocode_ns));
+    meta
+}
+
 fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::Value> {
     let mut sudocode_meta = Map::new();
     sudocode_meta.insert(
@@ -689,7 +714,8 @@ pub(crate) async fn run_acp_on_transport(
                                     SessionCapabilities::new()
                                         .close(SessionCloseCapabilities::new()),
                                 ),
-                        );
+                        )
+                        .meta(initialize_meta());
                     responder.respond(resp)?;
                     Ok(())
                 }

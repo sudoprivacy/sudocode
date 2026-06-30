@@ -1504,10 +1504,11 @@ mod tests {
     use super::MCP_SPAWN_ATTEMPT_LIMIT;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
     use tokio::runtime::Builder;

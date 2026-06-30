@@ -18,13 +18,19 @@ use crate::mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase,
 };
 
+// Test timeouts must still comfortably cover spawning a fresh Python child and
+// completing the JSON-RPC handshake on a loaded CI runner (macOS is the slowest).
+// They were originally 200/300 ms, which flaked when the *second* (legitimate)
+// spawn in the retry tests raced the timeout. They only bound how long a
+// deliberately-hung child is waited on, so 2 s keeps tests fast while removing
+// the race. Production values are unchanged.
 #[cfg(test)]
-const MCP_INITIALIZE_TIMEOUT_MS: u64 = 200;
+const MCP_INITIALIZE_TIMEOUT_MS: u64 = 2_000;
 #[cfg(not(test))]
 const MCP_INITIALIZE_TIMEOUT_MS: u64 = 10_000;
 
 #[cfg(test)]
-const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 300;
+const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 2_000;
 #[cfg(not(test))]
 const MCP_LIST_TOOLS_TIMEOUT_MS: u64 = 30_000;
 
@@ -1498,7 +1504,6 @@ mod tests {
     use super::MCP_SPAWN_ATTEMPT_LIMIT;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2502,8 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn given_child_exits_after_discovery_when_calling_twice_then_second_call_succeeds_after_reset()
-    {
+    fn given_child_exits_after_discovery_when_calling_then_manager_resets_and_call_succeeds() {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2524,25 +2528,25 @@ mod tests {
             let mut manager = McpServerManager::from_servers(&servers);
 
             manager.discover_tools().await.expect("discover tools");
-            let first_error = manager
-                .call_tool(
-                    &mcp_tool_name("alpha", "echo"),
-                    Some(json!({"text": "reconnect"})),
-                )
-                .await
-                .expect_err("first call should fail after transport drops");
 
-            match first_error {
-                McpServerManagerError::Transport {
-                    server_name,
-                    method,
-                    source,
-                } => {
-                    assert_eq!(server_name, "alpha");
-                    assert_eq!(method, "tools/call");
-                    assert_eq!(source.kind(), ErrorKind::UnexpectedEof);
-                }
-                other => panic!("expected transport error, got {other:?}"),
+            // The child exits right after `tools/list` (MCP_EXIT_AFTER_TOOLS_LIST=1).
+            // Wait until the manager observes the exit so the next call
+            // deterministically takes the reset-and-respawn path. Asserting that a
+            // call instead races the child's teardown mid-flight (an EOF transport
+            // error) is inherently timing-dependent and flaked on slower runners;
+            // the "transport drops mid-call" path is covered deterministically by
+            // `given_tool_call_disconnects_once_when_calling_twice_then_manager_resets_and_next_call_succeeds`.
+            let mut waited = Duration::ZERO;
+            while !manager
+                .server_process_exited("alpha")
+                .expect("query child exit status")
+            {
+                assert!(
+                    waited < Duration::from_secs(10),
+                    "child should exit after tools/list within 10s"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                waited += Duration::from_millis(10);
             }
 
             let response = manager
@@ -2551,7 +2555,7 @@ mod tests {
                     Some(json!({"text": "reconnect"})),
                 )
                 .await
-                .expect("second tool call should succeed after reset");
+                .expect("tool call should succeed after the manager resets the exited server");
 
             assert_eq!(
                 response

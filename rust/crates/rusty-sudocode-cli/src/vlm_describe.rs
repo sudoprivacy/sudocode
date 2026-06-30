@@ -14,10 +14,13 @@
 //!
 //! Design rationale: `docs/design/image-handling-non-user-facing.html`
 //! (Decision 2 + the "VLM model selection" section).
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 /// Default vision model used when no per-conversation override is configured.
 /// Cheap, fast, strong on vision (Gemini Flash family). Sudocode reaches it
@@ -65,6 +68,72 @@ impl std::fmt::Display for VlmError {
 
 impl std::error::Error for VlmError {}
 
+/// Bounded LRU of (image-sha256 → description). Saves a VLM round-trip when
+/// the same image bytes reappear later in the conversation (common when the
+/// user re-references an attached file, or the agent re-screenshots the same
+/// page via ai-dev-browser). 64-entry cap keeps memory bounded; the eldest
+/// entry is evicted on overflow. Hit-rate is best-effort — failure to cache
+/// is never user-visible.
+const VLM_CACHE_CAPACITY: usize = 64;
+
+static VLM_DESCRIPTION_CACHE: LazyLock<Mutex<VlmDescriptionCache>> =
+    LazyLock::new(|| Mutex::new(VlmDescriptionCache::new(VLM_CACHE_CAPACITY)));
+
+struct VlmDescriptionCache {
+    capacity: usize,
+    entries: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl VlmDescriptionCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<String> {
+        if let Some(v) = self.entries.get(key).cloned() {
+            // Move-to-front for true LRU semantics.
+            if let Some(pos) = self.order.iter().position(|k| k == key) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(key.to_string());
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    fn put(&mut self, key: String, value: String) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            if let Some(pos) = self.order.iter().position(|k| k == &key) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(key);
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, value);
+    }
+}
+
+fn cache_key(model: &str, image_b64: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(image_b64.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Issue a one-shot `/chat/completions` request with the image inline as a
 /// `image_url` content part (OpenAI-compatible shape — works with sudorouter
 /// proxy regardless of the upstream provider).
@@ -75,6 +144,10 @@ impl std::error::Error for VlmError {}
 /// Returns the model's textual reply, or a typed [`VlmError`] the caller can
 /// log + recover from (the caller should always degrade gracefully — failing
 /// to describe an image must not abort the user's turn).
+///
+/// Reads/writes [`VLM_DESCRIPTION_CACHE`] keyed by `sha256(model || image_b64)`
+/// — re-describing the same image bytes in the same conversation never makes
+/// a second HTTP round-trip.
 pub async fn describe_image_via_vlm(
     base_url: &str,
     api_key: &str,
@@ -82,6 +155,14 @@ pub async fn describe_image_via_vlm(
     image_b64: &str,
     mime_type: &str,
 ) -> Result<String, VlmError> {
+    // Cache hit short-circuits everything (no client build, no HTTP).
+    let key = cache_key(model, image_b64);
+    if let Ok(mut cache) = VLM_DESCRIPTION_CACHE.lock() {
+        if let Some(cached) = cache.get(&key) {
+            return Ok(cached);
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(VLM_HTTP_TIMEOUT)
         .build()
@@ -127,13 +208,20 @@ pub async fn describe_image_via_vlm(
         .await
         .map_err(|e| VlmError::Network(format!("json parse: {e}")))?;
 
-    parsed
+    let description = parsed
         .choices
         .into_iter()
         .next()
         .map(|c| c.message.content)
         .filter(|s| !s.trim().is_empty())
-        .ok_or(VlmError::EmptyResponse)
+        .ok_or(VlmError::EmptyResponse)?;
+
+    // Best-effort cache insert; a poisoned mutex is logged and skipped, never
+    // surfaced to the caller (the description itself is what matters).
+    if let Ok(mut cache) = VLM_DESCRIPTION_CACHE.lock() {
+        cache.put(key, description.clone());
+    }
+    Ok(description)
 }
 
 #[derive(Debug, Deserialize)]

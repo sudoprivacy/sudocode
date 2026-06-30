@@ -28,6 +28,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 telemetry = { path = "../telemetry" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+sha2 = "0.10"
 syntect = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
 tools = { path = "../tools" }

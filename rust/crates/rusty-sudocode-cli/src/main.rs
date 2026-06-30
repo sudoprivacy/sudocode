@@ -31,7 +31,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, model_token_limit, resolve_startup_auth_source,
+    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source,
     AnthropicClient, AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
     MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
     ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
@@ -2396,9 +2396,9 @@ impl AcpSdkDelegate {
             .model
             .as_ref()
             .unwrap_or(&self.inner.model);
-        let context_limit = model_token_limit(model)
-            .map(|limit| limit.context_window_tokens as usize)
-            .unwrap_or(200_000);
+        // Context window comes from the model-capabilities SSOT file (per-model
+        // entry, else the file's `default`). No hardcoded fallback here.
+        let context_limit = runtime::model_capabilities::context_window_or_default(model) as usize;
 
         // Estimate current session tokens
         let estimated_tokens = estimate_session_tokens(session.runtime.session());

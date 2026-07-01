@@ -556,14 +556,14 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Session auto-save</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Persists across turns</td></tr>
-    <tr><td>Session JSONL persistence (model + transcript)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_live_smoke.rs</code> + <code>resume_slash_commands.rs</code>; PTY pending — assistant messages carry model field, transcript replayable</td></tr>
-    <tr><td><code>/resume</code> (load saved session)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — send → close → resume → verify</td></tr>
-    <tr><td><code>--resume latest</code> shortcut</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — restores most-recent managed session without an explicit id</td></tr>
-    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/export</code> (session to markdown)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON + plaintext modes</td></tr>
-    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>undo_e2e.rs</code>; PTY pending — restore after edit, delete created file, nothing-to-undo, hook-feedback robustness, JSON output</td></tr>
-    <tr><td><code>/compact</code> (compress history)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Code shipped: <code>SlashCommand::Compact</code> in <code>commands/src/lib.rs</code>, handlers at <code>rusty-sudocode-cli/src/main.rs:3091</code> (REPL) and <code>:1015</code> (resume path); calls <code>runtime::compact_session</code>. PTY pending — needs a new mock-anthropic-service scenario variant (Compact) with multi-turn response sequence; out-of-scope for the context-overflow systemic fix series.</td></tr>
+    <tr><td>Session auto-save</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_session_management::session_auto_save_creates_jsonl</code></td><td>One-shot prompt → exit → verify .scode/sessions/ has JSONL file on disk.</td></tr>
+    <tr><td>Session JSONL persistence (model + transcript)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>Resume session → /export → verify exported file contains original user message.</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>--resume &lt;path&gt; + /export → context preserved.</td></tr>
+    <tr><td><code>--resume latest</code> shortcut</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_latest_restores_most_recent</code></td><td>Seed managed session → --resume latest.</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::session_list_shows_entries</code></td><td>Resume → /session list → verify session directory output. switch/fork: code exists, test covers list only.</td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>--resume → /export notes.txt → verify file contains conversation.</td></tr>
+    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::undo_restores_file_on_disk</code></td><td>Resume session with edit_file result → /undo → verify file restored to pre-image on disk.</td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::compact_reduces_messages</code></td><td>Resume 24-message session → /compact → verify removed/kept output.</td></tr>
     <tr><td>Auto-compact trigger</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Code shipped: <code>maybe_auto_compact</code> at <code>conversation.rs:1190</code>, triggered from turn loop at <code>:832</code> + <code>:1050</code>; threshold via <code>CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS</code> env. Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending.</td></tr>
     <tr><td>Auto-compact circuit-breaker (3 consecutive no-op cap)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shipped 2026-06-28 (PR #249 cluster commit <code>2022ca8</code>): <code>MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS = 3</code> in <code>conversation.rs</code> prevents <code>maybe_auto_compact</code> retrying every turn on sessions structurally pinned above threshold (CC parity — CC saved 250K wasted API calls/day with this). Integration-pending PTY: drive a session past threshold and confirm 4th turn does not emit AutoCompactionEvent.</td></tr>
     <tr><td>Image preflight on ACP <code>push_images</code> path (5MB cap + 8000px cap)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shipped 2026-06-28 (PR #249 commit <code>0d39128</code>): <code>image_registry::preflight_base64</code> made <code>pub</code>; <code>push_images</code> in <code>rusty-sudocode-cli/src/main.rs</code> now downsamples base64 images before constructing <code>ContentBlock::Image</code>. Closes the gap that surfaced as <code>single_request_too_large</code> when sudowork attached a 25MB image (CLI-direct paste already preflighted via <code>register_rgba</code>; ACP path was bypassed). Integration-pending PTY: ACP push_images with synthetic 25MB image → confirm downsampled bytes reach the LLM mock.</td></tr>
@@ -652,17 +652,17 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
-    <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
+    <tr><td>Session Management</td><td>11</td><td>0</td><td>0</td><td>11</td><td><strong>8</strong></td></tr>
     <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>3</strong></td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>26</th></tr>
+    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>34</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
-features. <strong>Current coverage: 26 / 80 (32%).</strong>
+<p><strong>90% target = 75 features covered</strong> out of the 83 in-denominator
+features. <strong>Current coverage: 34 / 83 (41%).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 

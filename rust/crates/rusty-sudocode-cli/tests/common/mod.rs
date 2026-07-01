@@ -368,18 +368,31 @@ pub fn spawn_scode_in_dir(
     let bin_str = bin.to_string_lossy().to_string();
     let dir_str = dir.display().to_string();
 
-    let mut cmd = format!(
-        "cd {} && exec {}",
-        shell_quote(&dir_str),
-        shell_quote(&bin_str)
-    );
-    for arg in args {
-        cmd.push_str(&format!(" {}", shell_quote(arg)));
+    #[cfg(unix)]
+    {
+        let mut cmd = format!(
+            "cd {} && exec {}",
+            shell_quote(&dir_str),
+            shell_quote(&bin_str)
+        );
+        for arg in args {
+            cmd.push_str(&format!(" {}", shell_quote(arg)));
+        }
+        let mut sess = PtySession::spawn("sh", &["-c", &cmd])?;
+        sess.set_default_timeout(timeout);
+        Ok(sess)
     }
 
-    let mut sess = PtySession::spawn("sh", &["-c", &cmd])?;
-    sess.set_default_timeout(timeout);
-    Ok(sess)
+    #[cfg(windows)]
+    {
+        let mut cmd = format!("cd /d \"{}\" && \"{}\"", dir_str, bin_str);
+        for arg in args {
+            cmd.push_str(&format!(" \"{}\"", arg));
+        }
+        let mut sess = PtySession::spawn("cmd", &["/c", &cmd])?;
+        sess.set_default_timeout(timeout);
+        Ok(sess)
+    }
 }
 
 fn shell_quote(s: &str) -> String {

@@ -63,7 +63,32 @@
   a:hover { text-decoration: underline; }
   .footer { margin-top: 80px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
   .revchip { display: inline-block; background: var(--surface); border: 1px solid var(--border); padding: 1px 6px; border-radius: 3px; font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .mermaid { background: var(--surface); padding: 12px; border-radius: 6px; margin: 16px 0; overflow-x: auto; }
+  .mermaid svg { max-width: 100%; height: auto; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.mermaid) {
+      window.mermaid.initialize({
+        startOnLoad: true,
+        theme: 'dark',
+        themeVariables: {
+          fontFamily: '"SF Mono", Consolas, monospace',
+          fontSize: '13px',
+          primaryColor: '#1e293b',
+          primaryTextColor: '#e2e8f0',
+          primaryBorderColor: '#334155',
+          lineColor: '#60a5fa',
+          secondaryColor: '#172033',
+          background: '#0f172a',
+        },
+        flowchart: { curve: 'basis', htmlLabels: true },
+        securityLevel: 'loose'
+      });
+    }
+  });
+</script>
 </head>
 <body>
 
@@ -93,156 +118,86 @@ Any of those today is a leak from <em>infrastructure constraint</em> up to <em>u
 <p>The design translates into three concrete data flows depending on what the image is and what model is active. All three converge on the same UX invariant: <strong>the user always gets a normal assistant reply, never a size/wrong-model tip</strong>.</p>
 
 <h3>Component boundaries</h3>
-<pre><code>┌────────────────────────────────────────────────────────────────────────────┐
-│                                                                            │
-│   USER  ─┬─►  sudowork Electron UI  ──ACP over stdio──►  scode subprocess  │
-│          │       (renderer + main)                        (Rust binary)    │
-│          │                                                                 │
-│          │   consumes _meta.imageCapability                                 │
-│          │   passes AI_DEV_BROWSER_IMAGE_CAP_* env                         │
-│          │                                                                 │
-│          └─►  ai-dev-browser (Python)  ─────────►  headless Chrome         │
-│                (tool called BY scode's LLM loop)     (screenshots page)    │
-│                                                                            │
-│   scode's LLM turn:  scode ──HTTP──► sudorouter ──►  LLM provider          │
-│                          image?      Anthropic/OpenAI/Gemini/xAI/...       │
-│                                                                            │
-│   scode's VLM side-call (wrong-model / oversized fallback):                 │
-│                        scode ──HTTP──► sudorouter ──► gemini-2.5-flash     │
-│                          image + describe prompt                            │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-
-sudorouter is the SSOT for per-model image caps (image_max_bytes,
-image_max_dimension, vision_supported). Sudocode's model_capabilities cache
-pulls /v1/models on startup + refresh; sudowork mirrors caps into
-_meta.imageCapability so the whole UI/renderer stack sees a consistent view.</code></pre>
+<pre class="mermaid">
+flowchart LR
+    U([USER]) --> UI["sudowork Electron UI<br/>(renderer + main)"]
+    UI -->|"ACP over stdio"| SCODE["scode subprocess<br/>(Rust binary)"]
+    UI -->|"AI_DEV_BROWSER_IMAGE_CAP_*<br/>env vars at spawn"| ADB["ai-dev-browser<br/>(Python)"]
+    ADB -->|"CDP"| CHROME["headless<br/>Chrome"]
+    SCODE -.->|"exposes _meta.imageCapability<br/>on initialize"| UI
+    SCODE -->|"LLM turn<br/>(image or spliced text)"| SR[["sudorouter"]]
+    SCODE -->|"VLM side-call<br/>wrong-model / oversized fallback"| SR
+    SR -->|"routes"| LLM["LLM provider<br/>Anthropic / OpenAI / Gemini / xAI / ..."]
+    SR -->|"gemini-2.5-flash<br/>for VLM describe"| VLM["Gemini Flash"]
+    SR -.->|"/v1/models feeds<br/>SSOT cache"| SCODE
+</pre>
+<p>Sudorouter is the SSOT for per-model image caps (<code>vision_supported</code>, <code>image_max_bytes</code>, <code>image_max_dimension</code>). Sudocode's <code>model_capabilities</code> cache pulls <code>/v1/models</code> on startup + refresh; sudowork mirrors the sudocode-advertised caps into <code>_meta.imageCapability</code> so the whole UI/renderer stack sees a consistent view.</p>
 
 <h3>Decision tree inside <code>push_images</code> (sudocode side)</h3>
-<pre><code>                    ┌─────────────────────────────────────────┐
-                    │  session/prompt arrives with ≥1 image   │
-                    │  content block                          │
-                    └────────────────────┬────────────────────┘
-                                         │
-                                         ▼
-                    ┌─────────────────────────────────────────┐
-                    │ For each image:                         │
-                    │   active_model = self.inner.model       │
-                    │   vision_ok = vision_capable(model)     │
-                    │              ▲                          │
-                    │              │ reads SSOT cache         │
-                    │              │ populated by             │
-                    │              │ model_capabilities::load │
-                    │              │ (called at startup       │
-                    │              │  in run_acp_server)      │
-                    └────────────────────┬────────────────────┘
-                                         │
-                              ┌──────────┴──────────┐
-                              │                     │
-                        vision_ok == true    vision_ok == false
-                              │                     │
-                              ▼                     ▼
-              ┌──────────────────────────┐   ┌──────────────────────────┐
-              │ preflight_base64(bytes)  │   │ VLM-route ── unconditional│
-              │  ├─ JPEG quality loop    │   │  (skip preflight — bytes │
-              │  │  85→70→55→40→25       │   │   won't go native anyway)│
-              │  └─ downsample to fit    │   │                          │
-              │                          │   │ vlm_describe_via_HTTP    │
-              └────────────┬─────────────┘   └────────────┬─────────────┘
-                           │                              │
-              ┌────────────┴────────────┐                 │
-              │                         │                 │
-        preflight OK          ImageTooLargeError          │
-              │              (even at q25 too big)        │
-              │                         │                 │
-              ▼                         ▼                 ▼
-   ┌────────────────────┐   ┌────────────────────────────────────────┐
-   │ ContentBlock::Image│   │ VLM-route (shared)                     │
-   │  { downsampled     │   │                                        │
-   │    bytes, mime }   │   │  block_in_place(Handle::current().     │
-   └────────┬───────────┘   │     block_on(describe_image_via_vlm))  │
-            │               │                                        │
-            │               │  POST sudorouter/chat/completions      │
-            │               │    model = gemini-2.5-flash            │
-            │               │    content = [text, image_url(base64)] │
-            │               │                                        │
-            │               │  ┌────────────────────────────────┐    │
-            │               │  │ cache: sha256(model+b64)→desc  │    │
-            │               │  │ hit → skip HTTP entirely       │    │
-            │               │  └────────────────────────────────┘    │
-            │               │                                        │
-            │               │      response ok           error/timeout│
-            │               │           │                      │     │
-            │               │           ▼                      ▼     │
-            │               │  ContentBlock::Text     ContentBlock::Text
-            │               │  "[Image #N: &lt;desc&gt;]"    "[Image #N could
-            │               │                          not be described
-            │               │                          — please retype ...]"
-            │               └────────────┬───────────────────────────┘
-            │                            │
-            └──────────────┬─────────────┘
-                           ▼
-              ┌──────────────────────────────┐
-              │ session.push_message(         │
-              │   ConversationMessage {       │
-              │     blocks: vec![block],      │
-              │     ...                       │
-              │   }                           │
-              │ )                             │
-              └──────────────┬───────────────┘
-                             ▼
-              ┌──────────────────────────────┐
-              │ LLM turn continues with the   │
-              │ image (native) or its         │
-              │ description (VLM'd)           │
-              └──────────────────────────────┘</code></pre>
+<pre class="mermaid">
+flowchart TD
+    START(["session/prompt arrives<br/>with ≥1 image content block"]) --> LOOP{{"for each image"}}
+    LOOP --> MODEL["active_model = self.inner.model"]
+    MODEL --> VC{"vision_capable(active_model)?<br/>reads SSOT cache populated by<br/>model_capabilities::load<br/>at run_acp_server startup"}
+
+    VC -->|"true"| PRE["preflight_base64(bytes)<br/>JPEG quality loop 85→70→55→40→25<br/>downsample to fit"]
+    VC -->|"false"| VLM_WRONG["VLM-route (wrong-model)<br/>skip preflight — bytes<br/>won't go native anyway"]
+
+    PRE --> PRE_OK{"preflight OK?"}
+    PRE_OK -->|"yes"| CB_IMG["ContentBlock::Image<br/>{ downsampled bytes, mime }"]
+    PRE_OK -->|"ImageTooLargeError<br/>even at q25 too big"| VLM_OS["VLM-route (oversized)"]
+
+    VLM_WRONG --> VLM_CORE
+    VLM_OS --> VLM_CORE
+    VLM_CORE["vlm_describe_via_HTTP<br/>block_in_place(<br/>&nbsp;&nbsp;Handle::current().block_on(<br/>&nbsp;&nbsp;&nbsp;&nbsp;describe_image_via_vlm))"] --> CACHE{"cache hit?<br/>key = sha256(model || b64)"}
+
+    CACHE -->|"hit"| CB_TEXT["ContentBlock::Text<br/>[Image #N: &lt;desc&gt;]"]
+    CACHE -->|"miss"| HTTP["POST sudorouter/chat/completions<br/>model = gemini-2.5-flash<br/>content = [text, image_url(base64)]"]
+    HTTP --> HTTP_OK{"response ok?"}
+    HTTP_OK -->|"yes"| CB_TEXT
+    HTTP_OK -->|"error / timeout"| CB_ERR["ContentBlock::Text<br/>[Image #N could not be<br/>described — please retype ...]"]
+
+    CB_IMG --> PUSH["session.push_message(<br/>&nbsp;&nbsp;ConversationMessage {<br/>&nbsp;&nbsp;&nbsp;&nbsp;blocks: vec![block], ...<br/>&nbsp;&nbsp;})"]
+    CB_TEXT --> PUSH
+    CB_ERR --> PUSH
+    PUSH --> LLM_TURN(["LLM turn continues with the image<br/>(native) or its description (VLM'd)"])
+
+    style CB_IMG fill:#1e40af,stroke:#60a5fa
+    style CB_TEXT fill:#065f46,stroke:#10b981
+    style CB_ERR fill:#7f1d1d,stroke:#f59e0b
+    style VLM_CORE fill:#4c1d95,stroke:#a78bfa
+</pre>
 
 <h3>Sudowork-side gate (matches the sudocode advertisement)</h3>
-<pre><code>User clicks send  →  AcpAgent.sendMessage(data)
-                          │
-                          ▼
-                 processAtFileReferences(
-                   content, workspace, files, model,
-                   { capability, economyMode })
-                          │
-                          ▼
-   ┌──────────────────────────────────────────────────────────────┐
-   │ getImageTargetSize(model, {capability, economyMode})         │
-   │                                                              │
-   │  economyMode? ────yes──► 128 KB (user opt-in via settings)   │
-   │       │                                                      │
-   │       no                                                     │
-   │       ▼                                                      │
-   │  capability.downsampleTargetBytes? ─yes─► use advertised      │
-   │       │                                                      │
-   │       no                                                     │
-   │       ▼                                                      │
-   │  IMAGE_TARGET_RAW_SIZE (512 KB sudowork default)             │
-   └──────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-                 tryReadAsImage(file, maxBytes)
-                   → resizeImageForContext(buf, maxBytes)
-                   → base64
-                          │
-                          ▼
-   ┌──────────────────────────────────────────────────────────────┐
-   │ Wrong-model gate (AcpAgent.ts ~ line 988):                   │
-   │                                                              │
-   │  if capability?.autoHandlesWrongModel === true:              │
-   │     → hand off silently, no tip                              │
-   │       (sudocode's push_images will VLM-route internally)     │
-   │  else if !isModelVisionCapable(currentModel):                │
-   │     → emit "当前模型 X 不支持图片分析" tip                       │
-   │       (legacy path for backends without _meta support)       │
-   │  else:                                                       │
-   │     → hand off natively                                      │
-   └──────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-                connection.sendRequest("session/prompt",
-                  { sessionId, prompt: [image_block, text_block, ...] })
-                  ── over ACP stdio to scode ──►</code></pre>
+<pre class="mermaid">
+flowchart TD
+    SEND(["User clicks send"]) --> AGENT["AcpAgent.sendMessage(data)"]
+    AGENT --> PROC["processAtFileReferences(<br/>&nbsp;&nbsp;content, workspace, files, model,<br/>&nbsp;&nbsp;{ capability, economyMode })"]
+    PROC --> RESOLVE{"getImageTargetSize"}
+
+    RESOLVE -->|"economyMode == true"| CAP128["cap = 128 KB<br/>(user opt-in via Settings)"]
+    RESOLVE -->|"capability.downsampleTargetBytes"| CAPADV["cap = backend-advertised"]
+    RESOLVE -->|"else"| CAPDEF["cap = IMAGE_TARGET_RAW_SIZE<br/>(512 KB sudowork default)"]
+
+    CAP128 --> READ
+    CAPADV --> READ
+    CAPDEF --> READ
+
+    READ["tryReadAsImage(file, cap)<br/>→ resizeImageForContext<br/>→ base64"] --> GATE{"wrong-model gate<br/>AcpAgent.ts ~988"}
+
+    GATE -->|"capability.autoHandlesWrongModel<br/>=== true"| HANDOFF["hand off silently — no tip<br/>(scode's push_images<br/>will VLM-route internally)"]
+    GATE -->|"else + !isModelVisionCapable"| LEGACY["emit legacy tip<br/>当前模型不支持图片分析<br/>(backends without _meta support)"]
+    GATE -->|"else"| NATIVE["hand off natively<br/>(vision model + normal cap)"]
+
+    HANDOFF --> ACP
+    NATIVE --> ACP
+    LEGACY -.->|"turn aborted"| END(["turn ends"])
+    ACP["connection.sendRequest('session/prompt',<br/>{ sessionId, prompt: [image_block, text_block, ...] })<br/>—— over ACP stdio to scode ——►"] --> SCODE(["scode<br/>push_images"])
+
+    style HANDOFF fill:#065f46,stroke:#10b981
+    style NATIVE fill:#1e40af,stroke:#60a5fa
+    style LEGACY fill:#7f1d1d,stroke:#f59e0b
+</pre>
 
 <h3>Concrete scenarios (real-e2e-verified 2026-07-01)</h3>
 
@@ -295,42 +250,43 @@ _meta.imageCapability so the whole UI/renderer stack sees a consistent view.</co
 </table>
 
 <h3>What kicks off the SSOT chain (all three sides)</h3>
-<pre><code>Startup ordering:
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant SR as sudorouter
+    participant SCODE as scode acp
+    participant SW as sudowork
 
-1. sudorouter (external, always up)
-   /v1/models emits per-model: {vision_supported, image_max_bytes, image_max_dimension}
-                                       ▲
-                                       │ (fields shipped to sudorouter master
-                                       │  784fbf0 2026-07-01, prod deploy pending)
-                                       │
-2. scode `acp` mode spawns:
-   ├─ run_acp_server()  ────► model_capabilities::load(config_home)
-   │                              │
-   │                              ▼
-   │                          reads {config_home}/cache/model-capabilities.json
-   │                          (bundled seed on first launch;
-   │                           merged with sudorouter refresh on subsequent)
-   │                              │
-   │                              ▼
-   │                          OnceLock CAPABILITIES set
-   │                              │
-   │                              ▼
-   │                          vision_capable() + per_model_image_cap()
-   │                          return real values from here on
-   │
-   └─ initialize response advertises _meta.sudocode.imageCapability
-      { maxBytes, maxDimension, downsampleTargetBytes,
-        autoHandlesOversized, autoHandlesWrongModel }
-                                       │
-                                       ▼
-3. sudowork's AcpConnection.getInitializeResponse() captures this
-                                       │
-                                       ▼
-4. AcpAgent.sendMessage per-turn:
-   parseImageCapability(initResponse) → IImageCapability | null
-   getImageTargetSize(model, {capability, economyMode}) → cap in bytes
-   processAtFileReferences(..., {capability, economyMode})
-   wrong-model gate consults capability.autoHandlesWrongModel</code></pre>
+    Note over SR: /v1/models emits per-model:<br/>vision_supported<br/>image_max_bytes<br/>image_max_dimension<br/>(shipped to master 784fbf0,<br/>prod deploy pending)
+
+    SCODE->>SCODE: run_acp_server()<br/>model_capabilities::load(config_home)
+    activate SCODE
+    Note right of SCODE: reads {config_home}/cache/<br/>model-capabilities.json<br/>(bundled seed → merged<br/>with sudorouter refresh)<br/>OnceLock CAPABILITIES set
+    deactivate SCODE
+
+    SW->>SCODE: initialize (protocolVersion:1)
+    SCODE-->>SW: response._meta.sudocode.imageCapability<br/>{ maxBytes, maxDimension,<br/>downsampleTargetBytes,<br/>autoHandlesOversized,<br/>autoHandlesWrongModel }
+    SW->>SW: parseImageCapability(initResponse)<br/>→ IImageCapability | null (stored on session)
+
+    Note over SW: per turn:
+    SW->>SW: getImageTargetSize(model, {capability, economyMode})<br/>→ cap in bytes
+    SW->>SW: wrong-model gate consults<br/>capability.autoHandlesWrongModel
+
+    alt vision-capable model, in-cap image
+        SW->>SCODE: session/prompt with ContentBlock::Image
+        SCODE->>SR: LLM turn (image native)
+        SR-->>SCODE: assistant response
+        SCODE-->>SW: session/update stream
+    else wrong-model or oversized
+        SW->>SCODE: session/prompt with ContentBlock::Image
+        SCODE->>SR: VLM side-call<br/>gemini-2.5-flash describe
+        SR-->>SCODE: description text
+        Note right of SCODE: push_images splices<br/>[Image #N: &lt;desc&gt;] into prompt
+        SCODE->>SR: LLM turn (text only)
+        SR-->>SCODE: assistant response
+        SCODE-->>SW: session/update stream
+    end
+</pre>
 
 <h2 id="multi-backend">Today's reality — the multi-backend constraint drives the architecture</h2>
 

@@ -77,8 +77,17 @@ jobs:
           mkdir -p "$pkgroot"
           cp "target/release/${{ matrix.bin }}" "$pkgroot/scode"
           chmod +x "$pkgroot/scode"
+          # Bundle the interactive config wizard alongside the binary.
+          cp "../packaging/macos/scode-setup.sh" "$pkgroot/scode-setup"
+          chmod +x "$pkgroot/scode-setup"
+          # postinstall launches the wizard in the user's Terminal.
+          scriptsdir="$(mktemp -d)/scripts"
+          mkdir -p "$scriptsdir"
+          cp "../packaging/macos/postinstall" "$scriptsdir/postinstall"
+          chmod +x "$scriptsdir/postinstall"
           pkgbuild \
             --root "$pkgroot" \
+            --scripts "$scriptsdir" \
             --identifier com.sudocode.scode \
             --version "${{ steps.version.outputs.version }}" \
             --install-location /usr/local/bin \

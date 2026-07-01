@@ -105,6 +105,8 @@ enum Scenario {
     MultiTurnContext,
     EditFileRoundtrip,
     GlobSearchRoundtrip,
+    EnterPlanModeRoundtrip,
+    ExitPlanModeRoundtrip,
 }
 
 impl Scenario {
@@ -127,6 +129,8 @@ impl Scenario {
             "multi_turn_context" => Some(Self::MultiTurnContext),
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
+            "enter_plan_mode_roundtrip" => Some(Self::EnterPlanModeRoundtrip),
+            "exit_plan_mode_roundtrip" => Some(Self::ExitPlanModeRoundtrip),
             _ => None,
         }
     }
@@ -150,6 +154,8 @@ impl Scenario {
             Self::MultiTurnContext => "multi_turn_context",
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
+            Self::EnterPlanModeRoundtrip => "enter_plan_mode_roundtrip",
+            Self::ExitPlanModeRoundtrip => "exit_plan_mode_roundtrip",
         }
     }
 }
@@ -545,6 +551,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"pattern":"*.txt"}"#],
             ),
         },
+        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "enter_plan_mode roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse("toolu_enter_plan_mode", "EnterPlanMode", &[r#"{}"#]),
+        },
+        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("exit_plan_mode roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse("toolu_exit_plan_mode", "ExitPlanMode", &[r#"{}"#]),
+        },
     }
 }
 
@@ -771,6 +789,30 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "*.txt"}),
             ),
         },
+        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_enter_plan_mode_final",
+                &format!("enter_plan_mode roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_enter_plan_mode_tool",
+                "toolu_enter_plan_mode",
+                "EnterPlanMode",
+                json!({}),
+            ),
+        },
+        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_exit_plan_mode_final",
+                &format!("exit_plan_mode roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_exit_plan_mode_tool",
+                "toolu_exit_plan_mode",
+                "ExitPlanMode",
+                json!({}),
+            ),
+        },
     }
 }
 
@@ -793,6 +835,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::MultiTurnContext => "req_multi_turn_context",
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
+        Scenario::EnterPlanModeRoundtrip => "req_enter_plan_mode_roundtrip",
+        Scenario::ExitPlanModeRoundtrip => "req_exit_plan_mode_roundtrip",
     }
 }
 

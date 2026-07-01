@@ -24,11 +24,30 @@ const BUNDLED_CAPABILITIES: &str = include_str!("model-capabilities.bundled.json
 /// Stale threshold: refresh if `updated_at` is older than this.
 const TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 
-/// Token limit metadata for a single model.
+/// Token limit + image-cap metadata for a single model.
+///
+/// All image-cap fields are optional + `serde(default)` so existing on-disk
+/// JSON files (and the bundled seed) deserialize without modification.
+/// Sudorouter populates them per-model via `/v1/models` (commit 784fbf0,
+/// 2026-07-01) — until a model's entry lands in the SSOT table, callers use
+/// [`vision_capable`] / [`per_model_image_cap`] which fall back to
+/// optimistic defaults; see those fns' docs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCapability {
     pub context_window: u32,
     pub max_output_tokens: u32,
+    /// `true`/`false` when documented; `None` when unknown (→ optimistic fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_supported: Option<bool>,
+    /// Per-image byte cap the model's API will actually accept. `None` (or
+    /// `0`) means "sudorouter doesn't have a documented number" — fall back
+    /// to sudocode's conservative default in [`crate::image_registry`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_max_bytes: Option<u32>,
+    /// Per-image longest-edge pixel cap. Same fallback rule as
+    /// [`Self::image_max_bytes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_max_dimension: Option<u32>,
 }
 
 /// The on-disk SSOT file schema.
@@ -76,6 +95,49 @@ pub fn lookup(model_id: &str) -> Option<ModelCapability> {
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
         .map(|(_, cap)| *cap)
+}
+
+/// Returns `true` if the model is known to accept image input. Used by the
+/// push_images path to decide whether to send the image natively or route it
+/// through a VLM-describe side-call (substituting a text description into the
+/// prompt).
+///
+/// Resolution order:
+///   1. If the SSOT file has an explicit `vision_supported` value for this
+///      model, use it (populated by sudorouter's `/v1/models` — preferred).
+///   2. Otherwise default to **true**: 2026-era frontier chat models all
+///      accept image input, and the cost of a false-positive (one wasteful
+///      native send to a text-only model) is bounded by the upstream API's
+///      own rejection. False-negatives (treating a vision model as text-only
+///      and burning a VLM round-trip on every image) would be the more
+///      common silent regression — keep the default optimistic until the
+///      SSOT is filled in. **This matches sudorouter's contract**: they
+///      emit `*bool` so `false` == documented text-only (fires wrong-model
+///      route correctly), `None` == unknown (optimistic).
+#[must_use]
+pub fn vision_capable(model_id: &str) -> bool {
+    lookup(model_id)
+        .and_then(|cap| cap.vision_supported)
+        .unwrap_or(true)
+}
+
+/// Per-model image byte/dimension cap, when sudorouter has documented values
+/// for this model; `(None, None)` when unknown. Callers (e.g.
+/// `image_registry::capability`) fall back to sudocode's conservative
+/// defaults when either half is missing.
+///
+/// Documented today (per sudorouter): Anthropic 5 MB / 8000 px, OpenAI 20 MB,
+/// Gemini ~7 MB. Not documented (returns None): Grok, Qwen-vl, Llama-4,
+/// Doubao — sudorouter will backfill as canonical numbers become available.
+#[must_use]
+pub fn per_model_image_cap(model_id: &str) -> (Option<u32>, Option<u32>) {
+    match lookup(model_id) {
+        Some(cap) => (
+            cap.image_max_bytes.filter(|&n| n > 0),
+            cap.image_max_dimension.filter(|&n| n > 0),
+        ),
+        None => (None, None),
+    }
 }
 
 /// Context window for a wire model ID, falling back to the SSOT file's
@@ -152,6 +214,9 @@ pub fn merge_and_write(
                 ModelCapability {
                     context_window: cw,
                     max_output_tokens: mo,
+                    vision_supported: entry.vision_supported,
+                    image_max_bytes: entry.image_max_bytes,
+                    image_max_dimension: entry.image_max_dimension,
                 },
             );
             count += 1;
@@ -169,6 +234,12 @@ pub struct ApiModelEntry {
     pub id: String,
     pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub vision_supported: Option<bool>,
+    #[serde(default)]
+    pub image_max_bytes: Option<u32>,
+    #[serde(default)]
+    pub image_max_dimension: Option<u32>,
 }
 
 /// Parse the `/v1/models` API response JSON into a vec of model entries.
@@ -187,10 +258,22 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 .get("max_output_tokens")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
+            let vision_supported = entry.get("vision_supported").and_then(|v| v.as_bool());
+            let image_max_bytes = entry
+                .get("image_max_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let image_max_dimension = entry
+                .get("image_max_dimension")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
             Some(ApiModelEntry {
                 id,
                 context_window,
                 max_output_tokens,
+                vision_supported,
+                image_max_bytes,
+                image_max_dimension,
             })
         })
         .collect()

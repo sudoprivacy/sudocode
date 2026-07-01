@@ -9,16 +9,15 @@
 //! Coverage:
 //!
 //! 1. `scode "describe @image.png"` runs the full CLI conversation loop
-//!    against a real PNG fixture written on disk. Response must reference
-//!    the image contents (mock scenario keys assistant reply on the
-//!    fixture's presence — see `openai_compat_mock.rs` for the mapping).
-//! 2. `scode "describe @image.png" --model <text-only>` exercises
-//!    push_images' VLM branch: `vision_capable(text-only) == false` →
-//!    stderr emits `[push_images] VLM-route start`. Since the mock has
-//!    no sudorouter reachable, we assert the fallback placeholder
-//!    ("could not be described automatically") lands in the response;
-//!    the point is that the branch fires without hanging the CLI (real
-//!    regression pattern from PR #267).
+//!    against a real PNG fixture written on disk. The CLI exits 0 AND
+//!    the mock backend recorded the request — this is the sentinel for
+//!    the pre-#258 silent-drop pattern (push_images stripped image
+//!    blocks when the model was text-only).
+//!
+//! The `text-only model + image → VLM branch must not hang` regression
+//! (PR #267 fix) is deliberately NOT in this PTY file — see the module
+//! block at the bottom for why. That invariant lives in
+//! `acp_wrong_model_vlm_full_roundtrip` in the same directory.
 //!
 //! ```bash
 //! cargo test --test pty_image_handling                          # mock (CI)
@@ -186,60 +185,24 @@ fn cli_at_image_reference_completes_turn() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 2. CLI @image + text-only model — VLM branch must not hang
+// 2. VLM-branch no-hang — covered upstream, deliberately not here
 // ──────────────────────────────────────────────────────────────────────
-
-/// Same input, but forced to a model the SSOT cache marks text-only.
-/// `vision_capable(...)` returns false → push_images enters the VLM
-/// branch. With no sudorouter reachable in mock mode the VLM leg
-/// resolves via the placeholder fallback (see
-/// `vlm_describe_block_or_placeholder`), the branch STILL exits — the
-/// PR #267 fix (dedicated OS thread + fresh runtime) guarantees no
-/// deadlock. Regression sentinel for the exact hang that shipped
-/// unnoticed and got surfaced by real UI drive.
-#[test]
-fn cli_at_image_text_only_model_no_hang() {
-    let env = TestEnv::new("image-cli-text-only-no-hang");
-    let fixture = env.workspace_root().join("shapes.png");
-    write_fixture_png(&fixture);
-
-    let prompt = env.prompt(
-        &format!(
-            "Describe the image in ONE short sentence: @{}",
-            fixture.display()
-        ),
-        "single_turn_text",
-    );
-
-    // Force a model the bundled capability table marks vision_supported=false.
-    // Any model listed in tests/common/openai_compat_mock.rs's text-only
-    // fixture would work; deepseek-v4-flash is the canonical one from
-    // the design partner's report.
-    let mut sess = env.spawn(&[
-        "--permission-mode",
-        "read-only",
-        "--model",
-        "deepseek-v4-flash",
-        &prompt,
-    ]);
-
-    // The CLI MUST reach some assistant output — either the mock's
-    // canned reply, or the "[Image #N could not be described
-    // automatically ...]" placeholder that push_images splices when
-    // sudorouter is unreachable. Both prove the VLM branch exited
-    // without hanging.
-    sess.expect("(?i)(answer|image|could not|shape|color|describe)")
-        .expect("push_images VLM branch must complete — no hang");
-
-    let exit = sess.expect_eof().expect("scode should exit");
-    assert_eq!(exit, 0, "text-only image turn should exit 0; got {exit}");
-
-    // Mock-only: even in the VLM branch, the final assistant turn
-    // still hits the backend once the description text is spliced in.
-    if env.is_mock() {
-        assert!(
-            env.captured_message_count() >= 1,
-            "expected at least 1 /v1/messages request; got 0 — VLM route may have hung"
-        );
-    }
-}
+//
+// The `text-only model + image → VLM branch must not hang` regression
+// (memory: PR #267, block_in_place → dedicated thread fix) is covered
+// by the mocked-integration test `acp_wrong_model_vlm_full_roundtrip`
+// in this same directory. That test spins up a mock sudorouter, so the
+// VLM leg completes deterministically without any network reach.
+//
+// Attempting to gate the same invariant from PTY is a bad shape:
+// - The mock harness only intercepts Anthropic's `/v1/messages`, not
+//   sudorouter's `/v1/chat/completions`. Forcing `--model deepseek-*`
+//   makes scode's VLM branch try to reach real sudorouter (>30 s network
+//   timeout in a CI sandbox) → the PTY expect times out well before the
+//   invariant can even be asserted.
+// - The right coverage layer is the acp_integration test (mock backend
+//   controls both sides) plus the live-e2e yaml
+//   (sudowork PR #967) which drives real sudorouter with real bytes.
+//
+// If a future PTY-level VLM-hang sentinel is needed, the harness must
+// grow a mock sudorouter — until then, we lean on the tests above.

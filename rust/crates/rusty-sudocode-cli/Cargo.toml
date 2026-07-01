@@ -37,6 +37,7 @@ tools = { path = "../tools" }
 workspace = true
 
 [dev-dependencies]
+flate2 = "1"
 futures-util = "0.3"
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 pty-expect.workspace = true

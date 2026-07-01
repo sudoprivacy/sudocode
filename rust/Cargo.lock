@@ -3106,6 +3106,7 @@ dependencies = [
  "compat-harness",
  "crossterm",
  "dialoguer",
+ "flate2",
  "futures",
  "futures-util",
  "mock-anthropic-service",

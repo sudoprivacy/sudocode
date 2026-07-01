@@ -4,7 +4,7 @@
   "models": {
     "claude-opus-4-6": { "context_window": 200000, "max_output_tokens": 32000 },
     "claude-opus-4-7": { "context_window": 200000, "max_output_tokens": 32000 },
-    "claude-opus-4-8": { "context_window": 200000, "max_output_tokens": 32000 },
+    "claude-opus-4-8": { "context_window": 1000000, "max_output_tokens": 32000 },
     "claude-sonnet-4-6": { "context_window": 200000, "max_output_tokens": 64000 },
     "claude-haiku-4-5-20251213": { "context_window": 200000, "max_output_tokens": 64000 },
     "grok-3": { "context_window": 131072, "max_output_tokens": 64000 },

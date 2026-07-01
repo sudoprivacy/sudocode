@@ -833,6 +833,115 @@ async fn acp_stdio_exits_on_stdin_close() {
     workspace.cleanup();
 }
 
+/// Resume across a process restart must restore prior conversation history.
+///
+/// Regression guard for the "amnesia on resume" bug. sudowork resumes a scode
+/// session by id via the ACP-standard `session/load`; previously it sent a
+/// generic `resumeSessionId` to `session/new`, which scode ignores, silently
+/// minting a fresh EMPTY session and losing all history. This test creates a
+/// session + one turn carrying a unique marker in process A, lets that process
+/// exit, then in a FRESH process B loads the same session id and runs another
+/// turn — asserting the upstream model request still carries process A's
+/// message (proving history was restored, not started fresh).
+#[tokio::test]
+async fn acp_stdio_resume_restores_history_across_reconnect() {
+    const HISTORY_MARKER: &str = "resume-marker-7f3a91c2";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-resume");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    // --- Process A: create a session, run one turn carrying HISTORY_MARKER, then exit ---
+    let session_id = {
+        let mut client = spawn_stdio_client(&workspace);
+        scenario_initialize(&mut client).await;
+        let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+        // The marker is a separate whitespace token, so detect_scenario still
+        // resolves `streaming_text`; the marker rides along into the persisted
+        // user message.
+        let first_prompt = format!("{SCENARIO_PREFIX}streaming_text {HISTORY_MARKER}");
+        let (_notifs, resp) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": first_prompt }]
+                }),
+            )
+            .await;
+        assert!(
+            resp["result"].get("stopReason").is_some(),
+            "first turn should complete: {resp}"
+        );
+        client.shutdown().await;
+        session_id
+    };
+
+    // --- Process B: a brand-new server process over the same workspace ---
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+
+    // session/load of a session created by the previous process must SUCCEED.
+    let (load_notifs, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id,
+                "cwd": workspace.root.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load_notifs.is_empty(),
+        "session/load should not produce notifications"
+    );
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load of a prior-process session should succeed, got: {load_resp}"
+    );
+
+    // A follow-up turn on the resumed session must carry process A's message
+    // upstream — that only happens if history was restored from disk.
+    let before = server.captured_requests().await.len();
+    let (_n, follow_resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}streaming_text follow-up")
+                }]
+            }),
+        )
+        .await;
+    assert!(
+        follow_resp["result"].get("stopReason").is_some(),
+        "resumed turn should complete: {follow_resp}"
+    );
+
+    let requests = server.captured_requests().await;
+    assert!(
+        requests.len() > before,
+        "resumed prompt should reach the model"
+    );
+    let last = requests.last().expect("at least one captured request");
+    assert!(
+        last.raw_body.contains(HISTORY_MARKER),
+        "resumed model request must include the prior turn's message ({HISTORY_MARKER}); \
+         a fresh/empty session would omit it. body: {}",
+        last.raw_body
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// End-to-end regression guard for the wrong-model VLM route. Verifies the
 /// entire VLM call chain including the sudorouter round-trip:
 ///

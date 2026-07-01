@@ -962,7 +962,7 @@ own row.</p>
 <table>
   <thead><tr><th>Section</th><th>CC status (v2.1.87)</th><th>scode status</th></tr></thead>
   <tbody>
-    <tr><td>Auto memory instructions</td><td>~3500 chars, 4-type taxonomy, write/forget, staleness verification</td><td>Done — ported 1:1 from claude-trace capture (PR #236)</td></tr>
+    <tr><td>Auto memory instructions</td><td>~3500 chars, 4-type taxonomy, write/forget, staleness verification</td><td>Done — ported 1:1 from claude-trace capture (PR #236). <strong>Future:</strong> CCB v2.8.2 significantly compresses type descriptions (deletes <code>&lt;when_to_save&gt;</code>, <code>&lt;how_to_use&gt;</code>, <code>&lt;examples&gt;</code>; ~20 lines vs current ~65). Also adds <code>&lt;scope&gt;</code> tags for team memory (not yet implemented in scode). Decision: hold — current prompt matches locally-verifiable CC v2.1.87 (Tier-1). Revisit after upgrading local CC to 2.8.x and re-capturing via claude-trace.</td></tr>
     <tr><td>Intro / identity</td><td>"You are Claude Code"</td><td>"You are Sudo Code" — aligned</td></tr>
     <tr><td>System / tools / tasks / actions / tone / output</td><td>CC-specific sections</td><td>Gap — partially aligned, needs section-by-section diff</td></tr>
     <tr><td>Environment context</td><td>Model family, cwd, date, platform, git status</td><td>Aligned — same structure</td></tr>

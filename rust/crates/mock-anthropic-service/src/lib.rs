@@ -107,6 +107,8 @@ enum Scenario {
     GlobSearchRoundtrip,
     EnterPlanModeRoundtrip,
     ExitPlanModeRoundtrip,
+    TodoWritePendingRoundtrip,
+    TodoWriteAllCompletedRoundtrip,
 }
 
 impl Scenario {
@@ -131,6 +133,8 @@ impl Scenario {
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
             "enter_plan_mode_roundtrip" => Some(Self::EnterPlanModeRoundtrip),
             "exit_plan_mode_roundtrip" => Some(Self::ExitPlanModeRoundtrip),
+            "todo_write_pending_roundtrip" => Some(Self::TodoWritePendingRoundtrip),
+            "todo_write_all_completed_roundtrip" => Some(Self::TodoWriteAllCompletedRoundtrip),
             _ => None,
         }
     }
@@ -156,6 +160,8 @@ impl Scenario {
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
             Self::EnterPlanModeRoundtrip => "enter_plan_mode_roundtrip",
             Self::ExitPlanModeRoundtrip => "exit_plan_mode_roundtrip",
+            Self::TodoWritePendingRoundtrip => "todo_write_pending_roundtrip",
+            Self::TodoWriteAllCompletedRoundtrip => "todo_write_all_completed_roundtrip",
         }
     }
 }
@@ -563,6 +569,30 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
             None => tool_use_sse("toolu_exit_plan_mode", "ExitPlanMode", &[r#"{}"#]),
         },
+        Scenario::TodoWritePendingRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "todo_write pending roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_todo_write_pending",
+                "TodoWrite",
+                &[
+                    r#"{"todos":[{"content":"write parser","activeForm":"writing parser","status":"pending"},{"content":"handle escapes","activeForm":"handling escapes","status":"in_progress"},{"content":"add tests","activeForm":"adding tests","status":"pending"}]}"#,
+                ],
+            ),
+        },
+        Scenario::TodoWriteAllCompletedRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "todo_write all-completed roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_todo_write_completed",
+                "TodoWrite",
+                &[
+                    r#"{"todos":[{"content":"step one","activeForm":"step one","status":"completed"},{"content":"step two","activeForm":"step two","status":"completed"},{"content":"step three","activeForm":"step three","status":"completed"}]}"#,
+                ],
+            ),
+        },
     }
 }
 
@@ -813,6 +843,42 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({}),
             ),
         },
+        Scenario::TodoWritePendingRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_todo_write_pending_final",
+                &format!("todo_write pending roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_todo_write_pending_tool",
+                "toolu_todo_write_pending",
+                "TodoWrite",
+                json!({
+                    "todos": [
+                        {"content": "write parser", "activeForm": "writing parser", "status": "pending"},
+                        {"content": "handle escapes", "activeForm": "handling escapes", "status": "in_progress"},
+                        {"content": "add tests", "activeForm": "adding tests", "status": "pending"}
+                    ]
+                }),
+            ),
+        },
+        Scenario::TodoWriteAllCompletedRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_todo_write_completed_final",
+                &format!("todo_write all-completed roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_todo_write_completed_tool",
+                "toolu_todo_write_completed",
+                "TodoWrite",
+                json!({
+                    "todos": [
+                        {"content": "step one", "activeForm": "step one", "status": "completed"},
+                        {"content": "step two", "activeForm": "step two", "status": "completed"},
+                        {"content": "step three", "activeForm": "step three", "status": "completed"}
+                    ]
+                }),
+            ),
+        },
     }
 }
 
@@ -837,6 +903,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
         Scenario::EnterPlanModeRoundtrip => "req_enter_plan_mode_roundtrip",
         Scenario::ExitPlanModeRoundtrip => "req_exit_plan_mode_roundtrip",
+        Scenario::TodoWritePendingRoundtrip => "req_todo_write_pending_roundtrip",
+        Scenario::TodoWriteAllCompletedRoundtrip => "req_todo_write_all_completed_roundtrip",
     }
 }
 

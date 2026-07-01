@@ -37,7 +37,13 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const RECV_TIMEOUT: Duration = Duration::from_secs(30);
+/// Recv timeout for JSON-RPC responses. Bumped 30s → 90s so the
+/// wrong-model VLM tests (which trigger `describe_image_via_vlm`'s own
+/// 30s HTTP timeout when the mock or real sudorouter is unreachable) have
+/// enough headroom for scode's error placeholder to bubble back through
+/// the ACP response. 30s was cutting it exactly at the VLM timeout and
+/// the test recv panicked before scode's push_images could finish.
+const RECV_TIMEOUT: Duration = Duration::from_secs(90);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -206,7 +212,7 @@ impl AcpTestClient {
     async fn recv(&mut self) -> Value {
         timeout(RECV_TIMEOUT, self.recv_inner())
             .await
-            .expect("recv timed out after 30s")
+            .expect("recv timed out (see RECV_TIMEOUT)")
     }
 
     async fn recv_inner(&mut self) -> Value {
@@ -1142,11 +1148,16 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
 
     // Assert the VLM mock actually got hit.
     let vlm_requests = sudorouter_mock.captured_requests().await;
+    // On failure, dump captured stderr so CI logs show what push_images
+    // actually did (native branch / VLM branch / crash). Silent panics
+    // without this context cost 40+ min of blind debugging on 2026-07-01.
+    let captured_now = stderr_captured.lock().await.clone();
     assert!(
         !vlm_requests.is_empty(),
         "OpenAiCompatMock (standing in for sudorouter) must have received at least one request from push_images's VLM route. \
-         If empty, either vision_capable(text-only fixture) returned true (SSOT cache didn't populate — regression of the load() bug), \
-         or push_images silently skipped the VLM branch (regression of the branch logic in main.rs)."
+         If empty, either vision_capable(sonnet) returned true (SSOT cache didn't populate — regression of the load() bug), \
+         or push_images silently skipped the VLM branch (regression of the branch logic in main.rs). \
+         scode stderr snapshot: {captured_now:#?}"
     );
 
     let vlm_req = &vlm_requests[0];

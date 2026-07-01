@@ -897,7 +897,10 @@ async fn acp_wrong_model_routes_via_vlm() {
             match reader.read_line(&mut line).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    stderr_captured_bg.lock().await.push(line.trim_end().to_string());
+                    stderr_captured_bg
+                        .lock()
+                        .await
+                        .push(line.trim_end().to_string());
                 }
             }
         }
@@ -1035,7 +1038,10 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         .expect("sudorouter mock should start");
     let workspace = TestWorkspace::new("vlm-full-roundtrip");
     workspace.create();
-    workspace.write_sudocode_json_with_sudorouter(&anthropic_mock.base_url(), sudorouter_mock.base_url());
+    workspace.write_sudocode_json_with_sudorouter(
+        &anthropic_mock.base_url(),
+        sudorouter_mock.base_url(),
+    );
     workspace.seed_text_only_test_fixture(TEST_MODEL);
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
@@ -1072,7 +1078,10 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
             match reader.read_line(&mut line).await {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    stderr_captured_bg.lock().await.push(line.trim_end().to_string());
+                    stderr_captured_bg
+                        .lock()
+                        .await
+                        .push(line.trim_end().to_string());
                 }
             }
         }
@@ -1137,14 +1146,21 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
     );
 
     let vlm_req = &vlm_requests[0];
-    assert_eq!(vlm_req.method, "POST", "VLM request must be POST /chat/completions");
+    assert_eq!(
+        vlm_req.method, "POST",
+        "VLM request must be POST /chat/completions"
+    );
     assert!(
         vlm_req.path.contains("chat/completions"),
         "VLM request must target /chat/completions endpoint, got: {}",
         vlm_req.path
     );
     assert!(
-        vlm_req.authorization.as_deref().unwrap_or("").starts_with("Bearer "),
+        vlm_req
+            .authorization
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Bearer "),
         "VLM request must carry Bearer auth. Got: {:?}",
         vlm_req.authorization
     );
@@ -1161,9 +1177,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
 
     // Optional sanity: stderr should have logged both entries.
     let final_lines = stderr_captured.lock().await.clone();
-    let saw_vlm_start = final_lines
-        .iter()
-        .any(|l| l.contains("VLM-route start"));
+    let saw_vlm_start = final_lines.iter().any(|l| l.contains("VLM-route start"));
     let saw_vlm_done = final_lines.iter().any(|l| l.contains("VLM done"));
     assert!(
         saw_vlm_start && saw_vlm_done,

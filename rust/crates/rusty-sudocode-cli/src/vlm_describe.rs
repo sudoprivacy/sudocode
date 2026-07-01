@@ -168,10 +168,7 @@ pub async fn describe_image_via_vlm(
         .build()
         .map_err(|e| VlmError::Client(e.to_string()))?;
 
-    let url = format!(
-        "{}/chat/completions",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
     let data_url = format!("data:{mime_type};base64,{image_b64}");
 

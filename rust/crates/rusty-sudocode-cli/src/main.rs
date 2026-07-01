@@ -32,11 +32,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source,
-    AnthropicClient, AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
-    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
+    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
+    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
+    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -2022,7 +2022,9 @@ fn vlm_describe_block_or_placeholder(
 ) -> runtime::ContentBlock {
     let human_idx = index + 1;
     let Some((base_url, api_key)) = sudorouter_creds else {
-        eprintln!("[push_images] image #{human_idx} — no sudorouter creds, falling back to placeholder");
+        eprintln!(
+            "[push_images] image #{human_idx} — no sudorouter creds, falling back to placeholder"
+        );
         return runtime::ContentBlock::Text {
             text: format!(
                 "[Image #{human_idx} could not be sent (sudorouter not configured) — please configure proxy.sudorouter or use a vision-capable model.]"
@@ -2056,7 +2058,9 @@ fn vlm_describe_block_or_placeholder(
             match rt {
                 Ok(rt) => rt.block_on(vlm_future),
                 Err(e) => {
-                    eprintln!("[push_images] image #{human_idx} — failed to build fallback runtime: {e}");
+                    eprintln!(
+                        "[push_images] image #{human_idx} — failed to build fallback runtime: {e}"
+                    );
                     return runtime::ContentBlock::Text {
                         text: format!(
                             "[Image #{human_idx} could not be described automatically (no runtime available)]"
@@ -2069,7 +2073,10 @@ fn vlm_describe_block_or_placeholder(
 
     match result {
         Ok(description) => {
-            eprintln!("[push_images] image #{human_idx} — VLM done, {} desc chars", description.len());
+            eprintln!(
+                "[push_images] image #{human_idx} — VLM done, {} desc chars",
+                description.len()
+            );
             runtime::ContentBlock::Text {
                 text: format!("[Image #{human_idx}: {description}]"),
             }
@@ -2381,7 +2388,12 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                         mime_type: final_mime,
                     },
                     Err(err) if runtime::image_registry::is_image_too_large(&err) => {
-                        vlm_describe_block_or_placeholder(data, mime_type, index, sudorouter_creds.as_ref())
+                        vlm_describe_block_or_placeholder(
+                            data,
+                            mime_type,
+                            index,
+                            sudorouter_creds.as_ref(),
+                        )
                     }
                     Err(_) => runtime::ContentBlock::Image {
                         data: data.clone(),

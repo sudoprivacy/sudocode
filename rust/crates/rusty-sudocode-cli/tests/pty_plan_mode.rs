@@ -142,7 +142,7 @@ fn enter_plan_mode_writes_settings_and_state_from_fresh_workspace() {
     );
     let state = read_json_or_empty(&plan_mode_state(&env));
     assert_eq!(
-        state.get("had_local_override").and_then(|v| v.as_bool()),
+        state.get("hadLocalOverride").and_then(|v| v.as_bool()),
         Some(false),
         "state file must record had_local_override = false when starting from a fresh workspace"
     );
@@ -198,12 +198,12 @@ fn plan_mode_roundtrip_preserves_prior_default_mode() {
     );
     let state = read_json_or_empty(&plan_mode_state(&env));
     assert_eq!(
-        state.get("had_local_override").and_then(|v| v.as_bool()),
+        state.get("hadLocalOverride").and_then(|v| v.as_bool()),
         Some(true),
         "state must record that a prior override existed"
     );
     assert_eq!(
-        state.get("previous_local_mode").and_then(|v| v.as_str()),
+        state.get("previousLocalMode").and_then(|v| v.as_str()),
         Some("workspace-write"),
         "state must remember the exact previous mode so Exit can restore it"
     );

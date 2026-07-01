@@ -155,6 +155,7 @@ fn session_auto_save_creates_jsonl() {
 /// 2. Spawn scode --resume <path> /export notes.txt
 /// 3. Verify notes.txt contains the original user message.
 #[test]
+#[cfg(unix)] // spawn_scode_in_dir uses sh -c
 fn resume_and_export_preserves_context() {
     let workspace = HarnessWorkspace::new("resume-export");
     let session_path = write_fixture_session(
@@ -204,6 +205,7 @@ fn resume_and_export_preserves_context() {
 /// 4. Spawn scode --resume <path> /undo
 /// 5. Verify file on disk is restored to original content.
 #[test]
+#[cfg(unix)]
 fn undo_restores_file_on_disk() {
     let workspace = HarnessWorkspace::new("undo-restore");
     let file_path = workspace.root.join("fixture.txt");
@@ -256,6 +258,7 @@ fn undo_restores_file_on_disk() {
 /// 2. Spawn scode --resume <path> /compact --output-format json
 /// 3. Verify JSON output contains removed_messages > 0.
 #[test]
+#[cfg(unix)]
 fn compact_reduces_messages() {
     let workspace = HarnessWorkspace::new("compact");
     let mut messages: Vec<(&str, &str, &str)> = Vec::new();
@@ -296,6 +299,7 @@ fn compact_reduces_messages() {
 /// Human resumes a session and runs /session list. Verifies the
 /// output shows at least one session entry.
 #[test]
+#[cfg(unix)]
 fn session_list_shows_entries() {
     let workspace = HarnessWorkspace::new("session-list");
     let session_path = write_fixture_session(

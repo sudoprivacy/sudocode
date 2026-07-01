@@ -17,6 +17,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/openai_compat_mock.rs"]
+mod openai_compat_mock;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -25,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
+use openai_compat_mock::OpenAiCompatMock;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -74,6 +78,21 @@ impl TestWorkspace {
         let sample = runtime::SAMPLE_SUDOCODE_JSON
             .replace("https://api.anthropic.com", base_url)
             .replace("<YOUR_ANTHROPIC_API_KEY>", "test-acp-key");
+        fs::write(self.config_home.join("sudocode.json"), sample)
+            .expect("test sudocode.json should be written");
+    }
+
+    /// Variant that also overrides sudorouter's base URL — for tests where a
+    /// mock openai-compat endpoint stands in for hk.sudorouter.ai (used by
+    /// the VLM-route full-roundtrip test to capture describe_image_via_vlm's
+    /// outgoing request). anthropic_url still points at MockAnthropicService
+    /// for the LLM call that follows VLM.
+    fn write_sudocode_json_with_sudorouter(&self, anthropic_url: &str, sudorouter_url: &str) {
+        let sample = runtime::SAMPLE_SUDOCODE_JSON
+            .replace("https://api.anthropic.com", anthropic_url)
+            .replace("<YOUR_ANTHROPIC_API_KEY>", "test-acp-key")
+            .replace("https://hk.sudorouter.ai/v1", sudorouter_url)
+            .replace("<YOUR_SUDOROUTER_API_KEY>", "test-sudorouter-key");
         fs::write(self.config_home.join("sudocode.json"), sample)
             .expect("test sudocode.json should be written");
     }
@@ -972,6 +991,183 @@ async fn acp_wrong_model_routes_via_vlm() {
          if this assertion fails, most likely `model_capabilities::load` was NOT called \
          in run_acp_server (regression of the 2026-07-01 bug fixed in commit 293286ed).\n\
          stderr: {final_lines:#?}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Full-roundtrip counterpart to `acp_wrong_model_routes_via_vlm`. That test
+/// verifies the ROUTING decision (wrong-model branch entered); this one
+/// verifies the ENTIRE VLM call chain including sudorouter round-trip:
+///
+///  1. Text-only fixture model is active.
+///  2. Sudorouter creds in sudocode.json point at OpenAiCompatMock instead
+///     of the real hk.sudorouter.ai.
+///  3. push_images sees vision_capable=false → VLM branch → HTTP POST to
+///     the mock's `/chat/completions` with the image bytes inline.
+///  4. Mock returns a canned description ("MOCK_VLM_DESCRIPTION").
+///  5. push_images splices `[Image #1: MOCK_VLM_DESCRIPTION]` into the
+///     prompt as ContentBlock::Text and pushes to the session.
+///
+/// Assertions:
+///  - mock.captured_requests() has ≥1 entry with method=POST, path containing
+///    `chat/completions`, and body containing an `image_url` content part.
+///  - session/prompt returns a stopReason (didn't hang) — proves both the
+///    VLM leg and the subsequent MockAnthropicService leg completed.
+///
+/// This catches:
+///  a) `model_capabilities::load` missing in run_acp_server (as
+///     acp_wrong_model_routes_via_vlm does), AND
+///  b) VLM-route wire-format regressions (wrong endpoint path, wrong content
+///     shape, missing Authorization header, etc.), AND
+///  c) block_in_place / runtime nesting regressions that would hang the call.
+#[tokio::test]
+async fn acp_wrong_model_vlm_full_roundtrip() {
+    const TEST_MODEL: &str = "text-only-test-fixture";
+    const MOCK_DESCRIPTION: &str = "MOCK_VLM_DESCRIPTION_a1b2c3";
+
+    let anthropic_mock = MockAnthropicService::spawn()
+        .await
+        .expect("anthropic mock should start");
+    let sudorouter_mock = OpenAiCompatMock::spawn(MOCK_DESCRIPTION)
+        .await
+        .expect("sudorouter mock should start");
+    let workspace = TestWorkspace::new("vlm-full-roundtrip");
+    workspace.create();
+    workspace.write_sudocode_json_with_sudorouter(&anthropic_mock.base_url(), sudorouter_mock.base_url());
+    workspace.seed_text_only_test_fixture(TEST_MODEL);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(&workspace.root)
+        .env_clear()
+        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
+        .env("HOME", &workspace.home)
+        .env("NO_COLOR", "1")
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--auth",
+            "proxy",
+            "--model",
+            TEST_MODEL,
+            "--permission-mode",
+            "read-only",
+            "acp",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn scode acp");
+    let stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+
+    let stderr_captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_captured_bg = std::sync::Arc::clone(&stderr_captured);
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    stderr_captured_bg.lock().await.push(line.trim_end().to_string());
+                }
+            }
+        }
+    });
+
+    let mut client = AcpTestClient {
+        transport: Transport::Stdio {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        },
+        next_id: 1,
+    };
+
+    // 1×1 transparent PNG.
+    const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
+
+    let (_notifs, init_resp) = client
+        .send_request("initialize", json!({ "protocolVersion": 1 }))
+        .await;
+    assert!(init_resp["result"].get("protocolVersion").is_some());
+
+    let (_notifs, new_resp) = client
+        .send_request(
+            "session/new",
+            json!({ "cwd": workspace.root.to_string_lossy(), "mcpServers": [] }),
+        )
+        .await;
+    let session_id = new_resp["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId string")
+        .to_string();
+
+    // Send prompt with inline image; text-only fixture model → VLM route
+    // fires → hits sudorouter_mock → response splice → passes to anthropic mock.
+    let (_notifs, prompt_resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [
+                    { "type": "image", "data": TINY_PNG_BASE64, "mimeType": "image/png" },
+                    { "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }
+                ]
+            }),
+        )
+        .await;
+
+    let result = &prompt_resp["result"];
+    assert!(
+        result.get("stopReason").is_some(),
+        "session/prompt should complete with a stopReason — full VLM roundtrip + LLM leg both had to succeed. Got: {prompt_resp}"
+    );
+
+    // Assert the VLM mock actually got hit.
+    let vlm_requests = sudorouter_mock.captured_requests().await;
+    assert!(
+        !vlm_requests.is_empty(),
+        "OpenAiCompatMock (standing in for sudorouter) must have received at least one request from push_images's VLM route. \
+         If empty, either vision_capable(text-only fixture) returned true (SSOT cache didn't populate — regression of the load() bug), \
+         or push_images silently skipped the VLM branch (regression of the branch logic in main.rs)."
+    );
+
+    let vlm_req = &vlm_requests[0];
+    assert_eq!(vlm_req.method, "POST", "VLM request must be POST /chat/completions");
+    assert!(
+        vlm_req.path.contains("chat/completions"),
+        "VLM request must target /chat/completions endpoint, got: {}",
+        vlm_req.path
+    );
+    assert!(
+        vlm_req.authorization.as_deref().unwrap_or("").starts_with("Bearer "),
+        "VLM request must carry Bearer auth. Got: {:?}",
+        vlm_req.authorization
+    );
+    assert!(
+        vlm_req.raw_body.contains("image_url"),
+        "VLM request body must contain image_url content part (OpenAI-compat shape). Got body head: {}",
+        &vlm_req.raw_body[..vlm_req.raw_body.len().min(500)]
+    );
+    assert!(
+        vlm_req.raw_body.contains("gemini-2.5-flash"),
+        "VLM request must use DEFAULT_VISION_MODEL gemini-2.5-flash. Got: {}",
+        &vlm_req.raw_body[..vlm_req.raw_body.len().min(500)]
+    );
+
+    // Optional sanity: stderr should have logged both entries.
+    let final_lines = stderr_captured.lock().await.clone();
+    let saw_vlm_start = final_lines
+        .iter()
+        .any(|l| l.contains("VLM-route start"));
+    let saw_vlm_done = final_lines.iter().any(|l| l.contains("VLM done"));
+    assert!(
+        saw_vlm_start && saw_vlm_done,
+        "expected [push_images] VLM-route start + VLM done lines in stderr, got: {final_lines:#?}"
     );
 
     client.shutdown().await;

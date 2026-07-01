@@ -1988,13 +1988,23 @@ struct AcpSdkDelegate {
 /// Route an image through a VLM (via sudorouter) and return a
 /// `ContentBlock::Text` containing the description, or — if the VLM call
 /// fails for any reason (creds missing, network error, bad response) —
-/// fall back to the pre-existing static placeholder so the conversation
-/// still has *something* to reference for that slot.
+/// fall back to a placeholder so the conversation still has *something*
+/// to reference for that slot.
 ///
-/// `tokio_rt` is the cli's existing runtime; we just block_on the async
-/// describe call inside it. No new runtime is created per image.
+/// **Runtime-nesting fix**: push_images is a sync trait method called from
+/// within the ACP server's async handler on a multi-thread tokio runtime.
+/// The tokio-idiomatic way to do a sync-context blocking call to async is
+/// `task::block_in_place` (which yields the current worker to the pool so
+/// other tasks make progress) + `Handle::current().block_on` (which runs
+/// the future on the same runtime, no nested runtime needed). This
+/// replaces an earlier `std::thread::scope + new current_thread runtime`
+/// attempt (commit 0b0100e) that ai-dev-browser e2e caught hanging the
+/// conversation for 5+ min with no error.
+///
+/// `try_current()` falls back to a one-shot current_thread runtime for the
+/// unusual case where push_images is called outside any tokio runtime
+/// (e.g. sync tests) — that path stays functional but slower.
 fn vlm_describe_block_or_placeholder(
-    tokio_rt: &tokio::runtime::Runtime,
     image_b64: &str,
     mime_type: &str,
     index: usize,
@@ -2002,30 +2012,60 @@ fn vlm_describe_block_or_placeholder(
 ) -> runtime::ContentBlock {
     let human_idx = index + 1;
     let Some((base_url, api_key)) = sudorouter_creds else {
-        // No sudorouter creds → fall back to the original static placeholder.
-        // This is the same UX the user would have seen before VLM-route landed;
-        // it preserves the "conversation continues" invariant without requiring
-        // a configured proxy.
+        eprintln!("[push_images] image #{human_idx} — no sudorouter creds, falling back to placeholder");
         return runtime::ContentBlock::Text {
             text: format!(
                 "[Image #{human_idx} could not be sent (sudorouter not configured) — please configure proxy.sudorouter or use a vision-capable model.]"
             ),
         };
     };
-    let result = tokio_rt.block_on(vlm_describe::describe_image_via_vlm(
+    eprintln!(
+        "[push_images] image #{human_idx} — VLM-route start, {} b64 bytes",
+        image_b64.len()
+    );
+
+    let vlm_future = vlm_describe::describe_image_via_vlm(
         base_url,
         api_key,
         vlm_describe::DEFAULT_VISION_MODEL,
         image_b64,
         mime_type,
-    ));
+    );
+
+    let result = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Inside an async runtime — release the current worker so other
+            // tokio tasks continue, then run the VLM future on the same runtime.
+            tokio::task::block_in_place(|| handle.block_on(vlm_future))
+        }
+        Err(_) => {
+            // Not inside a tokio runtime — build a one-shot current_thread rt.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match rt {
+                Ok(rt) => rt.block_on(vlm_future),
+                Err(e) => {
+                    eprintln!("[push_images] image #{human_idx} — failed to build fallback runtime: {e}");
+                    return runtime::ContentBlock::Text {
+                        text: format!(
+                            "[Image #{human_idx} could not be described automatically (no runtime available)]"
+                        ),
+                    };
+                }
+            }
+        }
+    };
+
     match result {
-        Ok(description) => runtime::ContentBlock::Text {
-            text: format!("[Image #{human_idx}: {description}]"),
-        },
+        Ok(description) => {
+            eprintln!("[push_images] image #{human_idx} — VLM done, {} desc chars", description.len());
+            runtime::ContentBlock::Text {
+                text: format!("[Image #{human_idx}: {description}]"),
+            }
+        }
         Err(e) => {
-            // Log + degrade. Never abort the user's turn over a VLM failure.
-            eprintln!("[push_images] VLM describe failed for image #{human_idx}: {e}");
+            eprintln!("[push_images] image #{human_idx} — VLM describe failed: {e}");
             runtime::ContentBlock::Text {
                 text: format!(
                     "[Image #{human_idx} could not be described automatically ({e}) — please retype your question with the image's key contents in text.]"
@@ -2290,10 +2330,15 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         images: &[(String, String)],
     ) -> Result<(), runtime::AcpError> {
+        eprintln!(
+            "[push_images] entered — session={session_id}, {} images",
+            images.len()
+        );
         // Resolve everything that needs runtime-level state BEFORE taking the
-        // mutable session borrow: the tokio runtime (for blocking VLM calls),
-        // the active model, and sudorouter creds. This also keeps any VLM
-        // round-trips outside of the session-mut critical section.
+        // mutable session borrow: the active model + sudorouter creds. Any
+        // VLM round-trips happen inside the per-image loop below (before we
+        // take the session-mut borrow), so the mut critical section stays
+        // small even when a VLM call is in flight.
         let active_model = self.inner.model.clone();
         let active_model_is_vision_capable =
             runtime::model_capabilities::vision_capable(&active_model);
@@ -2318,13 +2363,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let mut blocks: Vec<runtime::ContentBlock> = Vec::with_capacity(images.len());
         for (index, (data, mime_type)) in images.iter().enumerate() {
             let block = if !active_model_is_vision_capable {
-                vlm_describe_block_or_placeholder(
-                    &self.inner.tokio_runtime,
-                    data,
-                    mime_type,
-                    index,
-                    sudorouter_creds.as_ref(),
-                )
+                vlm_describe_block_or_placeholder(data, mime_type, index, sudorouter_creds.as_ref())
             } else {
                 match runtime::image_registry::preflight_base64(data, mime_type) {
                     Ok((final_data, final_mime)) => runtime::ContentBlock::Image {
@@ -2332,13 +2371,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                         mime_type: final_mime,
                     },
                     Err(err) if runtime::image_registry::is_image_too_large(&err) => {
-                        vlm_describe_block_or_placeholder(
-                            &self.inner.tokio_runtime,
-                            data,
-                            mime_type,
-                            index,
-                            sudorouter_creds.as_ref(),
-                        )
+                        vlm_describe_block_or_placeholder(data, mime_type, index, sudorouter_creds.as_ref())
                     }
                     Err(_) => runtime::ContentBlock::Image {
                         data: data.clone(),

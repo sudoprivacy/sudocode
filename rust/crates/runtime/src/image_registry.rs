@@ -47,15 +47,33 @@ pub struct ImageCapability {
 }
 
 /// Returns the capability descriptor sudocode advertises on session init.
+///
+/// When `active_model` is provided AND sudorouter's SSOT has documented
+/// image-cap values for it (see [`crate::model_capabilities::per_model_image_cap`]),
+/// the returned cap reflects `min(sudocode-hard-limit, model-documented-limit)`
+/// — the smaller wins because sudocode enforces its own preflight regardless
+/// of what the model would accept. When `active_model` is None or unknown,
+/// falls back to sudocode's hard-coded `MAX_IMAGE_BYTES` / `MAX_IMAGE_DIMENSION`.
 #[must_use]
-pub fn capability() -> ImageCapability {
+pub fn capability_for(active_model: Option<&str>) -> ImageCapability {
+    let (per_model_bytes, per_model_dim) = active_model
+        .map(crate::model_capabilities::per_model_image_cap)
+        .unwrap_or((None, None));
     ImageCapability {
-        max_bytes: MAX_IMAGE_BYTES as u32,
-        max_dimension: MAX_IMAGE_DIMENSION,
+        max_bytes: per_model_bytes
+            .map_or(MAX_IMAGE_BYTES as u32, |b| b.min(MAX_IMAGE_BYTES as u32)),
+        max_dimension: per_model_dim.map_or(MAX_IMAGE_DIMENSION, |d| d.min(MAX_IMAGE_DIMENSION)),
         downsample_target_bytes: DOWNSAMPLE_TARGET_BYTES,
         auto_handles_oversized: true,
         auto_handles_wrong_model: true,
     }
+}
+
+/// Legacy no-argument caller — kept for backwards compatibility.
+/// Prefer [`capability_for`] which respects sudorouter's per-model table.
+#[must_use]
+pub fn capability() -> ImageCapability {
+    capability_for(None)
 }
 
 /// Typed error returned by [`downsample_image`] / [`maybe_downsample_raw`] /

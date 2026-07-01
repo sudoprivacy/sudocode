@@ -854,13 +854,15 @@ async fn acp_stdio_exits_on_stdin_close() {
 ///      testing the ROUTING decision, not the VLM round-trip.)
 #[tokio::test]
 async fn acp_wrong_model_routes_via_vlm() {
-    // Reuse `sonnet` (what other tests use — passes through unrecognized alias
-    // to the mock anthropic service without crash), but seed the cache to mark
-    // it text-only so vision_capable("sonnet") returns false. Using a name
-    // absent from sudocode.json + `--auth proxy` (without proxy env creds)
-    // crashed scode on ubuntu CI 2026-07-01 with `stdio stdout closed
-    // unexpectedly`; matching base_command's args avoids that.
+    // `sonnet` = CLI alias other tests use (safe pass-through to mock).
+    // `claude-sonnet-4-6` = the WIRE model name scode resolves the alias to,
+    // and what push_images actually calls vision_capable() with. The cache
+    // seed must use the WIRE name — the alias never reaches vision_capable
+    // (verified via CI diagnostic eprintln 2026-07-01: on the same run that
+    // proved the ROUTING code path was fine, seeded-alias-key made
+    // vision_capable() return the optimistic default because lookup missed).
     const TEST_MODEL: &str = "sonnet";
+    const WIRE_MODEL: &str = "claude-sonnet-4-6";
 
     let server = MockAnthropicService::spawn()
         .await
@@ -868,7 +870,7 @@ async fn acp_wrong_model_routes_via_vlm() {
     let workspace = TestWorkspace::new("wrong-model-vlm");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
-    workspace.seed_text_only_test_fixture(TEST_MODEL);
+    workspace.seed_text_only_test_fixture(WIRE_MODEL);
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.current_dir(&workspace.root)
@@ -1036,8 +1038,9 @@ async fn acp_wrong_model_routes_via_vlm() {
 ///  c) block_in_place / runtime nesting regressions that would hang the call.
 #[tokio::test]
 async fn acp_wrong_model_vlm_full_roundtrip() {
-    // See acp_wrong_model_routes_via_vlm for the sonnet + api-key rationale.
+    // See acp_wrong_model_routes_via_vlm for the sonnet + api-key + WIRE_MODEL rationale.
     const TEST_MODEL: &str = "sonnet";
+    const WIRE_MODEL: &str = "claude-sonnet-4-6";
     const MOCK_DESCRIPTION: &str = "MOCK_VLM_DESCRIPTION_a1b2c3";
 
     let anthropic_mock = MockAnthropicService::spawn()
@@ -1052,7 +1055,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         &anthropic_mock.base_url(),
         sudorouter_mock.base_url(),
     );
-    workspace.seed_text_only_test_fixture(TEST_MODEL);
+    workspace.seed_text_only_test_fixture(WIRE_MODEL);
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.current_dir(&workspace.root)

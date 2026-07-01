@@ -159,7 +159,7 @@ end;
 
 { ---- Model list fetching ---------------------------------------------- }
 
-{ GET {baseUrl}/models with a bearer token via WinHTTP. Returns True on
+{ GET BaseUrl + /models with a bearer token via WinHTTP. Returns True on
   HTTP 200 with the body in Body; otherwise Body carries an error message. }
 function HttpGetModels(BaseUrl, ApiKey: string; var Body: string): Boolean;
 var

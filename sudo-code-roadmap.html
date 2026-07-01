@@ -576,21 +576,21 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
-    <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
+    <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::model_switch_in_repl</code></td><td>REPL: /model sonnet → switch confirmation.</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::permissions_switch_in_repl</code></td><td>REPL: /permissions read-only → switch report shows new mode.</td></tr>
     <tr><td>Permission prompt flow (approve / deny)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
     <tr><td><code>/auth</code> (switch auth mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Switch between accounts (e.g. different CC accounts). Handy for hackers.</td></tr>
-    <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
-    <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
+    <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::informational_commands_bypass_credentials</code></td><td>version/help/doctor/status/sandbox/config all exit 0 without API key.</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::skills_list_renders_json</code></td><td>scode skills --output-format json.</td></tr>
+    <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::agents_list_renders_json</code></td><td>scode agents --output-format json.</td></tr>
     <tr><td><code>/mcp</code> (list / show servers)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. MCP may be approaching deprecation; keep nice. Add PTY tests if code is complete.</td></tr>
     <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Plugin mechanism — a type of skill extension. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Exercised by <code>system_prompt_command.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Integration-covered by <code>mock_parity_harness.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::config_renders_json</code></td><td>cwd + config files in JSON output.</td></tr>
     <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::output_format_json_contract</code></td><td>Contract test: status, doctor, version, sandbox all produce JSON with "kind" field.</td></tr>
-    <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
-    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
+    <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_config_discovery::compact_flag_shows_only_final_text</code></td><td>--compact shows answer only, no tool boxes. Live verified via sudorouter.</td></tr>
+    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::slash_command_fuzzy_suggest_on_typo</code></td><td>REPL: /comit → suggests /commit. PTY-only test (needs interactive terminal).</td></tr>
     <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::help_shows_usage_and_subcommands</code>, <code>version_renders_json</code>, <code>system_prompt_renders</code></td><td>--help, version, system-prompt all verified via PTY.</td></tr>
   </tbody>
 </table>
@@ -653,16 +653,16 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
     <tr><td>Session Management</td><td>11</td><td>0</td><td>0</td><td>11</td><td><strong>8</strong></td></tr>
-    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>3</strong></td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>10</strong></td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>34</th></tr>
+    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>41</th></tr>
   </tbody>
 </table>
 
 <p><strong>90% target = 75 features covered</strong> out of the 83 in-denominator
-features. <strong>Current coverage: 34 / 83 (41%).</strong>
+features. <strong>Current coverage: 41 / 83 (49%).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 

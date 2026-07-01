@@ -356,6 +356,32 @@ fn spawn_with_workspace(
 
 /// Shell-quote a string so it's safe to embed in `sh -c "..."`.
 /// Wraps in single quotes and escapes any embedded single quotes.
+/// Spawn `scode <args>` under a PTY with CWD set to the given
+/// directory. Useful for session management tests where scode
+/// requires CWD to match the session's workspace_root.
+pub fn spawn_scode_in_dir(
+    dir: &std::path::Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<PtySession> {
+    let bin = scode_bin();
+    let bin_str = bin.to_string_lossy().to_string();
+    let dir_str = dir.display().to_string();
+
+    let mut cmd = format!(
+        "cd {} && exec {}",
+        shell_quote(&dir_str),
+        shell_quote(&bin_str)
+    );
+    for arg in args {
+        cmd.push_str(&format!(" {}", shell_quote(arg)));
+    }
+
+    let mut sess = PtySession::spawn("sh", &["-c", &cmd])?;
+    sess.set_default_timeout(timeout);
+    Ok(sess)
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }

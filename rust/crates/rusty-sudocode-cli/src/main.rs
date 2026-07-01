@@ -2352,15 +2352,19 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             images.len()
         );
         // Resolve everything that needs runtime-level state BEFORE taking the
-        // mutable session borrow: the active model + sudorouter creds. Any
-        // VLM round-trips happen inside the per-image loop below (before we
-        // take the session-mut borrow), so the mut critical section stays
-        // small even when a VLM call is in flight.
+        // mutable session borrow: the active model + sudorouter creds.
         let active_model = self.inner.model.clone();
         let active_model_is_vision_capable =
             runtime::model_capabilities::vision_capable(&active_model);
+        eprintln!(
+            "[push_images] active_model={active_model:?} vision_capable={active_model_is_vision_capable}"
+        );
         let sudocode_config = load_sudocode_config_for_current_dir();
         let sudorouter_creds = extract_sudorouter_credentials(&sudocode_config);
+        eprintln!(
+            "[push_images] sudorouter_creds_present={}",
+            sudorouter_creds.is_some()
+        );
 
         // The push_images path now has THREE failure modes to recover from —
         // each substitutes ContentBlock::Image → ContentBlock::Text so the

@@ -869,7 +869,16 @@ async fn acp_wrong_model_routes_via_vlm() {
         .expect("mock service should start");
     let workspace = TestWorkspace::new("wrong-model-vlm");
     workspace.create();
-    workspace.write_sudocode_json(&server.base_url());
+    // Point sudorouter at a guaranteed-refused local address so the VLM
+    // HTTP call fails FAST with connection refused (instead of the sample
+    // sudocode.json's `hk.sudorouter.ai` which just hangs in CI's
+    // network-isolated env until the 30s reqwest timeout — that plus the
+    // 90s test recv timeout raced badly, causing the test to panic before
+    // scode's error-placeholder response could get back). Fast fail is
+    // what we want here: this test is scoped to prove the wrong-model
+    // BRANCH was entered, not that the VLM roundtrip succeeded. The
+    // full-roundtrip counterpart covers success with a real mock.
+    workspace.write_sudocode_json_with_sudorouter(&server.base_url(), "http://127.0.0.1:1/v1");
     workspace.seed_text_only_test_fixture(WIRE_MODEL);
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));

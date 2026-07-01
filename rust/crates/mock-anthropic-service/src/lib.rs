@@ -105,6 +105,13 @@ enum Scenario {
     MultiTurnContext,
     EditFileRoundtrip,
     GlobSearchRoundtrip,
+    EnterPlanModeRoundtrip,
+    ExitPlanModeRoundtrip,
+    TodoWritePendingRoundtrip,
+    TodoWriteAllCompletedRoundtrip,
+    TaskCreateRoundtrip,
+    TaskListEmptyRoundtrip,
+    TaskCreateThenListRoundtrip,
 }
 
 impl Scenario {
@@ -127,6 +134,13 @@ impl Scenario {
             "multi_turn_context" => Some(Self::MultiTurnContext),
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
+            "enter_plan_mode_roundtrip" => Some(Self::EnterPlanModeRoundtrip),
+            "exit_plan_mode_roundtrip" => Some(Self::ExitPlanModeRoundtrip),
+            "todo_write_pending_roundtrip" => Some(Self::TodoWritePendingRoundtrip),
+            "todo_write_all_completed_roundtrip" => Some(Self::TodoWriteAllCompletedRoundtrip),
+            "task_create_roundtrip" => Some(Self::TaskCreateRoundtrip),
+            "task_list_empty_roundtrip" => Some(Self::TaskListEmptyRoundtrip),
+            "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
             _ => None,
         }
     }
@@ -150,6 +164,13 @@ impl Scenario {
             Self::MultiTurnContext => "multi_turn_context",
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
+            Self::EnterPlanModeRoundtrip => "enter_plan_mode_roundtrip",
+            Self::ExitPlanModeRoundtrip => "exit_plan_mode_roundtrip",
+            Self::TodoWritePendingRoundtrip => "todo_write_pending_roundtrip",
+            Self::TodoWriteAllCompletedRoundtrip => "todo_write_all_completed_roundtrip",
+            Self::TaskCreateRoundtrip => "task_create_roundtrip",
+            Self::TaskListEmptyRoundtrip => "task_list_empty_roundtrip",
+            Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
         }
     }
 }
@@ -545,6 +566,85 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"pattern":"*.txt"}"#],
             ),
         },
+        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "enter_plan_mode roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse("toolu_enter_plan_mode", "EnterPlanMode", &[r#"{}"#]),
+        },
+        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("exit_plan_mode roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse("toolu_exit_plan_mode", "ExitPlanMode", &[r#"{}"#]),
+        },
+        Scenario::TodoWritePendingRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "todo_write pending roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_todo_write_pending",
+                "TodoWrite",
+                &[
+                    r#"{"todos":[{"content":"write parser","activeForm":"writing parser","status":"pending"},{"content":"handle escapes","activeForm":"handling escapes","status":"in_progress"},{"content":"add tests","activeForm":"adding tests","status":"pending"}]}"#,
+                ],
+            ),
+        },
+        Scenario::TodoWriteAllCompletedRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "todo_write all-completed roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_todo_write_completed",
+                "TodoWrite",
+                &[
+                    r#"{"todos":[{"content":"step one","activeForm":"step one","status":"completed"},{"content":"step two","activeForm":"step two","status":"completed"},{"content":"step three","activeForm":"step three","status":"completed"}]}"#,
+                ],
+            ),
+        },
+        Scenario::TaskCreateRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("task_create roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_task_create",
+                "TaskCreate",
+                &[
+                    r#"{"prompt":"analyze the tests/ directory","description":"Read every test file and produce a report."}"#,
+                ],
+            ),
+        },
+        Scenario::TaskListEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "task_list empty roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse("toolu_task_list_empty", "TaskList", &[r#"{}"#]),
+        },
+        Scenario::TaskCreateThenListRoundtrip => {
+            let tool_results = tool_results_by_name(request);
+            match (
+                tool_results.get("TaskCreate"),
+                tool_results.get("TaskList"),
+            ) {
+                (Some((create_output, _)), Some((list_output, _))) => final_text_sse(&format!(
+                    "task_create+task_list roundtrip complete — created: {create_output}; list: {list_output}"
+                )),
+                _ => tool_uses_sse(&[
+                    ToolUseSse {
+                        tool_id: "toolu_multi_task_create",
+                        tool_name: "TaskCreate",
+                        partial_json_chunks: &[
+                            r#"{"prompt":"draft a design memo","description":"one-page brief"}"#,
+                        ],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_multi_task_list",
+                        tool_name: "TaskList",
+                        partial_json_chunks: &[r#"{}"#],
+                    },
+                ]),
+            }
+        }
     }
 }
 
@@ -771,6 +871,116 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "*.txt"}),
             ),
         },
+        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_enter_plan_mode_final",
+                &format!("enter_plan_mode roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_enter_plan_mode_tool",
+                "toolu_enter_plan_mode",
+                "EnterPlanMode",
+                json!({}),
+            ),
+        },
+        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_exit_plan_mode_final",
+                &format!("exit_plan_mode roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_exit_plan_mode_tool",
+                "toolu_exit_plan_mode",
+                "ExitPlanMode",
+                json!({}),
+            ),
+        },
+        Scenario::TodoWritePendingRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_todo_write_pending_final",
+                &format!("todo_write pending roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_todo_write_pending_tool",
+                "toolu_todo_write_pending",
+                "TodoWrite",
+                json!({
+                    "todos": [
+                        {"content": "write parser", "activeForm": "writing parser", "status": "pending"},
+                        {"content": "handle escapes", "activeForm": "handling escapes", "status": "in_progress"},
+                        {"content": "add tests", "activeForm": "adding tests", "status": "pending"}
+                    ]
+                }),
+            ),
+        },
+        Scenario::TodoWriteAllCompletedRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_todo_write_completed_final",
+                &format!("todo_write all-completed roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_todo_write_completed_tool",
+                "toolu_todo_write_completed",
+                "TodoWrite",
+                json!({
+                    "todos": [
+                        {"content": "step one", "activeForm": "step one", "status": "completed"},
+                        {"content": "step two", "activeForm": "step two", "status": "completed"},
+                        {"content": "step three", "activeForm": "step three", "status": "completed"}
+                    ]
+                }),
+            ),
+        },
+        Scenario::TaskCreateRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_task_create_final",
+                &format!("task_create roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_task_create_tool",
+                "toolu_task_create",
+                "TaskCreate",
+                json!({
+                    "prompt": "analyze the tests/ directory",
+                    "description": "Read every test file and produce a report."
+                }),
+            ),
+        },
+        Scenario::TaskListEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_task_list_empty_final",
+                &format!("task_list empty roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_task_list_empty_tool",
+                "toolu_task_list_empty",
+                "TaskList",
+                json!({}),
+            ),
+        },
+        Scenario::TaskCreateThenListRoundtrip => {
+            // Non-streaming (`stream=false`) response path. We can't easily
+            // return two tool_uses here per the existing scheme's shape;
+            // fall back to a single TaskCreate → text roundtrip. The
+            // streaming path (used by scode in practice) does emit the
+            // paired tool_uses via `tool_uses_sse` — this branch just keeps
+            // non-streaming compat.
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => text_message_response(
+                    "msg_task_create_then_list_final",
+                    &format!("task_create+task_list non-stream fallback: {tool_output}"),
+                ),
+                None => tool_message_response(
+                    "msg_task_create_then_list_tool",
+                    "toolu_task_create_then_list",
+                    "TaskCreate",
+                    json!({
+                        "prompt": "draft a design memo",
+                        "description": "one-page brief"
+                    }),
+                ),
+            }
+        }
     }
 }
 
@@ -793,6 +1003,13 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::MultiTurnContext => "req_multi_turn_context",
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
+        Scenario::EnterPlanModeRoundtrip => "req_enter_plan_mode_roundtrip",
+        Scenario::ExitPlanModeRoundtrip => "req_exit_plan_mode_roundtrip",
+        Scenario::TodoWritePendingRoundtrip => "req_todo_write_pending_roundtrip",
+        Scenario::TodoWriteAllCompletedRoundtrip => "req_todo_write_all_completed_roundtrip",
+        Scenario::TaskCreateRoundtrip => "req_task_create_roundtrip",
+        Scenario::TaskListEmptyRoundtrip => "req_task_list_empty_roundtrip",
+        Scenario::TaskCreateThenListRoundtrip => "req_task_create_then_list_roundtrip",
     }
 }
 

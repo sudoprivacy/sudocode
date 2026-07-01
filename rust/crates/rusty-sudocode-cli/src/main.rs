@@ -1952,6 +1952,16 @@ fn run_acp_server(
     auth_mode: Option<AuthMode>,
     ws_port: Option<u16>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Load model capabilities SSOT before serving so vision_capable /
+    // per_model_image_cap see sudorouter's populated data (falls back to
+    // bundled defaults if the cache file doesn't exist). Without this,
+    // the ACP server would always use the bundled fallback and never
+    // pick up documented text-only models — the wrong-model VLM route
+    // would never fire in production. Missing this call cost ~40 min of
+    // real-e2e debugging 2026-07-01.
+    let config_home = runtime::default_config_home();
+    runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+
     let config = runtime::acp_sdk_server::SdkAcpConfig {
         agent_version: VERSION.to_string(),
         model: model.clone(),

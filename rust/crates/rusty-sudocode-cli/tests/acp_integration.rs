@@ -1030,7 +1030,8 @@ async fn acp_wrong_model_routes_via_vlm() {
 ///  c) block_in_place / runtime nesting regressions that would hang the call.
 #[tokio::test]
 async fn acp_wrong_model_vlm_full_roundtrip() {
-    const TEST_MODEL: &str = "text-only-test-fixture";
+    // See acp_wrong_model_routes_via_vlm for the sonnet + api-key rationale.
+    const TEST_MODEL: &str = "sonnet";
     const MOCK_DESCRIPTION: &str = "MOCK_VLM_DESCRIPTION_a1b2c3";
 
     let anthropic_mock = MockAnthropicService::spawn()
@@ -1056,7 +1057,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         .env("PATH", "/usr/bin:/bin")
         .args([
             "--auth",
-            "proxy",
+            "api-key",
             "--model",
             TEST_MODEL,
             "--permission-mode",

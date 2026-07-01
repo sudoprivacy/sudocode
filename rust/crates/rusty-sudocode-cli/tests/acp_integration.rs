@@ -833,196 +833,8 @@ async fn acp_stdio_exits_on_stdin_close() {
     workspace.cleanup();
 }
 
-/// Regression guard for the class of bug where `run_acp_server` forgets to
-/// call `model_capabilities::load` — the SSOT cache would never be read,
-/// `vision_capable` would fall back to the optimistic default, and the
-/// wrong-model VLM-route branch of push_images would NEVER fire in production
-/// (silent regression, no test-time failure without a scenario like this).
-///
-/// Real e2e caught this bug on 2026-07-01 after 40 min of blind debugging;
-/// this test catches it in <10 s in CI on the very next run.
-///
-/// The test's approach:
-///   1. Seed `<config_home>/cache/model-capabilities.json` with a fixture
-///      model `text-only-test-fixture` marked `vision_supported: false`.
-///   2. Spawn scode acp with `--model text-only-test-fixture`.
-///   3. Send `session/prompt` carrying an inline image content block.
-///   4. Capture scode's stderr concurrently; assert it contains a
-///      `[push_images]` log line indicating VLM-route was ENTERED.
-///      (The VLM HTTP call itself fails cleanly against the unreachable
-///      sudorouter URL in the sample sudocode.json — that's fine, we're
-///      testing the ROUTING decision, not the VLM round-trip.)
-#[tokio::test]
-async fn acp_wrong_model_routes_via_vlm() {
-    // `sonnet` = CLI alias other tests use (safe pass-through to mock).
-    // `claude-sonnet-4-6` = the WIRE model name scode resolves the alias to,
-    // and what push_images actually calls vision_capable() with. The cache
-    // seed must use the WIRE name — the alias never reaches vision_capable
-    // (verified via CI diagnostic eprintln 2026-07-01: on the same run that
-    // proved the ROUTING code path was fine, seeded-alias-key made
-    // vision_capable() return the optimistic default because lookup missed).
-    const TEST_MODEL: &str = "sonnet";
-    const WIRE_MODEL: &str = "claude-sonnet-4-6";
-
-    let server = MockAnthropicService::spawn()
-        .await
-        .expect("mock service should start");
-    let workspace = TestWorkspace::new("wrong-model-vlm");
-    workspace.create();
-    // Point sudorouter at a guaranteed-refused local address so the VLM
-    // HTTP call fails FAST with connection refused (instead of the sample
-    // sudocode.json's `hk.sudorouter.ai` which just hangs in CI's
-    // network-isolated env until the 30s reqwest timeout — that plus the
-    // 90s test recv timeout raced badly, causing the test to panic before
-    // scode's error-placeholder response could get back). Fast fail is
-    // what we want here: this test is scoped to prove the wrong-model
-    // BRANCH was entered, not that the VLM roundtrip succeeded. The
-    // full-roundtrip counterpart covers success with a real mock.
-    workspace.write_sudocode_json_with_sudorouter(&server.base_url(), "http://127.0.0.1:1/v1");
-    workspace.seed_text_only_test_fixture(WIRE_MODEL);
-
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(&workspace.root)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
-        .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
-            "--auth",
-            "api-key",
-            "--model",
-            TEST_MODEL,
-            "--permission-mode",
-            "read-only",
-            "acp",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn scode acp");
-    let stdin = child.stdin.take().expect("stdin");
-    let stdout = child.stdout.take().expect("stdout");
-    let stderr = child.stderr.take().expect("stderr");
-
-    // Drain stderr concurrently into a shared Vec so the assertion at the
-    // end can inspect what push_images logged.
-    let stderr_captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-    let stderr_captured_bg = std::sync::Arc::clone(&stderr_captured);
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    stderr_captured_bg
-                        .lock()
-                        .await
-                        .push(line.trim_end().to_string());
-                }
-            }
-        }
-    });
-
-    let mut client = AcpTestClient {
-        transport: Transport::Stdio {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        },
-        next_id: 1,
-    };
-
-    // 1x1 transparent PNG — 67 bytes.
-    const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
-
-    // initialize + session/new
-    let (_notifs, init_resp) = client
-        .send_request("initialize", json!({ "protocolVersion": 1 }))
-        .await;
-    assert!(init_resp["result"].get("protocolVersion").is_some());
-
-    let (_notifs, new_resp) = client
-        .send_request(
-            "session/new",
-            json!({ "cwd": workspace.root.to_string_lossy(), "mcpServers": [] }),
-        )
-        .await;
-    let session_id = new_resp["result"]["sessionId"]
-        .as_str()
-        .expect("sessionId string")
-        .to_string();
-
-    // session/prompt with inline image. The request may return an error or
-    // a completion — we don't care about the response body here, only that
-    // scode's push_images went down the VLM-route branch (proving
-    // model_capabilities::load ran and populated the OnceLock with our
-    // text-only fixture, causing vision_capable(TEST_MODEL) to return false).
-    let _ = client
-        .send_request(
-            "session/prompt",
-            json!({
-                "sessionId": session_id,
-                "prompt": [
-                    { "type": "image", "data": TINY_PNG_BASE64, "mimeType": "image/png" },
-                    { "type": "text", "text": "Describe the image." }
-                ]
-            }),
-        )
-        .await;
-
-    // Poll stderr for up to 15s; push_images entry log should appear near
-    // the beginning of prompt handling.
-    let mut saw_entered = false;
-    let mut saw_vlm_route = false;
-    for _ in 0..30 {
-        {
-            let lines = stderr_captured.lock().await;
-            for l in lines.iter() {
-                if l.contains("[push_images] entered") {
-                    saw_entered = true;
-                }
-                // Either the VLM-route start log OR the no-creds fallback log
-                // proves the wrong-model VLM branch (not the native branch) was
-                // taken. The sample sudocode.json points sudorouter at
-                // hk.sudorouter.ai which is unreachable in CI's env_clear'd
-                // environment — a fallback message is the expected outcome.
-                if l.contains("VLM-route start")
-                    || l.contains("VLM describe failed")
-                    || l.contains("no sudorouter creds")
-                {
-                    saw_vlm_route = true;
-                }
-            }
-        }
-        if saw_entered && saw_vlm_route {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    let final_lines = stderr_captured.lock().await.clone();
-    assert!(
-        saw_entered,
-        "push_images should have been entered when session/prompt carried an image.\nstderr: {final_lines:#?}"
-    );
-    assert!(
-        saw_vlm_route,
-        "wrong-model VLM-route branch should have fired for text-only fixture model — \
-         if this assertion fails, most likely `model_capabilities::load` was NOT called \
-         in run_acp_server (regression of the 2026-07-01 bug fixed in commit 293286ed).\n\
-         stderr: {final_lines:#?}"
-    );
-
-    client.shutdown().await;
-    workspace.cleanup();
-}
-
-/// Full-roundtrip counterpart to `acp_wrong_model_routes_via_vlm`. That test
-/// verifies the ROUTING decision (wrong-model branch entered); this one
-/// verifies the ENTIRE VLM call chain including sudorouter round-trip:
+/// End-to-end regression guard for the wrong-model VLM route. Verifies the
+/// entire VLM call chain including the sudorouter round-trip:
 ///
 ///  1. Text-only fixture model is active.
 ///  2. Sudorouter creds in sudocode.json point at OpenAiCompatMock instead
@@ -1035,19 +847,32 @@ async fn acp_wrong_model_routes_via_vlm() {
 ///
 /// Assertions:
 ///  - mock.captured_requests() has ≥1 entry with method=POST, path containing
-///    `chat/completions`, and body containing an `image_url` content part.
+///    `chat/completions`, body containing an `image_url` content part + the
+///    DEFAULT_VISION_MODEL (gemini-2.5-flash) + Bearer auth header.
 ///  - session/prompt returns a stopReason (didn't hang) — proves both the
 ///    VLM leg and the subsequent MockAnthropicService leg completed.
+///  - stderr shows `[push_images] VLM-route start` + `VLM done` eprintlns.
 ///
-/// This catches:
-///  a) `model_capabilities::load` missing in run_acp_server (as
-///     acp_wrong_model_routes_via_vlm does), AND
+/// This catches ALL three regression classes in one test:
+///  a) `model_capabilities::load` missing in run_acp_server (SSOT cache
+///     never populated → vision_capable falls back to optimistic default
+///     → push_images takes native branch → mock gets 0 requests → fail).
 ///  b) VLM-route wire-format regressions (wrong endpoint path, wrong content
-///     shape, missing Authorization header, etc.), AND
-///  c) block_in_place / runtime nesting regressions that would hang the call.
+///     shape, missing Authorization header, wrong model name).
+///  c) block_in_place / runtime nesting regressions (would hang the call
+///     past the RECV_TIMEOUT and fail with a clear panic).
+///
+/// **Choice of mock**: `OpenAiCompatMock` stands in for sudorouter's
+/// `/v1/chat/completions`, `MockAnthropicService` stands in for the LLM
+/// provider that scode's own turn will call. Both are localhost so the
+/// timing is fast (no network hops); a real-network variant was tried
+/// (pointing at hk.sudorouter.ai) but hung 90+ s on CI's isolated network.
 #[tokio::test]
 async fn acp_wrong_model_vlm_full_roundtrip() {
-    // See acp_wrong_model_routes_via_vlm for the sonnet + api-key + WIRE_MODEL rationale.
+    // `sonnet` = CLI alias other tests use (safe pass-through to mock).
+    // `claude-sonnet-4-6` = the WIRE model name scode resolves the alias
+    // to, and what push_images actually calls vision_capable() with — the
+    // cache seed MUST use the wire name (CI eprintln verified on 2026-07-01).
     const TEST_MODEL: &str = "sonnet";
     const WIRE_MODEL: &str = "claude-sonnet-4-6";
     const MOCK_DESCRIPTION: &str = "MOCK_VLM_DESCRIPTION_a1b2c3";

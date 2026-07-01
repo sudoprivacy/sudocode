@@ -848,7 +848,13 @@ async fn acp_stdio_exits_on_stdin_close() {
 ///      testing the ROUTING decision, not the VLM round-trip.)
 #[tokio::test]
 async fn acp_wrong_model_routes_via_vlm() {
-    const TEST_MODEL: &str = "text-only-test-fixture";
+    // Reuse `sonnet` (what other tests use — passes through unrecognized alias
+    // to the mock anthropic service without crash), but seed the cache to mark
+    // it text-only so vision_capable("sonnet") returns false. Using a name
+    // absent from sudocode.json + `--auth proxy` (without proxy env creds)
+    // crashed scode on ubuntu CI 2026-07-01 with `stdio stdout closed
+    // unexpectedly`; matching base_command's args avoids that.
+    const TEST_MODEL: &str = "sonnet";
 
     let server = MockAnthropicService::spawn()
         .await
@@ -858,9 +864,6 @@ async fn acp_wrong_model_routes_via_vlm() {
     workspace.write_sudocode_json(&server.base_url());
     workspace.seed_text_only_test_fixture(TEST_MODEL);
 
-    // Spawn scode acp WITH the text-only fixture as the active model. We
-    // don't use the shared spawn_stdio_client because it hardcodes
-    // --model sonnet; we need our own --model override + stderr capture.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.current_dir(&workspace.root)
         .env_clear()
@@ -870,7 +873,7 @@ async fn acp_wrong_model_routes_via_vlm() {
         .env("PATH", "/usr/bin:/bin")
         .args([
             "--auth",
-            "proxy",
+            "api-key",
             "--model",
             TEST_MODEL,
             "--permission-mode",

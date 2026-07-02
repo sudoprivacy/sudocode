@@ -195,9 +195,7 @@ impl Scenario {
             Self::TeamListEmptyRoundtrip => "team_list_empty_roundtrip",
             Self::SendMessagePlainRoundtrip => "send_message_plain_roundtrip",
             Self::SendMessageBroadcastEmptyRoundtrip => "send_message_broadcast_empty_roundtrip",
-            Self::ForkSubagentRecursionGuardRoundtrip => {
-                "fork_subagent_recursion_guard_roundtrip"
-            }
+            Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
         }
     }
 }
@@ -701,15 +699,15 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
         },
         Scenario::TeamListEmptyRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("team_list empty roundtrip complete: {tool_output}"))
-            }
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "team_list empty roundtrip complete: {tool_output}"
+            )),
             None => tool_use_sse("toolu_team_list_empty", "TeamList", &[r#"{}"#]),
         },
         Scenario::SendMessagePlainRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("send_message plain roundtrip complete: {tool_output}"))
-            }
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "send_message plain roundtrip complete: {tool_output}"
+            )),
             None => tool_use_sse(
                 "toolu_send_message_plain",
                 "SendMessage",
@@ -1148,9 +1146,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::SendMessageBroadcastEmptyRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_send_message_broadcast_empty_final",
-                &format!(
-                    "send_message broadcast-empty roundtrip complete: {tool_output}"
-                ),
+                &format!("send_message broadcast-empty roundtrip complete: {tool_output}"),
             ),
             None => tool_message_response(
                 "msg_send_message_broadcast_empty_tool",

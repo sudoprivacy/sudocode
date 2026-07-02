@@ -61,8 +61,13 @@ fn coordinator_prompt_absent_without_env_var() {
     let mut sess = env.spawn(&["print-system-prompt"]);
 
     // Wait for the child to exit and observe rendered screen.
-    let exit = sess.expect_eof().expect("scode print-system-prompt should exit");
-    assert_eq!(exit, 0, "print-system-prompt turn should exit 0; got {exit}");
+    let exit = sess
+        .expect_eof()
+        .expect("scode print-system-prompt should exit");
+    assert_eq!(
+        exit, 0,
+        "print-system-prompt turn should exit 0; got {exit}"
+    );
 
     let rendered = sess.render(|screen| screen.contents());
     assert!(
@@ -95,8 +100,13 @@ fn coordinator_prompt_present_with_env_var() {
     sess.expect("coordinator")
         .expect("print-system-prompt output must include the coordinator role");
 
-    let exit = sess.expect_eof().expect("scode print-system-prompt should exit");
-    assert_eq!(exit, 0, "print-system-prompt turn should exit 0; got {exit}");
+    let exit = sess
+        .expect_eof()
+        .expect("scode print-system-prompt should exit");
+    assert_eq!(
+        exit, 0,
+        "print-system-prompt turn should exit 0; got {exit}"
+    );
 
     let rendered = sess.render(|screen| screen.contents());
     assert!(

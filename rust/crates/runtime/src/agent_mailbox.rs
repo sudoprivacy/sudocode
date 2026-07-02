@@ -136,7 +136,9 @@ pub fn append_envelope(
     let mut line =
         serde_json::to_string(&envelope).map_err(|e| format!("serialize envelope: {e}"))?;
     line.push('\n');
-    let _guard = WRITE_LOCK.lock().map_err(|_| "mailbox write lock poisoned".to_string())?;
+    let _guard = WRITE_LOCK
+        .lock()
+        .map_err(|_| "mailbox write lock poisoned".to_string())?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -161,8 +163,8 @@ pub fn read_all(workspace_root: &Path, recipient: &str) -> Result<Vec<MailboxEnv
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|e| format!("read mailbox {}: {e}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("read mailbox {}: {e}", path.display()))?;
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();

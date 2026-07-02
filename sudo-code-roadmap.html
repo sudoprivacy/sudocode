@@ -509,7 +509,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td><code>TodoWrite</code></td><td data-priority="must-have">must-have</td><td data-status="covered">Covered</td><td>PTY: <code>pty_todo_write.rs</code> (2 tests — verbatim persistence for pending/in-progress list, all-completed wipe to <code>[]</code> matching CC parity). Merged in PR #276.</td><td>Task list management</td></tr>
     <tr><td><code>AskUserQuestion</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
     <tr><td><code>StructuredOutput</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Return structured data</td></tr>
-    <tr><td><code>Sleep</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Low priority</td></tr>
+    <tr><td><code>Sleep</code></td><td data-priority="must-have">must-have</td><td data-status="covered">Covered</td><td>PTY: <code>pty_sleep.rs</code> (2 tests — wall-clock actually waits for <code>Sleep(600ms)</code>; <code>Sleep(400_000ms)</code> hits the <code>MAX_SLEEP_DURATION_MS = 300_000</code> guard and rejects in &lt; 60s). Merged in PR #278.</td><td>Low priority</td></tr>
   </tbody>
 </table>
 
@@ -649,7 +649,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td><strong>1</strong></td></tr>
     <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
-    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>2</strong></td></tr>
+    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
     <tr><td>Session Management</td><td>11</td><td>0</td><td>0</td><td>11</td><td><strong>8</strong></td></tr>
@@ -657,12 +657,12 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>43</th></tr>
+    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>44</th></tr>
   </tbody>
 </table>
 
 <p><strong>90% target = 75 features covered</strong> out of the 83 in-denominator
-features. <strong>Current coverage: 43 / 83 (52%).</strong>
+features. <strong>Current coverage: 44 / 83 (53%).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 

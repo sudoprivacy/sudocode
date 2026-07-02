@@ -112,6 +112,8 @@ enum Scenario {
     TaskCreateRoundtrip,
     TaskListEmptyRoundtrip,
     TaskCreateThenListRoundtrip,
+    SleepShortRoundtrip,
+    SleepOverMaxRoundtrip,
 }
 
 impl Scenario {
@@ -141,6 +143,8 @@ impl Scenario {
             "task_create_roundtrip" => Some(Self::TaskCreateRoundtrip),
             "task_list_empty_roundtrip" => Some(Self::TaskListEmptyRoundtrip),
             "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
+            "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
+            "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             _ => None,
         }
     }
@@ -171,6 +175,8 @@ impl Scenario {
             Self::TaskCreateRoundtrip => "task_create_roundtrip",
             Self::TaskListEmptyRoundtrip => "task_list_empty_roundtrip",
             Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
+            Self::SleepShortRoundtrip => "sleep_short_roundtrip",
+            Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
         }
     }
 }
@@ -645,6 +651,24 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ]),
             }
         }
+        Scenario::SleepShortRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("sleep short roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
+        },
+        Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => final_text_sse(&format!(
+                "sleep over-max roundtrip complete (is_error={is_error}): {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_sleep_over_max",
+                "Sleep",
+                // 400_000 ms > MAX_SLEEP_DURATION_MS (300_000). The tool
+                // must reject before sleeping — that's the invariant.
+                &[r#"{"duration_ms":400000}"#],
+            ),
+        },
     }
 }
 
@@ -981,6 +1005,30 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 ),
             }
         }
+        Scenario::SleepShortRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_sleep_short_final",
+                &format!("sleep short roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_sleep_short_tool",
+                "toolu_sleep_short",
+                "Sleep",
+                json!({"duration_ms": 600}),
+            ),
+        },
+        Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => text_message_response(
+                "msg_sleep_over_max_final",
+                &format!("sleep over-max roundtrip complete (is_error={is_error}): {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_sleep_over_max_tool",
+                "toolu_sleep_over_max",
+                "Sleep",
+                json!({"duration_ms": 400_000}),
+            ),
+        },
     }
 }
 
@@ -1010,6 +1058,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TaskCreateRoundtrip => "req_task_create_roundtrip",
         Scenario::TaskListEmptyRoundtrip => "req_task_list_empty_roundtrip",
         Scenario::TaskCreateThenListRoundtrip => "req_task_create_then_list_roundtrip",
+        Scenario::SleepShortRoundtrip => "req_sleep_short_roundtrip",
+        Scenario::SleepOverMaxRoundtrip => "req_sleep_over_max_roundtrip",
     }
 }
 

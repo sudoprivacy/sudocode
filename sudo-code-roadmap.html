@@ -640,7 +640,17 @@ coverage starts fresh and is tracked here as the single source.</p>
 
 <h3>Coverage denominator (the 90% target)</h3>
 
-<table>
+<!--
+  Contributor note (2026-07-02): the Total row cells + "90% target" +
+  "Current coverage" span are AUTO-COMPUTED by the <script> at the end
+  of this section from the per-row cells. When you land a new PTY
+  test, edit ONLY the corresponding row's last cell (Covered) — the
+  Total, target, and percentage refresh on next page load. Don't
+  hand-edit the Total row or the prose numbers; they'll be overwritten.
+  History: hand-editing all three places is what caused the "总是忘"
+  drift Ethan flagged.
+-->
+<table id="coverage-denominator">
   <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In denominator</th><th>Covered</th></tr></thead>
   <tbody>
     <tr><td>Core Conversation</td><td>6</td><td>0</td><td>0</td><td>6</td><td><strong>6</strong></td></tr>
@@ -657,14 +667,58 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>91</th><th>1</th><th>8</th><th>83</th><th>44</th></tr>
+    <tr data-role="total"><th>Total</th><th data-col="1">—</th><th data-col="2">—</th><th data-col="3">—</th><th data-col="4">—</th><th data-col="5">—</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 75 features covered</strong> out of the 83 in-denominator
-features. <strong>Current coverage: 44 / 83 (53%).</strong>
+<p><strong>90% target = <span id="cov-target">—</span> features covered</strong> out of the <span id="cov-denominator">—</span> in-denominator
+features. <strong>Current coverage: <span id="cov-numerator">—</span> / <span id="cov-denominator-2">—</span> (<span id="cov-percent">—</span>).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
+
+<script>
+  // Coverage denominator auto-calc. Sums the per-category rows'
+  // 5 numeric columns into the Total row + rewrites the "90% target"
+  // and "Current coverage" prose. Keeps a single source of truth
+  // (the per-category rows) and rules out hand-edit drift.
+  //
+  // Contract for future contributors:
+  //   - Per-row cell order MUST stay: Category, Total, N/A,
+  //     L2 deferred, In denominator, Covered.
+  //   - The Total row MUST have data-role="total"; its cells are
+  //     overwritten on load.
+  //   - The prose MUST use the four span IDs below.
+  (function () {
+    var table = document.getElementById('coverage-denominator');
+    if (!table) return;
+    var rows = table.querySelectorAll('tbody tr:not([data-role="total"])');
+    var sums = [0, 0, 0, 0, 0]; // Total, N/A, L2 deferred, In denominator, Covered
+    rows.forEach(function (row) {
+      var cells = row.querySelectorAll('td');
+      for (var i = 0; i < 5 && i + 1 < cells.length; i++) {
+        var n = parseInt((cells[i + 1].textContent || '').trim(), 10);
+        if (!isNaN(n)) sums[i] += n;
+      }
+    });
+    var totalRow = table.querySelector('tr[data-role="total"]');
+    if (totalRow) {
+      for (var c = 1; c <= 5; c++) {
+        var cell = totalRow.querySelector('[data-col="' + c + '"]');
+        if (cell) cell.textContent = String(sums[c - 1]);
+      }
+    }
+    var denom = sums[3];       // In denominator
+    var covered = sums[4];      // Covered
+    var target = Math.ceil(denom * 0.9);
+    var pct = denom > 0 ? Math.round((covered / denom) * 100) : 0;
+    var byId = function (id) { return document.getElementById(id); };
+    if (byId('cov-target')) byId('cov-target').textContent = String(target);
+    if (byId('cov-denominator')) byId('cov-denominator').textContent = String(denom);
+    if (byId('cov-numerator')) byId('cov-numerator').textContent = String(covered);
+    if (byId('cov-denominator-2')) byId('cov-denominator-2').textContent = String(denom);
+    if (byId('cov-percent')) byId('cov-percent').textContent = pct + '%';
+  })();
+</script>
 
 <p>The numerator counts <strong>PTY-fidelity tests only</strong>, per the test
 policy: integration tests (kept for protocol-layer surface like ACP and

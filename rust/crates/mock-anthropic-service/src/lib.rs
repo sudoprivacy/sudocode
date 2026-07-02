@@ -114,6 +114,8 @@ enum Scenario {
     TaskCreateThenListRoundtrip,
     SleepShortRoundtrip,
     SleepOverMaxRoundtrip,
+    TeamCreateRoundtrip,
+    TeamListEmptyRoundtrip,
 }
 
 impl Scenario {
@@ -145,6 +147,8 @@ impl Scenario {
             "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
             "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
+            "team_create_roundtrip" => Some(Self::TeamCreateRoundtrip),
+            "team_list_empty_roundtrip" => Some(Self::TeamListEmptyRoundtrip),
             _ => None,
         }
     }
@@ -177,6 +181,8 @@ impl Scenario {
             Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
+            Self::TeamCreateRoundtrip => "team_create_roundtrip",
+            Self::TeamListEmptyRoundtrip => "team_list_empty_roundtrip",
         }
     }
 }
@@ -669,6 +675,22 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"duration_ms":400000}"#],
             ),
         },
+        Scenario::TeamCreateRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("team_create roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_team_create",
+                "TeamCreate",
+                &[r#"{"team_name":"research-squad"}"#],
+            ),
+        },
+        Scenario::TeamListEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("team_list empty roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse("toolu_team_list_empty", "TeamList", &[r#"{}"#]),
+        },
     }
 }
 
@@ -1029,6 +1051,30 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 400_000}),
             ),
         },
+        Scenario::TeamCreateRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_team_create_final",
+                &format!("team_create roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_team_create_tool",
+                "toolu_team_create",
+                "TeamCreate",
+                json!({"team_name": "research-squad"}),
+            ),
+        },
+        Scenario::TeamListEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_team_list_empty_final",
+                &format!("team_list empty roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_team_list_empty_tool",
+                "toolu_team_list_empty",
+                "TeamList",
+                json!({}),
+            ),
+        },
     }
 }
 
@@ -1060,6 +1106,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TaskCreateThenListRoundtrip => "req_task_create_then_list_roundtrip",
         Scenario::SleepShortRoundtrip => "req_sleep_short_roundtrip",
         Scenario::SleepOverMaxRoundtrip => "req_sleep_over_max_roundtrip",
+        Scenario::TeamCreateRoundtrip => "req_team_create_roundtrip",
+        Scenario::TeamListEmptyRoundtrip => "req_team_list_empty_roundtrip",
     }
 }
 

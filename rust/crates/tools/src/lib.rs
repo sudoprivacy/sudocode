@@ -25,7 +25,7 @@ use runtime::{
     read_file,
     summary_compression::compress_summary_text,
     task_registry::TaskRegistry,
-    team_cron_registry::CronRegistry,
+    team_cron_registry::{CronRegistry, TeamRegistry},
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
     ConversationRuntime, GrepSearchInput, HookAbortSignal, LaneCommitProvenance, LaneEvent,
@@ -59,6 +59,12 @@ fn global_task_registry() -> &'static TaskRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
     REGISTRY.get_or_init(TaskRegistry::new)
+}
+
+fn global_team_registry() -> &'static TeamRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<TeamRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(TeamRegistry::new)
 }
 
 /// Global auth mode set by the CLI at startup. Subagents inherit this so they
@@ -1008,6 +1014,60 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "TeamCreate",
+            description: "Create a new team for grouping background tasks. A team is a logical collection of task IDs; use TaskCreate with team_id (once wired) to associate a task with this team. Only one team can be active per leader at a time.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_name": { "type": "string", "description": "Name for the new team." },
+                    "task_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional initial task IDs to associate with this team."
+                    }
+                },
+                "required": ["team_name"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "TeamGet",
+            description: "Get a team's details (members, status, timestamps) by team ID.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_id": { "type": "string" }
+                },
+                "required": ["team_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TeamList",
+            description: "List all teams and their current status.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TeamDelete",
+            description: "Soft-delete a team by ID (status transitions to deleted; the record remains in-memory for auditability).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "team_id": { "type": "string" }
+                },
+                "required": ["team_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
             name: "LSP",
             description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics).",
             input_schema: json!({
@@ -1177,6 +1237,10 @@ fn execute_tool_with_enforcer(
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
+        "TeamCreate" => from_value::<TeamCreateInput>(input).and_then(run_team_create),
+        "TeamGet" => from_value::<TeamIdInput>(input).and_then(run_team_get),
+        "TeamList" => run_team_list(input.clone()),
+        "TeamDelete" => from_value::<TeamIdInput>(input).and_then(run_team_delete),
         "LSP" => from_value::<LspInput>(input).and_then(run_lsp),
         "ListMcpResources" => {
             from_value::<McpResourceInput>(input).and_then(run_list_mcp_resources)
@@ -1538,6 +1602,74 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
         "crons": entries,
         "count": entries.len()
     }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_team_create(input: TeamCreateInput) -> Result<String, String> {
+    let name = input.team_name.trim();
+    if name.is_empty() {
+        return Err(String::from("team_name is required for TeamCreate"));
+    }
+    let registry = global_team_registry();
+    let team = registry.create(name, input.task_ids);
+    to_pretty_json(json!({
+        "team_id": team.team_id,
+        "name": team.name,
+        "task_ids": team.task_ids,
+        "status": team.status.to_string(),
+        "created_at": team.created_at,
+        "updated_at": team.updated_at
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_team_get(input: TeamIdInput) -> Result<String, String> {
+    let registry = global_team_registry();
+    match registry.get(&input.team_id) {
+        Some(team) => to_pretty_json(json!({
+            "team_id": team.team_id,
+            "name": team.name,
+            "task_ids": team.task_ids,
+            "status": team.status.to_string(),
+            "created_at": team.created_at,
+            "updated_at": team.updated_at
+        })),
+        None => Err(format!("team not found: {}", input.team_id)),
+    }
+}
+
+fn run_team_list(_input: Value) -> Result<String, String> {
+    let teams: Vec<_> = global_team_registry()
+        .list()
+        .into_iter()
+        .map(|t| {
+            json!({
+                "team_id": t.team_id,
+                "name": t.name,
+                "task_ids": t.task_ids,
+                "status": t.status.to_string(),
+                "created_at": t.created_at,
+                "updated_at": t.updated_at
+            })
+        })
+        .collect();
+    to_pretty_json(json!({
+        "teams": teams,
+        "count": teams.len()
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_team_delete(input: TeamIdInput) -> Result<String, String> {
+    let registry = global_team_registry();
+    match registry.delete(&input.team_id) {
+        Ok(team) => to_pretty_json(json!({
+            "team_id": team.team_id,
+            "status": team.status.to_string(),
+            "message": "Team deleted"
+        })),
+        Err(e) => Err(e),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2431,6 +2563,18 @@ struct CronCreateInput {
 #[derive(Debug, Deserialize)]
 struct CronDeleteInput {
     cron_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamCreateInput {
+    team_name: String,
+    #[serde(default)]
+    task_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamIdInput {
+    team_id: String,
 }
 
 #[derive(Debug, Deserialize)]

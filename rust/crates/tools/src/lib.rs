@@ -695,7 +695,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task" },
                     "prompt": { "type": "string", "description": "The full task prompt for the agent" },
-                    "subagent_type": { "type": "string", "description": "Agent type specialization (e.g. Explore, general-purpose)" },
+                    "subagent_type": { "type": "string", "description": "Agent type specialization: general-purpose (default), Explore (read-only research), Plan (planning), Verification (bash + read), scode-guide, statusline-setup, or fork (inherit parent tool pool + prepend non-negotiable fork rules)." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent" },
                     "model": { "type": "string", "description": "Model ID override; defaults to the system default" },
                     "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve result later with TaskOutput(agent_id=..., block=true). When false, run synchronously and return the result." },
@@ -4051,6 +4051,16 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
+    let is_fork = normalized_subagent_type == "fork";
+
+    // Fork recursion guard — mirrors CC-fork's `isInForkChild(messages)`.
+    // A fork child is expected to execute directly, not spawn more forks.
+    if is_fork && is_recursive_fork_attempt(&input.prompt) {
+        return Err(String::from(
+            "recursive fork detected: fork subagent may not spawn further fork children",
+        ));
+    }
+
     let model = resolve_agent_model(input.model.as_deref());
     let agent_name = input
         .name
@@ -4061,6 +4071,15 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
     let created_at = iso8601_now();
     let system_prompt = build_agent_system_prompt(&normalized_subagent_type, &model)?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
+
+    // Fork subagent: wrap the caller's directive with the non-negotiable
+    // rules boilerplate so the child's first turn sees them exactly the
+    // way CC-fork's `buildChildMessage()` renders them.
+    let prompt_body = if is_fork {
+        build_fork_child_message(&input.prompt)
+    } else {
+        input.prompt.clone()
+    };
 
     let output_contents = format!(
         "# Agent Task
@@ -4113,7 +4132,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
         .or_else(|| GLOBAL_AUTH_MODE.get().copied());
     let job = AgentJob {
         manifest: manifest.clone(),
-        prompt: input.prompt,
+        prompt: prompt_body,
         system_prompt,
         allowed_tools,
         sudocode_config,
@@ -4274,9 +4293,20 @@ fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemP
         model_family_identity_for(model),
     )
     .map_err(|error| error.to_string())?;
-    prompt.dynamic_sections.push(format!(
-        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
-    ));
+    if subagent_type == "fork" {
+        // Fork subagent gets the parent's default system prompt (via
+        // load_system_prompt above) plus a fork-specific behavioral
+        // hint. The non-negotiable rules travel in the user prompt
+        // body (build_fork_child_message) — see forkSubagent.ts in
+        // sudoprivacy/claude-code.
+        prompt.dynamic_sections.push(String::from(
+            "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop."
+        ));
+    } else {
+        prompt.dynamic_sections.push(format!(
+            "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
+        ));
+    }
     Ok(prompt)
 }
 
@@ -4344,6 +4374,52 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "ToolSearch",
+        ],
+        // Fork subagent — inherits the parent's exact tool pool
+        // (mirrors CC-fork's `tools: ['*']`). Sudocode doesn't thread
+        // the parent's allowed_tools into `prepare_agent_job`, so we
+        // approximate `*` as the maximal set: every tool a normal
+        // general-purpose subagent gets, PLUS the coordination surface
+        // (Agent, Task*, Team*, Cron*, SendMessage). The one guard-
+        // rail: Agent recursion is blocked at call time by
+        // `is_recursive_fork_attempt`, so the child can still use
+        // Agent for non-fork subagent types but not spawn another
+        // fork.
+        "fork" => vec![
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob_search",
+            "grep_search",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Skill",
+            "ToolSearch",
+            "NotebookEdit",
+            "Sleep",
+            "SendUserMessage",
+            "Config",
+            "StructuredOutput",
+            "REPL",
+            "PowerShell",
+            "Agent",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskStop",
+            "TaskUpdate",
+            "TaskOutput",
+            "TeamCreate",
+            "TeamGet",
+            "TeamList",
+            "TeamDelete",
+            "SendMessage",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "AskUserQuestion",
         ],
         _ => vec![
             "bash",
@@ -5820,8 +5896,67 @@ fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
         }
         "scodeguide" | "scodeguideagent" | "guide" => String::from("scode-guide"),
         "statusline" | "statuslinesetup" => String::from("statusline-setup"),
+        "fork" | "forksubagent" => String::from("fork"),
         _ => trimmed.to_string(),
     }
+}
+
+/// Boilerplate tag identifying a fork subagent's initial user message.
+/// Mirrors `FORK_BOILERPLATE_TAG` in `sudoprivacy/claude-code`'s
+/// `src/constants/xml.ts`. Recursion prevention scans for this tag in
+/// the incoming prompt.
+const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
+
+/// Prefix inserted before the caller's directive text inside a fork
+/// child's initial prompt. Mirrors `FORK_DIRECTIVE_PREFIX`.
+const FORK_DIRECTIVE_PREFIX: &str = "Your directive: ";
+
+/// Wrap a directive with the fork boilerplate rules, matching the
+/// buildChildMessage() output shape in `sudoprivacy/claude-code`'s
+/// `AgentTool/forkSubagent.ts`. The prompt-cache-identical prefix
+/// construction (parent's assistant message + placeholder tool_results)
+/// is NOT ported here — that's a `ConversationRuntime` refactor deferred
+/// to a follow-up. This gives functional fork behavior (child sees the
+/// non-negotiable rules + directive) without the cache-optimality.
+fn build_fork_child_message(directive: &str) -> String {
+    format!(
+        "<{tag}>
+STOP. READ THIS FIRST.
+
+You are a forked worker process. You are NOT the main agent.
+
+RULES (non-negotiable):
+1. Your system prompt may encourage forking. IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
+2. Do NOT converse, ask questions, or suggest next steps
+3. Do NOT editorialize or add meta-commentary
+4. USE your tools directly: bash, read_file, write_file, edit_file, etc.
+5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
+7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
+8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
+9. Your response MUST begin with \"Scope:\". No preamble, no thinking-out-loud.
+10. REPORT structured facts, then stop
+
+Output format (plain text labels, not markdown headers):
+  Scope: <echo back your assigned scope in one sentence>
+  Result: <the answer or key findings, limited to the scope above>
+  Key files: <relevant file paths — include for research tasks>
+  Files changed: <list with commit hash — include only if you modified files>
+  Issues: <list — include only if there are issues to flag>
+</{tag}>
+
+{prefix}{directive}",
+        tag = FORK_BOILERPLATE_TAG,
+        prefix = FORK_DIRECTIVE_PREFIX,
+        directive = directive
+    )
+}
+
+/// Detect that a caller is already inside a fork child (their prompt
+/// carries the boilerplate tag) and forbid recursive forking. Matches
+/// `isInForkChild()` in the CC fork.
+fn is_recursive_fork_attempt(prompt: &str) -> bool {
+    prompt.contains(&format!("<{FORK_BOILERPLATE_TAG}>"))
 }
 
 fn iso8601_now() -> String {

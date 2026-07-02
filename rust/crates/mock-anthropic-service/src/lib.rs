@@ -118,6 +118,7 @@ enum Scenario {
     TeamListEmptyRoundtrip,
     SendMessagePlainRoundtrip,
     SendMessageBroadcastEmptyRoundtrip,
+    ForkSubagentRecursionGuardRoundtrip,
 }
 
 impl Scenario {
@@ -155,6 +156,9 @@ impl Scenario {
             "send_message_broadcast_empty_roundtrip" => {
                 Some(Self::SendMessageBroadcastEmptyRoundtrip)
             }
+            "fork_subagent_recursion_guard_roundtrip" => {
+                Some(Self::ForkSubagentRecursionGuardRoundtrip)
+            }
             _ => None,
         }
     }
@@ -191,6 +195,9 @@ impl Scenario {
             Self::TeamListEmptyRoundtrip => "team_list_empty_roundtrip",
             Self::SendMessagePlainRoundtrip => "send_message_plain_roundtrip",
             Self::SendMessageBroadcastEmptyRoundtrip => "send_message_broadcast_empty_roundtrip",
+            Self::ForkSubagentRecursionGuardRoundtrip => {
+                "fork_subagent_recursion_guard_roundtrip"
+            }
         }
     }
 }
@@ -721,6 +728,23 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"to":"*","summary":"team-wide ping","message":"quick standup ping"}"#],
             ),
         },
+        Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => final_text_sse(&format!(
+                "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
+            )),
+            // The `prompt` intentionally contains the fork boilerplate
+            // tag — this drives the recursion guard in `prepare_agent_job`
+            // and MUST surface as a tool error before any subagent
+            // spawn happens (otherwise mock scenario inheritance would
+            // hang the CLI).
+            None => tool_use_sse(
+                "toolu_fork_recursion_guard",
+                "Agent",
+                &[
+                    r#"{"subagent_type":"fork","description":"nested probe","prompt":"<fork-boilerplate>already inside a fork child</fork-boilerplate> keep working"}"#,
+                ],
+            ),
+        },
     }
 }
 
@@ -1139,6 +1163,24 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 }),
             ),
         },
+        Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => text_message_response(
+                "msg_fork_recursion_guard_final",
+                &format!(
+                    "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
+                ),
+            ),
+            None => tool_message_response(
+                "msg_fork_recursion_guard_tool",
+                "toolu_fork_recursion_guard",
+                "Agent",
+                json!({
+                    "subagent_type": "fork",
+                    "description": "nested probe",
+                    "prompt": "<fork-boilerplate>already inside a fork child</fork-boilerplate> keep working"
+                }),
+            ),
+        },
     }
 }
 
@@ -1175,6 +1217,9 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SendMessagePlainRoundtrip => "req_send_message_plain_roundtrip",
         Scenario::SendMessageBroadcastEmptyRoundtrip => {
             "req_send_message_broadcast_empty_roundtrip"
+        }
+        Scenario::ForkSubagentRecursionGuardRoundtrip => {
+            "req_fork_subagent_recursion_guard_roundtrip"
         }
     }
 }

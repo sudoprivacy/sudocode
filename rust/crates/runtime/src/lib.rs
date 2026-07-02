@@ -9,6 +9,7 @@ pub mod acp_stdio_server;
 pub mod acp_ws_server;
 pub mod agent_mailbox;
 mod bash;
+pub mod coordinator_mode;
 pub mod bash_validation;
 mod bootstrap;
 pub mod branch_lock;

@@ -834,6 +834,10 @@ fn print_system_prompt(
     if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
         prompt.dynamic_sections.push(section);
     }
+    // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
+    // prepend the CC-fork coordinator role prompt so `scode
+    // print-system-prompt` reflects what the runtime would send.
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -4375,13 +4379,19 @@ fn build_system_prompt_for(
     // user actually started talking. ConversationRuntime separately tracks
     // this date and emits a system-reminder if the date rolls over
     // mid-session, keeping the prompt cache prefix warm.
-    Ok(load_system_prompt(
+    let mut prompt = load_system_prompt(
         cwd.to_path_buf(),
         runtime::today_local(),
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
-    )?)
+    )?;
+    // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
+    // set, prepend the ported CC-fork coordinator role prompt so it
+    // takes primacy over the default identity. See
+    // runtime::coordinator_mode for the full port.
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
+    Ok(prompt)
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {

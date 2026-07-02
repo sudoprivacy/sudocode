@@ -116,6 +116,8 @@ enum Scenario {
     SleepOverMaxRoundtrip,
     TeamCreateRoundtrip,
     TeamListEmptyRoundtrip,
+    SendMessagePlainRoundtrip,
+    SendMessageBroadcastEmptyRoundtrip,
 }
 
 impl Scenario {
@@ -149,6 +151,10 @@ impl Scenario {
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "team_create_roundtrip" => Some(Self::TeamCreateRoundtrip),
             "team_list_empty_roundtrip" => Some(Self::TeamListEmptyRoundtrip),
+            "send_message_plain_roundtrip" => Some(Self::SendMessagePlainRoundtrip),
+            "send_message_broadcast_empty_roundtrip" => {
+                Some(Self::SendMessageBroadcastEmptyRoundtrip)
+            }
             _ => None,
         }
     }
@@ -183,6 +189,8 @@ impl Scenario {
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::TeamCreateRoundtrip => "team_create_roundtrip",
             Self::TeamListEmptyRoundtrip => "team_list_empty_roundtrip",
+            Self::SendMessagePlainRoundtrip => "send_message_plain_roundtrip",
+            Self::SendMessageBroadcastEmptyRoundtrip => "send_message_broadcast_empty_roundtrip",
         }
     }
 }
@@ -691,6 +699,28 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
             None => tool_use_sse("toolu_team_list_empty", "TeamList", &[r#"{}"#]),
         },
+        Scenario::SendMessagePlainRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("send_message plain roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_send_message_plain",
+                "SendMessage",
+                &[
+                    r#"{"to":"researcher","summary":"look into flaky test","message":"please investigate the flaky test"}"#,
+                ],
+            ),
+        },
+        Scenario::SendMessageBroadcastEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "send_message broadcast-empty roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_send_message_broadcast_empty",
+                "SendMessage",
+                &[r#"{"to":"*","summary":"team-wide ping","message":"quick standup ping"}"#],
+            ),
+        },
     }
 }
 
@@ -1075,6 +1105,40 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({}),
             ),
         },
+        Scenario::SendMessagePlainRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_send_message_plain_final",
+                &format!("send_message plain roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_send_message_plain_tool",
+                "toolu_send_message_plain",
+                "SendMessage",
+                json!({
+                    "to": "researcher",
+                    "summary": "look into flaky test",
+                    "message": "please investigate the flaky test"
+                }),
+            ),
+        },
+        Scenario::SendMessageBroadcastEmptyRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_send_message_broadcast_empty_final",
+                &format!(
+                    "send_message broadcast-empty roundtrip complete: {tool_output}"
+                ),
+            ),
+            None => tool_message_response(
+                "msg_send_message_broadcast_empty_tool",
+                "toolu_send_message_broadcast_empty",
+                "SendMessage",
+                json!({
+                    "to": "*",
+                    "summary": "team-wide ping",
+                    "message": "quick standup ping"
+                }),
+            ),
+        },
     }
 }
 
@@ -1108,6 +1172,10 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SleepOverMaxRoundtrip => "req_sleep_over_max_roundtrip",
         Scenario::TeamCreateRoundtrip => "req_team_create_roundtrip",
         Scenario::TeamListEmptyRoundtrip => "req_team_list_empty_roundtrip",
+        Scenario::SendMessagePlainRoundtrip => "req_send_message_plain_roundtrip",
+        Scenario::SendMessageBroadcastEmptyRoundtrip => {
+            "req_send_message_broadcast_empty_roundtrip"
+        }
     }
 }
 

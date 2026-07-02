@@ -7,6 +7,7 @@
 pub mod acp_sdk_server;
 pub mod acp_stdio_server;
 pub mod acp_ws_server;
+pub mod agent_mailbox;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;

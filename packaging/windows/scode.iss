@@ -77,7 +77,6 @@ var
   BaseUrlEdit: TNewEdit;
   ApiKeyEdit: TPasswordEdit;
   FetchButton: TNewButton;
-  PresetButton: TNewButton;
   ModelCombo: TNewComboBox;
   SearchCheck: TNewCheckBox;
   StatusLabel: TNewStaticText;
@@ -216,31 +215,6 @@ begin
   until False;
 end;
 
-{ Built-in fallback list mirroring config-tool.html's PRESET_MODELS. }
-procedure LoadPresetModels(List: TStringList);
-begin
-  List.Clear;
-  List.Add('auto');
-  List.Add('grok-4-20-reasoning');
-  List.Add('grok-4.3');
-  List.Add('deepseek-v4-flash');
-  List.Add('deepseek-v4-pro');
-  List.Add('glm-5.1');
-  List.Add('MiniMax-M2.5');
-  List.Add('gemini-3.5-flash');
-  List.Add('gemini-3.1-flash-lite');
-  List.Add('gemini-3-flash-preview');
-  List.Add('gemini-3.1-pro-preview');
-  List.Add('Kimi-K2.6');
-  List.Add('gpt-5.3-codex');
-  List.Add('gpt-5.4');
-  List.Add('gpt-5.5');
-  List.Add('claude-sonnet-4-6');
-  List.Add('claude-opus-4-6');
-  List.Add('claude-opus-4-7');
-  List.Add('claude-opus-4-8');
-end;
-
 { Fill the dropdown from a list of model ids; preselect DefaultModel. }
 procedure PopulateModelCombo(List: TStringList);
 var
@@ -287,7 +261,7 @@ begin
     begin
       ParseModelIds(Body, List);
       if List.Count = 0 then
-        StatusLabel.Caption := '接口返回的模型列表为空，可点「使用内置预设」'
+        StatusLabel.Caption := '接口返回的模型列表为空，请检查 API Key 后重试'
       else
       begin
         PopulateModelCombo(List);
@@ -295,21 +269,7 @@ begin
       end;
     end
     else
-      StatusLabel.Caption := '拉取失败：' + Body + ' —— 可点「使用内置预设」';
-  finally
-    List.Free;
-  end;
-end;
-
-procedure PresetButtonClick(Sender: TObject);
-var
-  List: TStringList;
-begin
-  List := TStringList.Create;
-  try
-    LoadPresetModels(List);
-    PopulateModelCombo(List);
-    StatusLabel.Caption := '已加载内置预设模型列表（' + IntToStr(List.Count) + ' 个）';
+      StatusLabel.Caption := '拉取失败：' + Body + '，请检查网络与 API Key 后重试';
   finally
     List.Free;
   end;
@@ -445,7 +405,7 @@ begin
   ApiKeyEdit.OnExit := @ApiKeyEditExit;
   Y := Y + ApiKeyEdit.Height + ScaleY(12);
 
-  { Fetch / preset buttons }
+  { Fetch button }
   FetchButton := TNewButton.Create(WizardForm);
   FetchButton.Parent := ConfigPage.Surface;
   FetchButton.Top := Y;
@@ -453,22 +413,13 @@ begin
   FetchButton.Height := ScaleY(25);
   FetchButton.Caption := '拉取模型';
   FetchButton.OnClick := @FetchButtonClick;
-
-  PresetButton := TNewButton.Create(WizardForm);
-  PresetButton.Parent := ConfigPage.Surface;
-  PresetButton.Top := Y;
-  PresetButton.Left := FetchButton.Left + FetchButton.Width + ScaleX(10);
-  PresetButton.Width := ScaleX(130);
-  PresetButton.Height := ScaleY(25);
-  PresetButton.Caption := '使用内置预设';
-  PresetButton.OnClick := @PresetButtonClick;
   Y := Y + FetchButton.Height + ScaleY(12);
 
   { Default model dropdown }
   Hint := TNewStaticText.Create(WizardForm);
   Hint.Parent := ConfigPage.Surface;
   Hint.Top := Y;
-  Hint.Caption := '默认模型（拉取或加载预设后从下拉框选择）';
+  Hint.Caption := '默认模型（拉取后从下拉框选择）';
   Y := Y + Hint.Height + ScaleY(2);
 
   ModelCombo := TNewComboBox.Create(WizardForm);
@@ -525,7 +476,7 @@ begin
     end;
     if ModelCombo.Items.Count = 0 then
     begin
-      MsgBox('请先点击「拉取模型」或「使用内置预设」，再选择默认模型。', mbError, MB_OK);
+      MsgBox('请先点击「拉取模型」，再选择默认模型。', mbError, MB_OK);
       Result := False;
       exit;
     end;

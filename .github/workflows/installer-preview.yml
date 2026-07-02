@@ -97,7 +97,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install innosetup -y --no-progress
+          # Pin to 6.5.x so the compiler's message set matches the bundled
+          # Simplified Chinese language file (ChineseSimplified.isl, 6.5.0+).
+          choco install innosetup --version=6.5.4 -y --no-progress --allow-downgrade
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
           $base = "${{ matrix.installer_name }}" -replace '\.exe$', ''

@@ -45,6 +45,12 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ChangesEnvironment=yes
+ShowLanguageDialog=no
+
+[Languages]
+; Simplified Chinese for the whole wizard (welcome, dir page, tasks, buttons).
+; The .isl ships alongside this script in packaging/windows/.
+Name: "chinesesimp"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 ; Default-checked: append the install dir to the user's PATH.
@@ -309,6 +315,15 @@ begin
   end;
 end;
 
+{ Auto-fetch when the user finishes entering the API key (focus leaves the
+  field). The manual 拉取模型 button remains available; FetchButtonClick
+  ignores its Sender so passing nil is fine. }
+procedure ApiKeyEditExit(Sender: TObject);
+begin
+  if Trim(ApiKeyEdit.Text) <> '' then
+    FetchButtonClick(nil);
+end;
+
 { ---- Config file generation ------------------------------------------- }
 
 function BuildSudocodeJson(BaseUrl, ApiKey, ModelsBlock: string; EnableSearch: Boolean): string;
@@ -427,6 +442,7 @@ begin
   ApiKeyEdit.Parent := ConfigPage.Surface;
   ApiKeyEdit.Top := Y;
   ApiKeyEdit.Width := ConfigPage.SurfaceWidth;
+  ApiKeyEdit.OnExit := @ApiKeyEditExit;
   Y := Y + ApiKeyEdit.Height + ScaleY(12);
 
   { Fetch / preset buttons }

@@ -1611,6 +1611,10 @@ mod tests {
         );
 
         for _ in 0..5 {
+            // Sleep 2ms between iterations so each rotated_log_path()
+            // gets a distinct timestamp. Without this, fast machines
+            // produce duplicate paths and the test becomes flaky.
+            std::thread::sleep(std::time::Duration::from_millis(2));
             let rotated = super::rotated_log_path(&path);
             fs::write(&rotated, "old").expect("rotated file should write");
         }

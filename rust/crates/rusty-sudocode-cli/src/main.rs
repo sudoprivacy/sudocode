@@ -2006,19 +2006,22 @@ struct AcpSdkDelegate {
 /// fall back to a placeholder so the conversation still has *something*
 /// to reference for that slot.
 ///
-/// **Runtime-nesting fix**: push_images is a sync trait method called from
-/// within the ACP server's async handler on a multi-thread tokio runtime.
-/// The tokio-idiomatic way to do a sync-context blocking call to async is
-/// `task::block_in_place` (which yields the current worker to the pool so
-/// other tasks make progress) + `Handle::current().block_on` (which runs
-/// the future on the same runtime, no nested runtime needed). This
-/// replaces an earlier `std::thread::scope + new current_thread runtime`
-/// attempt (commit 0b0100e) that ai-dev-browser e2e caught hanging the
-/// conversation for 5+ min with no error.
+/// **Runtime-nesting fix (v2, 2026-07-01)**: push_images is a sync trait
+/// method called from within the ACP server's async handler. Two earlier
+/// attempts BOTH hung sudowork's real UI e2e (only surfaced by driving the
+/// actual Electron app via ai-dev-browser, not the mocked Rust integration
+/// test or the direct CLI path):
 ///
-/// `try_current()` falls back to a one-shot current_thread runtime for the
-/// unusual case where push_images is called outside any tokio runtime
-/// (e.g. sync tests) — that path stays functional but slower.
+///   - v0 (`std::thread::scope` + fresh current_thread rt): hung.
+///   - v1 (`block_in_place` + `Handle::current().block_on`): also hung —
+///     the outer ACP-server runtime's worker pool starved once we blocked
+///     one worker on the VLM future while reqwest needed workers too.
+///
+/// v2 uses **a dedicated OS thread** with **its own current_thread
+/// runtime**. Fully decouples the VLM leg from the ACP runtime's task
+/// pool, so no nesting/starvation is possible regardless of which context
+/// push_images is called from. Trade-off is one extra OS-thread spawn per
+/// image (still cheap next to the VLM HTTP round-trip).
 fn vlm_describe_block_or_placeholder(
     image_b64: &str,
     mime_type: &str,
@@ -2041,39 +2044,34 @@ fn vlm_describe_block_or_placeholder(
         image_b64.len()
     );
 
-    let vlm_future = vlm_describe::describe_image_via_vlm(
-        base_url,
-        api_key,
-        vlm_describe::DEFAULT_VISION_MODEL,
-        image_b64,
-        mime_type,
-    );
+    let base_url = base_url.clone();
+    let api_key = api_key.clone();
+    let image_b64 = image_b64.to_string();
+    let mime_type = mime_type.to_string();
 
-    let result = match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // Inside an async runtime — release the current worker so other
-            // tokio tasks continue, then run the VLM future on the same runtime.
-            tokio::task::block_in_place(|| handle.block_on(vlm_future))
-        }
-        Err(_) => {
-            // Not inside a tokio runtime — build a one-shot current_thread rt.
+    let spawn_result = std::thread::Builder::new()
+        .name(format!("vlm-describe-{human_idx}"))
+        .spawn(move || -> Result<String, String> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build();
-            match rt {
-                Ok(rt) => rt.block_on(vlm_future),
-                Err(e) => {
-                    eprintln!(
-                        "[push_images] image #{human_idx} — failed to build fallback runtime: {e}"
-                    );
-                    return runtime::ContentBlock::Text {
-                        text: format!(
-                            "[Image #{human_idx} could not be described automatically (no runtime available)]"
-                        ),
-                    };
-                }
-            }
-        }
+                .build()
+                .map_err(|e| format!("failed to build VLM runtime: {e}"))?;
+            rt.block_on(vlm_describe::describe_image_via_vlm(
+                &base_url,
+                &api_key,
+                vlm_describe::DEFAULT_VISION_MODEL,
+                &image_b64,
+                &mime_type,
+            ))
+            .map_err(|e| e.to_string())
+        });
+
+    let result: Result<String, String> = match spawn_result {
+        Ok(join) => match join.join() {
+            Ok(inner) => inner,
+            Err(_) => Err("VLM worker thread panicked".to_string()),
+        },
+        Err(e) => Err(format!("failed to spawn VLM worker thread: {e}")),
     };
 
     match result {

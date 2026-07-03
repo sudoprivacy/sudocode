@@ -505,11 +505,11 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Plan → implement → test → iterate</td></tr>
-    <tr><td><code>TodoWrite</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Task list management</td></tr>
+    <tr><td><code>EnterPlanMode</code> / <code>ExitPlanMode</code></td><td data-priority="must-have">must-have</td><td data-status="covered">Covered</td><td>PTY: <code>pty_plan_mode.rs</code> (3 tests — fresh-workspace Enter, full lifecycle preserving prior <code>defaultMode</code>, Exit-without-Enter no-op). Merged in PR #276.</td><td>Plan → implement → test → iterate</td></tr>
+    <tr><td><code>TodoWrite</code></td><td data-priority="must-have">must-have</td><td data-status="covered">Covered</td><td>PTY: <code>pty_todo_write.rs</code> (2 tests — verbatim persistence for pending/in-progress list, all-completed wipe to <code>[]</code> matching CC parity). Merged in PR #276.</td><td>Task list management</td></tr>
     <tr><td><code>AskUserQuestion</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>scode prompts for clarification</td></tr>
     <tr><td><code>StructuredOutput</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Return structured data</td></tr>
-    <tr><td><code>Sleep</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Low priority</td></tr>
+    <tr><td><code>Sleep</code></td><td data-priority="must-have">must-have</td><td data-status="covered">Covered</td><td>PTY: <code>pty_sleep.rs</code> (2 tests — wall-clock actually waits for <code>Sleep(600ms)</code>; <code>Sleep(400_000ms)</code> hits the <code>MAX_SLEEP_DURATION_MS = 300_000</code> guard and rejects in &lt; 60s). Merged in PR #278.</td><td>Low priority</td></tr>
   </tbody>
 </table>
 
@@ -518,7 +518,7 @@ coverage starts fresh and is tracked here as the single source.</p>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td><code>Agent</code> (sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Strict CC parity required — study latest CC design. When implemented, also introduce <a href="#cancel-architecture">CancelDispatcher</a> and <a href="#cancel-context">ESC context guards</a>.</td></tr>
-    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Background task management. Strict CC parity.</td></tr>
+    <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td>PTY: <code>pty_task_family.rs</code> covers <code>TaskList</code> (empty-registry <code>count: 0</code> path). <code>TaskCreate</code> PTY blocked in mock: TaskCreate's subagent issues its own /v1/messages requests with no <code>PARITY_SCENARIO</code>, which the harness rejects — a scenario-inheritance refactor unblocks it. Unit-covered in <code>runtime::task_registry::tests</code>. Merged in PR #276.</td><td>LLM tool. Background task management. Strict CC parity.</td></tr>
     <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Worker lifecycle. Strict CC parity.</td></tr>
     <tr><td>Teams (parallel sub-agents)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Team coordination. Strict CC parity.</td></tr>
     <tr><td><code>CronCreate</code> / <code>CronDelete</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>sudowork has a cron implementation; when scode ships this, sudowork's becomes a wrapper/UI. Per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
@@ -556,19 +556,19 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td>Session auto-save</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Persists across turns</td></tr>
-    <tr><td>Session JSONL persistence (model + transcript)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>acp_live_smoke.rs</code> + <code>resume_slash_commands.rs</code>; PTY pending — assistant messages carry model field, transcript replayable</td></tr>
-    <tr><td><code>/resume</code> (load saved session)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — send → close → resume → verify</td></tr>
-    <tr><td><code>--resume latest</code> shortcut</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code>; PTY pending — restores most-recent managed session without an explicit id</td></tr>
-    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/export</code> (session to markdown)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>resume_slash_commands.rs</code> + <code>output_format_contract.rs</code>; PTY pending — JSON + plaintext modes</td></tr>
-    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>undo_e2e.rs</code>; PTY pending — restore after edit, delete created file, nothing-to-undo, hook-feedback robustness, JSON output</td></tr>
-    <tr><td><code>/compact</code> (compress history)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Code shipped: <code>SlashCommand::Compact</code> in <code>commands/src/lib.rs</code>, handlers at <code>rusty-sudocode-cli/src/main.rs:3091</code> (REPL) and <code>:1015</code> (resume path); calls <code>runtime::compact_session</code>. PTY pending — needs a new mock-anthropic-service scenario variant (Compact) with multi-turn response sequence; out-of-scope for the context-overflow systemic fix series.</td></tr>
+    <tr><td>Session auto-save</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_session_management::session_auto_save_creates_jsonl</code></td><td>One-shot prompt → exit → verify .scode/sessions/ has JSONL file on disk.</td></tr>
+    <tr><td>Session JSONL persistence (model + transcript)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>Resume session → /export → verify exported file contains original user message.</td></tr>
+    <tr><td><code>/resume</code> (load saved session)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>--resume &lt;path&gt; + /export → context preserved.</td></tr>
+    <tr><td><code>--resume latest</code> shortcut</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_latest_restores_most_recent</code></td><td>Seed managed session → --resume latest.</td></tr>
+    <tr><td><code>/session list</code> / <code>switch</code> / <code>fork</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::session_list_shows_entries</code></td><td>Resume → /session list → verify session directory output. switch/fork: code exists, test covers list only.</td></tr>
+    <tr><td><code>/export</code> (session to markdown)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::resume_and_export_preserves_context</code></td><td>--resume → /export notes.txt → verify file contains conversation.</td></tr>
+    <tr><td><code>/undo</code> (edit_file / write_file rollback)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::undo_restores_file_on_disk</code></td><td>Resume session with edit_file result → /undo → verify file restored to pre-image on disk.</td></tr>
+    <tr><td><code>/compact</code> (compress history)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_session_management::compact_reduces_messages</code></td><td>Resume 24-message session → /compact → verify removed/kept output.</td></tr>
     <tr><td>Auto-compact trigger</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Code shipped: <code>maybe_auto_compact</code> at <code>conversation.rs:1190</code>, triggered from turn loop at <code>:832</code> + <code>:1050</code>; threshold via <code>CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS</code> env. Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending.</td></tr>
     <tr><td>Auto-compact circuit-breaker (3 consecutive no-op cap)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shipped 2026-06-28 (PR #249 cluster commit <code>2022ca8</code>): <code>MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS = 3</code> in <code>conversation.rs</code> prevents <code>maybe_auto_compact</code> retrying every turn on sessions structurally pinned above threshold (CC parity — CC saved 250K wasted API calls/day with this). Integration-pending PTY: drive a session past threshold and confirm 4th turn does not emit AutoCompactionEvent.</td></tr>
     <tr><td>Image preflight on ACP <code>push_images</code> path (5MB cap + 8000px cap)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shipped 2026-06-28 (PR #249 commit <code>0d39128</code>): <code>image_registry::preflight_base64</code> made <code>pub</code>; <code>push_images</code> in <code>rusty-sudocode-cli/src/main.rs</code> now downsamples base64 images before constructing <code>ContentBlock::Image</code>. Closes the gap that surfaced as <code>single_request_too_large</code> when sudowork attached a 25MB image (CLI-direct paste already preflighted via <code>register_rgba</code>; ACP path was bypassed). Integration-pending PTY: ACP push_images with synthetic 25MB image → confirm downsampled bytes reach the LLM mock.</td></tr>
     <tr><td>Image preflight fallback: text-placeholder when ultra-compressed still too large (CC parity)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Shipped 2026-06-28 (PR-E followup to #249): pre-change, <code>downsample_image</code> returned whatever quality-30 produced even if still &gt; 5 MB → LLM rejected with <code>single_request_too_large</code>. Post-change, returns typed <code>ImageTooLargeError</code>; <code>push_images</code> catches via <code>is_image_too_large()</code> and substitutes a <code>ContentBlock::Text</code> placeholder per image (<code>"[Image #N was too large to send..."</code>) so the conversation continues. Mirrors CC's split-of-concerns: <code>compressImageBuffer</code> hard-fails, <code>errors.ts:448</code> catches and substitutes a friendly assistant message via <code>getImageTooLargeErrorMessage()</code> (verified from CCB ref 236d99ed).</td></tr>
-    <tr><td>Image too large / wrong-model should be NON-user-facing (auto-VLM-route + always-on transparent downsample)</td><td data-priority="must-have">must-have</td><td data-status="shipped">Shipped</td><td>PTY ✓ (initialize-meta + image-attach + wrong-model-VLM + full-VLM-roundtrip) · vitest ✓ (14 cases: parser + cap-resolver) · real e2e ✓ (ai-dev-browser + direct scode probe)</td><td><strong>Shipped 2026-07-01 across sudocode PR #258 + sudowork PR #958.</strong> Full design + flow diagrams (mermaid) at <a href="https://s.shareone.vip/s/image-handling-non-user-facing">the design doc</a>. <strong>Sudocode side:</strong> advertises <code>_meta.sudocode.imageCapability</code> on the ACP <code>initialize</code> response (maxBytes 5 MB, maxDimension 8000 px, downsampleTargetBytes 512 KB, autoHandlesOversized true, autoHandlesWrongModel true) from <code>runtime::image_registry::capability_for(active_model)</code> — reads per-model caps from sudorouter's new <code>/v1/models</code> fields (<code>vision_supported</code>, <code>image_max_bytes</code>, <code>image_max_dimension</code> — sudorouter shipped 784fbf0 2026-07-01) via <code>runtime::model_capabilities::per_model_image_cap()</code>. <code>run_acp_server</code> calls <code>model_capabilities::load()</code> at boot so the SSOT cache actually populates (real-e2e caught the missing call). <code>push_images</code> does 3-way routing: (1) active model not vision-capable → VLM-route via <code>vlm_describe.rs</code> to gemini-2.5-flash, splice description; (2) <code>ImageTooLargeError</code> → same VLM-route (replaces the static "[Image #N too large]" placeholder); (3) generic decode failure → fall through. The VLM path uses <code>tokio::task::block_in_place</code> + <code>Handle::current().block_on</code> (the canonical sync-in-async pattern; earlier <code>std::thread::scope + fresh current_thread runtime</code> deadlocked, real-e2e caught). A 64-entry LRU cache keyed by <code>sha256(model || image_b64)</code> saves the VLM round-trip when the same bytes reappear in the same conversation. <strong>Sudowork side:</strong> consumes the advertised capability via <code>parseImageCapability</code> + <code>getImageTargetSize</code>; drops the empirical <code>LOW_IMAGE_TARGET_PATTERN /gemini|claude/i → 128KB</code> heuristic in favour of model-driven caps; gates the legacy wrong-model tip on <code>autoHandlesWrongModel</code> (hand-off silently when true, so scode's push_images owns the fallback); adds an opt-in <code>image.economyMode</code> toggle (Settings → 系统, i18n zh + en, default OFF) that force-caps to 128 KB for cost-sensitive plans; bumps vendored <code>ai-dev-browser</code> submodule <code>v0.10.1 → v0.12.2</code> for <code>image_cap</code> + env-var fallback support; injects <code>AI_DEV_BROWSER_IMAGE_CAP_MAX_BYTES</code> / <code>_MAX_DIMENSION</code> env on scode spawn so any <code>page_screenshot</code> from an agent inside scode's tool loop auto-caps to sudocode's hard limit. <strong>CI regression protection:</strong> two new PTY scenarios in <code>acp_integration.rs</code> — <code>acp_wrong_model_routes_via_vlm</code> (asserts wrong-model branch is entered via stderr-captured <code>[push_images] VLM-route start</code>) + <code>acp_wrong_model_vlm_full_roundtrip</code> (spins up <code>OpenAiCompatMock</code> as fake sudorouter, asserts mock captured a POST with <code>image_url</code> content + <code>gemini-2.5-flash</code> model + Bearer auth, dumps stderr snapshot on failure). Spot-check: Qwen ships exactly this design natively (validates as upstream prior art); Codex downsamples but doesn't handle wrong-model; Claude Code CLI source opaque (conservative wrap). <em>(History: a 2026-06-28 stopgap sudowork-client cap PR was opened then reverted as redundant once <code>tryReadAsImage</code>'s existing 512 KB cap was understood — see sudowork PRs #944 + revert #946.)</em></td></tr>
+    <tr><td>Image too large / wrong-model should be NON-user-facing (auto-VLM-route + always-on transparent downsample)</td><td data-priority="must-have">must-have</td><td data-status="shipped">Shipped</td><td>4-layer: <strong>unit</strong> ✓ (sudowork 14 vitest cases in <code>imageUtils.test.ts</code> — parseImageCapability shapes + getImageTargetSize economy/capability/default resolution) · <strong>mocked-integration</strong> ✓ 2 tests (sudocode <code>acp_stdio_integration::scenario_session_prompt_with_image_attachment</code> asserts <code>_meta.sudocode.imageCapability</code> advertisement on <code>initialize</code> + image ContentBlock ships end-to-end; <code>acp_wrong_model_vlm_full_roundtrip</code> spins up a mock sudorouter, asserts captured POST carries <code>image_url</code> + <code>gemini-2.5-flash</code> + Bearer) · <strong>PTY</strong> ✓ 1 test (sudocode <code>pty_image_handling::cli_at_image_reference_completes_turn</code> — inline PNG fixture, CLI <code>@path</code> resolution + mock-backend request receipt; VLM-branch no-hang deliberately covered upstream at the mocked-integration layer where the harness can control sudorouter) · <strong>live-e2e yaml</strong> ✓ 28 steps (sudowork <code>acp-image-vlm-fallback.yaml</code> Phases A/B/C via new <code>paste_clipboard_image_file</code> + <code>assert_not_contains</code> ops — negative assertion refuses the legacy 不支持 tip)</td><td><strong>Shipped 2026-07-01 across 6 PRs: sudocode #258, #266 (doc), #267 (VLM thread fix), #271 (PTY); sudowork #958, #967 (e2e yaml + op).</strong> Full design + flow diagrams (mermaid) at <a href="https://s.shareone.vip/s/image-handling-non-user-facing">the design doc</a>. <strong>Sudocode side:</strong> advertises <code>_meta.sudocode.imageCapability</code> on the ACP <code>initialize</code> response (maxBytes 5 MB, maxDimension 8000 px, downsampleTargetBytes 512 KB, autoHandlesOversized true, autoHandlesWrongModel true) from <code>runtime::image_registry::capability_for(active_model)</code> — reads per-model caps from sudorouter's new <code>/v1/models</code> fields (<code>vision_supported</code>, <code>image_max_bytes</code>, <code>image_max_dimension</code> — sudorouter shipped 784fbf0 2026-07-01) via <code>runtime::model_capabilities::per_model_image_cap()</code>. <code>run_acp_server</code> calls <code>model_capabilities::load()</code> at boot so the SSOT cache actually populates (real-e2e caught the missing call). <code>push_images</code> does 3-way routing: (1) active model not vision-capable → VLM-route via <code>vlm_describe.rs</code> to gemini-2.5-flash, splice description; (2) <code>ImageTooLargeError</code> → same VLM-route (replaces the static "[Image #N too large]" placeholder); (3) generic decode failure → fall through. <strong>PR #267 v2 fix:</strong> the VLM leg now runs on a dedicated OS thread with its own <code>current_thread</code> runtime — earlier v1 (<code>block_in_place</code> + <code>Handle::current().block_on</code>) starved the outer ACP runtime's worker pool when reqwest needed additional workers, hanging sudowork's UI silently (CI + mocked-integration + direct CLI probe all missed it; only ai-dev-browser real UI drive surfaced it). A 64-entry LRU cache keyed by <code>sha256(model || image_b64)</code> saves the VLM round-trip when the same bytes reappear. <strong>Sudowork side:</strong> consumes the advertised capability via <code>parseImageCapability</code> + <code>getImageTargetSize</code>; drops the empirical <code>LOW_IMAGE_TARGET_PATTERN /gemini|claude/i → 128KB</code> heuristic in favour of model-driven caps; gates the legacy wrong-model tip on <code>autoHandlesWrongModel</code> (hand-off silently when true, so scode's push_images owns the fallback); adds an opt-in <code>image.economyMode</code> toggle (Settings → 系统, i18n zh + en, default OFF) that force-caps to 128 KB for cost-sensitive plans; bumps vendored <code>ai-dev-browser</code> submodule <code>v0.10.1 → v0.12.2</code> for <code>image_cap</code> + env-var fallback support; injects <code>AI_DEV_BROWSER_IMAGE_CAP_MAX_BYTES</code> / <code>_MAX_DIMENSION</code> env on scode spawn so any <code>page_screenshot</code> from an agent inside scode's tool loop auto-caps to sudocode's hard limit. <strong>Real UI e2e verified all 4 scenarios (2026-07-01 via ai-dev-browser CDP drive):</strong> A gemini + 128 B PNG (native pass-through, 12 s) · B gemini + 7.7 MB PNG (preflight downsample, 12 s) · C gemini + 79 MB PNG (sudowork resize 79 MB→407 KB then native, 12.6 s) · D deepseek-v4-flash + PNG (VLM route via #267, 7 s). Spot-check: Qwen ships exactly this design natively (validates as upstream prior art); Codex downsamples but doesn't handle wrong-model; Claude Code CLI source opaque (conservative wrap). <em>(History: a 2026-06-28 stopgap sudowork-client cap PR was opened then reverted as redundant once <code>tryReadAsImage</code>'s existing 512 KB cap was understood — see sudowork PRs #944 + revert #946. Real e2e via ai-dev-browser 2026-07-01 uncovered two runtime hangs that CI missed — see memory <code>project_image_handling_capability_gap</code> + PRs #267 / dev's <code>ProcessConfig.getSync</code> fix.)</em></td></tr>
   </tbody>
 </table>
 
@@ -576,21 +576,21 @@ coverage starts fresh and is tracked here as the single source.</p>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — <code>--model X</code> wiring + persisted in resumed status</td></tr>
-    <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — read-only / workspace-write / danger</td></tr>
+    <tr><td><code>/model</code> (switch model)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::model_switch_in_repl</code></td><td>REPL: /model sonnet → switch confirmation.</td></tr>
+    <tr><td><code>/permissions</code> (switch mode)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::permissions_switch_in_repl</code></td><td>REPL: /permissions read-only → switch report shows new mode.</td></tr>
     <tr><td>Permission prompt flow (approve / deny)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>mock_parity_harness.rs</code>; PTY pending — interactive approval at the boundary, not just mode switch</td></tr>
     <tr><td><code>/auth</code> (switch auth mode)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Switch between accounts (e.g. different CC accounts). Handy for hackers.</td></tr>
-    <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — help / version / config / status / sandbox succeed without any auth</td></tr>
-    <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td></td></tr>
-    <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>output_format_contract.rs</code>; PTY pending — structured-JSON agent entries</td></tr>
+    <tr><td>Informational commands bypass credential check</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::informational_commands_bypass_credentials</code></td><td>version/help/doctor/status/sandbox/config all exit 0 without API key.</td></tr>
+    <tr><td><code>/skills</code> (list / invoke)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::skills_list_renders_json</code></td><td>scode skills --output-format json.</td></tr>
+    <tr><td><code>/agents</code> (list)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::agents_list_renders_json</code></td><td>scode agents --output-format json.</td></tr>
     <tr><td><code>/mcp</code> (list / show servers)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. MCP may be approaching deprecation; keep nice. Add PTY tests if code is complete.</td></tr>
     <tr><td><code>/plugins</code> (manage)</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Plugin mechanism — a type of skill extension. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin → system-prompt injection</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Exercised by <code>system_prompt_command.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td>Plugin tool roundtrip</td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td>Code exists. Integration-covered by <code>mock_parity_harness.rs</code>. Add PTY tests if code is complete.</td></tr>
     <tr><td><code>/config</code> (inspect)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::config_renders_json</code></td><td>cwd + config files in JSON output.</td></tr>
     <tr><td><code>--output-format json</code> (universal flag)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::output_format_json_contract</code></td><td>Contract test: status, doctor, version, sandbox all produce JSON with "kind" field.</td></tr>
-    <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>compact_output.rs</code>; PTY pending — final assistant text only, no tool-call details. Distinct from <code>/compact</code> slash command</td></tr>
-    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Integration-covered by <code>cli_flags_and_config_defaults.rs</code>; PTY pending — typo'd slash shows nearest match; OMC-namespaced commands surface targeted compat hint</td></tr>
+    <tr><td><code>--compact</code> output flag</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="yes"><strong>Covered</strong></td><td><code>pty_config_discovery::compact_flag_shows_only_final_text</code></td><td>--compact shows answer only, no tool boxes. Live verified via sudorouter.</td></tr>
+    <tr><td>Slash command UX (fuzzy suggest + OMC compat hint)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_config_discovery::slash_command_fuzzy_suggest_on_typo</code></td><td>REPL: /comit → suggests /commit. PTY-only test (needs interactive terminal).</td></tr>
     <tr><td>Informational CLI subcommands (<code>help</code>/<code>version</code>/<code>init</code>/<code>bootstrap</code>/<code>system-prompt</code>/<code>dump-manifests</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="no-api"><strong>Covered</strong></td><td><code>pty_subcommands::help_shows_usage_and_subcommands</code>, <code>version_renders_json</code>, <code>system_prompt_renders</code></td><td>--help, version, system-prompt all verified via PTY.</td></tr>
   </tbody>
 </table>
@@ -640,7 +640,17 @@ coverage starts fresh and is tracked here as the single source.</p>
 
 <h3>Coverage denominator (the 90% target)</h3>
 
-<table>
+<!--
+  Contributor note (2026-07-02): the Total row cells + "90% target" +
+  "Current coverage" span are AUTO-COMPUTED by the <script> at the end
+  of this section from the per-row cells. When you land a new PTY
+  test, edit ONLY the corresponding row's last cell (Covered) — the
+  Total, target, and percentage refresh on next page load. Don't
+  hand-edit the Total row or the prose numbers; they'll be overwritten.
+  History: hand-editing all three places is what caused the "总是忘"
+  drift Ethan flagged.
+-->
+<table id="coverage-denominator">
   <thead><tr><th>Category</th><th>Total</th><th>N/A</th><th>L2 deferred</th><th>In denominator</th><th>Covered</th></tr></thead>
   <tbody>
     <tr><td>Core Conversation</td><td>6</td><td>0</td><td>0</td><td>6</td><td><strong>6</strong></td></tr>
@@ -649,22 +659,66 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td><strong>1</strong></td></tr>
     <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
     <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
-    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
+    <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Background &amp; Parallel</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->
-    <tr><td>Session Management</td><td>9</td><td>0</td><td>0</td><td>9</td><td>0</td></tr>
-    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>3</strong></td></tr>
+    <tr><td>Session Management</td><td>11</td><td>0</td><td>0</td><td>11</td><td><strong>8</strong></td></tr>
+    <tr><td>Config &amp; Discovery</td><td>16</td><td>0</td><td>4</td><td>12</td><td><strong>10</strong></td></tr>
     <tr><td>Diagnostics</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Auth</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td></tr>
     <tr><td>Memory System</td><td>12</td><td>0</td><td>0</td><td>12</td><td><strong>7</strong></td></tr>
-    <tr><th>Total</th><th>89</th><th>1</th><th>8</th><th>80</th><th>26</th></tr>
+    <tr data-role="total"><th>Total</th><th data-col="1">—</th><th data-col="2">—</th><th data-col="3">—</th><th data-col="4">—</th><th data-col="5">—</th></tr>
   </tbody>
 </table>
 
-<p><strong>90% target = 72 features covered</strong> out of the 80 in-denominator
-features. <strong>Current coverage: 26 / 80 (32%).</strong>
+<p><strong>90% target = <span id="cov-target">—</span> features covered</strong> out of the <span id="cov-denominator">—</span> in-denominator
+features. <strong>Current coverage: <span id="cov-numerator">—</span> / <span id="cov-denominator-2">—</span> (<span id="cov-percent">—</span>).</strong>
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
+
+<script>
+  // Coverage denominator auto-calc. Sums the per-category rows'
+  // 5 numeric columns into the Total row + rewrites the "90% target"
+  // and "Current coverage" prose. Keeps a single source of truth
+  // (the per-category rows) and rules out hand-edit drift.
+  //
+  // Contract for future contributors:
+  //   - Per-row cell order MUST stay: Category, Total, N/A,
+  //     L2 deferred, In denominator, Covered.
+  //   - The Total row MUST have data-role="total"; its cells are
+  //     overwritten on load.
+  //   - The prose MUST use the four span IDs below.
+  (function () {
+    var table = document.getElementById('coverage-denominator');
+    if (!table) return;
+    var rows = table.querySelectorAll('tbody tr:not([data-role="total"])');
+    var sums = [0, 0, 0, 0, 0]; // Total, N/A, L2 deferred, In denominator, Covered
+    rows.forEach(function (row) {
+      var cells = row.querySelectorAll('td');
+      for (var i = 0; i < 5 && i + 1 < cells.length; i++) {
+        var n = parseInt((cells[i + 1].textContent || '').trim(), 10);
+        if (!isNaN(n)) sums[i] += n;
+      }
+    });
+    var totalRow = table.querySelector('tr[data-role="total"]');
+    if (totalRow) {
+      for (var c = 1; c <= 5; c++) {
+        var cell = totalRow.querySelector('[data-col="' + c + '"]');
+        if (cell) cell.textContent = String(sums[c - 1]);
+      }
+    }
+    var denom = sums[3];       // In denominator
+    var covered = sums[4];      // Covered
+    var target = Math.ceil(denom * 0.9);
+    var pct = denom > 0 ? Math.round((covered / denom) * 100) : 0;
+    var byId = function (id) { return document.getElementById(id); };
+    if (byId('cov-target')) byId('cov-target').textContent = String(target);
+    if (byId('cov-denominator')) byId('cov-denominator').textContent = String(denom);
+    if (byId('cov-numerator')) byId('cov-numerator').textContent = String(covered);
+    if (byId('cov-denominator-2')) byId('cov-denominator-2').textContent = String(denom);
+    if (byId('cov-percent')) byId('cov-percent').textContent = pct + '%';
+  })();
+</script>
 
 <p>The numerator counts <strong>PTY-fidelity tests only</strong>, per the test
 policy: integration tests (kept for protocol-layer surface like ACP and

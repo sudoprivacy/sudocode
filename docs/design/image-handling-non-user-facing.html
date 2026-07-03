@@ -199,52 +199,61 @@ flowchart TD
     style LEGACY fill:#7f1d1d,stroke:#f59e0b
 </pre>
 
-<h3>Concrete scenarios (real-e2e-verified 2026-07-01)</h3>
+<h3>Concrete scenarios (verified 2026-07-01)</h3>
+
+<p style="opacity:0.85;font-size:0.95em"><strong>Verification legend</strong>: <em>live-e2e</em> = drove the actual scode 0.1.12 binary or sudowork UI end-to-end today; <em>mocked-integration</em> = Rust integration test with mock sudorouter (CI-gated); <em>unit</em> = vitest / cargo test invariant. Every scenario has at least one layer; live-e2e is called out where it exists.</p>
 
 <table>
-  <thead><tr><th>Scenario</th><th>Trigger</th><th>Path taken</th><th>User sees</th></tr></thead>
+  <thead><tr><th>Scenario</th><th>Trigger</th><th>Path taken</th><th>User sees</th><th>How verified</th></tr></thead>
   <tbody>
     <tr>
       <td>A</td>
-      <td>Small photo (≤ 512 KB) + vision model (claude, gemini, gpt-4/5, qwen-vl)</td>
+      <td>Small photo + vision model (claude, gemini, gpt-4/5, qwen-vl)</td>
       <td>sudowork: fast-path pass-through → ACP → scode push_images native (preflight fast-path) → LLM sees image bytes</td>
-      <td>Normal describe response, ~2-5 s. No VLM call. Verified via direct scode probe end-to-end.</td>
+      <td>Normal describe response, ~2-5 s. No VLM call.</td>
+      <td><strong>live-e2e</strong>: scode 0.1.12 + gemini-3-flash-preview + 478 B PNG → 2.9 s, response correctly named shapes+colors.</td>
     </tr>
     <tr>
       <td>B</td>
-      <td>Photo up to 5 MB + vision model</td>
+      <td>Photo up to 5 MB + vision model (or larger PNG that JPEG can compress under 5 MB)</td>
       <td>sudowork: tryReadAsImage downsamples to session cap → ACP → scode preflight_base64 (JPEG quality loop) → LLM sees ≤5 MB bytes</td>
-      <td>Normal response, ~3-7 s. No user-visible size warning.</td>
+      <td>Normal response, ~2-7 s. No user-visible size warning.</td>
+      <td><strong>live-e2e</strong>: scode 0.1.12 + gemini-3-flash-preview + 10.7 MB noisy PNG → 2.1 s, response correctly named 4 quadrant colors.</td>
     </tr>
     <tr>
       <td>C</td>
-      <td>Pathological image (100 MB+, or even q25 still &gt; 5 MB)</td>
+      <td>Pathological image (JPEG q25 still exceeds 5 MB)</td>
       <td>scode preflight throws ImageTooLargeError → VLM-route (gemini-2.5-flash describes) → splice <code>[Image #N: &lt;desc&gt;]</code> text → LLM sees text</td>
-      <td>Response references the image via its description. No user-visible "compressed" warning. Latency +2-5 s for VLM leg.</td>
+      <td>Response references the image via its description. No user-visible "too large" warning.</td>
+      <td><strong>live-e2e</strong>: scode 0.1.12 + gemini-3-flash-preview + 79 MB pure-noise PNG → 8.7 s, normal describe response, no size error. Also <strong>mocked-integration</strong>: <code>acp_wrong_model_vlm_full_roundtrip</code> exercises the ImageTooLarge → VLM branch with mock sudorouter (CI-gated on sudocode #258).</td>
     </tr>
     <tr>
       <td>D</td>
       <td>Any image + text-only model (grok, deepseek, kimi, minimax, llama-3.3)</td>
       <td>scode <code>vision_capable(model)</code> returns <strong>false</strong> (from SSOT cache) → skip preflight → VLM-route → splice text → LLM sees text</td>
-      <td>Response describes what the image shows. <strong>No "当前模型不支持图片分析" tip.</strong> User doesn't know text-only was involved. Verified via <code>acp_wrong_model_routes_via_vlm</code> + real e2e.</td>
+      <td>Response describes what the image shows. <strong>No "当前模型不支持图片分析" tip.</strong> User doesn't know text-only was involved.</td>
+      <td><strong>live-e2e</strong>: scode 0.1.12 + deepseek-v4-flash + 478 B PNG → 77 s (agent chained tool calls); response cited the actual test-image colors (red, cyan, yellow). Also <strong>mocked-integration</strong>: <code>acp_wrong_model_vlm_full_roundtrip</code> in sudocode #258 CI (green).</td>
     </tr>
     <tr>
       <td>E</td>
       <td>Agent screenshots a long ShareOne page via ai-dev-browser inside scode's tool loop</td>
       <td>ai-dev-browser reads <code>AI_DEV_BROWSER_IMAGE_CAP_MAX_BYTES</code> + <code>_MAX_DIMENSION</code> env (injected by sudowork on scode spawn) → apply_image_cap resizes/re-encodes screenshot to fit → scode's LLM turn treats it as scenario A/B/C</td>
-      <td>Agent completes the task normally. No "图片太大了" tip on follow-up actions. Verified via ai-dev-browser v0.12.2 e2e + coord verified.</td>
+      <td>Agent completes the task normally. No "图片太大了" tip on follow-up actions.</td>
+      <td><strong>live-e2e</strong> (env injection): sudowork.log captured <code>[[ACP scode]] Injected AI_DEV_BROWSER_IMAGE_CAP_MAX_BYTES=5242880, MAX_DIMENSION=8000</code> on both live sessions during real send. ai-dev-browser v0.12.2 downstream resize verified by upstream (their tests + coord).</td>
     </tr>
     <tr>
       <td>F</td>
       <td>User opts into economyMode toggle (Settings → System)</td>
       <td>sudowork getImageTargetSize returns 128 KB regardless of capability → tryReadAsImage downsamples aggressively → smaller bytes on the wire</td>
       <td>Lower input-token bill on metered plans. Image detail visibly reduced (fine for OCR-of-labels tasks, worse for photos). Discoverable in Settings.</td>
+      <td><strong>live-e2e</strong> (UI): CDP-drove Settings → System, toggled 图片经济模式, reloaded page, verified persistence (idx=5 switch remains checked). <strong>unit</strong>: 14 vitest cases in <code>tests/unit/imageUtils.test.ts</code> cover getImageTargetSize wire cap under economyMode = true / false / partial-capability.</td>
     </tr>
     <tr>
       <td>G</td>
       <td>Backend that predates the <code>_meta.imageCapability</code> extension (Claude Code / Codex / Qwen without advertisement)</td>
       <td>sudowork: <code>parseImageCapability(init)</code> returns null → falls back to IMAGE_TARGET_RAW_SIZE default → wrong-model gate uses legacy <code>isModelVisionCapable</code> check → emits legacy tip if applicable</td>
       <td>Same UX as pre-Decision-1 for these backends. Graceful degradation (Decision 1's hard rule): no crash, no error banner, just the old behaviour until they advertise.</td>
+      <td><strong>live-observed</strong>: dev app booted against pre-swap scode 0.1.11 (no _meta advertisement) — sudowork behaved exactly per legacy path (no crash, config-driven fallback). <strong>unit</strong>: parseImageCapability null-input cases in <code>tests/unit/imageUtils.test.ts</code>.</td>
     </tr>
   </tbody>
 </table>

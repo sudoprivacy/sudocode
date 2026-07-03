@@ -1,0 +1,25 @@
+#!/bin/bash
+#
+# pkg postinstall: best-effort launch of the scode config wizard in the
+# console user's Terminal right after install. Runs as root during install,
+# so we drop to the logged-in user's GUI session to open Terminal. Failure
+# here never fails the install — the user can always run `scode-setup`.
+
+set +e
+
+consoleUser="$(stat -f "%Su" /dev/console 2>/dev/null)"
+if [ -z "$consoleUser" ] || [ "$consoleUser" = "root" ]; then
+  exit 0
+fi
+
+uid="$(id -u "$consoleUser" 2>/dev/null)"
+if [ -z "$uid" ]; then
+  exit 0
+fi
+
+launchctl asuser "$uid" sudo -u "$consoleUser" /usr/bin/osascript \
+  -e 'tell application "Terminal" to activate' \
+  -e 'tell application "Terminal" to do script "/usr/local/bin/scode-setup"' \
+  >/dev/null 2>&1
+
+exit 0

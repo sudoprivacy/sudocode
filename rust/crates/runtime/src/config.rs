@@ -733,7 +733,10 @@ pub fn default_config_home() -> PathBuf {
     std::env::var_os("SUDO_CODE_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
+            // Windows sets USERPROFILE rather than HOME.
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
         })
         .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
 }

@@ -83,7 +83,8 @@ impl McpServer {
     /// callers can log and exit non-zero.
     pub async fn run(&mut self) -> io::Result<()> {
         loop {
-            let Some(payload) = crate::jsonrpc_transport::read_msg(&mut self.stdin).await? else {
+            let Some(payload) = crate::mcp_ndjson_transport::read_msg(&mut self.stdin).await?
+            else {
                 return Ok(());
             };
 
@@ -141,7 +142,7 @@ impl McpServer {
     async fn write_response(&mut self, response: &JsonRpcResponse<JsonValue>) -> io::Result<()> {
         let body = serde_json::to_vec(response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        crate::jsonrpc_transport::write_msg(&mut self.stdout, &body).await
+        crate::mcp_ndjson_transport::write_msg(&mut self.stdout, &body).await
     }
 
     fn dispatch(&self, request: JsonRpcRequest<JsonValue>) -> JsonRpcResponse<JsonValue> {

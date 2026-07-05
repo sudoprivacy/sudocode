@@ -451,13 +451,27 @@ impl GlobalToolRegistry {
         input: &Value,
         abort_signal: Option<&HookAbortSignal>,
     ) -> Result<String, String> {
+        self.execute_with_abort_and_context(name, input, abort_signal, None)
+    }
+
+    /// Dispatch a tool with the per-call context threaded through from
+    /// the runtime tool loop. Used by [`CliToolExecutor`] to give the
+    /// Agent tool's fork branch access to the parent's assistant
+    /// message (see [`runtime::ToolDispatchContext`]).
+    pub fn execute_with_abort_and_context(
+        &self,
+        name: &str,
+        input: &Value,
+        abort_signal: Option<&HookAbortSignal>,
+        ctx: Option<&ToolDispatchContext>,
+    ) -> Result<String, String> {
         if mvp_tool_specs().iter().any(|spec| spec.name == name) {
             return execute_tool_with_enforcer(
                 self.enforcer.as_ref(),
                 name,
                 input,
                 abort_signal,
-                None,
+                ctx,
             );
         }
         self.plugin_tools

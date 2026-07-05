@@ -13,8 +13,8 @@
 //! `coordinator_system_prompt()` to the system prompt's dynamic
 //! sections. This gives the model a coordinator role directive
 //! (Research → Synthesis → Implementation → Verification, delegate via
-//! Agent + SendMessage, stop via TaskStop) that takes primacy over the
-//! default identity.
+//! Agent, stop via TaskStop) that takes primacy over the default
+//! identity.
 //!
 //! ## Two branches this PTY test covers
 //!

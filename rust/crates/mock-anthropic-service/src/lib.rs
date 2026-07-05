@@ -114,8 +114,6 @@ enum Scenario {
     TaskCreateThenListRoundtrip,
     SleepShortRoundtrip,
     SleepOverMaxRoundtrip,
-    SendMessagePlainRoundtrip,
-    SendMessageBroadcastEmptyRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
 }
 
@@ -148,10 +146,6 @@ impl Scenario {
             "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
             "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
-            "send_message_plain_roundtrip" => Some(Self::SendMessagePlainRoundtrip),
-            "send_message_broadcast_empty_roundtrip" => {
-                Some(Self::SendMessageBroadcastEmptyRoundtrip)
-            }
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
             }
@@ -187,8 +181,6 @@ impl Scenario {
             Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
-            Self::SendMessagePlainRoundtrip => "send_message_plain_roundtrip",
-            Self::SendMessageBroadcastEmptyRoundtrip => "send_message_broadcast_empty_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
         }
     }
@@ -682,28 +674,6 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"duration_ms":400000}"#],
             ),
         },
-        Scenario::SendMessagePlainRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "send_message plain roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_send_message_plain",
-                "SendMessage",
-                &[
-                    r#"{"to":"researcher","summary":"look into flaky test","message":"please investigate the flaky test"}"#,
-                ],
-            ),
-        },
-        Scenario::SendMessageBroadcastEmptyRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "send_message broadcast-empty roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_send_message_broadcast_empty",
-                "SendMessage",
-                &[r#"{"to":"*","summary":"team-wide ping","message":"quick standup ping"}"#],
-            ),
-        },
         Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
             Some((tool_output, is_error)) => final_text_sse(&format!(
                 "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
@@ -1081,38 +1051,6 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 400_000}),
             ),
         },
-        Scenario::SendMessagePlainRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_send_message_plain_final",
-                &format!("send_message plain roundtrip complete: {tool_output}"),
-            ),
-            None => tool_message_response(
-                "msg_send_message_plain_tool",
-                "toolu_send_message_plain",
-                "SendMessage",
-                json!({
-                    "to": "researcher",
-                    "summary": "look into flaky test",
-                    "message": "please investigate the flaky test"
-                }),
-            ),
-        },
-        Scenario::SendMessageBroadcastEmptyRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_send_message_broadcast_empty_final",
-                &format!("send_message broadcast-empty roundtrip complete: {tool_output}"),
-            ),
-            None => tool_message_response(
-                "msg_send_message_broadcast_empty_tool",
-                "toolu_send_message_broadcast_empty",
-                "SendMessage",
-                json!({
-                    "to": "*",
-                    "summary": "team-wide ping",
-                    "message": "quick standup ping"
-                }),
-            ),
-        },
         Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
             Some((tool_output, is_error)) => text_message_response(
                 "msg_fork_recursion_guard_final",
@@ -1162,10 +1100,6 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TaskCreateThenListRoundtrip => "req_task_create_then_list_roundtrip",
         Scenario::SleepShortRoundtrip => "req_sleep_short_roundtrip",
         Scenario::SleepOverMaxRoundtrip => "req_sleep_over_max_roundtrip",
-        Scenario::SendMessagePlainRoundtrip => "req_send_message_plain_roundtrip",
-        Scenario::SendMessageBroadcastEmptyRoundtrip => {
-            "req_send_message_broadcast_empty_roundtrip"
-        }
         Scenario::ForkSubagentRecursionGuardRoundtrip => {
             "req_fork_subagent_recursion_guard_roundtrip"
         }

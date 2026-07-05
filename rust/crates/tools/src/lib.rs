@@ -2550,6 +2550,12 @@ struct AgentJob {
     /// Auth mode detected from env vars at spawn time so the subagent uses the
     /// same credential path (api-key / proxy / subscription) as the parent.
     auth_mode: Option<api::AuthMode>,
+    /// Pre-seeded conversation prefix. Threaded into the child's `Session`
+    /// via [`Session::with_messages`] before the first API call. Empty for
+    /// every non-fork spawn; populated by the fork rebuild in a follow-up
+    /// commit with the parent's assistant message + placeholder
+    /// tool_results (mirroring CC-fork's `buildForkedMessages`).
+    inherited_messages: Vec<ConversationMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -3628,6 +3634,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
         sudocode_config,
         fallback_config,
         auth_mode,
+        inherited_messages: Vec::new(),
     };
     Ok(PreparedAgent { manifest, job })
 }
@@ -3764,7 +3771,7 @@ fn build_agent_runtime(
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
     Ok(ConversationRuntime::new(
-        Session::new(),
+        Session::new().with_messages(job.inherited_messages.clone()),
         api_client,
         tool_executor,
         permission_policy,

@@ -51,6 +51,7 @@ pub mod sandbox;
 mod session;
 pub mod session_control;
 pub use session_control::SessionStore;
+pub mod cron_registry;
 pub mod spawn_task;
 mod sse;
 pub mod stale_base;
@@ -58,7 +59,6 @@ pub mod stale_branch;
 pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;
-pub mod team_cron_registry;
 mod time;
 #[cfg(test)]
 mod trust_resolver;

@@ -17,7 +17,7 @@ use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
 use crate::prompt::SystemPrompt;
-use crate::session::{ContentBlock, ConversationMessage, Session};
+use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageAggregation, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
@@ -122,9 +122,74 @@ pub trait RuntimeObserver {
     }
 }
 
+/// XML tag identifying a fork subagent's inherited directive message.
+/// Populated by `tools::build_fork_child_message` (writer) and consumed
+/// by [`ToolDispatchContext::is_inside_fork_child`] (reader). Living
+/// here — rather than in the tools crate — keeps runtime as the SSOT
+/// for the tag string; tools contains the rules text that wraps it.
+pub const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
+
+/// Per-tool-call context threaded from the runtime tool loop into
+/// [`ToolExecutor::execute_with_context`]. Carries the parent's
+/// in-flight assistant message plus the session history up to the
+/// currently-executing tool_use so the fork subagent path can:
+/// 1. Clone the parent's assistant message into the child's initial
+///    session prefix (matching CC-fork's `buildForkedMessages` shape
+///    for prompt-cache-identical prefixes).
+/// 2. Detect fork-inside-fork recursion via the boilerplate tag left
+///    in the child's own inherited user message.
+///
+/// Every non-fork tool call receives this context but ignores it —
+/// [`ToolExecutor`]'s default `execute_with_context` forwards to
+/// `execute` without reading `ctx`.
+#[derive(Debug, Clone, Default)]
+pub struct ToolDispatchContext {
+    /// The parent's assistant message that emitted the currently-
+    /// executing tool_use. `None` when the caller isn't inside a
+    /// parent's tool loop (test harnesses, direct executor invocations).
+    pub parent_assistant_message: Option<ConversationMessage>,
+    /// The parent session's full message history at dispatch time,
+    /// including the assistant message that just emitted this tool_use.
+    /// Populated by the runtime tool loop from `Session::messages`.
+    /// Consumed by [`Self::is_inside_fork_child`].
+    pub parent_session_messages: Vec<ConversationMessage>,
+}
+
+impl ToolDispatchContext {
+    /// Returns `true` when the parent session's history contains a user
+    /// message tagged with [`FORK_BOILERPLATE_TAG`] — meaning this
+    /// dispatch is happening inside a fork child. Mirrors CC-fork's
+    /// `isInForkChild(messages)` in `forkSubagent.ts`.
+    #[must_use]
+    pub fn is_inside_fork_child(&self) -> bool {
+        let needle = format!("<{FORK_BOILERPLATE_TAG}>");
+        self.parent_session_messages.iter().any(|m| {
+            matches!(m.role, MessageRole::User)
+                && m.blocks.iter().any(|b| match b {
+                    ContentBlock::Text { text } => text.contains(&needle),
+                    _ => false,
+                })
+        })
+    }
+}
+
 /// Trait implemented by tool dispatchers that execute model-requested tools.
 pub trait ToolExecutor: Send {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    /// Dispatch with per-call context. Default forwards to
+    /// [`ToolExecutor::execute`], preserving backwards-compatibility for
+    /// tools that don't need parent state. Override to consult `ctx`
+    /// (e.g. the Agent tool's fork branch reads
+    /// `ctx.parent_assistant_message` to build the child's prefix).
+    fn execute_with_context(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        _ctx: &ToolDispatchContext,
+    ) -> Result<String, ToolError> {
+        self.execute(tool_name, input)
+    }
 
     fn set_abort_signal(&mut self, _abort_signal: HookAbortSignal) {}
 }
@@ -903,11 +968,21 @@ where
             self.session
                 .push_message(assistant_message.clone())
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
-            assistant_messages.push(assistant_message);
+            assistant_messages.push(assistant_message.clone());
 
             if pending_tool_uses.is_empty() {
                 break;
             }
+
+            // Build ToolDispatchContext once per assistant turn: the
+            // parent_assistant_message + session-history snapshot are
+            // identical across all tool_uses emitted in the same
+            // assistant message, so cloning once here (rather than per
+            // tool_use iteration) saves an O(n_tools) allocation.
+            let dispatch_context = ToolDispatchContext {
+                parent_assistant_message: Some(assistant_message),
+                parent_session_messages: self.session.messages.clone(),
+            };
 
             for tool_index in 0..pending_tool_uses.len() {
                 if self.hook_abort_signal.is_aborted() {
@@ -992,11 +1067,13 @@ where
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);
-                        let (mut output, mut is_error) =
-                            match self.tool_executor.execute(&tool_name, &effective_input) {
-                                Ok(output) => (output, false),
-                                Err(error) => (error.to_string(), true),
-                            };
+                        let (mut output, mut is_error) = match self
+                            .tool_executor
+                            .execute_with_context(&tool_name, &effective_input, &dispatch_context)
+                        {
+                            Ok(output) => (output, false),
+                            Err(error) => (error.to_string(), true),
+                        };
                         if self.hook_abort_signal.is_aborted() {
                             output = merge_hook_feedback(pre_hook_result.messages(), output, true);
                             let result_message = ConversationMessage::tool_result(

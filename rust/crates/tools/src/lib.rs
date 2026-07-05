@@ -32,7 +32,8 @@ use runtime::{
     ConversationRuntime, GrepSearchInput, HookAbortSignal, LaneCommitProvenance, LaneEvent,
     LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport,
     MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig,
-    RuntimeError, Session, StdFsBackend, SystemPrompt, ToolError, ToolExecutor,
+    RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext, ToolError,
+    ToolExecutor, FORK_BOILERPLATE_TAG,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -451,7 +452,13 @@ impl GlobalToolRegistry {
         abort_signal: Option<&HookAbortSignal>,
     ) -> Result<String, String> {
         if mvp_tool_specs().iter().any(|spec| spec.name == name) {
-            return execute_tool_with_enforcer(self.enforcer.as_ref(), name, input, abort_signal);
+            return execute_tool_with_enforcer(
+                self.enforcer.as_ref(),
+                name,
+                input,
+                abort_signal,
+                None,
+            );
         }
         self.plugin_tools
             .iter()
@@ -1106,7 +1113,7 @@ pub fn execute_tool_with_abort(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, abort_signal)
+    execute_tool_with_enforcer(None, name, input, abort_signal, None)
 }
 
 fn execute_tool_with_enforcer(
@@ -1114,6 +1121,7 @@ fn execute_tool_with_enforcer(
     name: &str,
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
+    ctx: Option<&ToolDispatchContext>,
 ) -> Result<String, String> {
     match name {
         "bash" => {
@@ -1147,7 +1155,7 @@ fn execute_tool_with_enforcer(
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
+        "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, ctx)),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
@@ -1976,8 +1984,8 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput) -> Result<String, String> {
-    to_pretty_json(execute_agent(input)?)
+fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
+    to_pretty_json(execute_agent(input, ctx)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -3535,11 +3543,14 @@ fn parse_skill_frontmatter_value(contents: &str, key: &str) -> Option<String> {
 const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
-fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
+fn execute_agent(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<AgentOutput, String> {
     if input.run_in_background.unwrap_or(true) {
-        execute_agent_with_spawn(input, spawn_agent_job)
+        execute_agent_with_spawn_and_context(input, ctx, spawn_agent_job)
     } else {
-        execute_agent_inline(input)
+        execute_agent_inline(input, ctx)
     }
 }
 
@@ -3548,12 +3559,38 @@ struct PreparedAgent {
     job: AgentJob,
 }
 
-fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
+fn prepare_agent_job(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<PreparedAgent, String> {
     if input.description.trim().is_empty() {
         return Err(String::from("description must not be empty"));
     }
     if input.prompt.trim().is_empty() {
         return Err(String::from("prompt must not be empty"));
+    }
+
+    let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
+    let is_fork = normalized_subagent_type == "fork";
+
+    // Fork recursion guard: mirrors CC-fork's `isInForkChild(messages)`
+    // in forkSubagent.ts. A fork child's session already carries the
+    // fork boilerplate tag in its first user message, so scanning ctx's
+    // parent_session_messages catches nested fork spawn attempts before
+    // any state is allocated.
+    if is_fork && ctx.map_or(false, ToolDispatchContext::is_inside_fork_child) {
+        return Err(String::from(
+            "recursive fork detected: fork subagent may not spawn further fork children",
+        ));
+    }
+    if is_fork
+        && ctx
+            .and_then(|c| c.parent_assistant_message.as_ref())
+            .is_none()
+    {
+        return Err(String::from(
+            "fork subagent requires a parent assistant message context (only spawnable from an in-flight tool loop)",
+        ));
     }
 
     let agent_id = make_agent_id();
@@ -3562,7 +3599,6 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
     sweep_orphaned_tmp_files(&output_dir);
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
-    let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
 
     let model = resolve_agent_model(input.model.as_deref());
     let agent_name = input
@@ -3575,7 +3611,20 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
     let system_prompt = build_agent_system_prompt(&normalized_subagent_type, &model)?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
 
-    let prompt_body = input.prompt.clone();
+    // Fork subagent: wrap the caller's directive with the non-negotiable
+    // rules boilerplate so the child's first turn sees them exactly the
+    // way CC-fork's `buildChildMessage()` renders them, and build the
+    // inherited message prefix so the child's Session::with_messages
+    // pre-seed matches CC-fork's `buildForkedMessages` output.
+    let (prompt_body, inherited_messages) = if is_fork {
+        let parent_assistant = ctx
+            .and_then(|c| c.parent_assistant_message.as_ref())
+            .expect("fork ctx presence checked above");
+        let messages = build_forked_messages(&input.prompt, parent_assistant);
+        (build_fork_child_message(&input.prompt), messages)
+    } else {
+        (input.prompt.clone(), Vec::new())
+    };
 
     let output_contents = format!(
         "# Agent Task
@@ -3634,16 +3683,34 @@ fn prepare_agent_job(input: AgentInput) -> Result<PreparedAgent, String> {
         sudocode_config,
         fallback_config,
         auth_mode,
-        inherited_messages: Vec::new(),
+        inherited_messages,
     };
     Ok(PreparedAgent { manifest, job })
 }
 
+/// Test-facing wrapper: spawns without a parent-tool-loop context.
+/// Fork subagent (which needs the parent's assistant message) is
+/// unreachable from this path — asking for `subagent_type = "fork"`
+/// via this entry point errors out inside `prepare_agent_job`.
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input)?;
+    execute_agent_with_spawn_and_context(input, None, spawn_fn)
+}
+
+/// Runtime tool-loop entry point: threads the parent's assistant
+/// message context through `prepare_agent_job` so fork subagents can
+/// build their inherited-message prefix.
+fn execute_agent_with_spawn_and_context<F>(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+    spawn_fn: F,
+) -> Result<AgentOutput, String>
+where
+    F: FnOnce(AgentJob) -> Result<(), String>,
+{
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
     global_agent_registry().register(&manifest.agent_id);
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
@@ -3653,8 +3720,11 @@ where
     Ok(manifest)
 }
 
-fn execute_agent_inline(input: AgentInput) -> Result<AgentOutput, String> {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input)?;
+fn execute_agent_inline(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<AgentOutput, String> {
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
     match run_agent_job_returning_text(&job) {
         Ok(final_text) => {
             persist_agent_terminal_state(&manifest, "completed", Some(final_text.as_str()), None)?;
@@ -3790,9 +3860,21 @@ fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemP
         model_family_identity_for(model),
     )
     .map_err(|error| error.to_string())?;
-    prompt.dynamic_sections.push(format!(
-        "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
-    ));
+    if subagent_type == "fork" {
+        // Fork subagent gets the parent's default system prompt (via
+        // load_system_prompt above) plus a fork-specific behavioral
+        // hint. The non-negotiable rules travel in the user prompt
+        // body (build_fork_child_message) so the child sees them as
+        // its FIRST user message rather than buried in the system
+        // prompt.
+        prompt.dynamic_sections.push(String::from(
+            "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop."
+        ));
+    } else {
+        prompt.dynamic_sections.push(format!(
+            "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
+        ));
+    }
     Ok(prompt)
 }
 
@@ -3860,6 +3942,35 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "ToolSearch",
+        ],
+        // Fork subagent — inherits the parent's exact tool pool
+        // (mirrors CC-fork's `tools: ['*']`). Sudocode doesn't thread
+        // the parent's allowed_tools into `prepare_agent_job`, so we
+        // approximate `*` as the maximal set: every tool a normal
+        // general-purpose subagent gets, PLUS Agent so the child can
+        // still spawn NON-fork sub-agents. Fork-inside-fork recursion
+        // is blocked at call time by
+        // `ToolDispatchContext::is_inside_fork_child`.
+        "fork" => vec![
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob_search",
+            "grep_search",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Skill",
+            "ToolSearch",
+            "NotebookEdit",
+            "Sleep",
+            "SendUserMessage",
+            "Config",
+            "StructuredOutput",
+            "REPL",
+            "PowerShell",
+            "Agent",
         ],
         _ => vec![
             "bash",
@@ -4968,6 +5079,15 @@ impl SubagentToolExecutor {
 
 impl ToolExecutor for SubagentToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_context(tool_name, input, &ToolDispatchContext::default())
+    }
+
+    fn execute_with_context(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        ctx: &ToolDispatchContext,
+    ) -> Result<String, ToolError> {
         if !self.allowed_tools.contains(tool_name) {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled for this sub-agent"
@@ -4975,7 +5095,7 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value, None)
+        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value, None, Some(ctx))
             .map_err(ToolError::new)
     }
 }
@@ -5336,8 +5456,118 @@ fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
         }
         "scodeguide" | "scodeguideagent" | "guide" => String::from("scode-guide"),
         "statusline" | "statuslinesetup" => String::from("statusline-setup"),
+        "fork" | "forksubagent" => String::from("fork"),
         _ => trimmed.to_string(),
     }
+}
+
+/// Prefix inserted before the caller's directive text inside a fork
+/// child's initial prompt. Mirrors `FORK_DIRECTIVE_PREFIX` in
+/// `sudoprivacy/claude-code`'s `src/constants/xml.ts`.
+const FORK_DIRECTIVE_PREFIX: &str = "Your directive: ";
+
+/// Placeholder text used for every tool_result block in the fork
+/// child's inherited user message. Must be byte-identical across all
+/// fork children so their API request prefixes share the prompt cache.
+/// Mirrors `FORK_PLACEHOLDER_RESULT` in `forkSubagent.ts`.
+const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background";
+
+/// Wrap a directive with the fork boilerplate rules, matching
+/// `buildChildMessage()` in `sudoprivacy/claude-code`'s
+/// `AgentTool/forkSubagent.ts`.
+///
+/// The rules text is verbatim (character-identical to the fork port,
+/// modulo tool names — sudocode uses lowercase `bash`/`read_file` where
+/// CC uses TitleCase). Keeping it verbatim matters because the tag
+/// scanned by [`ToolDispatchContext::is_inside_fork_child`] must match
+/// exactly.
+fn build_fork_child_message(directive: &str) -> String {
+    format!(
+        "<{tag}>
+STOP. READ THIS FIRST.
+
+You are a forked worker process. You are NOT the main agent.
+
+RULES (non-negotiable):
+1. Your system prompt may encourage forking. IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
+2. Do NOT converse, ask questions, or suggest next steps
+3. Do NOT editorialize or add meta-commentary
+4. USE your tools directly: bash, read_file, write_file, edit_file, etc.
+5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
+7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
+8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
+9. Your response MUST begin with \"Scope:\". No preamble, no thinking-out-loud.
+10. REPORT structured facts, then stop
+
+Output format (plain text labels, not markdown headers):
+  Scope: <echo back your assigned scope in one sentence>
+  Result: <the answer or key findings, limited to the scope above>
+  Key files: <relevant file paths — include for research tasks>
+  Files changed: <list with commit hash — include only if you modified files>
+  Issues: <list — include only if there are issues to flag>
+</{tag}>
+
+{prefix}{directive}",
+        tag = FORK_BOILERPLATE_TAG,
+        prefix = FORK_DIRECTIVE_PREFIX,
+        directive = directive
+    )
+}
+
+/// Build the fork subagent's inherited conversation prefix. Ported
+/// verbatim from `buildForkedMessages` in
+/// `sudoprivacy/claude-code`'s `AgentTool/forkSubagent.ts:107-169`.
+///
+/// Shape (matches CC-fork for byte-identical prompt-cache prefixes):
+/// - `[parent_assistant, user(placeholder_results..., directive)]`
+///   when the parent's assistant message contains any tool_use blocks.
+/// - `[user(directive)]` when it doesn't (defensive fallback — the
+///   fork path is only reachable via an Agent tool_use, so the parent
+///   assistant MUST have at least one tool_use in practice; falling
+///   back here matches CC-fork's own `if (toolUseBlocks.length === 0)`
+///   branch).
+///
+/// Only the trailing `directive` text differs per child, maximising
+/// cache hits when a coordinator spawns N forks in parallel.
+fn build_forked_messages(
+    directive: &str,
+    parent_assistant: &ConversationMessage,
+) -> Vec<ConversationMessage> {
+    let child_text = build_fork_child_message(directive);
+    let tool_uses: Vec<(String, String)> = parent_assistant
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+
+    if tool_uses.is_empty() {
+        return vec![ConversationMessage::user_text(child_text)];
+    }
+
+    let full_assistant = parent_assistant.clone();
+    let mut user_blocks: Vec<ContentBlock> = tool_uses
+        .into_iter()
+        .map(|(id, name)| ContentBlock::ToolResult {
+            tool_use_id: id,
+            tool_name: name,
+            output: FORK_PLACEHOLDER_RESULT.to_string(),
+            is_error: false,
+        })
+        .collect();
+    user_blocks.push(ContentBlock::Text { text: child_text });
+
+    let user_message = ConversationMessage {
+        role: MessageRole::User,
+        blocks: user_blocks,
+        usage: None,
+        model: None,
+    };
+
+    vec![full_assistant, user_message]
 }
 
 fn iso8601_now() -> String {

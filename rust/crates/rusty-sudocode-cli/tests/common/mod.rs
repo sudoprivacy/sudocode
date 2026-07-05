@@ -329,7 +329,13 @@ fn spawn_with_workspace(
     // bash) need to operate in the workspace where fixture files live.
     let workspace_root = workspace.root.display().to_string();
 
-    let mut cmd = format!("cd {} && exec env", shell_quote(&workspace_root));
+    // Use /usr/bin/env (full POSIX path) rather than bare `env` so we
+    // do NOT rely on sh's PATH lookup. On Windows sh (Git Bash),
+    // sh receives PATH in Windows format (semi-colon separated with
+    // C:\ paths) and can't find `env` — the resulting `exec: env: not
+    // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
+    // same way on Linux, macOS, and Git Bash on Windows.
+    let mut cmd = format!("cd {} && exec /usr/bin/env", shell_quote(&workspace_root));
     cmd.push_str(&format!(
         " SUDO_CODE_CONFIG_HOME={}",
         shell_quote(&effective_config_home)
@@ -349,9 +355,52 @@ fn spawn_with_workspace(
         cmd.push_str(&format!(" {}", shell_quote(arg)));
     }
 
-    let mut sess = PtySession::spawn("sh", &["-c", &cmd]).expect("spawn scode");
+    let sh = resolve_sh();
+    let mut sess = PtySession::spawn(&sh, &["-c", &cmd]).expect("spawn scode");
     sess.set_default_timeout(timeout);
     sess
+}
+
+/// Resolve the `sh` binary to the full path portable_pty needs.
+///
+/// On Unix this is trivially `"sh"` — the CreateProcess-equivalent
+/// (posix_spawn) does PATH resolution. On Windows, portable_pty's
+/// `CommandBuilder::new("sh")` hands the raw name to CreateProcessW,
+/// which does NOT look up PATH; the child spawn then fails with
+/// `os error 2` ("system cannot find the specified file"). Resolve
+/// against Git for Windows' bundled `sh.exe` first, then fall back to
+/// PATH scanning so contributors with a different sh installation
+/// (WSL, MSYS2, chocolatey) are still covered.
+fn resolve_sh() -> String {
+    #[cfg(unix)]
+    {
+        String::from("sh")
+    }
+    #[cfg(windows)]
+    {
+        let candidates = [
+            "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
+            "C:\\Program Files\\Git\\bin\\sh.exe",
+            "C:\\Program Files (x86)\\Git\\usr\\bin\\sh.exe",
+        ];
+        for candidate in candidates {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        if let Some(path_env) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_env) {
+                let candidate = dir.join("sh.exe");
+                if candidate.exists() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+        // Last resort — will produce a clear "os error 2" spawn
+        // failure rather than a silent hang, and matches historical
+        // Linux CI behaviour.
+        String::from("sh")
+    }
 }
 
 /// Shell-quote a string so it's safe to embed in `sh -c "..."`.
@@ -378,7 +427,8 @@ pub fn spawn_scode_in_dir(
         for arg in args {
             cmd.push_str(&format!(" {}", shell_quote(arg)));
         }
-        let mut sess = PtySession::spawn("sh", &["-c", &cmd])?;
+        let sh = resolve_sh();
+        let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
         sess.set_default_timeout(timeout);
         Ok(sess)
     }

@@ -76,6 +76,18 @@ pub mod testing {
         crate::prepare_agent_job(input, None).map(|_| ())
     }
 
+    /// Test seam for `build_forked_messages`. Produces the same
+    /// ConversationMessage list that a real fork spawn would inject
+    /// into its child's Session before the first API turn — the
+    /// callers just want to inspect the shape for
+    /// prompt-cache-prefix assertions.
+    pub fn build_forked_messages_for_test(
+        directive: &str,
+        parent_assistant: &runtime::ConversationMessage,
+    ) -> Vec<runtime::ConversationMessage> {
+        crate::build_forked_messages(directive, parent_assistant)
+    }
+
     /// Test seam: does the summary-threshold gate — mirrors the
     /// production `maybe_summarize_agent_result` decision but does
     /// NOT invoke the LLM summarizer. Instead, when the text

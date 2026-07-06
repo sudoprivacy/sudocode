@@ -57,6 +57,7 @@ fn base_view<'a>() -> TaskNotificationView<'a> {
         status: "completed",
         summary: "Agent \"Investigate auth bug\" completed",
         result: None,
+        color: None,
         duration_ms: None,
         tool_uses: None,
         total_tokens: None,
@@ -147,6 +148,30 @@ fn shape_omits_usage_entirely_when_all_counters_missing() {
         !xml.contains("<usage>"),
         "empty <usage> tag must be omitted"
     );
+}
+
+#[test]
+fn shape_color_tag_emitted_when_set_and_omitted_when_none() {
+    // Color-set path — palette name renders inside `<color>…</color>`
+    // between the result and the usage tags.
+    let with_color = TaskNotificationView {
+        color: Some("cyan"),
+        result: Some("done"),
+        ..base_view()
+    };
+    let xml = render_task_notification(&with_color);
+    assert!(xml.contains("<color>cyan</color>"));
+    let result_at = xml.find("</result>").expect("result present");
+    let color_at = xml.find("<color>").expect("color present");
+    assert!(
+        result_at < color_at,
+        "color tag must follow result tag"
+    );
+
+    // Color-unset path — no `<color>` tag anywhere.
+    let without_color = base_view();
+    let xml = render_task_notification(&without_color);
+    assert!(!xml.contains("<color>"), "no color -> no tag");
 }
 
 #[test]

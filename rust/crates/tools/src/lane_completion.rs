@@ -113,6 +113,7 @@ mod tests {
             error: None,
             result: None,
             result_full_path: None,
+            color: None,
         }
     }
 

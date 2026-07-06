@@ -1729,6 +1729,7 @@ fn render_manifest_task_notification(manifest: &AgentOutput) -> String {
         status: normalized_status,
         summary: summary.as_str(),
         result: manifest.result.as_deref(),
+        color: manifest.color.as_deref(),
         duration_ms,
         tool_uses: None,
         total_tokens: None,
@@ -3230,6 +3231,13 @@ struct AgentOutput {
         skip_serializing_if = "Option::is_none"
     )]
     result_full_path: Option<String>,
+    /// Palette color assigned to this agent — one of
+    /// `runtime::agent_color::AGENT_COLOR_PALETTE`. Populated in
+    /// `prepare_agent_job` so every spawned sub-agent has a
+    /// distinguishable label. Rendered as `<color>{name}</color>` in
+    /// the task-notification XML when coordinator mode is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4370,6 +4378,7 @@ fn prepare_agent_job(
     );
     std::fs::write(&output_file, output_contents).map_err(|error| error.to_string())?;
 
+    let assigned_color = runtime::agent_color::assign_agent_color(&agent_id).map(str::to_string);
     let manifest = AgentOutput {
         agent_id,
         name: agent_name,
@@ -4388,6 +4397,7 @@ fn prepare_agent_job(
         error: None,
         result: None,
         result_full_path: None,
+        color: assigned_color,
     };
     write_agent_manifest(&manifest)?;
 

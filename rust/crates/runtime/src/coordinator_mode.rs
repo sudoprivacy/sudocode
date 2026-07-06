@@ -353,6 +353,11 @@ pub struct TaskNotificationView<'a> {
     /// omitted (matches CC-fork's shape when the agent had no textual
     /// response — e.g. errored before its first turn).
     pub result: Option<&'a str>,
+    /// Palette color assigned to this agent (e.g. `red`, `cyan`).
+    /// When `Some`, a `<color>{name}</color>` tag is emitted so the
+    /// coordinator's UI can render this agent's label distinctly
+    /// from concurrent siblings. `None` -> tag omitted.
+    pub color: Option<&'a str>,
     /// Wall-clock duration in milliseconds. When `None`, the enclosing
     /// `<usage>` tag is omitted unless another counter is populated.
     pub duration_ms: Option<u64>,
@@ -433,6 +438,12 @@ pub fn render_task_notification(view: &TaskNotificationView<'_>) -> String {
         out.push_str("<result>");
         push_xml_escaped(&mut out, result);
         out.push_str("</result>\n");
+    }
+
+    if let Some(color) = view.color {
+        out.push_str("<color>");
+        push_xml_escaped(&mut out, color);
+        out.push_str("</color>\n");
     }
 
     let has_usage =

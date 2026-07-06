@@ -331,3 +331,157 @@ pub fn apply_coordinator_prompt_if_enabled(prompt: &mut SystemPrompt) {
         .dynamic_sections
         .insert(0, coordinator_system_prompt().to_string());
 }
+
+/// Fields required to render a [`task-notification`][render_task_notification]
+/// XML block. Kept as a borrowed view so the `tools` crate (which owns
+/// the concrete `AgentOutput` struct) can map without a cross-crate
+/// type dependency — SRP-clean.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskNotificationView<'a> {
+    /// Opaque agent identifier — becomes `<task-id>{agent_id}</task-id>`.
+    pub agent_id: &'a str,
+    /// Terminal status. Must be one of `completed`, `failed`, `killed`
+    /// to match the shape documented in the coordinator prompt; callers
+    /// map their internal status strings before constructing the view
+    /// via [`normalize_task_notification_status`].
+    pub status: &'a str,
+    /// Human-readable one-line outcome — e.g.
+    /// `Agent "X" completed`, `Agent "X" failed: <err>`, or
+    /// `Agent "X" was stopped`.
+    pub summary: &'a str,
+    /// Agent's final assistant text. When `None`, the `<result>` tag is
+    /// omitted (matches CC-fork's shape when the agent had no textual
+    /// response — e.g. errored before its first turn).
+    pub result: Option<&'a str>,
+    /// Wall-clock duration in milliseconds. When `None`, the enclosing
+    /// `<usage>` tag is omitted unless another counter is populated.
+    pub duration_ms: Option<u64>,
+    /// Count of tool_use blocks the agent executed. `None` skips the
+    /// `<tool_uses>` sub-tag.
+    pub tool_uses: Option<u64>,
+    /// Total input+output tokens the agent burned. `None` skips the
+    /// `<total_tokens>` sub-tag.
+    pub total_tokens: Option<u64>,
+}
+
+/// Map any internal agent-status string onto the terminal set the
+/// coordinator prompt teaches the model: `completed | failed | killed`.
+///
+/// This is the SSOT for the mapping so every notification-emitter uses
+/// the same rules. Rule shape:
+/// - `completed` (case-insensitive) → `completed`
+/// - `failed`, `error`, `errored` → `failed`
+/// - `killed`, `stopped`, `aborted`, `cancelled`, `canceled` → `killed`
+/// - anything else (including `running`, empty) → `failed`
+///
+/// The default-to-failed on unknown status is deliberate: a
+/// notification with `<status>running</status>` would confuse the
+/// coordinator, and `<status>failed</status>` at least surfaces the
+/// unexpected state instead of hiding it.
+#[must_use]
+pub fn normalize_task_notification_status(status: &str) -> &'static str {
+    let lowered = status.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "completed" | "success" | "succeeded" | "done" | "finished" => "completed",
+        "killed" | "stopped" | "aborted" | "cancelled" | "canceled" => "killed",
+        _ => "failed",
+    }
+}
+
+/// Render a `<task-notification>` XML block per the shape documented
+/// in [`coordinator_system_prompt`] (see the ```xml``` fence in
+/// section 2). This is the SSOT — every place that emits a
+/// task-notification MUST route through here so the format never drifts
+/// from what the coordinator prompt teaches the model.
+///
+/// Shape:
+///
+/// ```xml
+/// <task-notification>
+/// <task-id>{agent_id}</task-id>
+/// <status>{completed|failed|killed}</status>
+/// <summary>{human-readable}</summary>
+/// <result>{final assistant text}</result>
+/// <usage><total_tokens>N</total_tokens><tool_uses>N</tool_uses><duration_ms>N</duration_ms></usage>
+/// </task-notification>
+/// ```
+///
+/// `<result>` and `<usage>` are optional. `<usage>` is emitted only if
+/// at least one of the three counters is present; each sub-tag is
+/// individually omitted when its field is `None`. All text content is
+/// XML-escaped so results containing `&`, `<`, `>`, `"`, `'` don't
+/// break the enclosing XML — mirrors CC-fork's `renderTaskNotification`
+/// contract.
+#[must_use]
+pub fn render_task_notification(view: &TaskNotificationView<'_>) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("<task-notification>\n");
+
+    out.push_str("<task-id>");
+    push_xml_escaped(&mut out, view.agent_id);
+    out.push_str("</task-id>\n");
+
+    out.push_str("<status>");
+    push_xml_escaped(&mut out, view.status);
+    out.push_str("</status>\n");
+
+    out.push_str("<summary>");
+    push_xml_escaped(&mut out, view.summary);
+    out.push_str("</summary>\n");
+
+    if let Some(result) = view.result {
+        out.push_str("<result>");
+        push_xml_escaped(&mut out, result);
+        out.push_str("</result>\n");
+    }
+
+    let has_usage =
+        view.duration_ms.is_some() || view.tool_uses.is_some() || view.total_tokens.is_some();
+    if has_usage {
+        out.push_str("<usage>");
+        if let Some(n) = view.total_tokens {
+            out.push_str(&format!("<total_tokens>{n}</total_tokens>"));
+        }
+        if let Some(n) = view.tool_uses {
+            out.push_str(&format!("<tool_uses>{n}</tool_uses>"));
+        }
+        if let Some(n) = view.duration_ms {
+            out.push_str(&format!("<duration_ms>{n}</duration_ms>"));
+        }
+        out.push_str("</usage>\n");
+    }
+
+    out.push_str("</task-notification>");
+    out
+}
+
+/// Coord-mode-gated variant of [`render_task_notification`]. Returns
+/// `Some(xml)` when [`is_coordinator_mode`] is on, `None` otherwise.
+///
+/// Non-coordinator sessions keep whatever JSON manifest their caller
+/// already emits — this preserves backwards-compatibility with tools
+/// that consume `TaskOutput` in non-coordinator mode.
+#[must_use]
+pub fn render_task_notification_if_enabled(view: &TaskNotificationView<'_>) -> Option<String> {
+    if is_coordinator_mode() {
+        Some(render_task_notification(view))
+    } else {
+        None
+    }
+}
+
+/// XML-escape `s` and append it to `out`. Minimal 5-entity escape
+/// (`&`, `<`, `>`, `"`, `'`) — sufficient for text content and
+/// attribute values in the `<task-notification>` shape.
+fn push_xml_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+}

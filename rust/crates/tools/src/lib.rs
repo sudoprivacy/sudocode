@@ -1548,7 +1548,7 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
     if !block {
         // Non-blocking: read manifest from disk and return current state.
         if let Ok(manifest) = read_manifest_from_store(agent_id) {
-            return to_pretty_json(agent_output_json(&manifest, "success"));
+            return format_agent_output(&manifest, "success");
         }
         // Try reading the manifest even if status is still running.
         let store = agent_store_dir()?;
@@ -1557,7 +1557,7 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
             Ok(contents) => {
                 let manifest: AgentOutput =
                     serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-                to_pretty_json(agent_output_json(&manifest, "not_ready"))
+                format_agent_output(&manifest, "not_ready")
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(format!("agent not found: {agent_id}"))
@@ -1569,7 +1569,7 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
     // Blocking: use condvar registry for instant wake.
     let timeout = Duration::from_millis(timeout_ms.min(agent_await_timeout_cap_ms()));
     match global_agent_registry().await_agent(agent_id, timeout) {
-        Ok(manifest) => to_pretty_json(agent_output_json(&manifest, "success")),
+        Ok(manifest) => format_agent_output(&manifest, "success"),
         Err(e) if e.contains("timed out") => to_pretty_json(json!({
             "agent_id": agent_id,
             "status": "running",
@@ -1577,6 +1577,92 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
         })),
         Err(e) => Err(e),
     }
+}
+
+/// Route the manifest through the coordinator-mode-gated
+/// `<task-notification>` XML renderer when coordinator mode is on;
+/// otherwise fall back to the legacy JSON manifest shape.
+///
+/// The XML variant fires only for TERMINAL manifests (i.e. status
+/// mapping to one of `completed | failed | killed`) — mid-flight polls
+/// (`retrieval_status == "not_ready"`) still receive JSON because the
+/// XML shape has no `<status>running</status>` slot.
+fn format_agent_output(manifest: &AgentOutput, retrieval_status: &str) -> Result<String, String> {
+    if runtime::coordinator_mode::is_coordinator_mode()
+        && is_terminal_agent_status(&manifest.status)
+    {
+        return Ok(render_manifest_task_notification(manifest));
+    }
+    to_pretty_json(agent_output_json(manifest, retrieval_status))
+}
+
+/// Map an internal manifest status onto the terminal set. Mirrors
+/// `runtime::coordinator_mode::normalize_task_notification_status` but
+/// returns a bool (only terminal states drive the XML path).
+fn is_terminal_agent_status(status: &str) -> bool {
+    !matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "" | "running" | "working" | "pending"
+    )
+}
+
+/// Build a `<task-notification>` XML block from a terminal `AgentOutput`
+/// manifest. Delegates the actual XML shape to
+/// [`runtime::coordinator_mode::render_task_notification`] (SSOT).
+fn render_manifest_task_notification(manifest: &AgentOutput) -> String {
+    let normalized_status =
+        runtime::coordinator_mode::normalize_task_notification_status(&manifest.status);
+    let summary = build_notification_summary(manifest, normalized_status);
+    let duration_ms = compute_notification_duration_ms(manifest);
+    let view = runtime::coordinator_mode::TaskNotificationView {
+        agent_id: manifest.agent_id.as_str(),
+        status: normalized_status,
+        summary: summary.as_str(),
+        result: manifest.result.as_deref(),
+        duration_ms,
+        tool_uses: None,
+        total_tokens: None,
+    };
+    runtime::coordinator_mode::render_task_notification(&view)
+}
+
+/// Human-readable one-line summary for the notification's `<summary>`
+/// tag. Shape mirrors CC-fork's `renderTaskNotification` output:
+/// - `completed` → `Agent "{description}" completed`
+/// - `failed`    → `Agent "{description}" failed: {error}`
+/// - `killed`    → `Agent "{description}" was stopped`
+///
+/// The status here is the normalized (three-value) form; caller must
+/// pre-normalize via [`runtime::coordinator_mode::normalize_task_notification_status`].
+fn build_notification_summary(manifest: &AgentOutput, normalized_status: &str) -> String {
+    let label = if manifest.description.trim().is_empty() {
+        manifest.name.as_str()
+    } else {
+        manifest.description.as_str()
+    };
+    match normalized_status {
+        "completed" => format!("Agent \"{label}\" completed"),
+        "killed" => format!("Agent \"{label}\" was stopped"),
+        _ => match manifest.error.as_deref() {
+            Some(err) if !err.trim().is_empty() => {
+                format!("Agent \"{label}\" failed: {err}")
+            }
+            _ => format!("Agent \"{label}\" failed"),
+        },
+    }
+}
+
+/// Compute wall-clock duration in ms from the manifest's `created_at`
+/// and `completed_at` timestamps. Both are produced by
+/// [`iso8601_now`], which despite the name currently emits Unix-epoch
+/// SECONDS as a decimal string. Returns `None` when either timestamp
+/// is missing or unparseable — the caller then omits the
+/// `<duration_ms>` tag.
+fn compute_notification_duration_ms(manifest: &AgentOutput) -> Option<u64> {
+    let start_secs: u64 = manifest.created_at.parse().ok()?;
+    let end_secs: u64 = manifest.completed_at.as_deref()?.parse().ok()?;
+    let delta = end_secs.saturating_sub(start_secs);
+    Some(delta.saturating_mul(1000))
 }
 
 fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {

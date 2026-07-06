@@ -128,21 +128,21 @@ pub use mcp_client::{
     McpClientAuth, McpClientBootstrap, McpClientTransport, McpManagedProxyTransport,
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,
 };
+pub use mcp_connection::McpConnection;
 pub use mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase, McpLifecycleState,
     McpLifecycleValidator, McpPhaseResult,
 };
 pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
-pub use mcp_connection::McpConnection;
-pub use mcp_stdio::{spawn_mcp_stdio_process, McpStdioProcess};
 pub use mcp_server_manager::{
     JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure,
     McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
-    McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents, McpServerManager,
-    McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult,
-    McpToolDiscoveryReport, UnsupportedMcpServer,
+    McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents,
+    McpServerManager, McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams,
+    McpToolCallResult, McpToolDiscoveryReport, UnsupportedMcpServer,
 };
+pub use mcp_stdio::{spawn_mcp_stdio_process, McpStdioProcess};
 pub use oauth::{
     clear_oauth_credentials, clear_oauth_credentials_from_keyring, clear_oauth_credentials_with,
     code_challenge_s256, credentials_path, generate_pkce_pair, generate_state,

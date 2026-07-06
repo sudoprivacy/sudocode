@@ -302,12 +302,13 @@ async fn run_headers_helper(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let headers: BTreeMap<String, String> = serde_json::from_str(stdout.trim()).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("headersHelper stdout is not a JSON object of string→string: {error}"),
-        )
-    })?;
+    let headers: BTreeMap<String, String> =
+        serde_json::from_str(stdout.trim()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("headersHelper stdout is not a JSON object of string→string: {error}"),
+            )
+        })?;
     Ok(headers)
 }
 
@@ -375,9 +376,14 @@ mod tests {
                     }
                 }),
             )
-            .route("/message", post(|| async { axum::http::StatusCode::ACCEPTED }));
+            .route(
+                "/message",
+                post(|| async { axum::http::StatusCode::ACCEPTED }),
+            );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -400,8 +406,9 @@ mod tests {
             headers_helper: None,
             auth: McpClientAuth::None,
         };
-        let mut connection =
-            McpSseConnection::connect(&transport, "mock-sse").await.expect("connect");
+        let mut connection = McpSseConnection::connect(&transport, "mock-sse")
+            .await
+            .expect("connect");
 
         let initialized = connection
             .initialize(
@@ -449,12 +456,14 @@ mod tests {
         let app = Router::new().route(
             "/sse",
             get(|| async {
-                Sse::new(futures::stream::iter(vec![
-                    Ok::<Event, io::Error>(Event::default().event("message").data("hello")),
-                ]))
+                Sse::new(futures::stream::iter(vec![Ok::<Event, io::Error>(
+                    Event::default().event("message").data("hello"),
+                )]))
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -467,6 +476,9 @@ mod tests {
             auth: McpClientAuth::None,
         };
         let result = McpSseConnection::connect(&transport, "mock-sse").await;
-        assert!(result.is_err(), "connect should fail without an endpoint event");
+        assert!(
+            result.is_err(),
+            "connect should fail without an endpoint event"
+        );
     }
 }

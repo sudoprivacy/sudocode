@@ -562,9 +562,7 @@ impl McpServerManager {
                 unsupported_servers.push(UnsupportedMcpServer {
                     server_name: server_name.clone(),
                     transport,
-                    reason: format!(
-                        "transport {transport:?} is not supported by McpServerManager"
-                    ),
+                    reason: format!("transport {transport:?} is not supported by McpServerManager"),
                 });
             }
         }

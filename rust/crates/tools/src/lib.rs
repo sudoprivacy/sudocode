@@ -1070,10 +1070,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TaskList",
-            description: "List all background tasks and their current status.",
+            description: "List all background tasks and background sub-agents with their current status. Sub-agents come from the Agent tool and appear under `background_agents` in the response. Use `backgrounded_only=true` to narrow to sub-agents whose status is `backgrounded` or `running` — the useful set when the coordinator wants to switch between live workers.",
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "backgrounded_only": {
+                        "type": "boolean",
+                        "description": "When true, `background_agents` includes only sub-agents whose status is `backgrounded` or `running`. Defaults to false (all statuses)."
+                    }
+                },
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -1572,7 +1577,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
     }
 }
 
-fn run_task_list(_input: Value) -> Result<String, String> {
+fn run_task_list(input: Value) -> Result<String, String> {
     let registry = global_task_registry();
     let tasks: Vec<_> = registry
         .list(None)
@@ -1589,10 +1594,92 @@ fn run_task_list(_input: Value) -> Result<String, String> {
             })
         })
         .collect();
+
+    // Sub-agents (Agent tool spawns) live in a separate registry —
+    // read them off disk so `TaskList` can be a single stop for
+    // "everything running in this session," matching the downgraded
+    // Background Agent Selector plan (§4.6). `backgrounded_only`
+    // narrows to agents whose status is `backgrounded` or `running`
+    // — exactly the set a coordinator would want to switch between.
+    let backgrounded_only = input
+        .get("backgrounded_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let agents = list_agent_snapshots_from_store(backgrounded_only).unwrap_or_default();
+
     to_pretty_json(json!({
         "tasks": tasks,
-        "count": tasks.len()
+        "count": tasks.len(),
+        "background_agents": agents,
+        "background_agent_count": agents.len(),
     }))
+}
+
+/// Sub-agent snapshot suitable for `TaskList` output + a future
+/// `/tasks list --backgrounded` slash-command view. Compact JSON
+/// shape so the coordinator LLM can scan it without paying a large
+/// context cost.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSnapshot {
+    pub agent_id: String,
+    pub status: String,
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub created_at: String,
+}
+
+/// Read every `<agent_id>.json` manifest from the agent store and
+/// return snapshots. When `backgrounded_only == true`, only agents
+/// with status `backgrounded` or `running` are included. Sorted by
+/// `created_at` DESCENDING so the most recent agents surface first
+/// (matches "you probably want the one you just launched" heuristic).
+///
+/// Errors accessing the directory itself surface as `Err`. Errors
+/// reading individual manifests are logged-then-skipped so a
+/// corrupt file doesn't wipe the whole list.
+pub fn list_agent_snapshots_from_store(
+    backgrounded_only: bool,
+) -> Result<Vec<AgentSnapshot>, String> {
+    let store = agent_store_dir()?;
+    let read_dir = match std::fs::read_dir(&store) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read agent store {}: {e}", store.display())),
+    };
+    let mut out = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
+            continue;
+        };
+        if backgrounded_only {
+            let status = manifest.status.trim().to_ascii_lowercase();
+            if status != "backgrounded" && status != "running" {
+                continue;
+            }
+        }
+        out.push(AgentSnapshot {
+            agent_id: manifest.agent_id,
+            status: manifest.status,
+            name: manifest.name,
+            description: manifest.description,
+            subagent_type: manifest.subagent_type,
+            color: manifest.color,
+            created_at: manifest.created_at,
+        });
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
 }
 
 #[allow(clippy::needless_pass_by_value)]

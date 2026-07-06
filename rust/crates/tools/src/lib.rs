@@ -74,6 +74,34 @@ pub mod testing {
         };
         crate::prepare_agent_job(input, None).map(|_| ())
     }
+
+    /// Test seam: does the summary-threshold gate — mirrors the
+    /// production `maybe_summarize_agent_result` decision but does
+    /// NOT invoke the LLM summarizer. Instead, when the text
+    /// exceeds the threshold, it (a) writes the full text to the
+    /// `.full.md` sibling, (b) updates the on-disk manifest with
+    /// `result_full_path`, and (c) returns `(placeholder_summary,
+    /// Some(full_path))`. Tests can then assert the sibling file
+    /// exists + the manifest reflects the pointer without paying
+    /// for a live LLM.
+    pub fn maybe_summarize_for_test(
+        manifest_json_path: &std::path::Path,
+        full_text: &str,
+        placeholder_summary: &str,
+    ) -> Result<(String, Option<std::path::PathBuf>), String> {
+        let raw = std::fs::read_to_string(manifest_json_path)
+            .map_err(|e| format!("read manifest {}: {e}", manifest_json_path.display()))?;
+        let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let Some(threshold) = crate::agent_summary_threshold_chars() else {
+            return Ok((full_text.to_string(), None));
+        };
+        if full_text.chars().count() <= threshold {
+            return Ok((full_text.to_string(), None));
+        }
+        let full_path = crate::write_full_result_and_update_manifest(&manifest, full_text)?;
+        crate::record_full_result_path(&manifest, &full_path)?;
+        Ok((placeholder_summary.to_string(), Some(full_path)))
+    }
 }
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -3176,6 +3204,18 @@ struct AgentOutput {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<String>,
+    /// Path to the `.full.md` sibling file containing the FULL
+    /// unabridged assistant output. Populated only when the result
+    /// exceeded `SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS` and the
+    /// summarizer replaced the parent-visible `result` with a
+    /// condensed version. When absent, `result` IS the full text
+    /// (no summarization happened).
+    #[serde(
+        rename = "resultFullPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    result_full_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4333,6 +4373,7 @@ fn prepare_agent_job(
         derived_state: String::from("working"),
         error: None,
         result: None,
+        result_full_path: None,
     };
     write_agent_manifest(&manifest)?;
 
@@ -4628,7 +4669,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
     let workspace_root = std::env::current_dir().unwrap_or_default();
-    run_multi_turn_loop(
+    let final_text = run_multi_turn_loop(
         &job.manifest.agent_id,
         &workspace_root,
         job.abort_signal.clone(),
@@ -4638,7 +4679,172 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             let summary = run_single_turn(&mut conv_runtime, prompt)?;
             Ok(final_assistant_text(&summary))
         },
+    )?;
+    // If the worker's final text exceeds the summary threshold, save
+    // the FULL text to a sibling `.full.md` file (so the parent can
+    // `read_file` the raw output) and condense the parent-facing
+    // return via a summarizer sub-turn. Aborted mid-work?
+    // Skip summarization — abort semantics are "stop everything now."
+    if job.abort_signal.is_aborted() {
+        return Ok(final_text);
+    }
+    let (parent_text, full_path) = match maybe_summarize_agent_result(job, &final_text) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("sudocode: agent summarizer failed ({err}); falling back to full text");
+            (final_text.clone(), None)
+        }
+    };
+    if let Some(path) = full_path {
+        // Record the sibling path on the manifest so
+        // `persist_agent_terminal_state` and downstream consumers can
+        // point to the unabridged output. Best-effort: any IO error
+        // is logged but not fatal — the parent still receives the
+        // summary via the return value.
+        if let Err(err) = record_full_result_path(&job.manifest, &path) {
+            eprintln!("sudocode: failed to record full-result path on manifest: {err}");
+        }
+    }
+    Ok(parent_text)
+}
+
+/// Write `full_text` to `<agent_id>.full.md` sibling next to the
+/// agent's normal `.md` output and update the on-disk manifest with
+/// a `result_full_path` pointer.
+fn write_full_result_and_update_manifest(
+    manifest: &AgentOutput,
+    full_text: &str,
+) -> Result<std::path::PathBuf, String> {
+    let output_path = std::path::PathBuf::from(&manifest.output_file);
+    let sibling = output_path.with_extension("full.md");
+    let contents = format!(
+        "# Agent Task — full unabridged final response\n\n\
+         - agent_id: {agent_id}\n\
+         - subagent_type: {subagent_type}\n\n\
+         ## Final response (verbatim)\n\n{full_text}\n",
+        agent_id = manifest.agent_id,
+        subagent_type = manifest
+            .subagent_type
+            .as_deref()
+            .unwrap_or("general-purpose"),
+    );
+    std::fs::write(&sibling, contents)
+        .map_err(|e| format!("write full-result sibling {}: {e}", sibling.display()))?;
+    Ok(sibling)
+}
+
+/// Update the persisted manifest's `result_full_path` to the given
+/// sibling path. Reads-modifies-writes the .json manifest so a race
+/// with `persist_agent_terminal_state` doesn't clobber the update:
+/// the terminal-state writer starts from a fresh clone anyway, so
+/// this call must happen BEFORE terminal-state persistence to be
+/// preserved.
+fn record_full_result_path(
+    manifest: &AgentOutput,
+    full_path: &std::path::Path,
+) -> Result<(), String> {
+    let path_str = full_path.display().to_string();
+    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let mut updated: AgentOutput = if let Some(text) = existing {
+        serde_json::from_str(&text).unwrap_or_else(|_| manifest.clone())
+    } else {
+        manifest.clone()
+    };
+    updated.result_full_path = Some(path_str);
+    write_agent_manifest(&updated)
+}
+
+fn maybe_summarize_agent_result(
+    job: &AgentJob,
+    full_text: &str,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
+    let Some(threshold) = agent_summary_threshold_chars() else {
+        return Ok((full_text.to_string(), None));
+    };
+    if full_text.chars().count() <= threshold {
+        return Ok((full_text.to_string(), None));
+    }
+    // Over threshold: persist full text alongside + summarize.
+    let full_path = write_full_result_and_update_manifest(&job.manifest, full_text)?;
+    let summary = run_agent_summarizer(job, full_text)?;
+    Ok((summary, Some(full_path)))
+}
+
+/// Default summary threshold in CHARS (not bytes — we count via
+/// `chars().count()` so multi-byte UTF-8 doesn't inflate the count).
+/// Mirrors CC-fork's ~8 KB heuristic — a result any longer than this
+/// starts to bloat the parent's context per delegated task.
+const DEFAULT_AGENT_SUMMARY_THRESHOLD_CHARS: usize = 8000;
+
+/// Env var override for the summary threshold. Setting to `0`
+/// disables summarization entirely (parent always receives the raw
+/// text — useful for debugging or for callers who explicitly want
+/// verbatim results).
+pub const AGENT_SUMMARY_THRESHOLD_ENV: &str = "SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS";
+
+/// Read the summary threshold. `None` -> feature disabled (either
+/// env=0 or explicit opt-out). `Some(n)` -> results with more than
+/// `n` chars get summarized.
+#[must_use]
+pub fn agent_summary_threshold_chars() -> Option<usize> {
+    match std::env::var(AGENT_SUMMARY_THRESHOLD_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(_) => Some(DEFAULT_AGENT_SUMMARY_THRESHOLD_CHARS),
+        },
+        Err(_) => Some(DEFAULT_AGENT_SUMMARY_THRESHOLD_CHARS),
+    }
+}
+
+/// Condense `final_text` via a one-turn LLM call when it exceeds the
+/// configured threshold. Returns the summary on the summarize path,
+/// the original text otherwise. Errors bubble up as `Err` so the
+/// caller can log + fall back to the raw text (better to ship
+/// something than nothing).
+///
+/// The summarizer reuses the sub-agent's provider config (same
+/// Spin a summarizer ConversationRuntime that reuses `job`'s
+/// provider config + auth but has an empty tool set + a specialized
+/// system prompt, then run ONE turn asking for a ≤500-word summary.
+fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, String> {
+    let model = job
+        .manifest
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+    let empty_tools: BTreeSet<String> = BTreeSet::new();
+    let api_client = ProviderRuntimeClient::new_with_config(
+        model,
+        empty_tools.clone(),
+        &job.sudocode_config,
+        &job.fallback_config,
+        job.auth_mode,
+    )?;
+    let permission_policy = agent_permission_policy();
+    let tool_executor = SubagentToolExecutor::new(empty_tools);
+    let mut system_prompt = SystemPrompt::default();
+    system_prompt.dynamic_sections.push(String::from(
+        "You are a summarizer. You will be given the full output of a background sub-agent. \
+         Summarize it for the parent coordinator in 500 words or fewer. Preserve every concrete \
+         file path, line number, error message, PR number, commit hash, and command that appears \
+         verbatim — the parent needs those to act. Drop the padding, restatement, and \
+         chain-of-thought. Reply with ONLY the summary, no preamble.",
+    ));
+    let mut summarizer = ConversationRuntime::new(
+        Session::new(),
+        api_client,
+        tool_executor,
+        permission_policy,
+        system_prompt,
     )
+    .with_session_known_date(runtime::today_local())
+    .with_max_iterations(2);
+    let prompt = format!(
+        "Summarize this agent's output for the parent coordinator in \u{2264}500 words:\n\n{final_text}"
+    );
+    let summary = run_single_turn(&mut summarizer, prompt)?;
+    Ok(final_assistant_text(&summary))
 }
 
 /// Sub-agent multi-turn state machine, factored out from

@@ -112,6 +112,7 @@ mod tests {
             current_blocker: None,
             error: None,
             result: None,
+            result_full_path: None,
         }
     }
 

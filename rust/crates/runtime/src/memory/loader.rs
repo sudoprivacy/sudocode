@@ -47,6 +47,52 @@ pub fn default_memory_dir() -> PathBuf {
     default_memory_dir_for(&std::env::current_dir().unwrap_or_default())
 }
 
+/// Resolve the per-agent-type memory directory for a given working
+/// directory + sub-agent type. Path shape:
+/// `<workspace-base>/agent-memory/<agent_type>/` where
+/// `<workspace-base>` follows the same resolution rules as
+/// [`default_memory_dir_for`] MINUS its trailing `memory/` segment.
+///
+/// Mirrors CC-fork's `agentMemory.ts` scoping (see
+/// `~/.claude/projects/<slug>/agent-memory/<agentType>/`) so agent A
+/// can `remember X=42` without leaking that into agent B's memory
+/// index. Distinct from the workspace-scoped
+/// [`default_memory_dir_for`] which every non-subagent turn uses.
+///
+/// `SUDOCODE_MEMORY_DIR` still wins as a top-level override so tests
+/// can pin the base — the agent-type suffix is appended to that
+/// override (`<SUDOCODE_MEMORY_DIR>/agent-memory/<agent_type>/`).
+///
+/// `agent_type` is sanitized identically to workspace slugs so an
+/// agent name containing punctuation stays filesystem-safe.
+#[must_use]
+pub fn agent_memory_dir_for(cwd: &Path, agent_type: &str) -> PathBuf {
+    let base = agent_memory_base_dir(cwd);
+    let sanitized_agent = sanitize_path(agent_type.trim());
+    base.join("agent-memory").join(sanitized_agent)
+}
+
+/// Base directory (parent of the trailing `memory/` or
+/// `agent-memory/<type>/` segment). Not part of the public API — it
+/// exists so [`agent_memory_dir_for`] and [`default_memory_dir_for`]
+/// stay consistent when the override or fallback path shifts.
+fn agent_memory_base_dir(cwd: &Path) -> PathBuf {
+    if let Some(dir) = std::env::var_os(MEMORY_DIR_ENV) {
+        // The env override targets the workspace memory dir; the
+        // agent-memory subdirs live alongside it.
+        return PathBuf::from(dir);
+    }
+    let base = find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let slug = sanitize_path(&base.to_string_lossy());
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".scode")
+            .join("projects")
+            .join(&slug);
+    }
+    PathBuf::from(".scode").join("projects").join(&slug)
+}
+
 /// Ensure the memory directory exists, creating it (and parents) if needed.
 /// Errors are silently ignored — a missing directory simply means no
 /// memory will be loaded.
@@ -264,6 +310,86 @@ mod tests {
         let dir = temp_dir("noindex");
         assert!(load_index(&dir).expect("load").is_none());
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn agent_memory_dir_lives_under_workspace_agent_memory_subdir() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cwd = temp_dir("agent-scoped-cwd");
+        let prior_env = std::env::var_os(MEMORY_DIR_ENV);
+        let prior_home = std::env::var_os("HOME");
+        std::env::remove_var(MEMORY_DIR_ENV);
+        std::env::set_var("HOME", "/tmp/sudocode-test-home-agent");
+
+        let a = agent_memory_dir_for(&cwd, "Explore");
+        let b = agent_memory_dir_for(&cwd, "general-purpose");
+
+        if let Some(value) = prior_env {
+            std::env::set_var(MEMORY_DIR_ENV, value);
+        } else {
+            std::env::remove_var(MEMORY_DIR_ENV);
+        }
+        if let Some(value) = prior_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let slug = sanitize_path(&cwd.to_string_lossy());
+        let base = PathBuf::from("/tmp/sudocode-test-home-agent/.scode/projects").join(&slug);
+        assert_eq!(a, base.join("agent-memory").join("Explore"));
+        assert_eq!(b, base.join("agent-memory").join("general-purpose"));
+        // Agent-scoped path must NEVER equal the workspace-scoped path.
+        assert_ne!(a, base.join("memory"));
+        assert_ne!(a, b, "different agent types must produce different dirs");
+        fs::remove_dir_all(cwd).ok();
+    }
+
+    #[test]
+    fn agent_memory_dir_env_override_is_respected_but_still_scopes_by_type() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let base = temp_dir("agent-scoped-env-override");
+        let prior_env = std::env::var_os(MEMORY_DIR_ENV);
+        std::env::set_var(MEMORY_DIR_ENV, &base);
+
+        let a = agent_memory_dir_for(Path::new("/does/not/matter"), "Plan");
+
+        if let Some(value) = prior_env {
+            std::env::set_var(MEMORY_DIR_ENV, value);
+        } else {
+            std::env::remove_var(MEMORY_DIR_ENV);
+        }
+
+        assert_eq!(a, base.join("agent-memory").join("Plan"));
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn agent_memory_dir_sanitizes_punctuated_agent_names() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let base = temp_dir("agent-scoped-sanitize");
+        let prior_env = std::env::var_os(MEMORY_DIR_ENV);
+        std::env::set_var(MEMORY_DIR_ENV, &base);
+
+        let a = agent_memory_dir_for(Path::new("/anywhere"), "my.custom/agent name");
+
+        if let Some(value) = prior_env {
+            std::env::set_var(MEMORY_DIR_ENV, value);
+        } else {
+            std::env::remove_var(MEMORY_DIR_ENV);
+        }
+
+        // sanitize_path replaces non-alphanumeric ASCII chars with -,
+        // so `.`, `/`, and spaces should all collapse to hyphens.
+        let last = a.file_name().expect("has filename");
+        assert_eq!(last, std::ffi::OsStr::new("my-custom-agent-name"));
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]

@@ -22,7 +22,6 @@ use runtime::{
     check_freshness,
     cron_registry::CronRegistry,
     dedupe_superseded_commit_events, edit_file, execute_bash_with_abort, glob_search, grep_search,
-    load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -4547,12 +4546,19 @@ fn build_agent_runtime(
 
 fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let mut prompt = load_system_prompt(
+    // Route sub-agents through the per-agent-type memory scope
+    // (`<workspace>/agent-memory/<subagent_type>/`) so one agent's
+    // remembered facts don't leak into another's memory index —
+    // mirrors CC-fork's `agentMemory.ts` per-agent scoping. Fork is
+    // intentionally scoped too so a fork child's memory is separate
+    // from its parent's workspace memory.
+    let mut prompt = runtime::load_system_prompt_for_agent(
         cwd,
         runtime::today_local(),
         std::env::consts::OS,
         "unknown",
         model_family_identity_for(model),
+        subagent_type,
     )
     .map_err(|error| error.to_string())?;
     if subagent_type == "fork" {
@@ -10220,6 +10226,63 @@ mod tests {
         assert!(tools.contains("read_file"));
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn build_system_prompt_uses_agent_scoped_memory_dir() {
+        // Two sub-agents of DIFFERENT types running under the same
+        // workspace must see DIFFERENT memory dirs — that's the whole
+        // point of per-agent-type scoping.
+        let _guard = env_guard();
+        let base = temp_path("agent-memory-scope");
+        std::env::set_var("SUDOCODE_MEMORY_DIR", &base);
+
+        // Seed one entry under Explore's dir and a different one under
+        // Plan's dir. Each build_agent_system_prompt call should only
+        // see its own.
+        let explore_dir = base.join("agent-memory").join("Explore");
+        let plan_dir = base.join("agent-memory").join("Plan");
+        fs::create_dir_all(&explore_dir).expect("mkdir explore");
+        fs::create_dir_all(&plan_dir).expect("mkdir plan");
+        fs::write(
+            explore_dir.join("secret.md"),
+            "---\nname: secret\ndescription: EXPLORE_ONLY_MARKER\nmetadata:\n  type: user\n---\nExplore's secret.\n",
+        )
+        .expect("write explore entry");
+        fs::write(
+            plan_dir.join("secret.md"),
+            "---\nname: secret\ndescription: PLAN_ONLY_MARKER\nmetadata:\n  type: user\n---\nPlan's secret.\n",
+        )
+        .expect("write plan entry");
+
+        let explore_prompt =
+            build_agent_system_prompt("Explore", "claude-opus-4-8").expect("Explore prompt built");
+        let plan_prompt =
+            build_agent_system_prompt("Plan", "claude-opus-4-8").expect("Plan prompt built");
+
+        std::env::remove_var("SUDOCODE_MEMORY_DIR");
+
+        let explore_joined = explore_prompt.dynamic_sections.join("\n||\n");
+        let plan_joined = plan_prompt.dynamic_sections.join("\n||\n");
+
+        assert!(
+            explore_joined.contains("EXPLORE_ONLY_MARKER"),
+            "Explore's system prompt MUST see its own memory entry"
+        );
+        assert!(
+            !explore_joined.contains("PLAN_ONLY_MARKER"),
+            "Explore MUST NOT see Plan's memory entry — scoping broken"
+        );
+        assert!(
+            plan_joined.contains("PLAN_ONLY_MARKER"),
+            "Plan's system prompt MUST see its own memory entry"
+        );
+        assert!(
+            !plan_joined.contains("EXPLORE_ONLY_MARKER"),
+            "Plan MUST NOT see Explore's memory entry — scoping broken"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

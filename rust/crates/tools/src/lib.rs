@@ -71,6 +71,7 @@ pub mod testing {
             model: None,
             run_in_background: Some(true),
             auth_mode: None,
+            permission_mode: None,
         };
         crate::prepare_agent_job(input, None).map(|_| ())
     }
@@ -829,7 +830,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "name": { "type": "string", "description": "Optional human-readable label for this agent" },
                     "model": { "type": "string", "description": "Model ID override; defaults to the system default" },
                     "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve result later with TaskOutput(agent_id=..., block=true). When false, run synchronously and return the result." },
-                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." }
+                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
+                    "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
                 },
                 "required": ["description", "prompt"],
                 "additionalProperties": false
@@ -2810,7 +2812,7 @@ struct SkillInput {
     args: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct AgentInput {
     description: String,
     prompt: String,
@@ -2822,6 +2824,18 @@ struct AgentInput {
     /// Explicit auth mode: `"api-key"`, `"proxy"`, or `"subscription"`.
     /// When set, overrides the config's auto-detect priority.
     auth_mode: Option<String>,
+    /// Permission escalation mode for the sub-agent's tool calls.
+    ///
+    /// Currently the only recognized value is `"bubble"`, which
+    /// documents (and MUST match) the existing default behavior:
+    /// whenever the sub-agent hits a permission-gated tool, the
+    /// resulting prompt bubbles up to the parent process's
+    /// `PermissionPrompter` (i.e., the human at the terminal or the
+    /// ACP/WebUI client driving the parent), NOT to the sub-agent's
+    /// own inner prompter. Mirrors CC-fork's
+    /// `AgentInput.permission_mode = 'bubble'`. Any other value is
+    /// silently ignored — reserved for future modes.
+    permission_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9400,6 +9414,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             move |job| {
                 *captured_for_spawn
@@ -9483,6 +9498,7 @@ mod tests {
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9542,6 +9558,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9591,6 +9608,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9638,6 +9656,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9688,6 +9707,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9730,6 +9750,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9778,6 +9799,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9850,6 +9872,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -9893,6 +9916,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |_| Err(String::from("thread creation failed")),
         )
@@ -10192,6 +10216,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -10237,6 +10262,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -10279,6 +10305,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |job| {
                 let thread_name = format!("sudocode-agent-{}", job.manifest.agent_id);
@@ -10325,6 +10352,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |_job| Ok(()), // spawn but don't complete — manifest stays "running"
         )
@@ -10355,6 +10383,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |_job| Ok(()),
         )
@@ -10419,6 +10448,7 @@ mod tests {
             model: None,
             run_in_background: Some(false),
             auth_mode: None,
+            permission_mode: None,
         }
     }
 
@@ -10825,6 +10855,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |_job| Ok(()),
         )
@@ -10886,6 +10917,7 @@ mod tests {
                 model: None,
                 run_in_background: None,
                 auth_mode: None,
+                permission_mode: None,
             },
             |_job| Ok(()),
         )

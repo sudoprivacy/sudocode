@@ -20,11 +20,73 @@
 //! - `SUDOCODE_COORDINATOR_MODE` — set to `1`, `true`, `on`, or `yes`
 //!   (case-insensitive) to enable. Anything else, or unset, disables.
 
+use std::collections::BTreeSet;
+
 use crate::SystemPrompt;
 
 /// Environment variable that toggles coordinator mode. Mirrors CC-fork's
 /// `CLAUDE_CODE_COORDINATOR_MODE`.
 pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
+
+/// Hard allowlist of tools the coordinator LLM is allowed to invoke.
+///
+/// Mirrors CC-fork's `INTERNAL_WORKER_TOOLS` restriction — the
+/// coordinator's job is to orchestrate workers, not to execute
+/// write-side work itself. Every write tool (`bash`, `write_file`,
+/// `edit_file`, `PowerShell`, `REPL`, `EnterPlanMode`,
+/// `ExitPlanMode`, `NotebookEdit`) is intentionally excluded so a
+/// non-compliant model that tries them gets an instructive error
+/// pointing back to `Agent(...)`. Read-only tools (`read_file`,
+/// `glob_search`, `grep_search`, `WebSearch`, `WebFetch`) remain
+/// available so the coordinator can peek at code without spawning a
+/// worker for trivial lookups.
+///
+/// The set is consumed by [`is_tool_allowed_in_coordinator_mode`]
+/// (dispatch-side guard) and by
+/// `tools::GlobalToolRegistry::definitions` /
+/// `permission_specs` (LLM-schema-side filter, so the model
+/// doesn't even see the forbidden tools when coordinator mode is on).
+#[must_use]
+pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
+    [
+        // Delegation surface
+        "Agent",
+        "TaskStop",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "SendMessage",
+        // Skills + web (read-only research)
+        "Skill",
+        "WebSearch",
+        "WebFetch",
+        // Read-only code exploration
+        "read_file",
+        "glob_search",
+        "grep_search",
+        // Coordinator's own bookkeeping
+        "TodoWrite",
+        "AskUserQuestion",
+        "SendUserMessage",
+        "StructuredOutput",
+        "ToolSearch",
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Predicate consumed at tool-dispatch time. When coordinator mode is
+/// off this returns `true` for every tool (fast path — never blocks).
+/// When coordinator mode is on it returns `true` iff `tool_name` is in
+/// [`coordinator_allowed_tools`]. Deliberately keyed by name string so
+/// callers don't have to depend on the tools crate.
+#[must_use]
+pub fn is_tool_allowed_in_coordinator_mode(tool_name: &str) -> bool {
+    if !is_coordinator_mode() {
+        return true;
+    }
+    coordinator_allowed_tools().contains(tool_name)
+}
 
 /// Return `true` when coordinator mode is enabled via env var.
 ///
@@ -45,15 +107,14 @@ pub fn is_coordinator_mode() -> bool {
 /// The coordinator role + workflow system prompt. Ported near-verbatim
 /// from CC-fork's `getCoordinatorSystemPrompt()`.
 ///
-/// TODO(sub-agent-parity rebuild): the SendMessage-based "continue an
-/// existing worker" workflow is temporarily excised from this prompt.
-/// The middle-state SendMessage tool was deleted in the revert commit
-/// series because its receiver side was never implemented. Once the
-/// receiver lands (spawn_task inbox polling + subagent-side envelope
-/// consumption) and SendMessage is restored with a hard tool-gate,
-/// re-add the "continue via SendMessage" advice and the SendMessage
-/// examples. Until then, the coordinator only knows how to spawn fresh
-/// workers.
+/// SendMessage is included as the "continue an existing worker"
+/// mechanism. Live delivery for `shutdown_request` is wired
+/// end-to-end via the process-wide abort-signal registry
+/// (`tools::abort_registered_agent`). Live delivery for plain-text
+/// messages (worker resumes on new user turn) is architecturally
+/// tracked as a downstream change — this prompt still teaches the
+/// pattern because the sender-side tool works today and the fixture
+/// is on disk for any worker-side reader that eventually lands.
 ///
 /// The `CLAUDE_CODE_SIMPLE` env-flagged shorter-tools branch from the
 /// fork is not ported: sudocode's tool set already matches the
@@ -76,9 +137,12 @@ Every message you send is to the user. Worker results and system notifications a
 ## 2. Your Tools
 
 - **Agent** - Spawn a new worker
+- **SendMessage** - Continue an existing worker (send follow-up to its ID) or signal shutdown
 - **TaskStop** - Stop a running worker
 - **TaskGet** - Fetch a running worker's metadata by `task_id`
 - **TaskOutput** - Read a running or completed worker's output by `task_id`
+
+Write tools (`bash`, `write_file`, `edit_file`, `NotebookEdit`, `PowerShell`, `REPL`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `Agent(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 
 When calling Agent:
 - Do not use one worker to check on another. Workers will notify you when they are done.

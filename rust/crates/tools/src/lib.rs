@@ -352,9 +352,17 @@ impl GlobalToolRegistry {
 
     #[must_use]
     pub fn definitions(&self, allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolDefinition> {
+        // Coordinator hard tool-gate: when coordinator mode is on,
+        // hide write-side tools from the LLM's schema entirely so it
+        // can't even name them. Belt-and-suspenders enforcement also
+        // fires at dispatch time in `execute_tool_with_enforcer`. See
+        // `runtime::coordinator_mode` for the allowlist SSOT.
+        let coord_gate =
+            |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
         let builtin = mvp_tool_specs()
             .into_iter()
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
+            .filter(|spec| coord_gate(spec.name))
             .map(|spec| ToolDefinition {
                 name: spec.name.to_string(),
                 description: Some(spec.description.to_string()),
@@ -364,6 +372,7 @@ impl GlobalToolRegistry {
             .runtime_tools
             .iter()
             .filter(|tool| allowed_tools.is_none_or(|allowed| allowed.contains(tool.name.as_str())))
+            .filter(|tool| coord_gate(tool.name.as_str()))
             .map(|tool| ToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
@@ -376,6 +385,7 @@ impl GlobalToolRegistry {
                 allowed_tools
                     .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
+            .filter(|tool| coord_gate(tool.definition().name.as_str()))
             .map(|tool| ToolDefinition {
                 name: tool.definition().name.clone(),
                 description: tool.definition().description.clone(),
@@ -1196,6 +1206,16 @@ fn execute_tool_with_enforcer(
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
 ) -> Result<String, String> {
+    // Coordinator hard tool-gate — belt-and-suspenders against a
+    // non-compliant model that hallucinates a forbidden tool name
+    // even though the LLM schema hides it (see
+    // `GlobalToolRegistry::definitions`). Fires only when
+    // SUDOCODE_COORDINATOR_MODE is truthy; no cost otherwise.
+    if !runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name) {
+        return Err(format!(
+            "tool `{name}` is not available in coordinator mode; delegate write-side work to a worker via `Agent(...)` (or use SendMessage to continue an existing worker)."
+        ));
+    }
     match name {
         "bash" => {
             // Parse input to get the command for permission classification

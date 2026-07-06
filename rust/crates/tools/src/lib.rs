@@ -1,5 +1,51 @@
 pub mod managed_agent;
 
+/// Test-only seams exposed for integration tests.
+///
+/// These wrappers cross the crate boundary so `tools/tests/*.rs`
+/// integration tests can drive internals like the sub-agent
+/// multi-turn loop without waiting on a live LLM. Do NOT rely on
+/// this module from production code — the shape may change without
+/// a semver bump; runtime code should use the non-testing entry
+/// points instead.
+pub mod testing {
+    use std::path::Path;
+
+    use runtime::HookAbortSignal;
+
+    /// Test seam for [`crate::run_multi_turn_loop`] — same contract,
+    /// just re-exported under a non-underscore name.
+    pub fn run_multi_turn_loop_for_test<F>(
+        agent_id: &str,
+        workspace_root: &Path,
+        abort_signal: HookAbortSignal,
+        initial_prompt: String,
+        max_multi_turns: usize,
+        run_turn_fn: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(String) -> Result<String, String>,
+    {
+        crate::run_multi_turn_loop(
+            agent_id,
+            workspace_root,
+            abort_signal,
+            initial_prompt,
+            max_multi_turns,
+            run_turn_fn,
+        )
+    }
+
+    /// Test seam for the pure XML formatter used to synthesise the
+    /// resume prompt from mailbox envelopes.
+    #[must_use]
+    pub fn compose_next_turn_from_envelopes_for_test(
+        envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
+    ) -> String {
+        crate::compose_next_turn_from_envelopes(envelopes)
+    }
+}
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -4484,15 +4530,124 @@ fn notify_agent_completion(original_manifest: &AgentOutput) {
     global_agent_registry().mark_done(&manifest);
 }
 
+/// Default per-subagent cap on how many DISTINCT user-turns the
+/// multi-turn loop will service before force-exiting. Not the same as
+/// `DEFAULT_AGENT_MAX_ITERATIONS` (which caps tool-loop iterations
+/// WITHIN a single turn). Overridable via
+/// `SUDOCODE_SUBAGENT_MAX_MULTI_TURNS`.
+///
+/// Sized to leave plenty of headroom for a coordinator-driven
+/// conversation where the parent sends 5–10 follow-ups before the
+/// worker completes; at 16 turns × 32 tool-loop iterations that's
+/// still bounded well below runaway.
+const DEFAULT_SUBAGENT_MAX_MULTI_TURNS: usize = 16;
+
+fn subagent_max_multi_turns() -> usize {
+    std::env::var("SUDOCODE_SUBAGENT_MAX_MULTI_TURNS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SUBAGENT_MAX_MULTI_TURNS)
+}
+
 fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
-    let prompt = job.prompt.clone();
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    run_multi_turn_loop(
+        &job.manifest.agent_id,
+        &workspace_root,
+        job.abort_signal.clone(),
+        job.prompt.clone(),
+        subagent_max_multi_turns(),
+        |prompt| {
+            let summary = run_single_turn(&mut conv_runtime, prompt)?;
+            Ok(final_assistant_text(&summary))
+        },
+    )
+}
 
-    // When inside a tokio context, spawn a scoped thread to avoid nesting
-    // runtimes. block_in_place is not used because it panics on current_thread
-    // runtimes (the MCP server entry path uses one).
-    let summary = if tokio::runtime::Handle::try_current().is_ok() {
+/// Sub-agent multi-turn state machine, factored out from
+/// [`run_agent_job_returning_text`] so integration tests can drive it
+/// deterministically with a fake `run_turn_fn`.
+///
+/// Contract per iteration:
+/// 1. Call `run_turn_fn(current_prompt)` — the ONE-turn primitive
+///    (does its own tool loop internally, returns the assistant's
+///    final text). Errors bubble up.
+/// 2. If `abort_signal.is_aborted()` → exit with the last final text.
+///    This catches both `shutdown_request` (abort registry flipped
+///    mid-turn, `run_turn` returned early with `cancelled: true`) and
+///    any out-of-band `HookAbortSignal::abort()`.
+/// 3. Drain any new envelopes that arrived on the agent's mailbox
+///    since the last drain.
+/// 4. If new envelopes include a `shutdown_request`, exit cleanly —
+///    the sender already flipped the abort registry before writing,
+///    but reading it just-in-case belts-and-suspenders past the
+///    small race window in step 2 where the envelope landed AFTER
+///    `run_turn` returned but BEFORE the abort flag was checked.
+/// 5. Else, if there ARE new envelopes, synthesise the next
+///    user-turn prompt from them and loop.
+/// 6. Else (no new envelopes) → exit with the last final text.
+///
+/// A hard `max_multi_turns` cap prevents runaway if the parent
+/// keeps sending mail forever — mirrors the tool-loop iteration cap
+/// inside a single `run_turn`.
+fn run_multi_turn_loop<F>(
+    agent_id: &str,
+    workspace_root: &std::path::Path,
+    abort_signal: HookAbortSignal,
+    initial_prompt: String,
+    max_multi_turns: usize,
+    mut run_turn_fn: F,
+) -> Result<String, String>
+where
+    F: FnMut(String) -> Result<String, String>,
+{
+    let mut consumed_envelopes = 0usize;
+    let mut current_prompt = initial_prompt;
+    let mut last_final_text = String::new();
+
+    for _turn_index in 0..max_multi_turns {
+        last_final_text = run_turn_fn(current_prompt.clone())?;
+
+        if abort_signal.is_aborted() {
+            return Ok(last_final_text);
+        }
+
+        let envelopes =
+            runtime::agent_mailbox::read_all(workspace_root, agent_id).unwrap_or_default();
+        if envelopes.len() > consumed_envelopes {
+            let new_envelopes = &envelopes[consumed_envelopes..];
+            let has_shutdown = new_envelopes
+                .iter()
+                .any(|env| env.kind == runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST);
+            consumed_envelopes = envelopes.len();
+            if has_shutdown {
+                return Ok(last_final_text);
+            }
+            current_prompt = compose_next_turn_from_envelopes(new_envelopes);
+            continue;
+        }
+
+        return Ok(last_final_text);
+    }
+    Ok(last_final_text)
+}
+
+/// Run one `ConversationRuntime::run_turn` call, handling the
+/// tokio-nesting dance (block_in_place would panic on the
+/// `current_thread` runtime used by the MCP entry path).
+///
+/// Extracted from the pre-multi-turn version of
+/// [`run_agent_job_returning_text`] so both the first turn and every
+/// resumed turn share the exact same nesting path — one place to
+/// fix if `run_turn`'s signature or the runtime primitives change.
+fn run_single_turn(
+    conv_runtime: &mut ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor>,
+    prompt: String,
+) -> Result<runtime::TurnSummary, String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
         std::thread::scope(|s| {
             s.spawn(|| {
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
@@ -4501,13 +4656,61 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             })
             .join()
             .map_err(|_| String::from("sub-agent thread panicked"))?
-        })?
+        })
     } else {
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
         rt.block_on(conv_runtime.run_turn(prompt, None, None))
-            .map_err(|e| e.to_string())?
-    };
-    Ok(final_assistant_text(&summary))
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Render a batch of freshly-arrived mailbox envelopes into a single
+/// synthetic user-turn text. Each envelope is wrapped in an
+/// XML-shaped `<mailbox-*>` block so the model can tell them apart
+/// from ordinary user prompts and — critically — so a follow-up
+/// SendMessage in the middle of a stream doesn't look like it came
+/// from the human user.
+///
+/// Multiple envelopes are concatenated with a blank line so the
+/// model treats them as distinct messages. Order preserves the
+/// mailbox write order (JSONL is append-only).
+fn compose_next_turn_from_envelopes(
+    envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
+) -> String {
+    let mut blocks = Vec::with_capacity(envelopes.len());
+    for env in envelopes {
+        let tag = match env.kind.as_str() {
+            runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST => "shutdown-request",
+            runtime::agent_mailbox::kinds::SHUTDOWN_RESPONSE => "shutdown-response",
+            runtime::agent_mailbox::kinds::PLAN_APPROVAL_RESPONSE => "plan-approval-response",
+            _ => "mailbox-message",
+        };
+        let mut header = format!("<{tag} from=\"{}\"", xml_attr_escape(&env.from));
+        if let Some(rid) = &env.request_id {
+            header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
+        }
+        header.push('>');
+        blocks.push(format!("{header}\n{}\n</{tag}>", env.text));
+    }
+    blocks.join("\n\n")
+}
+
+/// Minimal XML-attribute escape for the mailbox envelope headers.
+/// Only escapes `"` and `&` — the character set for `from` / request-id
+/// is `[A-Za-z0-9_-]` in practice, but a hostile envelope shouldn't
+/// break the synthetic prompt.
+fn xml_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn build_agent_runtime(

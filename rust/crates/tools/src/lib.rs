@@ -1,9 +1,10 @@
 pub mod managed_agent;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use command_group::CommandGroup;
@@ -17,6 +18,7 @@ use api::{
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use reqwest::blocking::Client;
 use runtime::{
+    agent_mailbox::{self, kinds as mailbox_kinds, MailboxEnvelope},
     check_freshness,
     cron_registry::CronRegistry,
     dedupe_superseded_commit_events, edit_file, execute_bash_with_abort, glob_search, grep_search,
@@ -1030,6 +1032,63 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "SendMessage",
+            description: concat!(
+                "Send a message to another agent teammate via the workspace mailbox. ",
+                "Recipients receive one JSONL line at ",
+                "<workspace>/.sudocode-inbox/<recipient>.jsonl. ",
+                "Set `to` to a bare teammate name or \"*\" for broadcast. ",
+                "`message` is either a plain string (requires `summary`) or a structured object ",
+                "{type: shutdown_request|shutdown_response|plan_approval_response, ...}. ",
+                "Structured messages CANNOT be broadcast (`to: \"*\"`). ",
+                "Live delivery: `shutdown_request` calls abort() on the target subagent's ",
+                "HookAbortSignal via the process-wide agent-abort registry, so an in-process ",
+                "background subagent stops on its next tool-loop check. Plain-text messages are ",
+                "written to disk for observability but consumption by a running subagent requires ",
+                "the multi-turn subagent loop (deferred)."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient: teammate name, or \"*\" for broadcast to all teammates."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)."
+                    },
+                    "message": {
+                        "description": "Plain text (string) or a structured message object.",
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["shutdown_request", "shutdown_response", "plan_approval_response"]
+                                    },
+                                    "request_id": { "type": "string" },
+                                    "approve": { "type": "boolean" },
+                                    "reason": { "type": "string" },
+                                    "feedback": { "type": "string" }
+                                },
+                                "required": ["type"]
+                            }
+                        ]
+                    },
+                    "sender": {
+                        "type": "string",
+                        "description": "Optional sender name; defaults to \"team-lead\" for the main agent."
+                    }
+                },
+                "required": ["to", "message"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "LSP",
             description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics).",
             input_schema: json!({
@@ -1200,6 +1259,7 @@ fn execute_tool_with_enforcer(
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
+        "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
         "LSP" => from_value::<LspInput>(input).and_then(run_lsp),
         "ListMcpResources" => {
             from_value::<McpResourceInput>(input).and_then(run_list_mcp_resources)
@@ -1559,6 +1619,349 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
         "crons": entries,
         "count": entries.len()
     }))
+}
+
+// ── SendMessage ────────────────────────────────────────────────────
+
+/// Resolve the workspace root that receives inbox files. The current
+/// working directory is the canonical anchor — matches the way plan-mode,
+/// todos, and agent manifests use `env::current_dir()`.
+fn send_message_workspace() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|e| format!("resolve workspace root: {e}"))
+}
+
+/// Best-effort sanitizer for a mailbox filename stem. Recipient
+/// names can be arbitrary strings from the model — collapse anything
+/// outside `[A-Za-z0-9_-]` to `_` so we can't traverse or overwrite
+/// files outside `.sudocode-inbox/`.
+fn sanitize_recipient(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+/// Extract the sender label, defaulting to `TEAM_LEAD_NAME` (matches
+/// CC-fork: `getAgentName() || TEAM_LEAD_NAME`). Callers can override
+/// via the `sender` field for subagent contexts that know their own
+/// name.
+fn resolve_sender(input: &SendMessageInput) -> String {
+    input
+        .sender
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(TEAM_LEAD_NAME)
+        .to_string()
+}
+
+fn write_envelope(
+    workspace: &Path,
+    recipient: &str,
+    from: &str,
+    text: &str,
+    summary: Option<&str>,
+    kind: &str,
+    request_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let recipient_sanitized = sanitize_recipient(recipient);
+    let envelope = MailboxEnvelope {
+        from: from.to_string(),
+        to: recipient.to_string(),
+        text: text.to_string(),
+        summary: summary.map(str::to_string),
+        timestamp: 0, // filled in by append_envelope
+        color: None,
+        kind: kind.to_string(),
+        request_id: request_id.map(str::to_string),
+    };
+    agent_mailbox::append_envelope(workspace, &recipient_sanitized, envelope)
+}
+
+fn generate_request_id(prefix: &str, target: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let target_slug = sanitize_recipient(target);
+    format!("{prefix}_{target_slug}_{ts:x}")
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_send_message(input: SendMessageInput) -> Result<String, String> {
+    if input.to.trim().is_empty() {
+        return Err("to must not be empty".to_string());
+    }
+    if input.to.contains('@') {
+        return Err(
+            "to must be a bare teammate name or \"*\" — there is only one team per session"
+                .to_string(),
+        );
+    }
+
+    let workspace = send_message_workspace()?;
+    let sender = resolve_sender(&input);
+
+    // ── Plain text branch ──────────────────────────────────────────
+    if let Some(text) = input.message.as_str() {
+        // Broadcast
+        if input.to == "*" {
+            let summary = input.summary.as_deref();
+            let mut recipients = agent_mailbox::list_recipients(&workspace)?;
+            // Never echo to sender.
+            recipients.retain(|r| r != &sender);
+            if recipients.is_empty() {
+                return to_pretty_json(json!({
+                    "success": true,
+                    "message": "No teammates to broadcast to (empty inbox directory)",
+                    "recipients": [],
+                }));
+            }
+            for r in &recipients {
+                write_envelope(
+                    &workspace,
+                    r,
+                    &sender,
+                    text,
+                    summary,
+                    mailbox_kinds::MESSAGE,
+                    None,
+                )?;
+            }
+            return to_pretty_json(json!({
+                "success": true,
+                "message": format!(
+                    "Message broadcast to {} teammate(s): {}",
+                    recipients.len(),
+                    recipients.join(", ")
+                ),
+                "recipients": recipients,
+                "routing": {
+                    "sender": sender,
+                    "target": "@team",
+                    "summary": summary,
+                    "content": text,
+                }
+            }));
+        }
+        // Point-to-point plain text
+        if input.summary.as_deref().unwrap_or("").trim().is_empty() {
+            return Err("summary is required when message is a string".to_string());
+        }
+        let path = write_envelope(
+            &workspace,
+            &input.to,
+            &sender,
+            text,
+            input.summary.as_deref(),
+            mailbox_kinds::MESSAGE,
+            None,
+        )?;
+        return to_pretty_json(json!({
+            "success": true,
+            "message": format!("Message sent to {}'s inbox", input.to),
+            "routing": {
+                "sender": sender,
+                "target": format!("@{}", input.to),
+                "summary": input.summary,
+                "content": text,
+                "mailbox_path": path.display().to_string(),
+            }
+        }));
+    }
+
+    // ── Structured branch ──────────────────────────────────────────
+    if input.to == "*" {
+        return Err("structured messages cannot be broadcast (to: \"*\")".to_string());
+    }
+    let obj = input
+        .message
+        .as_object()
+        .ok_or_else(|| "message must be a string or a structured object".to_string())?;
+    let msg_type = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "structured message requires a `type` field".to_string())?;
+
+    match msg_type {
+        "shutdown_request" => {
+            let reason = obj.get("reason").and_then(|v| v.as_str());
+            let request_id = generate_request_id("shutdown", &input.to);
+            let body = json!({
+                "type": "shutdown_request",
+                "request_id": request_id,
+                "from": sender,
+                "reason": reason,
+            })
+            .to_string();
+            write_envelope(
+                &workspace,
+                &input.to,
+                &sender,
+                &body,
+                None,
+                mailbox_kinds::SHUTDOWN_REQUEST,
+                Some(&request_id),
+            )?;
+            // Live delivery: mirrors CC-fork's
+            // `handleShutdownApproval` → `task.abortController.abort()`
+            // path in `src/tools/SendMessageTool/SendMessageTool.ts:357`.
+            // A background subagent whose HookAbortSignal is registered
+            // here stops on its next `abort_signal.is_aborted()` check
+            // in the tool loop — no polling required. Foreground /
+            // synchronous subagents already share the parent's abort
+            // signal; the registry lookup for those may return the
+            // parent's signal, which is safe because the parent is
+            // itself the caller.
+            let aborted = abort_registered_agent(&input.to);
+            to_pretty_json(json!({
+                "success": true,
+                "message": format!("Shutdown request sent to {}. Request ID: {}", input.to, request_id),
+                "request_id": request_id,
+                "target": input.to,
+                "live_abort_signaled": aborted,
+            }))
+        }
+        "shutdown_response" => {
+            if input.to != TEAM_LEAD_NAME {
+                return Err(format!("shutdown_response must be sent to \"{TEAM_LEAD_NAME}\""));
+            }
+            let request_id = obj
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "shutdown_response requires `request_id`".to_string())?;
+            let approve = obj.get("approve").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reason = obj.get("reason").and_then(|v| v.as_str());
+            if !approve && reason.map(str::trim).unwrap_or("").is_empty() {
+                return Err(
+                    "reason is required when rejecting a shutdown request".to_string(),
+                );
+            }
+            let body = json!({
+                "type": "shutdown_response",
+                "request_id": request_id,
+                "from": sender,
+                "approve": approve,
+                "reason": reason,
+            })
+            .to_string();
+            write_envelope(
+                &workspace,
+                &input.to,
+                &sender,
+                &body,
+                None,
+                mailbox_kinds::SHUTDOWN_RESPONSE,
+                Some(request_id),
+            )?;
+            to_pretty_json(json!({
+                "success": true,
+                "message": if approve {
+                    format!("Shutdown approved. Sent confirmation to {}.", input.to)
+                } else {
+                    format!("Shutdown rejected. Reason sent to {}.", input.to)
+                },
+                "request_id": request_id,
+            }))
+        }
+        "plan_approval_response" => {
+            let request_id = obj
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "plan_approval_response requires `request_id`".to_string())?;
+            let approve = obj.get("approve").and_then(|v| v.as_bool()).unwrap_or(false);
+            let feedback = obj.get("feedback").and_then(|v| v.as_str());
+            let body = json!({
+                "type": "plan_approval_response",
+                "request_id": request_id,
+                "from": sender,
+                "approve": approve,
+                "feedback": feedback,
+            })
+            .to_string();
+            write_envelope(
+                &workspace,
+                &input.to,
+                &sender,
+                &body,
+                None,
+                mailbox_kinds::PLAN_APPROVAL_RESPONSE,
+                Some(request_id),
+            )?;
+            to_pretty_json(json!({
+                "success": true,
+                "message": if approve {
+                    format!("Plan approved for {}. They will receive the approval.", input.to)
+                } else {
+                    format!("Plan rejected for {}.", input.to)
+                },
+                "request_id": request_id,
+            }))
+        }
+        other => Err(format!(
+            "unknown structured message type: {other} (expected one of: shutdown_request, shutdown_response, plan_approval_response)"
+        )),
+    }
+}
+
+// ── Agent abort-signal registry ────────────────────────────────────
+
+/// Process-wide map from `agent_id` to that subagent's
+/// [`HookAbortSignal`]. Populated by `spawn_agent_job` when a
+/// background subagent starts; consumed by
+/// `SendMessage(shutdown_request)` for live abort delivery
+/// (mirrors CC-fork's `task.abortController.abort()` path in
+/// `SendMessageTool.ts:357`).
+///
+/// Cleared by `run_spawned_agent_job` when the subagent terminates
+/// (success, error, or panic) so a subsequent SendMessage to the same
+/// (recycled) name doesn't attempt to abort a defunct signal.
+fn global_agent_abort_signals() -> &'static Mutex<HashMap<String, HookAbortSignal>> {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<Mutex<HashMap<String, HookAbortSignal>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a subagent's abort signal so `SendMessage(shutdown_request)`
+/// can look it up by `agent_id` and call `.abort()`. Called by
+/// `spawn_agent_job` before the runtime starts.
+pub fn register_agent_abort_signal(agent_id: &str, signal: HookAbortSignal) {
+    if let Ok(mut guard) = global_agent_abort_signals().lock() {
+        guard.insert(agent_id.to_string(), signal);
+    }
+}
+
+/// Remove a subagent from the abort-signal registry — invoked on
+/// subagent completion so a stale entry can't abort a future agent
+/// that gets the same name.
+pub fn unregister_agent_abort_signal(agent_id: &str) {
+    if let Ok(mut guard) = global_agent_abort_signals().lock() {
+        guard.remove(agent_id);
+    }
+}
+
+/// Look up `agent_id` in the abort registry and, if present, call
+/// `abort()` on its signal. Returns `true` when a signal was found and
+/// aborted, `false` when the agent isn't registered (either it
+/// finished already or was never registered).
+///
+/// Matches CC-fork's `findTeammateTaskByAgentId(agentId,
+/// appState.tasks); if (task?.abortController) task.abortController.abort()`.
+pub fn abort_registered_agent(agent_id: &str) -> bool {
+    if let Ok(guard) = global_agent_abort_signals().lock() {
+        if let Some(signal) = guard.get(agent_id) {
+            signal.abort();
+            return true;
+        }
+    }
+    false
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2454,6 +2857,25 @@ struct CronDeleteInput {
     cron_id: String,
 }
 
+// SendMessage input. `message` is a JSON `Value` because it accepts
+// either a plain string or a structured object — validated inside
+// `run_send_message`, not by serde, so we can produce the
+// fork-compatible error messages verbatim.
+#[derive(Debug, Deserialize)]
+struct SendMessageInput {
+    to: String,
+    message: Value,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+/// Default sender name used when the caller doesn't supply one.
+/// Matches `sudoprivacy/claude-code`'s `TEAM_LEAD_NAME` for the main
+/// agent path.
+const TEAM_LEAD_NAME: &str = "team-lead";
+
 #[derive(Debug, Deserialize)]
 struct LspInput {
     action: String,
@@ -2578,6 +3000,13 @@ struct AgentJob {
     /// commit with the parent's assistant message + placeholder
     /// tool_results (mirroring CC-fork's `buildForkedMessages`).
     inherited_messages: Vec<ConversationMessage>,
+    /// Signal wired into the subagent's `ConversationRuntime` via
+    /// `with_hook_abort_signal`. Registered by name in
+    /// [`global_agent_abort_signals`] so
+    /// `SendMessage(shutdown_request)` can look it up and call
+    /// `.abort()` for live delivery — mirrors CC-fork's
+    /// `task.abortController.abort()`.
+    abort_signal: HookAbortSignal,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -3698,6 +4127,7 @@ fn prepare_agent_job(
         fallback_config,
         auth_mode,
         inherited_messages,
+        abort_signal: HookAbortSignal::default(),
     };
     Ok(PreparedAgent { manifest, job })
 }
@@ -3761,12 +4191,16 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
     // TOKIO_BLOCKING_THREADS). Scales to 100+ concurrent agents.
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| String::from("no tokio runtime available for spawning agent"))?;
+    // Register the subagent's abort signal BEFORE the thread starts so a
+    // `SendMessage(shutdown_request)` racing the spawn still finds an entry.
+    register_agent_abort_signal(&job.manifest.agent_id, job.abort_signal.clone());
     handle.spawn_blocking(move || run_spawned_agent_job(job));
     Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)] // ownership required for move into spawn_blocking
 fn run_spawned_agent_job(job: AgentJob) {
+    let agent_id = job.manifest.agent_id.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_agent_job_returning_text(&job).and_then(|text| {
             persist_agent_terminal_state(&job.manifest, "completed", Some(text.as_str()), None)
@@ -3788,6 +4222,13 @@ fn run_spawned_agent_job(job: AgentJob) {
     }
     // Signal the completion registry so TaskOutput(agent_id, block=true) callers unblock.
     notify_agent_completion(&job.manifest);
+    // Drop the abort-signal registration LAST — a
+    // `SendMessage(shutdown_request)` arriving during teardown against
+    // an already-completed agent is silently a no-op (returns
+    // `live_abort_signaled: false`), which matches CC-fork's
+    // `findTeammateTaskByAgentId → task === undefined → warn-and-skip`
+    // branch in `SendMessageTool.ts:362`.
+    unregister_agent_abort_signal(&agent_id);
 }
 
 /// Re-read the persisted manifest and notify the global completion registry.
@@ -3861,7 +4302,8 @@ fn build_agent_runtime(
         permission_policy,
         job.system_prompt.clone(),
     )
-    .with_session_known_date(runtime::today_local()))
+    .with_session_known_date(runtime::today_local())
+    .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
 fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
@@ -3985,6 +4427,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "REPL",
             "PowerShell",
             "Agent",
+            "SendMessage",
         ],
         _ => vec![
             "bash",

@@ -4565,6 +4565,18 @@ fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemP
         prompt.dynamic_sections.push(String::from(
             "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop."
         ));
+    } else if let Some(custom) = lookup_custom_agent(subagent_type) {
+        // Custom `.md` agent — its body IS the sub-agent's role
+        // section. Prepend a compact identity line so the child knows
+        // its own type even if the body is terse. Mirrors CC-fork's
+        // `parseAgentFromMarkdown` → `getSystemPrompt` closure that
+        // returns the raw markdown body as the agent's system prompt.
+        prompt.dynamic_sections.push(format!(
+            "You are the custom sub-agent `{}` defined at {}.",
+            custom.name,
+            custom.source_path.display()
+        ));
+        prompt.dynamic_sections.push(custom.system_prompt);
     } else {
         prompt.dynamic_sections.push(format!(
             "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
@@ -4582,6 +4594,19 @@ fn resolve_agent_model(model: Option<&str>) -> String {
 }
 
 fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
+    // Custom `.md` agents can restrict their tool pool via the
+    // `tools:` frontmatter. `Some(vec)` → explicit allowlist;
+    // `Some(vec![])` (i.e. `tools: '*'` or no items) → inherit the
+    // maximal general-purpose set; `None` (no `tools:` field) → same
+    // inherit fallback.
+    if let Some(custom) = lookup_custom_agent(subagent_type) {
+        if let Some(ref tools) = custom.tools {
+            if !tools.is_empty() {
+                return tools.iter().cloned().collect();
+            }
+        }
+        return general_purpose_tools();
+    }
     let tools = match subagent_type {
         "Explore" => vec![
             "read_file",
@@ -4668,28 +4693,39 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "Agent",
             "SendMessage",
         ],
-        _ => vec![
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "TodoWrite",
-            "Skill",
-            "ToolSearch",
-            "NotebookEdit",
-            "Sleep",
-            "SendUserMessage",
-            "Config",
-            "StructuredOutput",
-            "REPL",
-            "PowerShell",
-        ],
+        _ => return general_purpose_tools(),
     };
     tools.into_iter().map(str::to_string).collect()
+}
+
+/// The maximal tool set a general-purpose sub-agent may invoke —
+/// SSOT for both the explicit `general-purpose` preset and the
+/// fallback path (unknown built-in name AND custom `.md` agents whose
+/// frontmatter says `tools: '*'` / omits the field).
+fn general_purpose_tools() -> BTreeSet<String> {
+    [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob_search",
+        "grep_search",
+        "WebFetch",
+        "WebSearch",
+        "TodoWrite",
+        "Skill",
+        "ToolSearch",
+        "NotebookEdit",
+        "Sleep",
+        "SendUserMessage",
+        "Config",
+        "StructuredOutput",
+        "REPL",
+        "PowerShell",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -6153,8 +6189,44 @@ fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
         "scodeguide" | "scodeguideagent" | "guide" => String::from("scode-guide"),
         "statusline" | "statuslinesetup" => String::from("statusline-setup"),
         "fork" | "forksubagent" => String::from("fork"),
+        // Unknown token — could be a custom `.md` agent
+        // (`runtime::custom_agents`). Preserve the caller's exact
+        // string so the downstream lookup by name succeeds even for
+        // agents whose frontmatter `name` contains uppercase or
+        // punctuation that `canonical_tool_token` would flatten.
         _ => trimmed.to_string(),
     }
+}
+
+/// Try to resolve a `subagent_type` string as a custom `.md` agent
+/// definition found under one of the standard search paths. Returns
+/// `None` for the built-in preset names — those are handled ahead of
+/// this call.
+fn lookup_custom_agent(
+    subagent_type: &str,
+) -> Option<runtime::custom_agents::CustomAgentDefinition> {
+    if is_builtin_subagent(subagent_type) {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    runtime::custom_agents::find_custom_agent(subagent_type, &cwd)
+}
+
+/// Built-in preset names that must NOT be shadowed by a custom `.md`
+/// agent — the built-in behavior wins, even if a user drops a
+/// same-named .md file under `~/.claude/agents/`. Matches CC-fork's
+/// `getBuiltInAgents()` precedence at `loadAgentsDir.ts:357-402`.
+fn is_builtin_subagent(name: &str) -> bool {
+    matches!(
+        name,
+        "general-purpose"
+            | "Explore"
+            | "Plan"
+            | "Verification"
+            | "scode-guide"
+            | "statusline-setup"
+            | "fork"
+    )
 }
 
 /// Prefix inserted before the caller's directive text inside a fork
@@ -7620,14 +7692,14 @@ mod tests {
 
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, auto_background_threshold,
-        await_agent_output, classify_lane_failure, derive_agent_state,
+        await_agent_output, build_agent_system_prompt, classify_lane_failure, derive_agent_state,
         execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry,
-        maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
-        persist_agent_terminal_state, push_output_block, run_ask_user_question_v2,
-        sweep_orphaned_tmp_files, AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem,
-        AskUserQuestionOption, GlobalToolRegistry, LaneEventName, LaneFailureClass,
-        SubagentToolExecutor,
+        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
+        maybe_commit_provenance, mvp_tool_specs, normalize_subagent_type,
+        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
+        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
+        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        LaneEventName, LaneFailureClass, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -9954,6 +10026,227 @@ mod tests {
         std::env::remove_var("SUDOCODE_AGENT_STORE");
         std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ── custom `.md` agents (Commit 8) ────────────────────────────
+
+    /// Set HOME (or USERPROFILE on Windows) to the given path for the
+    /// duration of the returned guard, so the standard-search-path
+    /// resolver in `runtime::custom_agents` looks under our fixture.
+    struct HomeGuard {
+        keys: Vec<(&'static str, Option<String>)>,
+    }
+    impl HomeGuard {
+        fn override_home(new_home: &Path) -> Self {
+            let mut keys = Vec::new();
+            for key in ["HOME", "USERPROFILE"] {
+                let prior = std::env::var(key).ok();
+                std::env::set_var(key, new_home);
+                keys.push((key, prior));
+            }
+            Self { keys }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            for (key, prior) in &self.keys {
+                match prior {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn write_fixture_agent(home: &Path, name: &str, frontmatter: &str, body: &str) -> PathBuf {
+        let dir = home.join(".claude").join("agents");
+        fs::create_dir_all(&dir).expect("mkdir fixture agents dir");
+        let path = dir.join(format!("{name}.md"));
+        let contents = format!("---\n{frontmatter}---\n{body}");
+        fs::write(&path, contents).expect("write fixture agent");
+        path
+    }
+
+    #[test]
+    fn normalize_preserves_unknown_names_for_custom_lookup() {
+        // A custom `.md` agent's name (e.g. `my-researcher`) must pass
+        // through normalize_subagent_type verbatim so the lookup on
+        // the other side can find it by exact match.
+        assert_eq!(
+            normalize_subagent_type(Some("my-researcher")),
+            "my-researcher"
+        );
+        assert_eq!(
+            normalize_subagent_type(Some("Naming.Committee")),
+            "Naming.Committee"
+        );
+    }
+
+    #[test]
+    fn lookup_custom_agent_finds_md_file_under_home() {
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-home");
+        write_fixture_agent(
+            &home,
+            "my-researcher",
+            "name: my-researcher\ndescription: Names only.\ntools: [read_file, glob_search]\n",
+            "You are a naming committee. Reply with names only.\n",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        let def =
+            lookup_custom_agent("my-researcher").expect("custom agent must resolve under HOME");
+        assert_eq!(def.name, "my-researcher");
+        assert_eq!(
+            def.tools.as_deref(),
+            Some(&["glob_search".to_string(), "read_file".to_string()][..])
+        );
+        assert!(def.system_prompt.contains("naming committee"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn lookup_custom_agent_returns_none_for_builtin_names() {
+        // A user dropping a shadow `.md` for a built-in preset must
+        // NOT hijack the preset — same precedence as CC-fork's
+        // getBuiltInAgents winning over parseAgentFromMarkdown.
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-shadow");
+        write_fixture_agent(
+            &home,
+            "Explore",
+            "name: Explore\ndescription: Shadow.\n",
+            "Bogus body.\n",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        for builtin in [
+            "Explore",
+            "Plan",
+            "Verification",
+            "scode-guide",
+            "statusline-setup",
+            "general-purpose",
+            "fork",
+        ] {
+            assert!(
+                lookup_custom_agent(builtin).is_none(),
+                "custom lookup must NOT shadow built-in `{builtin}`"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn allowed_tools_for_custom_agent_uses_frontmatter_list() {
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-tools");
+        write_fixture_agent(
+            &home,
+            "restricted",
+            "name: restricted\ndescription: R.\ntools: [read_file, glob_search]\n",
+            "body",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        let tools = allowed_tools_for_subagent("restricted");
+        assert!(tools.contains("read_file"));
+        assert!(tools.contains("glob_search"));
+        assert!(!tools.contains("bash"), "write-side tool must be excluded");
+        assert!(
+            !tools.contains("edit_file"),
+            "write-side tool must be excluded"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn allowed_tools_for_custom_agent_star_inherits_general_purpose() {
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-star");
+        write_fixture_agent(
+            &home,
+            "wide-open",
+            "name: wide-open\ndescription: W.\ntools: '*'\n",
+            "body",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        let tools = allowed_tools_for_subagent("wide-open");
+        // `*` → inherit maximal set, so bash + write_file must appear.
+        assert!(tools.contains("bash"), "`*` must inherit bash");
+        assert!(tools.contains("write_file"), "`*` must inherit write_file");
+        assert!(tools.contains("read_file"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn allowed_tools_for_custom_agent_missing_field_inherits_default() {
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-no-tools");
+        write_fixture_agent(
+            &home,
+            "inheritor",
+            "name: inheritor\ndescription: I.\n",
+            "body",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        let tools = allowed_tools_for_subagent("inheritor");
+        assert!(tools.contains("bash"));
+        assert!(tools.contains("write_file"));
+        assert!(tools.contains("read_file"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn allowed_tools_for_unknown_non_custom_agent_uses_general_purpose_default() {
+        // No custom .md exists for this name. Historically this fell
+        // to the `_ =>` default arm returning the general-purpose
+        // set — that must NOT regress.
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-none");
+        fs::create_dir_all(&home).expect("home");
+        let _home = HomeGuard::override_home(&home);
+
+        let tools = allowed_tools_for_subagent("some-unknown-name");
+        assert!(tools.contains("bash"));
+        assert!(tools.contains("write_file"));
+        assert!(tools.contains("read_file"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn build_system_prompt_embeds_custom_agent_body() {
+        let _guard = env_guard();
+        let home = temp_path("custom-agent-prompt");
+        write_fixture_agent(
+            &home,
+            "committee",
+            "name: committee\ndescription: Just names.\n",
+            "You are the NAMING_COMMITTEE_SENTINEL. Reply with names only.\n",
+        );
+        let _home = HomeGuard::override_home(&home);
+
+        let prompt =
+            build_agent_system_prompt("committee", "claude-opus-4-8").expect("system prompt build");
+        let joined = prompt.dynamic_sections.join("\n---section---\n");
+        assert!(
+            joined.contains("NAMING_COMMITTEE_SENTINEL"),
+            "custom-agent body must be embedded in system prompt; got: {joined}"
+        );
+        assert!(
+            joined.contains("custom sub-agent `committee`"),
+            "identity line must reference the agent name; got: {joined}"
+        );
+
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

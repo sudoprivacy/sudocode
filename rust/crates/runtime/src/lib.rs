@@ -17,6 +17,7 @@ pub mod config;
 pub mod config_validate;
 mod conversation;
 pub mod coordinator_mode;
+pub mod custom_agents;
 mod file_intent;
 mod file_ops;
 mod file_redirect;

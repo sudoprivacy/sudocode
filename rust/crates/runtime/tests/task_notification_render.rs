@@ -163,10 +163,7 @@ fn shape_color_tag_emitted_when_set_and_omitted_when_none() {
     assert!(xml.contains("<color>cyan</color>"));
     let result_at = xml.find("</result>").expect("result present");
     let color_at = xml.find("<color>").expect("color present");
-    assert!(
-        result_at < color_at,
-        "color tag must follow result tag"
-    );
+    assert!(result_at < color_at, "color tag must follow result tag");
 
     // Color-unset path — no `<color>` tag anywhere.
     let without_color = base_view();

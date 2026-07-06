@@ -47,15 +47,17 @@ fn parent_assistant_with_two_tool_uses() -> ConversationMessage {
             ContentBlock::ToolUse {
                 id: "toolu_001".to_string(),
                 name: "Agent".to_string(),
-                input: r#"{"description":"read a.txt","prompt":"read a.txt","subagent_type":"fork"}"#
-                    .to_string(),
+                input:
+                    r#"{"description":"read a.txt","prompt":"read a.txt","subagent_type":"fork"}"#
+                        .to_string(),
                 thought_signature: None,
             },
             ContentBlock::ToolUse {
                 id: "toolu_002".to_string(),
                 name: "Agent".to_string(),
-                input: r#"{"description":"read b.txt","prompt":"read b.txt","subagent_type":"fork"}"#
-                    .to_string(),
+                input:
+                    r#"{"description":"read b.txt","prompt":"read b.txt","subagent_type":"fork"}"#
+                        .to_string(),
                 thought_signature: None,
             },
         ],
@@ -109,11 +111,19 @@ fn parallel_forks_share_user_tool_result_blocks_byte_identical() {
     assert_eq!(c_blocks.len(), 3);
 
     for i in 0..2 {
-        assert_eq!(a_blocks[i], b_blocks[i], "tool_result block {i} differs a vs b");
-        assert_eq!(b_blocks[i], c_blocks[i], "tool_result block {i} differs b vs c");
+        assert_eq!(
+            a_blocks[i], b_blocks[i],
+            "tool_result block {i} differs a vs b"
+        );
+        assert_eq!(
+            b_blocks[i], c_blocks[i],
+            "tool_result block {i} differs b vs c"
+        );
         // Sanity: it IS a ToolResult and carries the shared placeholder.
         match a_blocks[i] {
-            ContentBlock::ToolResult { output, is_error, .. } => {
+            ContentBlock::ToolResult {
+                output, is_error, ..
+            } => {
                 assert!(!is_error);
                 assert!(
                     output.contains("Fork started"),

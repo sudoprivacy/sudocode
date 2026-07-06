@@ -103,10 +103,7 @@ mod tests {
             "agent-q9r",
             "agent-s0t",
         ];
-        let colors: HashSet<_> = ids
-            .iter()
-            .filter_map(|id| assign_agent_color(id))
-            .collect();
+        let colors: HashSet<_> = ids.iter().filter_map(|id| assign_agent_color(id)).collect();
         assert!(
             colors.len() >= 3,
             "hash must spread across at least 3 palette buckets in a 10-sample; got {colors:?}"

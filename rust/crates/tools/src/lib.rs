@@ -1599,10 +1599,15 @@ fn format_agent_output(manifest: &AgentOutput, retrieval_status: &str) -> Result
 /// Map an internal manifest status onto the terminal set. Mirrors
 /// `runtime::coordinator_mode::normalize_task_notification_status` but
 /// returns a bool (only terminal states drive the XML path).
+///
+/// `backgrounded` is deliberately NON-terminal: it means the worker
+/// exceeded the sync-call auto-bg threshold but is still running.
+/// Emitting `<task-notification><status>failed</status>...` for it
+/// would be a lie — the parent should keep polling.
 fn is_terminal_agent_status(status: &str) -> bool {
     !matches!(
         status.trim().to_ascii_lowercase().as_str(),
-        "" | "running" | "working" | "pending"
+        "" | "running" | "working" | "pending" | "backgrounded"
     )
 }
 
@@ -4274,21 +4279,149 @@ fn execute_agent_inline(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
 ) -> Result<AgentOutput, String> {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
-    match run_agent_job_returning_text(&job) {
-        Ok(final_text) => {
-            persist_agent_terminal_state(&manifest, "completed", Some(final_text.as_str()), None)?;
-            // Re-read manifest so lane events and result written by persist are present.
-            std::fs::read_to_string(&manifest.manifest_file)
-                .map_err(|e| e.to_string())
-                .and_then(|s| serde_json::from_str::<AgentOutput>(&s).map_err(|e| e.to_string()))
-                .or(Ok(manifest))
-        }
-        Err(error) => {
-            let _ = persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
-            Err(format!("sub-agent failed: {error}"))
-        }
+    execute_agent_inline_with_work(input, ctx, |job| run_agent_job_returning_text(&job))
+}
+
+/// Default auto-background threshold. Mirrors CC-fork's 120-second
+/// window for sync `Agent(...)` calls: the parent's tool loop can wait
+/// this long for a "quick" delegation; after that the worker is
+/// transitioned to background mode so the parent isn't blocked
+/// indefinitely.
+const DEFAULT_AGENT_AUTO_BG_SECS: u64 = 120;
+
+/// Read the auto-background threshold from the environment, honouring
+/// the `SUDOCODE_AGENT_AUTO_BG_SECS` override. Returns `None` when the
+/// override is `0` (feature disabled — sync path stays sync
+/// indefinitely, matching pre-commit-6 behaviour). Returns
+/// `Some(Duration)` otherwise. Unparseable values fall back to the
+/// 120 s default rather than disable the safety net.
+fn auto_background_threshold() -> Option<Duration> {
+    match std::env::var("SUDOCODE_AGENT_AUTO_BG_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(Duration::from_secs(secs)),
+            Err(_) => Some(Duration::from_secs(DEFAULT_AGENT_AUTO_BG_SECS)),
+        },
+        Err(_) => Some(Duration::from_secs(DEFAULT_AGENT_AUTO_BG_SECS)),
     }
+}
+
+/// Test-facing seam for [`execute_agent_inline`]: the actual
+/// LLM-driving work happens in `work_fn` so integration tests can
+/// inject a deterministic sleep/return closure and observe both the
+/// "completes within threshold" and "auto-backgrounded on timeout"
+/// paths without a live LLM.
+///
+/// Semantics — when the auto-bg threshold is `Some(d)`:
+/// 1. Register the abort signal in the process-wide registry (so
+///    `SendMessage(shutdown_request)` reaches the still-running worker
+///    if the parent hands out its `agent_id`).
+/// 2. Register the agent with the completion registry so a subsequent
+///    `TaskOutput(agent_id, block=true)` can await it.
+/// 3. Spawn the work on a fresh thread (parallels the tokio-backed
+///    `spawn_agent_job` but uses a plain `std::thread` so this path is
+///    reachable from non-tokio test harnesses).
+/// 4. Block up to `d` on the completion registry. Completion → return
+///    the persisted manifest. Timeout → persist status
+///    `backgrounded` and return the mutated manifest; the worker
+///    continues in its thread and will overwrite the manifest with
+///    `completed`/`failed` later.
+///
+/// When the threshold is `None` (env `SUDOCODE_AGENT_AUTO_BG_SECS=0`),
+/// runs the work fully synchronously in the calling thread —
+/// bit-for-bit identical to pre-commit-6 behaviour.
+fn execute_agent_inline_with_work<W>(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+    work_fn: W,
+) -> Result<AgentOutput, String>
+where
+    W: FnOnce(AgentJob) -> Result<String, String> + Send + 'static,
+{
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let Some(threshold) = auto_background_threshold() else {
+        // Auto-bg disabled — original fully-sync path.
+        return match work_fn(job) {
+            Ok(final_text) => {
+                persist_agent_terminal_state(
+                    &manifest,
+                    "completed",
+                    Some(final_text.as_str()),
+                    None,
+                )?;
+                reload_manifest_or_fallback(manifest)
+            }
+            Err(error) => {
+                let _ =
+                    persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+                Err(format!("sub-agent failed: {error}"))
+            }
+        };
+    };
+
+    // Auto-bg enabled: run on a worker thread + await up to threshold.
+    let agent_id = manifest.agent_id.clone();
+    register_agent_abort_signal(&agent_id, job.abort_signal.clone());
+    global_agent_registry().register(&agent_id);
+
+    let bg_manifest = manifest.clone();
+    let bg_agent_id = agent_id.clone();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work_fn(job)));
+        match result {
+            Ok(Ok(final_text)) => {
+                let _ = persist_agent_terminal_state(
+                    &bg_manifest,
+                    "completed",
+                    Some(final_text.as_str()),
+                    None,
+                );
+            }
+            Ok(Err(err)) => {
+                let _ = persist_agent_terminal_state(&bg_manifest, "failed", None, Some(err));
+            }
+            Err(_) => {
+                let _ = persist_agent_terminal_state(
+                    &bg_manifest,
+                    "failed",
+                    None,
+                    Some(String::from("sub-agent thread panicked")),
+                );
+            }
+        }
+        notify_agent_completion(&bg_manifest);
+        unregister_agent_abort_signal(&bg_agent_id);
+    });
+
+    match global_agent_registry().await_agent(&agent_id, threshold) {
+        Ok(final_manifest) => Ok(final_manifest),
+        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Persist the manifest with the sentinel `backgrounded` status and
+/// return the mutated in-memory copy. Status `backgrounded` signals to
+/// the parent: "sync call exceeded the auto-bg threshold; the worker
+/// is still running — poll with `TaskOutput(agent_id, block=true)`."
+/// It is NOT a terminal state — [`is_terminal_agent_status`] returns
+/// false so mid-flight `TaskOutput` queries under coord mode still
+/// return JSON (not the `<task-notification>` XML that requires a real
+/// terminal outcome).
+fn mark_manifest_backgrounded(manifest: &AgentOutput) -> AgentOutput {
+    let mut updated = manifest.clone();
+    updated.status = String::from("backgrounded");
+    let _ = write_agent_manifest(&updated);
+    updated
+}
+
+fn reload_manifest_or_fallback(manifest: AgentOutput) -> Result<AgentOutput, String> {
+    // Re-read so lane events + result written by persist are visible;
+    // fall back to the in-memory manifest if the re-read blips.
+    std::fs::read_to_string(&manifest.manifest_file)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str::<AgentOutput>(&s).map_err(|e| e.to_string()))
+        .or(Ok(manifest))
 }
 
 fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
@@ -7486,8 +7619,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        agent_permission_policy, allowed_tools_for_subagent, await_agent_output,
-        classify_lane_failure, derive_agent_state, execute_agent_with_spawn, execute_tool,
+        agent_permission_policy, allowed_tools_for_subagent, auto_background_threshold,
+        await_agent_output, classify_lane_failure, derive_agent_state,
+        execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
         extract_recovery_outcome, final_assistant_text, global_cron_registry,
         maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
         persist_agent_terminal_state, push_output_block, run_ask_user_question_v2,
@@ -9674,6 +9808,166 @@ mod tests {
         std::env::remove_var("SUDOCODE_AGENT_STORE");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    // ── auto-background threshold (Commit 6) ───────────────────────
+
+    #[test]
+    fn auto_bg_threshold_defaults_to_120s_when_env_unset() {
+        let _guard = env_guard();
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+        let t = auto_background_threshold().expect("default should enable auto-bg");
+        assert_eq!(t.as_secs(), 120);
+    }
+
+    #[test]
+    fn auto_bg_threshold_zero_disables_feature() {
+        let _guard = env_guard();
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "0");
+        assert!(
+            auto_background_threshold().is_none(),
+            "0 must disable auto-bg — caller falls back to fully-sync path"
+        );
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+    }
+
+    #[test]
+    fn auto_bg_threshold_reads_env_override() {
+        let _guard = env_guard();
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "5");
+        let t = auto_background_threshold().expect("override should enable auto-bg");
+        assert_eq!(t.as_secs(), 5);
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+    }
+
+    #[test]
+    fn auto_bg_threshold_falls_back_to_default_on_garbage_env() {
+        let _guard = env_guard();
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "not-a-number");
+        let t = auto_background_threshold()
+            .expect("unparseable value should fall back to default, not disable");
+        assert_eq!(t.as_secs(), 120);
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+    }
+
+    fn auto_bg_input(label: &str) -> AgentInput {
+        AgentInput {
+            description: format!("auto-bg test: {label}"),
+            prompt: format!("scenario={label}"),
+            subagent_type: None,
+            name: Some(format!("auto-bg-{label}")),
+            model: None,
+            run_in_background: Some(false),
+            auth_mode: None,
+        }
+    }
+
+    #[test]
+    fn auto_bg_returns_completed_manifest_when_work_finishes_within_threshold() {
+        let _guard = env_guard();
+        let dir = temp_path("agent-autobg-fast");
+        std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "5");
+
+        let manifest = execute_agent_inline_with_work(auto_bg_input("fast"), None, |_job| {
+            // Finishes well before the 5-second threshold.
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(String::from("done fast"))
+        })
+        .expect("fast work should complete via auto-bg await path");
+
+        assert_eq!(manifest.status, "completed");
+        assert_eq!(manifest.result.as_deref(), Some("done fast"));
+
+        std::env::remove_var("SUDOCODE_AGENT_STORE");
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_bg_returns_backgrounded_manifest_when_work_exceeds_threshold() {
+        let _guard = env_guard();
+        let dir = temp_path("agent-autobg-slow");
+        std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
+        // Very short threshold so the test's sync-await window closes quickly.
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "1");
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let manifest = execute_agent_inline_with_work(auto_bg_input("slow"), None, move |_job| {
+            // Block until the test releases us — proves the manifest is
+            // returned from the timeout branch while the worker is
+            // still running.
+            let _ = rx.recv();
+            Ok(String::from("eventually done"))
+        })
+        .expect("timeout path should still return Ok(manifest)");
+
+        assert_eq!(
+            manifest.status, "backgrounded",
+            "auto-bg timeout MUST mark the manifest as backgrounded"
+        );
+
+        // The on-disk manifest should also reflect the backgrounded status —
+        // a subsequent TaskOutput poll must see the same state.
+        let persisted =
+            std::fs::read_to_string(&manifest.manifest_file).expect("manifest must be on disk");
+        let value: serde_json::Value = serde_json::from_str(&persisted).expect("valid json");
+        assert_eq!(value["status"], "backgrounded");
+
+        // Now release the worker and prove TaskOutput(block=true) eventually
+        // sees the "completed" transition.
+        let _ = tx.send(());
+        let out = await_agent_output(&manifest.agent_id, true, 5_000)
+            .expect("await should succeed after worker finishes");
+        let value: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["result"], "eventually done");
+
+        std::env::remove_var("SUDOCODE_AGENT_STORE");
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_bg_disabled_runs_fully_sync() {
+        let _guard = env_guard();
+        let dir = temp_path("agent-autobg-disabled");
+        std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
+        std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "0");
+
+        // With auto-bg disabled, the call must block for the full work
+        // duration — no early "backgrounded" return.
+        let start = std::time::Instant::now();
+        let manifest = execute_agent_inline_with_work(auto_bg_input("disabled"), None, |_job| {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(String::from("sync done"))
+        })
+        .expect("disabled auto-bg must still complete");
+        let elapsed = start.elapsed();
+
+        assert_eq!(manifest.status, "completed");
+        assert_eq!(manifest.result.as_deref(), Some("sync done"));
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "disabled auto-bg must block for the full work duration (elapsed={elapsed:?})"
+        );
+
+        std::env::remove_var("SUDOCODE_AGENT_STORE");
+        std::env::remove_var("SUDOCODE_AGENT_AUTO_BG_SECS");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn backgrounded_status_is_not_a_terminal_state_for_notifications() {
+        // Under coord mode, TaskOutput on a still-running (backgrounded)
+        // agent must return JSON not <task-notification> XML — otherwise
+        // the coordinator would think the worker completed prematurely.
+        assert!(!super::is_terminal_agent_status("backgrounded"));
+        assert!(!super::is_terminal_agent_status("BACKGROUNDED"));
+        assert!(super::is_terminal_agent_status("completed"));
+        assert!(super::is_terminal_agent_status("failed"));
+    }
+
+    // ── legacy sync tests continue below ───────────────────────────
 
     #[test]
     fn task_output_clamps_oversized_timeout_to_cap() {

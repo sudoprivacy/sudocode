@@ -44,6 +44,36 @@ pub mod testing {
     ) -> String {
         crate::compose_next_turn_from_envelopes(envelopes)
     }
+
+    /// Test seam for `execute_todo_write`, returning the raw JSON
+    /// output string so callers can grep for the streak-nudge
+    /// substring without depending on the private `TodoWriteOutput`
+    /// struct shape.
+    pub fn execute_todo_write_for_test(input_json: &str) -> Result<String, String> {
+        let input: crate::TodoWriteInput =
+            serde_json::from_str(input_json).map_err(|e| e.to_string())?;
+        let output = crate::execute_todo_write(input)?;
+        serde_json::to_string(&output).map_err(|e| e.to_string())
+    }
+
+    /// Test seam for `prepare_agent_job`. Callers just want to fire
+    /// the side effect (Verification -> reset_streak); the manifest
+    /// return value is discarded because the test env has no real
+    /// workspace to spawn into. Returns `Ok(())` when the job was
+    /// prepared successfully (i.e. the reset side-effect fired),
+    /// otherwise the wrapped error.
+    pub fn prepare_agent_job_for_test(subagent_type: &str, prompt: &str) -> Result<(), String> {
+        let input = crate::AgentInput {
+            description: format!("test-{subagent_type}"),
+            prompt: prompt.to_string(),
+            subagent_type: Some(subagent_type.to_string()),
+            name: None,
+            model: None,
+            run_in_background: Some(true),
+            auth_mode: None,
+        };
+        crate::prepare_agent_job(input, None).map(|_| ())
+    }
 }
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -3094,6 +3124,17 @@ struct TodoWriteOutput {
     new_todos: Vec<TodoItem>,
     #[serde(rename = "verificationNudgeNeeded")]
     verification_nudge_needed: Option<bool>,
+    /// `<system-reminder>` block injected exactly once when the
+    /// `runtime::verification_watcher` streak counter crosses the
+    /// threshold (default 3). Consumed inline — subsequent
+    /// TodoWrite calls do NOT repeat the nudge until the streak
+    /// resets (either by another 3-completion streak or by
+    /// dispatching `Agent(subagent_type="Verification")`).
+    #[serde(
+        rename = "verificationStreakNudge",
+        skip_serializing_if = "Option::is_none"
+    )]
+    verification_streak_nudge: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3821,10 +3862,30 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
             .any(|todo| todo.content.to_lowercase().contains("verif")))
     .then_some(true);
 
+    // Streak counter: each newly-completed todo (by content string)
+    // bumps the process-global watcher exactly once via
+    // `record_completion_by_id` — the dedupe set inside
+    // `runtime::verification_watcher` shields us from sudocode's
+    // "TodoWrite clears the on-disk store when all todos are
+    // completed" behavior, which would otherwise over-count a
+    // re-persisted batch. Once the streak crosses the threshold
+    // (default 3), the model gets a one-shot `<system-reminder>`
+    // nudging it to spawn a Verification sub-agent. Reset happens
+    // either automatically on the next Verification spawn
+    // (`prepare_agent_job`) or via `should_nudge_and_consume`'s
+    // check-and-reset semantics.
+    for todo in &input.todos {
+        if matches!(todo.status, TodoStatus::Completed) {
+            runtime::verification_watcher::record_completion_by_id(&todo.content);
+        }
+    }
+    let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
+
     Ok(TodoWriteOutput {
         old_todos,
         new_todos: input.todos,
         verification_nudge_needed,
+        verification_streak_nudge,
     })
 }
 
@@ -4171,6 +4232,19 @@ fn prepare_agent_job(
 
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
     let is_fork = normalized_subagent_type == "fork";
+
+    // Verification-streak reset: whenever the model dispatches a
+    // Verification sub-agent, zero the process-global streak counter
+    // (`runtime::verification_watcher`) so the nudge that fired at
+    // 3-completions-in-a-row doesn't re-fire until another streak
+    // accumulates. Placed BEFORE the fork-recursion guard so the
+    // reset happens even if the Verification spawn is unreachable
+    // for some other unrelated reason later in this function — the
+    // signal is "the model tried to verify", not "the spawn
+    // succeeded".
+    if normalized_subagent_type == "Verification" {
+        runtime::verification_watcher::reset_streak();
+    }
 
     // Fork recursion guard: mirrors CC-fork's `isInForkChild(messages)`
     // in forkSubagent.ts. A fork child's session already carries the

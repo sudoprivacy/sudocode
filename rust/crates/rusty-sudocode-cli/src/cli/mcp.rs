@@ -531,4 +531,40 @@ mod tests {
 
         fs::remove_dir_all(root).expect("cleanup");
     }
+
+    /// Regression guard for the nested-runtime fix in `block_on_isolated`.
+    ///
+    /// The interactive and ACP tool loops reach `RuntimeMcpState::call_tool`
+    /// (and the resource methods) from a thread that has already entered the
+    /// outer `tokio_runtime.block_on(run_turn)` context. Driving the inner
+    /// runtime with a bare `self.runtime.block_on(..)` there panics with
+    /// "Cannot start a runtime from within a runtime"; `block_on_isolated`
+    /// escapes to a scoped OS thread that has no entered runtime.
+    ///
+    /// This reproduces that exact condition — calling `block_on_isolated` from
+    /// inside an entered multi-thread runtime. A bare `runtime.block_on` here
+    /// would panic and fail the test, which is the point: without this guard,
+    /// reverting `block_on_isolated` to `self.runtime.block_on` keeps every
+    /// other test green (none cross a runtime boundary) while reintroducing the
+    /// production panic.
+    #[test]
+    fn block_on_isolated_survives_being_called_from_within_a_runtime() {
+        // Mirrors production: `run_turn` drives on a multi-thread runtime
+        // (`Runtime::new()` defaults to multi_thread) and `RuntimeMcpState`
+        // owns a separate inner runtime.
+        let outer = tokio::runtime::Runtime::new().expect("outer runtime");
+        let inner = tokio::runtime::Runtime::new().expect("inner runtime");
+
+        let result = outer.block_on(async {
+            // On a worker thread with `outer` entered: a direct
+            // `inner.block_on(..)` from here would panic; `block_on_isolated`
+            // must not.
+            super::RuntimeMcpState::block_on_isolated(&inner, async { 21_u32 * 2 })
+        });
+
+        assert_eq!(
+            result, 42,
+            "isolated block_on should drive the future to completion"
+        );
+    }
 }

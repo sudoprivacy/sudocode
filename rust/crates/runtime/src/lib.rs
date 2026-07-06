@@ -30,9 +30,12 @@ mod lane_events;
 pub mod lsp_client;
 mod mcp;
 mod mcp_client;
+mod mcp_connection;
 pub mod mcp_lifecycle_hardened;
 mod mcp_ndjson_transport;
 pub mod mcp_server;
+mod mcp_server_manager;
+mod mcp_sse;
 mod mcp_stdio;
 pub mod mcp_tool_bridge;
 pub mod memory;
@@ -130,14 +133,15 @@ pub use mcp_lifecycle_hardened::{
     McpLifecycleValidator, McpPhaseResult,
 };
 pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
-pub use mcp_stdio::{
-    spawn_mcp_stdio_process, JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-    ManagedMcpTool, McpDiscoveryFailure, McpInitializeClientInfo, McpInitializeParams,
-    McpInitializeResult, McpInitializeServerInfo, McpListResourcesParams, McpListResourcesResult,
-    McpListToolsParams, McpListToolsResult, McpReadResourceParams, McpReadResourceResult,
-    McpResource, McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess,
-    McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult, McpToolDiscoveryReport,
-    UnsupportedMcpServer,
+pub use mcp_connection::McpConnection;
+pub use mcp_stdio::{spawn_mcp_stdio_process, McpStdioProcess};
+pub use mcp_server_manager::{
+    JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure,
+    McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
+    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
+    McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents, McpServerManager,
+    McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult,
+    McpToolDiscoveryReport, UnsupportedMcpServer,
 };
 pub use oauth::{
     clear_oauth_credentials, clear_oauth_credentials_from_keyring, clear_oauth_credentials_with,

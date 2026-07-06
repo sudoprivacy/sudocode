@@ -18,7 +18,7 @@ use std::io;
 use serde_json::{json, Value as JsonValue};
 use tokio::io::{stdin, stdout, BufReader, Stdin, Stdout};
 
-use crate::mcp_stdio::{
+use crate::mcp_server_manager::{
     JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeResult,
     McpInitializeServerInfo, McpListToolsResult, McpTool, McpToolCallContent, McpToolCallParams,
     McpToolCallResult,

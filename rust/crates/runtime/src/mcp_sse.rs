@@ -167,9 +167,7 @@ impl McpSseConnection {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "MCP SSE endpoint `{endpoint_path}` must be same-origin as `{base_url}`"
-                ),
+                format!("MCP SSE endpoint `{endpoint_path}` must be same-origin as `{base_url}`"),
             ));
         }
 

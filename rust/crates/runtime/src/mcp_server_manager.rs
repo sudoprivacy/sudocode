@@ -21,10 +21,10 @@ use crate::config::{McpTransport, RuntimeConfig, ScopedMcpServerConfig};
 use crate::mcp::mcp_tool_name;
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS};
 use crate::mcp_connection::McpConnection;
+use crate::mcp_http::McpHttpConnection;
 use crate::mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase,
 };
-use crate::mcp_http::McpHttpConnection;
 use crate::mcp_sse::McpSseConnection;
 use crate::mcp_stdio::spawn_mcp_stdio_process;
 
@@ -556,7 +556,10 @@ impl McpServerManager {
 
         for (server_name, server_config) in servers {
             let transport = server_config.transport();
-            if matches!(transport, McpTransport::Stdio | McpTransport::Sse | McpTransport::Http) {
+            if matches!(
+                transport,
+                McpTransport::Stdio | McpTransport::Sse | McpTransport::Http
+            ) {
                 let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
                 managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
             } else {

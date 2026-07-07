@@ -362,11 +362,7 @@ mod tests {
             .lock()
             .expect("request_headers lock")
             .push(request_headers);
-        let resp = state
-            .responses
-            .lock()
-            .expect("responses lock")
-            .remove(0);
+        let resp = state.responses.lock().expect("responses lock").remove(0);
         let mut builder =
             Response::builder().status(StatusCode::from_u16(resp.status).expect("valid status"));
         for (name, value) in &resp.headers {

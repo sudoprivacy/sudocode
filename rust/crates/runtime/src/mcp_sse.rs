@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
-use crate::mcp_remote::resolve_headers;
+use crate::mcp_remote::{resolve_headers, MAX_RESPONSE_BYTES};
 use crate::mcp_server_manager::{
     JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
@@ -58,7 +58,17 @@ impl McpSseConnection {
         transport: &McpRemoteTransport,
         server_name: &str,
     ) -> io::Result<Self> {
-        let client = Client::builder().build().map_err(reqwest_error_to_io)?;
+        // Redirects disabled: this client carries user auth headers, which
+        // reqwest would forward to any redirect target (only standard
+        // sensitive headers are stripped cross-host). A legitimate redirect
+        // (http→https upgrade, load-balancer 307, trailing slash) surfaces as
+        // an error instead. See `mcp_http::connect` for the same rationale.
+        // Only headers/headersHelper auth is supported; `transport.auth`
+        // (OAuth) is intentionally not consumed by the remote transports.
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(reqwest_error_to_io)?;
         let headers = resolve_headers(transport, server_name).await;
 
         let base_url = Url::parse(&transport.url).map_err(|error| {
@@ -90,11 +100,18 @@ impl McpSseConnection {
         let mut stream = Box::pin(response.bytes_stream());
         tokio::spawn(async move {
             let mut parser = IncrementalSseParser::new();
+            let mut read = 0usize;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(bytes) => {
-                        let chunk = String::from_utf8_lossy(&bytes[..]);
-                        for event in parser.push_chunk(&chunk) {
+                        read += bytes.len();
+                        if read > MAX_RESPONSE_BYTES {
+                            // Over the cap: stop draining to bound memory. The
+                            // receiver sees the stream close (has_exited → reset).
+                            closed_task.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        for event in parser.push_chunk(&bytes[..]) {
                             if sender.send(event).await.is_err() {
                                 // Receiver dropped — connection torn down.
                                 closed_task.store(true, Ordering::Relaxed);

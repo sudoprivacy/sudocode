@@ -18,6 +18,13 @@ use crate::mcp_client::McpRemoteTransport;
 /// still apply).
 const HEADERS_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Per-response-sequence byte cap shared by the remote transports (legacy
+/// SSE, Streamable HTTP). Bounds memory against a runaway/malicious server:
+/// the outer `tokio::time::timeout` limits wall time, not bytes, so without a
+/// cap a server could stream GBs within the 10–60s window. 10 MiB comfortably
+/// covers normal MCP responses (tools/list, tools/call, resources/read).
+pub(crate) const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Merge static `headers` with dynamic `headersHelper` output (dynamic wins).
 /// Helper failures (missing script, non-zero exit, malformed JSON, timeout)
 /// are absorbed — the caller proceeds with static headers alone, matching the

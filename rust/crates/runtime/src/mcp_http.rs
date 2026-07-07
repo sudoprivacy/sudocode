@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
-use crate::mcp_remote::resolve_headers;
+use crate::mcp_remote::{resolve_headers, MAX_RESPONSE_BYTES};
 use crate::mcp_server_manager::{
     JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
@@ -58,11 +58,26 @@ impl McpHttpConnection {
     /// Resolve headers (static + `headersHelper`) and parse `transport.url`
     /// as the single MCP endpoint. No request is issued here — the Streamable
     /// HTTP transport first talks to the server on `initialize`.
+    ///
+    /// Redirects are **disabled** on the client: this connection carries
+    /// user-supplied auth headers and a server-issued `Mcp-Session-Id`, which
+    /// reqwest would forward to any redirect target (only a fixed set of
+    /// standard sensitive headers are stripped cross-host). Disabling means a
+    /// legitimate redirect (http→https upgrade, load-balancer 307, trailing
+    /// slash) surfaces as an error rather than being followed — the safe
+    /// default for a credentialed client.
+    ///
+    /// Only `headers`/`headersHelper` authentication is supported here;
+    /// `transport.auth` (OAuth) is intentionally not consumed by the remote
+    /// transports (see `McpRemoteTransport.auth`).
     pub(crate) async fn connect(
         transport: &McpRemoteTransport,
         server_name: &str,
     ) -> io::Result<Self> {
-        let client = Client::builder().build().map_err(reqwest_error_to_io)?;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(reqwest_error_to_io)?;
         let headers = resolve_headers(transport, server_name).await;
         let endpoint = Url::parse(&transport.url).map_err(|error| {
             io::Error::new(
@@ -82,8 +97,9 @@ impl McpHttpConnection {
     /// The response body is either a single JSON-RPC object or an SSE stream;
     /// events that fail to parse as a response or carry a different id
     /// (notifications, progress) are skipped until the matching response
-    /// arrives. A `Mcp-Session-Id` response header, when present, is recorded
-    /// and echoed on subsequent requests.
+    /// arrives. A `Mcp-Session-Id` response header is recorded **only on
+    /// `initialize`** (the spec assigns it there) and echoed on subsequent
+    /// requests.
     async fn post_and_read<TParams, TResult>(
         &mut self,
         method: &str,
@@ -125,14 +141,16 @@ impl McpHttpConnection {
             )));
         }
 
-        // A server MAY assign/refresh the session id on any response; record
-        // it so subsequent POSTs echo it back (spec requirement).
-        if let Some(session_id) = response
-            .headers()
-            .get(MCP_SESSION_ID)
-            .and_then(|value| value.to_str().ok())
-        {
-            self.session_id = Some(session_id.to_string());
+        // Record the session id only on `initialize` (the spec assigns it
+        // there). Deliberately do not refresh on later responses.
+        if method == "initialize" {
+            if let Some(session_id) = response
+                .headers()
+                .get(MCP_SESSION_ID)
+                .and_then(|value| value.to_str().ok())
+            {
+                self.session_id = Some(session_id.to_string());
+            }
         }
 
         let content_type = response
@@ -143,36 +161,50 @@ impl McpHttpConnection {
             .to_ascii_lowercase();
 
         if content_type.contains("text/event-stream") {
-            return read_sse_stream::<TResult>(response, id).await;
+            return read_sse_stream::<TResult>(response, id, MAX_RESPONSE_BYTES).await;
         }
 
-        let bytes = response.bytes().await.map_err(reqwest_error_to_io)?;
-        let response: JsonRpcResponse<TResult> =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("MCP HTTP response is not a JSON-RPC response: {error}"),
-                )
-            })?;
-        Ok(response)
+        // JSON branch (also the fallback when Content-Type is missing/unknown:
+        // probing would require reading the whole body, which the spec allows a
+        // server to keep open past the response — so we attempt JSON and, on
+        // failure, surface a message that names the actual Content-Type).
+        let bytes = read_limited(response, MAX_RESPONSE_BYTES).await?;
+        serde_json::from_slice::<JsonRpcResponse<TResult>>(&bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "MCP HTTP response is not a JSON-RPC response (Content-Type: {content_type:?}, expected `application/json` or `text/event-stream`): {error}"
+                ),
+            )
+        })
     }
 }
 
 /// Drain a `text/event-stream` POST response, returning the first JSON-RPC
 /// response whose id matches. Non-matching events (notifications, progress)
-/// are skipped, matching the legacy SSE read loop.
+/// are skipped. Streaming with early return is preserved (the spec lets a
+/// server keep the stream open past the response); bytes read are capped to
+/// bound memory.
 async fn read_sse_stream<TResult: DeserializeOwned>(
     response: reqwest::Response,
     id: JsonRpcId,
+    max_bytes: usize,
 ) -> io::Result<JsonRpcResponse<TResult>> {
     let mut stream = response.bytes_stream();
     let mut parser = IncrementalSseParser::new();
+    let mut read = 0usize;
     loop {
         match stream.next().await {
             Some(Ok(bytes)) => {
-                let chunk = String::from_utf8_lossy(&bytes[..]);
-                for event in parser.push_chunk(&chunk) {
-                    if let Ok(response) = serde_json::from_str::<JsonRpcResponse<TResult>>(&event.data)
+                read += bytes.len();
+                if read > max_bytes {
+                    return Err(io::Error::other(format!(
+                        "MCP HTTP SSE stream exceeded {max_bytes} bytes"
+                    )));
+                }
+                for event in parser.push_chunk(&bytes) {
+                    if let Ok(response) =
+                        serde_json::from_str::<JsonRpcResponse<TResult>>(&event.data)
                     {
                         if response.id == id {
                             return Ok(response);
@@ -183,7 +215,8 @@ async fn read_sse_stream<TResult: DeserializeOwned>(
             Some(Err(error)) => return Err(reqwest_error_to_io(error)),
             None => {
                 for event in parser.finish() {
-                    if let Ok(response) = serde_json::from_str::<JsonRpcResponse<TResult>>(&event.data)
+                    if let Ok(response) =
+                        serde_json::from_str::<JsonRpcResponse<TResult>>(&event.data)
                     {
                         if response.id == id {
                             return Ok(response);
@@ -197,6 +230,22 @@ async fn read_sse_stream<TResult: DeserializeOwned>(
             }
         }
     }
+}
+
+/// Read the full response body into a `Vec<u8>`, bounding memory by `max_bytes`.
+async fn read_limited(response: reqwest::Response, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(reqwest_error_to_io)?;
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(io::Error::other(format!(
+                "MCP HTTP response exceeded {max_bytes} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 #[async_trait]
@@ -318,9 +367,8 @@ mod tests {
             .lock()
             .expect("responses lock")
             .remove(0);
-        let mut builder = Response::builder().status(
-            StatusCode::from_u16(resp.status).expect("valid status"),
-        );
+        let mut builder =
+            Response::builder().status(StatusCode::from_u16(resp.status).expect("valid status"));
         for (name, value) in &resp.headers {
             builder = builder.header(*name, *value);
         }
@@ -405,7 +453,6 @@ mod tests {
             initialized.result.expect("init result").server_info.name,
             "mock-http"
         );
-        // Session id assigned by the server on initialize is recorded.
         assert_eq!(connection.session_id.as_deref(), Some("sess-abc"));
 
         let tools = connection
@@ -425,7 +472,11 @@ mod tests {
             "sess-abc"
         );
         assert_eq!(
-            request_headers[1].get("accept").expect("accept sent").to_str().expect("ascii"),
+            request_headers[1]
+                .get("accept")
+                .expect("accept sent")
+                .to_str()
+                .expect("ascii"),
             "application/json, text/event-stream"
         );
         drop(request_headers);
@@ -473,6 +524,30 @@ mod tests {
         );
     }
 
+    /// High-1 (via the HTTP path): multibyte UTF-8 carried in an SSE event
+    /// survives byte-level parsing.
+    #[tokio::test]
+    async fn http_sse_preserves_multibyte_content() {
+        // tools/list response whose tool name is CJK.
+        let list = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"中文工具","description":"描述","inputSchema":{"type":"object"}}]}}"#;
+        let sse_body = format!("data: {list}\n\n");
+        let (addr, _state) = spawn_mock_http(vec![MockResp {
+            status: 200,
+            headers: vec![("content-type", "text/event-stream")],
+            body: sse_body,
+        }])
+        .await;
+
+        let mut connection = McpHttpConnection::connect(&transport(addr), "mock-cjk")
+            .await
+            .expect("connect");
+        let tools = connection
+            .list_tools(JsonRpcId::Number(1), None)
+            .await
+            .expect("list tools");
+        assert_eq!(tools.result.expect("list result").tools[0].name, "中文工具");
+    }
+
     #[tokio::test]
     async fn http_non_2xx_surfaces_error() {
         let (addr, _state) = spawn_mock_http(vec![MockResp {
@@ -490,5 +565,111 @@ mod tests {
             .await;
         let error = result.expect_err("initialize should fail on 404");
         assert!(error.to_string().contains("404"), "error was: {error}");
+    }
+
+    /// High-2: a redirect must NOT be followed (credentials must not leak).
+    #[tokio::test]
+    async fn http_redirect_is_not_followed() {
+        let (addr, _state) = spawn_mock_http(vec![MockResp {
+            status: 307,
+            headers: vec![("location", "http://attacker.example/leak")],
+            body: String::new(),
+        }])
+        .await;
+
+        let mut connection = McpHttpConnection::connect(&transport(addr), "mock-redirect")
+            .await
+            .expect("connect");
+        let error = connection
+            .initialize(JsonRpcId::Number(1), init_params())
+            .await
+            .expect_err("307 must surface as an error, not be followed");
+        assert!(error.to_string().contains("307"), "error was: {error}");
+    }
+
+    /// Medium-3: response body beyond the cap is rejected.
+    #[tokio::test]
+    async fn http_read_limited_enforces_byte_cap() {
+        let (addr, _state) = spawn_mock_http(vec![MockResp {
+            status: 200,
+            headers: vec![("content-type", "application/json")],
+            body: "0".repeat(100),
+        }])
+        .await;
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .body("")
+            .send()
+            .await
+            .expect("request");
+        let error = read_limited(response, 10)
+            .await
+            .expect_err("body over cap must error");
+        assert!(error.to_string().contains("10 bytes"), "error was: {error}");
+    }
+
+    /// Low-5: only the initialize response assigns/refreshes the session id.
+    #[tokio::test]
+    async fn http_session_id_not_refreshed_after_initialize() {
+        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0.1.0"}}}"#;
+        let list = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#;
+        let (addr, _state) = spawn_mock_http(vec![
+            MockResp {
+                status: 200,
+                headers: vec![
+                    ("content-type", "application/json"),
+                    ("mcp-session-id", "initial"),
+                ],
+                body: init.to_string(),
+            },
+            // A later response tries to "refresh" the session id — must be ignored.
+            MockResp {
+                status: 200,
+                headers: vec![
+                    ("content-type", "application/json"),
+                    ("mcp-session-id", "should-be-ignored"),
+                ],
+                body: list.to_string(),
+            },
+        ])
+        .await;
+
+        let mut connection = McpHttpConnection::connect(&transport(addr), "mock-sess")
+            .await
+            .expect("connect");
+        connection
+            .initialize(JsonRpcId::Number(1), init_params())
+            .await
+            .expect("initialize");
+        assert_eq!(connection.session_id.as_deref(), Some("initial"));
+        connection
+            .list_tools(JsonRpcId::Number(2), None)
+            .await
+            .expect("list tools");
+        // Unchanged — the post-initialize Mcp-Session-Id was NOT applied.
+        assert_eq!(connection.session_id.as_deref(), Some("initial"));
+    }
+
+    /// Low-4: when the JSON branch fails, the error names the actual
+    /// Content-Type so a mislabeled/missing type is diagnosable.
+    #[tokio::test]
+    async fn http_json_parse_error_names_content_type() {
+        let (addr, _state) = spawn_mock_http(vec![MockResp {
+            status: 200,
+            // No Content-Type; body is not JSON.
+            headers: vec![],
+            body: "not-json".to_string(),
+        }])
+        .await;
+
+        let mut connection = McpHttpConnection::connect(&transport(addr), "mock-ct")
+            .await
+            .expect("connect");
+        let error = connection
+            .initialize(JsonRpcId::Number(1), init_params())
+            .await
+            .expect_err("non-JSON body must error");
+        let msg = error.to_string();
+        assert!(msg.contains("Content-Type"), "error was: {msg}");
     }
 }

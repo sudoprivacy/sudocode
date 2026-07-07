@@ -1,0 +1,137 @@
+name: Model Compatibility
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'Comma-separated model IDs (empty = auto-fetch from sudorouter)'
+        default: ''
+        required: false
+
+concurrency:
+  group: model-compat
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: rust
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compat:
+    name: Model compatibility sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Fetch model list from sudorouter
+        id: models
+        env:
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # Use manually provided models if available.
+          MANUAL_MODELS="${{ github.event.inputs.models }}"
+          if [ -n "$MANUAL_MODELS" ]; then
+            echo "models=$MANUAL_MODELS" >> "$GITHUB_OUTPUT"
+            echo "Using manually provided models: $MANUAL_MODELS"
+            exit 0
+          fi
+
+          # Fetch all models from sudorouter /v1/models.
+          RESPONSE=$(curl -sf -H "Authorization: Bearer $SUDOROUTER_API_KEY" \
+            "https://hk.sudorouter.ai/v1/models" || true)
+
+          if [ -z "$RESPONSE" ]; then
+            echo "::warning::Failed to fetch model list from sudorouter"
+            echo "models=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Filter to chat-completion-capable models.
+          # Exclude: embedding, image-gen, video, speech, search, moderation, tts, whisper, dall-e.
+          MODELS=$(echo "$RESPONSE" | jq -r '
+            .data[]
+            | select(.id)
+            | .id
+            | select(
+                test("embed|embedding|tts|whisper|dall-e|moderation|search|image|video|speech|audio"; "i")
+                | not
+              )
+          ' | paste -sd ',' -)
+
+          MODEL_COUNT=$(echo "$MODELS" | tr ',' '\n' | wc -l | tr -d ' ')
+          echo "Discovered $MODEL_COUNT text-capable models"
+          echo "models=$MODELS" >> "$GITHUB_OUTPUT"
+
+      - name: Write proxy config
+        if: steps.models.outputs.models != ''
+        env:
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          CONFIG_DIR="$HOME/.nexus/sudocode"
+          mkdir -p "$CONFIG_DIR"
+
+          # Write a minimal sudocode.json with proxy auth for sudorouter.
+          cat > "$CONFIG_DIR/sudocode.json" <<ENDJSON
+          {
+            "auth_modes": {
+              "proxy": {
+                "sudorouter": {
+                  "baseUrl": "https://hk.sudorouter.ai/v1",
+                  "apiKey": "$SUDOROUTER_API_KEY"
+                }
+              }
+            },
+            "models": {}
+          }
+          ENDJSON
+
+          echo "Proxy config written to $CONFIG_DIR/sudocode.json"
+
+      - name: Run model compatibility tests
+        if: steps.models.outputs.models != ''
+        env:
+          SCODE_TEST_BACKEND: live
+          SCODE_COMPAT_MODELS: ${{ steps.models.outputs.models }}
+        run: cargo test --test pty_model_compat -- --test-threads=1 --nocapture
+        timeout-minutes: 30
+
+      - name: Collect report
+        if: always() && steps.models.outputs.models != ''
+        run: |
+          # Find the JSON report in any temp directory.
+          REPORT=$(find /tmp -name "model-compat-report.json" -type f 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            mkdir -p ../artifacts
+            cp "$REPORT" ../artifacts/model-compat-report.json
+            echo "Report collected:"
+            cat ../artifacts/model-compat-report.json | jq '.pass, .skip, .fail'
+          else
+            echo "::warning::No report file found"
+          fi
+
+      - name: Upload report artifact
+        if: always() && steps.models.outputs.models != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-compat-report
+          path: artifacts/model-compat-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Skip notice
+        if: steps.models.outputs.models == ''
+        run: echo "::notice::No models to test — skipping compatibility sweep"

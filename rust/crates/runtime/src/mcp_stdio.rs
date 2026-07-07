@@ -1740,10 +1740,11 @@ mod tests {
         let manager = McpServerManager::from_servers(&servers);
         let unsupported = manager.unsupported_servers();
 
-        assert_eq!(unsupported.len(), 3);
-        assert_eq!(unsupported[0].server_name, "http");
-        assert_eq!(unsupported[1].server_name, "sdk");
-        assert_eq!(unsupported[2].server_name, "ws");
+        // Http is now a supported transport (Streamable HTTP); only SDK and WS
+        // remain unsupported by McpServerManager.
+        assert_eq!(unsupported.len(), 2);
+        assert_eq!(unsupported[0].server_name, "sdk");
+        assert_eq!(unsupported[1].server_name, "ws");
         assert_eq!(
             unsupported_server_failed_server(&unsupported[0]).phase,
             McpLifecyclePhase::ServerRegistration

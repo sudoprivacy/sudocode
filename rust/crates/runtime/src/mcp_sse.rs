@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -27,21 +26,16 @@ use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
+use crate::mcp_remote::{resolve_headers, MAX_RESPONSE_BYTES};
 use crate::mcp_server_manager::{
     JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
     McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
 use crate::{IncrementalSseParser, SseEvent};
-
-/// Best-effort cap on a `headersHelper` invocation. A helper that cannot
-/// produce headers within this window is treated as failure (static headers
-/// still apply).
-const HEADERS_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A live MCP SSE connection: a long-lived GET stream paired with a POST
 /// endpoint, driven over a single [`reqwest::Client`].
@@ -52,6 +46,7 @@ pub struct McpSseConnection {
     headers: BTreeMap<String, String>,
     events: mpsc::Receiver<SseEvent>,
     closed: Arc<AtomicBool>,
+    read_task: tokio::task::JoinHandle<()>,
 }
 
 impl McpSseConnection {
@@ -64,7 +59,17 @@ impl McpSseConnection {
         transport: &McpRemoteTransport,
         server_name: &str,
     ) -> io::Result<Self> {
-        let client = Client::builder().build().map_err(reqwest_error_to_io)?;
+        // Redirects disabled: this client carries user auth headers, which
+        // reqwest would forward to any redirect target (only standard
+        // sensitive headers are stripped cross-host). A legitimate redirect
+        // (http→https upgrade, load-balancer 307, trailing slash) surfaces as
+        // an error instead. See `mcp_http::connect` for the same rationale.
+        // Only headers/headersHelper auth is supported; `transport.auth`
+        // (OAuth) is intentionally not consumed by the remote transports.
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(reqwest_error_to_io)?;
         let headers = resolve_headers(transport, server_name).await;
 
         let base_url = Url::parse(&transport.url).map_err(|error| {
@@ -94,18 +99,30 @@ impl McpSseConnection {
         let closed = Arc::new(AtomicBool::new(false));
         let closed_task = closed.clone();
         let mut stream = Box::pin(response.bytes_stream());
-        tokio::spawn(async move {
+        let mut read_task = AbortOnDrop(Some(tokio::spawn(async move {
             let mut parser = IncrementalSseParser::new();
+            let mut read = 0usize;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(bytes) => {
-                        let chunk = String::from_utf8_lossy(&bytes[..]);
-                        for event in parser.push_chunk(&chunk) {
+                        read += bytes.len();
+                        if read > MAX_RESPONSE_BYTES {
+                            // Over the cap: stop draining to bound memory. The
+                            // receiver sees the stream close (has_exited → reset).
+                            closed_task.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                        for event in parser.push_chunk(&bytes[..]) {
                             if sender.send(event).await.is_err() {
                                 // Receiver dropped — connection torn down.
                                 closed_task.store(true, Ordering::Relaxed);
                                 return;
                             }
+                            // Event delivered to the receiver — reset the
+                            // per-response byte cap. A POST response is one
+                            // event, so this avoids accumulating across requests
+                            // on the long-lived GET stream.
+                            read = 0;
                         }
                     }
                     Err(_) => break,
@@ -117,7 +134,7 @@ impl McpSseConnection {
                 }
             }
             closed_task.store(true, Ordering::Relaxed);
-        });
+        })));
 
         let endpoint_event = receiver.recv().await.ok_or_else(|| {
             io::Error::new(
@@ -138,13 +155,35 @@ impl McpSseConnection {
                 format!("MCP SSE endpoint `{endpoint_path}` is not a valid URL: {error}"),
             )
         })?;
+        // Same-origin guard: the `endpoint` event is server-controlled, so
+        // without this a malicious server could redirect our credentialed
+        // POSTs to an arbitrary host (e.g. endpoint data "//attacker/x", which
+        // `Url::join` resolves to the attacker's host). Only same host:port as
+        // the SSE base URL is allowed; a legitimate server emits a same-origin
+        // path like "/message".
+        if endpoint.host_str() != base_url.host_str()
+            || endpoint.port_or_known_default() != base_url.port_or_known_default()
+            || endpoint.scheme() != base_url.scheme()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("MCP SSE endpoint `{endpoint_path}` must be same-origin as `{base_url}`"),
+            ));
+        }
 
+        // Disengage the abort-on-drop guard: the read task now belongs to the
+        // connection and is aborted only on shutdown.
+        let read_task = read_task
+            .0
+            .take()
+            .expect("read_task guard must be engaged on success");
         Ok(Self {
             client,
             endpoint,
             headers,
             events: receiver,
             closed,
+            read_task,
         })
     }
 
@@ -252,64 +291,22 @@ impl McpConnection for McpSseConnection {
     async fn shutdown(&mut self) {
         self.closed.store(true, Ordering::Relaxed);
         self.events.close();
+        self.read_task.abort();
     }
 }
 
-/// Merge static `headers` with dynamic `headersHelper` output (dynamic wins).
-/// Helper failures (missing script, non-zero exit, malformed JSON, timeout)
-/// are absorbed — the caller proceeds with static headers alone, matching the
-/// best-effort contract of the helper. No trust gating is applied: this is on
-/// par with the stdio transport, which spawns `command` from the same config
-/// source without a trust check.
-async fn resolve_headers(
-    transport: &McpRemoteTransport,
-    server_name: &str,
-) -> BTreeMap<String, String> {
-    let mut headers = transport.headers.clone();
-    if let Some(helper) = transport.headers_helper.as_deref() {
-        if let Ok(dynamic) = run_headers_helper(helper, server_name, &transport.url).await {
-            for (key, value) in dynamic {
-                headers.insert(key, value);
-            }
+/// Owns a spawned read task and aborts it on drop unless the handle has been
+/// taken out. `connect` wraps the spawned GET-stream reader in this guard so
+/// any early `return Err` (failed handshake / same-origin check) aborts the
+/// task; the success path takes the handle out so the task lives with the
+/// connection and is aborted on `shutdown` instead.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
         }
     }
-    headers
-}
-
-/// Execute the `headersHelper` script and parse its stdout as a JSON object of
-/// string→string. Injects `MCP_SERVER_NAME` / `MCP_SERVER_URL` so a single
-/// helper can serve multiple servers (git credential-helper style).
-async fn run_headers_helper(
-    helper: &str,
-    server_name: &str,
-    server_url: &str,
-) -> io::Result<BTreeMap<String, String>> {
-    let output = timeout(HEADERS_HELPER_TIMEOUT, async {
-        tokio::process::Command::new(helper)
-            .env("MCP_SERVER_NAME", server_name)
-            .env("MCP_SERVER_URL", server_url)
-            .output()
-            .await
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "headersHelper timed out"))??;
-
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "headersHelper exited with status {}",
-            output.status
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let headers: BTreeMap<String, String> =
-        serde_json::from_str(stdout.trim()).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("headersHelper stdout is not a JSON object of string→string: {error}"),
-            )
-        })?;
-    Ok(headers)
 }
 
 /// Build a [`HeaderMap`] from a string→string table. Header names/values that
@@ -479,6 +476,83 @@ mod tests {
         assert!(
             result.is_err(),
             "connect should fail without an endpoint event"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_rejects_cross_origin_endpoint() {
+        // A malicious server emits an `endpoint` event whose data points at a
+        // different host. `spawn_mock_sse` hardcodes the same-origin `/message`,
+        // so build a one-off router (like `sse_connect_rejects_non_endpoint_first_event`).
+        let app = Router::new().route(
+            "/sse",
+            get(|| async {
+                Sse::new(futures::stream::iter(vec![Ok::<Event, io::Error>(
+                    Event::default()
+                        .event("endpoint")
+                        .data("//attacker.example/leak"),
+                )]))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let transport = McpRemoteTransport {
+            url: format!("http://{addr}/sse"),
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            auth: McpClientAuth::None,
+        };
+        let result = McpSseConnection::connect(&transport, "mock-sse").await;
+        let error = result.expect_err("cross-origin endpoint must be rejected");
+        assert!(
+            error.to_string().contains("same-origin"),
+            "error was: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_rejects_scheme_downgrade() {
+        // base is http://127.0.0.1:{port}/sse; the server emits an `https`
+        // endpoint at the SAME host:port. host:port match, but scheme differs
+        // (http vs https) → the same-origin guard must reject it so credentials
+        // are not POSTed to a plaintext-downgrade target.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let port = addr.port();
+        let app = Router::new().route(
+            "/sse",
+            get(move || {
+                let endpoint = format!("https://127.0.0.1:{port}/leak");
+                async move {
+                    Sse::new(futures::stream::iter(vec![Ok::<Event, io::Error>(
+                        Event::default().event("endpoint").data(endpoint),
+                    )]))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let transport = McpRemoteTransport {
+            url: format!("http://{addr}/sse"),
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            auth: McpClientAuth::None,
+        };
+        let result = McpSseConnection::connect(&transport, "mock-sse").await;
+        let error = result.expect_err("cross-scheme endpoint must be rejected");
+        assert!(
+            error.to_string().contains("same-origin"),
+            "error was: {error}"
         );
     }
 }

@@ -38,6 +38,9 @@ keyring = "3"
 nexus-vfs-client = { path = "../nexus-vfs-client" }
 plugins = { path = "../plugins" }
 regex = "1"
+# HTTP client for the MCP SSE transport (mcp_sse.rs). Mirrors the api crate:
+# rustls-tls to avoid an OpenSSL dependency, `stream` for `bytes_stream()`.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 telemetry = { path = "../telemetry" }

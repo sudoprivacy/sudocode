@@ -124,15 +124,41 @@ impl RuntimeMcpState {
         self.manager.server_names()
     }
 
+    /// Drives `future` to completion on a dedicated OS thread instead of
+    /// calling `self.runtime.block_on` on the caller's thread.
+    ///
+    /// The interactive and ACP tool loops run synchronously inside an outer
+    /// `tokio_runtime.block_on(run_turn)` (multi-thread runtime), so the MCP
+    /// tool methods below are reached from a tokio worker thread that has
+    /// already entered a runtime. Calling `self.runtime.block_on` there panics
+    /// with "Cannot start a runtime from within a runtime". A scoped thread has
+    /// no entered runtime, so the nested `block_on` is safe. This mirrors the
+    /// thread isolation already used by `runtime::mcp_tool_bridge`'s
+    /// `spawn_tool_call`. `scope` joins the thread before returning, preserving
+    /// the original blocking semantics.
+    fn block_on_isolated<F>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(future))
+                .join()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+        })
+    }
+
     pub(crate) fn call_tool(
         &mut self,
         qualified_tool_name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<String, ToolError> {
-        let response = self
-            .runtime
-            .block_on(self.manager.call_tool(qualified_tool_name, arguments))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+        let response = Self::block_on_isolated(
+            &self.runtime,
+            self.manager.call_tool(qualified_tool_name, arguments),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         if let Some(error) = response.error {
             return Err(ToolError::new(format!(
                 "MCP tool `{qualified_tool_name}` returned JSON-RPC error: {} ({})",
@@ -152,10 +178,9 @@ impl RuntimeMcpState {
         &mut self,
         server_name: &str,
     ) -> Result<String, ToolError> {
-        let result = self
-            .runtime
-            .block_on(self.manager.list_resources(server_name))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+        let result =
+            Self::block_on_isolated(&self.runtime, self.manager.list_resources(server_name))
+                .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "resources": result.resources,
@@ -168,9 +193,7 @@ impl RuntimeMcpState {
         let mut failures = Vec::new();
 
         for server_name in self.server_names() {
-            match self
-                .runtime
-                .block_on(self.manager.list_resources(&server_name))
+            match Self::block_on_isolated(&self.runtime, self.manager.list_resources(&server_name))
             {
                 Ok(result) => resources.push(json!({
                     "server": server_name,
@@ -204,10 +227,9 @@ impl RuntimeMcpState {
         server_name: &str,
         uri: &str,
     ) -> Result<String, ToolError> {
-        let result = self
-            .runtime
-            .block_on(self.manager.read_resource(server_name, uri))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+        let result =
+            Self::block_on_isolated(&self.runtime, self.manager.read_resource(server_name, uri))
+                .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "contents": result.contents,
@@ -508,5 +530,41 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    /// Regression guard for the nested-runtime fix in `block_on_isolated`.
+    ///
+    /// The interactive and ACP tool loops reach `RuntimeMcpState::call_tool`
+    /// (and the resource methods) from a thread that has already entered the
+    /// outer `tokio_runtime.block_on(run_turn)` context. Driving the inner
+    /// runtime with a bare `self.runtime.block_on(..)` there panics with
+    /// "Cannot start a runtime from within a runtime"; `block_on_isolated`
+    /// escapes to a scoped OS thread that has no entered runtime.
+    ///
+    /// This reproduces that exact condition — calling `block_on_isolated` from
+    /// inside an entered multi-thread runtime. A bare `runtime.block_on` here
+    /// would panic and fail the test, which is the point: without this guard,
+    /// reverting `block_on_isolated` to `self.runtime.block_on` keeps every
+    /// other test green (none cross a runtime boundary) while reintroducing the
+    /// production panic.
+    #[test]
+    fn block_on_isolated_survives_being_called_from_within_a_runtime() {
+        // Mirrors production: `run_turn` drives on a multi-thread runtime
+        // (`Runtime::new()` defaults to multi_thread) and `RuntimeMcpState`
+        // owns a separate inner runtime.
+        let outer = tokio::runtime::Runtime::new().expect("outer runtime");
+        let inner = tokio::runtime::Runtime::new().expect("inner runtime");
+
+        let result = outer.block_on(async {
+            // On a worker thread with `outer` entered: a direct
+            // `inner.block_on(..)` from here would panic; `block_on_isolated`
+            // must not.
+            super::RuntimeMcpState::block_on_isolated(&inner, async { 21_u32 * 2 })
+        });
+
+        assert_eq!(
+            result, 42,
+            "isolated block_on should drive the future to completion"
+        );
     }
 }

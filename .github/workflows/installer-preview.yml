@@ -1,0 +1,119 @@
+name: Installer preview
+
+# Standalone workflow to validate native installers (Windows .exe / macOS .pkg)
+# before wiring them into the production release pipeline. Runs on pushes to the
+# feature branch and on manual dispatch; uploads installers as build artifacts.
+
+on:
+  push:
+    branches:
+      - feat/native-installers
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-installer:
+    name: installer-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-15
+            bin: scode
+            installer_name: scode-macos-arm64.pkg
+          - name: macos-x64
+            os: macos-15-intel
+            bin: scode
+            installer_name: scode-macos-x64.pkg
+          - name: windows-x64
+            os: windows-2022
+            bin: scode.exe
+            installer_name: scode-windows-x64-setup.exe
+          - name: windows-arm64
+            os: windows-11-arm
+            bin: scode.exe
+            installer_name: scode-windows-arm64-setup.exe
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Build release binary
+        run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
+
+      - name: Stage dist dir
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS installer (pkg)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkgroot="$(mktemp -d)/root"
+          mkdir -p "$pkgroot"
+          cp "target/release/${{ matrix.bin }}" "$pkgroot/scode"
+          chmod +x "$pkgroot/scode"
+          # Bundle the interactive config wizard alongside the binary.
+          cp "../packaging/macos/scode-setup.sh" "$pkgroot/scode-setup"
+          chmod +x "$pkgroot/scode-setup"
+          # postinstall launches the wizard in the user's Terminal.
+          scriptsdir="$(mktemp -d)/scripts"
+          mkdir -p "$scriptsdir"
+          cp "../packaging/macos/postinstall" "$scriptsdir/postinstall"
+          chmod +x "$scriptsdir/postinstall"
+          pkgbuild \
+            --root "$pkgroot" \
+            --scripts "$scriptsdir" \
+            --identifier com.sudocode.scode \
+            --version "${{ steps.version.outputs.version }}" \
+            --install-location /usr/local/bin \
+            "dist/${{ matrix.installer_name }}"
+
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Pin to 6.5.x so the compiler's message set matches the bundled
+          # Simplified Chinese language file (ChineseSimplified.isl, 6.5.0+).
+          choco install innosetup --version=6.5.4 -y --no-progress --allow-downgrade
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          $base = "${{ matrix.installer_name }}" -replace '\.exe$', ''
+          & $iscc `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "/DSourceExe=$((Resolve-Path 'target/release/scode.exe').Path)" `
+            "/DOutputDir=$((Resolve-Path 'dist').Path)" `
+            "/DOutputBase=$base" `
+            "../packaging/windows/scode.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.installer_name }}
+          path: rust/dist/${{ matrix.installer_name }}
+          if-no-files-found: error

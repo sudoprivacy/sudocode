@@ -99,6 +99,7 @@ enum Scenario {
     BashPermissionPromptApproved,
     BashPermissionPromptDenied,
     PluginToolRoundtrip,
+    McpToolRoundtrip,
     AutoCompactTriggered,
     TokenCostReporting,
     SingleTurnText,
@@ -131,6 +132,7 @@ impl Scenario {
             "bash_permission_prompt_approved" => Some(Self::BashPermissionPromptApproved),
             "bash_permission_prompt_denied" => Some(Self::BashPermissionPromptDenied),
             "plugin_tool_roundtrip" => Some(Self::PluginToolRoundtrip),
+            "mcp_tool_roundtrip" => Some(Self::McpToolRoundtrip),
             "auto_compact_triggered" => Some(Self::AutoCompactTriggered),
             "token_cost_reporting" => Some(Self::TokenCostReporting),
             "single_turn_text" => Some(Self::SingleTurnText),
@@ -166,6 +168,7 @@ impl Scenario {
             Self::BashPermissionPromptApproved => "bash_permission_prompt_approved",
             Self::BashPermissionPromptDenied => "bash_permission_prompt_denied",
             Self::PluginToolRoundtrip => "plugin_tool_roundtrip",
+            Self::McpToolRoundtrip => "mcp_tool_roundtrip",
             Self::AutoCompactTriggered => "auto_compact_triggered",
             Self::TokenCostReporting => "token_cost_reporting",
             Self::SingleTurnText => "single_turn_text",
@@ -541,6 +544,17 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"message":"hello from plugin parity"}"#],
             ),
         },
+        Scenario::McpToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => final_text_sse(&format!(
+                "mcp tool roundtrip complete (is_error={is_error}): {}",
+                mcp_echo_verdict(&tool_output)
+            )),
+            None => tool_use_sse(
+                "toolu_mcp_echo",
+                "mcp__parity__echo",
+                &[r#"{"text":"hello from mcp parity"}"#],
+            ),
+        },
         Scenario::AutoCompactTriggered => {
             final_text_sse_with_usage("auto compact parity complete.", 50_000, 200)
         }
@@ -864,6 +878,21 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"message": "hello from plugin parity"}),
             ),
         },
+        Scenario::McpToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => text_message_response(
+                "msg_mcp_tool_final",
+                &format!(
+                    "mcp tool roundtrip complete (is_error={is_error}): {}",
+                    mcp_echo_verdict(&tool_output)
+                ),
+            ),
+            None => tool_message_response(
+                "msg_mcp_tool_start",
+                "toolu_mcp_echo",
+                "mcp__parity__echo",
+                json!({"text": "hello from mcp parity"}),
+            ),
+        },
         Scenario::AutoCompactTriggered => text_message_response_with_usage(
             "msg_auto_compact_triggered",
             "auto compact parity complete.",
@@ -1085,6 +1114,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::BashPermissionPromptApproved => "req_bash_permission_prompt_approved",
         Scenario::BashPermissionPromptDenied => "req_bash_permission_prompt_denied",
         Scenario::PluginToolRoundtrip => "req_plugin_tool_roundtrip",
+        Scenario::McpToolRoundtrip => "req_mcp_tool_roundtrip",
         Scenario::AutoCompactTriggered => "req_auto_compact_triggered",
         Scenario::TokenCostReporting => "req_token_cost_reporting",
         Scenario::SingleTurnText => "req_single_turn_text",
@@ -1576,4 +1606,25 @@ fn extract_plugin_message(tool_output: &str) -> String {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| tool_output.trim().to_string())
+}
+
+/// Confirms the MCP `echo` tool's output round-tripped back through the
+/// NDJSON stdio transport and the nested-runtime `block_on_isolated`
+/// bridge. The mock MCP server echoes `echo:{text}`, so a successful
+/// roundtrip carries `echo:hello from mcp parity` in the tool-result JSON
+/// (`call_tool` pretty-prints the JSON-RPC `result`, whose first content
+/// block holds the echoed text).
+fn mcp_echo_verdict(tool_output: &str) -> String {
+    serde_json::from_str::<Value>(tool_output)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|blocks| blocks.first())
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "echo MISSING".to_string())
 }

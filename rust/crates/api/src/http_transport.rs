@@ -305,7 +305,28 @@ impl HttpTransport {
             }
 
             let retry_after = last_error.as_ref().and_then(ApiError::retry_after);
-            tokio::time::sleep(retry_policy.delay_for_attempt(attempts, retry_after)?).await;
+            let delay = retry_policy.delay_for_attempt(attempts, retry_after)?;
+            // Surface retry attempts to the user so they know scode
+            // isn't hung — it's waiting for the provider to recover.
+            if let Some(ref error) = last_error {
+                let reason = match error {
+                    ApiError::Api {
+                        status, message, ..
+                    } => {
+                        let msg = message.as_deref().unwrap_or("unknown error");
+                        format!("{status}: {msg}")
+                    }
+                    other => format!("{other}"),
+                };
+                eprintln!(
+                    "  ⟳ retry {}/{} in {:.0}s — {}",
+                    attempts,
+                    retry_policy.max_retries,
+                    delay.as_secs_f64(),
+                    reason,
+                );
+            }
+            tokio::time::sleep(delay).await;
         }
 
         Err(ApiError::RetriesExhausted {

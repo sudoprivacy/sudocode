@@ -263,17 +263,33 @@ pub fn resolve_provider_from_config(
     let explicit_auth_str = explicit_auth.map(AuthMode::as_str);
 
     // 1. Look up the model in config.
-    let model_config =
-        resolve_model_for_mode(config, &alias_lower, explicit_auth_str).ok_or_else(|| {
-            ApiError::Configuration(format!(
-                "model alias '{model_alias}' not found in sudocode.json"
-            ))
-        })?;
+    let model_config = resolve_model_for_mode(config, &alias_lower, explicit_auth_str);
+
+    // If the model is not in config, try proxy passthrough: send the
+    // model ID directly to a proxy provider (e.g. sudorouter) which
+    // knows how to route any model. This avoids requiring every model
+    // to be registered in sudocode.json.
+    if model_config.is_none() {
+        if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config) {
+            return Ok(resolved);
+        }
+        return Err(ApiError::Configuration(format!(
+            "model alias '{model_alias}' not found in sudocode.json and no proxy provider available for passthrough"
+        )));
+    }
+    let model_config = model_config.expect("checked above");
 
     // 2. Determine the auth mode to use.
     let auth_mode_str = if let Some(mode) = explicit_auth {
         let s = mode.as_str();
         if !model_config.providers.contains_key(s) {
+            // If the explicit auth mode doesn't have this model but
+            // it's proxy mode, try passthrough.
+            if s == "proxy" {
+                if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config) {
+                    return Ok(resolved);
+                }
+            }
             return Err(ApiError::Configuration(format!(
                 "auth mode '{}' is not available for model '{}'. Available: {}",
                 s,
@@ -333,6 +349,43 @@ pub fn resolve_provider_from_config(
         base_url: connection.base_url.clone(),
         credential,
         model_id: mapping.model.clone(),
+    })
+}
+
+/// Try to resolve a model by sending it directly to a proxy provider.
+///
+/// When a model is not registered in `sudocode.json`, proxy providers
+/// (e.g. sudorouter) can still route it — they maintain their own
+/// model registry. This function finds the first available proxy
+/// provider in `auth_modes.proxy` and synthesizes a `ResolvedProvider`
+/// that sends the model ID as-is.
+fn try_proxy_passthrough(
+    model_id: &str,
+    explicit_auth: Option<AuthMode>,
+    config: &SudoCodeConfig,
+) -> Option<ResolvedProvider> {
+    // Only use proxy passthrough if auth mode is proxy or unspecified.
+    if let Some(mode) = explicit_auth {
+        if mode != AuthMode::Proxy {
+            return None;
+        }
+    }
+
+    // Find the first proxy provider with a valid connection.
+    let proxy_providers = config.auth_modes.get("proxy")?;
+    let (provider_name, connection) = proxy_providers.iter().next()?;
+
+    // Proxy providers default to openai-completions API format.
+    let api_format = ApiFormat::OpenAiCompletions;
+    let credential = resolve_credential("proxy", provider_name, connection).ok()?;
+    let kind = infer_provider_kind(provider_name, api_format);
+
+    Some(ResolvedProvider {
+        kind,
+        api_format,
+        base_url: connection.base_url.clone(),
+        credential,
+        model_id: model_id.to_string(),
     })
 }
 

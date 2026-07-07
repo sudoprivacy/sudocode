@@ -250,12 +250,18 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
     data.iter()
         .filter_map(|entry| {
             let id = entry.get("id")?.as_str()?.to_string();
+            // Accept both sudocode field names (context_window /
+            // max_output_tokens) and OpenAI-standard names
+            // (context_length / max_tokens) for compatibility with
+            // nova-gateway's /v1/models response.
             let context_window = entry
                 .get("context_window")
+                .or_else(|| entry.get("context_length"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
             let max_output_tokens = entry
                 .get("max_output_tokens")
+                .or_else(|| entry.get("max_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
             let vision_supported = entry.get("vision_supported").and_then(|v| v.as_bool());

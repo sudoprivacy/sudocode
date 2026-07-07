@@ -1054,6 +1054,12 @@ pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
     if api::resolve_model(&config, trimmed).is_some() {
         return Ok(());
     }
+    // If a proxy provider is configured, accept any bare model ID —
+    // the proxy (e.g. sudorouter) maintains its own model registry
+    // and can route models not listed in sudocode.json.
+    if config.auth_modes.contains_key("proxy") {
+        return Ok(());
+    }
     if trimmed.contains(' ') {
         return Err(format!(
             "invalid model syntax: '{trimmed}' contains spaces. Use provider/model format or known alias"

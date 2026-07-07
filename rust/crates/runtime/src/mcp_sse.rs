@@ -46,6 +46,7 @@ pub struct McpSseConnection {
     headers: BTreeMap<String, String>,
     events: mpsc::Receiver<SseEvent>,
     closed: Arc<AtomicBool>,
+    read_task: tokio::task::JoinHandle<()>,
 }
 
 impl McpSseConnection {
@@ -98,7 +99,7 @@ impl McpSseConnection {
         let closed = Arc::new(AtomicBool::new(false));
         let closed_task = closed.clone();
         let mut stream = Box::pin(response.bytes_stream());
-        tokio::spawn(async move {
+        let mut read_task = AbortOnDrop(Some(tokio::spawn(async move {
             let mut parser = IncrementalSseParser::new();
             let mut read = 0usize;
             while let Some(chunk_result) = stream.next().await {
@@ -117,6 +118,11 @@ impl McpSseConnection {
                                 closed_task.store(true, Ordering::Relaxed);
                                 return;
                             }
+                            // Event delivered to the receiver — reset the
+                            // per-response byte cap. A POST response is one
+                            // event, so this avoids accumulating across requests
+                            // on the long-lived GET stream.
+                            read = 0;
                         }
                     }
                     Err(_) => break,
@@ -128,7 +134,7 @@ impl McpSseConnection {
                 }
             }
             closed_task.store(true, Ordering::Relaxed);
-        });
+        })));
 
         let endpoint_event = receiver.recv().await.ok_or_else(|| {
             io::Error::new(
@@ -157,6 +163,7 @@ impl McpSseConnection {
         // path like "/message".
         if endpoint.host_str() != base_url.host_str()
             || endpoint.port_or_known_default() != base_url.port_or_known_default()
+            || endpoint.scheme() != base_url.scheme()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -166,12 +173,19 @@ impl McpSseConnection {
             ));
         }
 
+        // Disengage the abort-on-drop guard: the read task now belongs to the
+        // connection and is aborted only on shutdown.
+        let read_task = read_task
+            .0
+            .take()
+            .expect("read_task guard must be engaged on success");
         Ok(Self {
             client,
             endpoint,
             headers,
             events: receiver,
             closed,
+            read_task,
         })
     }
 
@@ -279,6 +293,21 @@ impl McpConnection for McpSseConnection {
     async fn shutdown(&mut self) {
         self.closed.store(true, Ordering::Relaxed);
         self.events.close();
+        self.read_task.abort();
+    }
+}
+
+/// Owns a spawned read task and aborts it on drop unless the handle has been
+/// taken out. `connect` wraps the spawned GET-stream reader in this guard so
+/// any early `return Err` (failed handshake / same-origin check) aborts the
+/// task; the success path takes the handle out so the task lives with the
+/// connection and is aborted on `shutdown` instead.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -483,6 +512,46 @@ mod tests {
         };
         let result = McpSseConnection::connect(&transport, "mock-sse").await;
         let error = result.expect_err("cross-origin endpoint must be rejected");
+        assert!(
+            error.to_string().contains("same-origin"),
+            "error was: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_rejects_scheme_downgrade() {
+        // base is http://127.0.0.1:{port}/sse; the server emits an `https`
+        // endpoint at the SAME host:port. host:port match, but scheme differs
+        // (http vs https) → the same-origin guard must reject it so credentials
+        // are not POSTed to a plaintext-downgrade target.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let port = addr.port();
+        let app = Router::new().route(
+            "/sse",
+            get(move || {
+                let endpoint = format!("https://127.0.0.1:{port}/leak");
+                async move {
+                    Sse::new(futures::stream::iter(vec![Ok::<Event, io::Error>(
+                        Event::default().event("endpoint").data(endpoint),
+                    )]))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let transport = McpRemoteTransport {
+            url: format!("http://{addr}/sse"),
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            auth: McpClientAuth::None,
+        };
+        let result = McpSseConnection::connect(&transport, "mock-sse").await;
+        let error = result.expect_err("cross-scheme endpoint must be rejected");
         assert!(
             error.to_string().contains("same-origin"),
             "error was: {error}"

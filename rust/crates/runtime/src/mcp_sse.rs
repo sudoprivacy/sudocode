@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -27,21 +26,16 @@ use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
+use crate::mcp_remote::resolve_headers;
 use crate::mcp_server_manager::{
     JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
     McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
 use crate::{IncrementalSseParser, SseEvent};
-
-/// Best-effort cap on a `headersHelper` invocation. A helper that cannot
-/// produce headers within this window is treated as failure (static headers
-/// still apply).
-const HEADERS_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A live MCP SSE connection: a long-lived GET stream paired with a POST
 /// endpoint, driven over a single [`reqwest::Client`].
@@ -253,63 +247,6 @@ impl McpConnection for McpSseConnection {
         self.closed.store(true, Ordering::Relaxed);
         self.events.close();
     }
-}
-
-/// Merge static `headers` with dynamic `headersHelper` output (dynamic wins).
-/// Helper failures (missing script, non-zero exit, malformed JSON, timeout)
-/// are absorbed — the caller proceeds with static headers alone, matching the
-/// best-effort contract of the helper. No trust gating is applied: this is on
-/// par with the stdio transport, which spawns `command` from the same config
-/// source without a trust check.
-async fn resolve_headers(
-    transport: &McpRemoteTransport,
-    server_name: &str,
-) -> BTreeMap<String, String> {
-    let mut headers = transport.headers.clone();
-    if let Some(helper) = transport.headers_helper.as_deref() {
-        if let Ok(dynamic) = run_headers_helper(helper, server_name, &transport.url).await {
-            for (key, value) in dynamic {
-                headers.insert(key, value);
-            }
-        }
-    }
-    headers
-}
-
-/// Execute the `headersHelper` script and parse its stdout as a JSON object of
-/// string→string. Injects `MCP_SERVER_NAME` / `MCP_SERVER_URL` so a single
-/// helper can serve multiple servers (git credential-helper style).
-async fn run_headers_helper(
-    helper: &str,
-    server_name: &str,
-    server_url: &str,
-) -> io::Result<BTreeMap<String, String>> {
-    let output = timeout(HEADERS_HELPER_TIMEOUT, async {
-        tokio::process::Command::new(helper)
-            .env("MCP_SERVER_NAME", server_name)
-            .env("MCP_SERVER_URL", server_url)
-            .output()
-            .await
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "headersHelper timed out"))??;
-
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "headersHelper exited with status {}",
-            output.status
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let headers: BTreeMap<String, String> =
-        serde_json::from_str(stdout.trim()).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("headersHelper stdout is not a JSON object of string→string: {error}"),
-            )
-        })?;
-    Ok(headers)
 }
 
 /// Build a [`HeaderMap`] from a string→string table. Header names/values that

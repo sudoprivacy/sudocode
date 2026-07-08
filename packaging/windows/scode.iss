@@ -81,6 +81,7 @@ var
   SearchCheck: TNewCheckBox;
   StatusLabel: TNewStaticText;
   ConfigDone: Boolean;
+  LastFetchedApiKey: String;
 
 { ---- PATH helper ------------------------------------------------------- }
 
@@ -266,6 +267,7 @@ begin
       begin
         PopulateModelCombo(List);
         StatusLabel.Caption := '✓ 已拉取 ' + IntToStr(List.Count) + ' 个模型';
+        LastFetchedApiKey := ApiKey;
       end;
     end
     else
@@ -279,8 +281,11 @@ end;
   field). The manual 拉取模型 button remains available; FetchButtonClick
   ignores its Sender so passing nil is fine. }
 procedure ApiKeyEditExit(Sender: TObject);
+var
+  Key: String;
 begin
-  if Trim(ApiKeyEdit.Text) <> '' then
+  Key := Trim(ApiKeyEdit.Text);
+  if (Key <> '') and (Key <> LastFetchedApiKey) then
     FetchButtonClick(nil);
 end;
 

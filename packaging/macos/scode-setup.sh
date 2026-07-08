@@ -3,8 +3,8 @@
 # Interactive first-run configuration wizard for the `scode` CLI on macOS.
 #
 # Mirrors the logic of the browser-based config-tool: the user supplies a
-# sudorouter API key, we fetch the available model list over HTTPS (with a
-# built-in preset fallback), pick a default model, and write ready-to-use
+# sudorouter API key, we fetch the available model list over HTTPS,
+# pick a default model, and write ready-to-use
 # sudocode.json + settings.json into ~/.nexus/sudocode. Pure bash + curl,
 # no python/jq dependency, so it runs on a stock macOS.
 #
@@ -18,25 +18,10 @@ DEFAULT_MODEL="deepseek-v4-pro"
 SEARCH_API_URL="https://hk.sudorouter.ai/search/tavily/search"
 CONFIG_DIR="${SUDO_CODE_CONFIG_HOME:-$HOME/.nexus/sudocode}"
 
-PRESET_MODELS='auto
-grok-4-20-reasoning
-grok-4.3
-deepseek-v4-flash
-deepseek-v4-pro
-glm-5.1
-MiniMax-M2.5
-gemini-3.5-flash
-gemini-3.1-flash-lite
-gemini-3-flash-preview
-gemini-3.1-pro-preview
-Kimi-K2.6
-gpt-5.3-codex
-gpt-5.4
-gpt-5.5
-claude-sonnet-4-6
-claude-opus-4-6
-claude-opus-4-7
-claude-opus-4-8'
+# Minimal JSON string escaping (backslash + double quote).
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 
 echo "================================================"
 echo "     Sudo Code · scode 首次配置向导"
@@ -79,8 +64,8 @@ MODELS="$(curl -fsS -H "Authorization: Bearer $API_KEY" "$BASE_URL/models" 2>/de
   | awk 'NF && !seen[$0]++' || true)"
 
 if [ -z "$MODELS" ]; then
-  echo "⚠ 拉取失败或列表为空（可能是网络/密钥/CORS），改用内置预设列表。"
-  MODELS="$PRESET_MODELS"
+  echo "⚠ 拉取失败或列表为空（可能是网络/密钥/CORS），请检查后重试。"
+  exit 1
 else
   COUNT="$(printf '%s\n' "$MODELS" | grep -c . || true)"
   echo "✓ 已拉取 $COUNT 个模型"
@@ -131,8 +116,9 @@ first=1
 while IFS= read -r id; do
   [ -z "$id" ] && continue
   if is_vision "$id"; then input='["text", "image"]'; else input='["text"]'; fi
+  eid="$(json_escape "$id")"
   entry=$(printf '    "%s": {\n      "alias": "%s",\n      "name": "%s",\n      "input": %s,\n      "providers": {\n        "proxy": { "provider": "sudorouter", "model": "%s", "api": "openai-completions" }\n      }\n    }' \
-    "$id" "$id" "$id" "$input" "$id")
+    "$eid" "$eid" "$eid" "$input" "$eid")
   if [ $first -eq 1 ]; then
     MODELS_BLOCK="$entry"
     first=0
@@ -159,16 +145,18 @@ $MODELS_BLOCK
   },
   \"auth_modes\": {
     \"proxy\": {
-      \"sudorouter\": { \"baseUrl\": \"$BASE_URL\", \"apiKey\": \"$API_KEY\" }
+      \"sudorouter\": { \"baseUrl\": \"$(json_escape "$BASE_URL")\", \"apiKey\": \"$(json_escape "$API_KEY")\" }
     }
   }$WEB_SEARCH
 }"
 
-SETTINGS_JSON="{ \"model\": \"$CHOSEN_MODEL\" }"
+SETTINGS_JSON="{ \"model\": \"$(json_escape "$CHOSEN_MODEL")\" }"
 
 # --- Write files ---
 mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
 printf '%s\n' "$SUDOCODE_JSON" > "$CONFIG_DIR/sudocode.json"
+chmod 600 "$CONFIG_DIR/sudocode.json"
 printf '%s\n' "$SETTINGS_JSON" > "$CONFIG_DIR/settings.json"
 
 echo

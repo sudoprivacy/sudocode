@@ -5645,7 +5645,22 @@ fn persist_agent_terminal_state_with_telemetry(
             ));
         }
     }
-    write_agent_manifest(&next_manifest)
+    write_agent_manifest(&next_manifest)?;
+
+    // Push side: under coordinator mode, emit a
+    // `<task-notification>` XML block into the coordinator's inbox
+    // so the coordinator's REPL picks it up on its next drain. The
+    // emit helper self-guards on `is_coordinator_mode` — no
+    // conditional needed here. Best-effort: an IO error on emit
+    // shouldn't fail the terminal persist, so we log + swallow.
+    let xml = render_manifest_task_notification(&next_manifest);
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    if let Err(err) =
+        runtime::coordinator_notification::emit(&workspace_root, &next_manifest.agent_id, &xml)
+    {
+        eprintln!("sudocode: failed to emit coordinator task-notification: {err}");
+    }
+    Ok(())
 }
 
 const MIN_LANE_SUMMARY_WORDS: usize = 7;

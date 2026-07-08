@@ -3102,6 +3102,23 @@ impl LiveCli {
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
+        // Coordinator push: before starting this turn, drain any
+        // `<task-notification>` blocks that background sub-agents
+        // have deposited in `<workspace>/.sudocode-inbox/coordinator.jsonl`
+        // since the previous turn, and prepend them to the user's
+        // input. Under non-coordinator sessions the drain returns
+        // empty so `input` is unchanged.
+        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let notifications =
+            runtime::coordinator_notification::drain(&workspace_root).unwrap_or_default();
+        let prepended_input = if notifications.is_empty() {
+            input.to_string()
+        } else {
+            let mut prefixed =
+                runtime::coordinator_notification::format_drain_batch(&notifications);
+            prefixed.push_str(input);
+            prefixed
+        };
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
         spinner.start(
@@ -3118,7 +3135,7 @@ impl LiveCli {
         runtime.tool_executor_mut().set_spinner_pause(pause_flag);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
+            prepended_input.as_str(),
             Some(&mut permission_prompter),
             None,
         ));

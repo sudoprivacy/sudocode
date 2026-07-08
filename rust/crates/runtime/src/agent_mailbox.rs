@@ -76,6 +76,12 @@ pub mod kinds {
     pub const SHUTDOWN_REQUEST: &str = "shutdown_request";
     pub const SHUTDOWN_RESPONSE: &str = "shutdown_response";
     pub const PLAN_APPROVAL_RESPONSE: &str = "plan_approval_response";
+    /// Coordinator-mode push notification — a sub-agent's terminal
+    /// state was reached and it emitted a `<task-notification>` XML
+    /// block into the coordinator's inbox. The coordinator's REPL
+    /// drains these between turns and prepends them to the next
+    /// user prompt so the model sees them mid-conversation.
+    pub const TASK_NOTIFICATION: &str = "task_notification";
 }
 
 fn now_secs() -> u64 {

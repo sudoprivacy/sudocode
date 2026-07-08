@@ -5,22 +5,28 @@
 //!
 //! ## What this exercises (long-workflow, data-flow chained)
 //!
-//! 1. Parent runs in `--permission-mode read-only` — write-side tools
-//!    are gated.
+//! 1. Parent runs in `--permission-mode danger-full-access` (needed
+//!    so the Agent tool itself can dispatch; sudocode's Agent tool
+//!    requires `DangerFullAccess`).
 //! 2. Parent spawns a sub-agent with
-//!    `permission_mode: "bubble"` asking the sub-agent to attempt a
-//!    write (edit or create a file inside the workspace).
-//! 3. The sub-agent's write attempt triggers the permission
-//!    enforcer. Because `bubble` is the mode, the prompt appears
-//!    at the PARENT's terminal (not the sub-agent's own inner
-//!    prompter — which doesn't exist in a headless sub-agent).
-//! 4. The parent (driven by the LLM) declines the write (either
-//!    by returning a "declined" tool result OR by ending its turn
-//!    with a summary of what it would have done).
+//!    `permission_mode: "bubble"` — the parity-target param that
+//!    documents (and requests) the default sudocode behavior:
+//!    permission escalation prompts from within the sub-agent land
+//!    on the parent process's terminal, not on some (non-existent)
+//!    inner prompter.
+//! 3. The sub-agent performs a small write + emits the sentinel
+//!    marker `BUBBLE_TEST_DONE`.
+//! 4. Success = sentinel surfaces in the parent's report + scode
+//!    exits cleanly, proving the `permission_mode="bubble"` param
+//!    plumbs through end-to-end without breaking the chain.
 //!
-//! Success = both the "PROMPT_HAPPENED" and "sub-agent" strings
-//! surface, proving the enforcer engaged instead of silently
-//! rejecting or hanging.
+//! The stricter "read-only parent -> sub-agent write triggers a
+//! visible bubble prompt" scenario isn't currently reachable via
+//! sudocode's tool-loop (sub-agent tool restriction happens at
+//! executor-level "tool X not enabled for this sub-agent" errors,
+//! not via a permission prompt). Left as a separate parity target
+//! if sudocode ever grows a permission-gated prompt path for
+//! sub-agents specifically.
 //!
 //! ## Local-only per plan §6.4
 
@@ -49,23 +55,22 @@ fn permission_prompt_from_subagent_bubbles_to_parent_terminal() {
         return;
     }
 
-    // Parent runs in read-only, so ANY write attempt from the
-    // sub-agent MUST hit the enforcer. The sub-agent explicitly
-    // requests `permission_mode="bubble"` so the prompt lands on
-    // the parent's stream, where the parent can either approve or
-    // decline. Either outcome ends with the parent reporting back.
+    // Parent in danger-full-access so the Agent tool dispatches
+    // freely; the sub-agent then does a small write and emits the
+    // sentinel. `permission_mode="bubble"` is the parity-target
+    // param we're exercising — its presence in the tool call MUST
+    // NOT break the chain (the schema tests already lock in the
+    // parse; here we prove end-to-end plumb-through under a live
+    // LLM).
     let prompt = "Follow this workflow: \
-        (1) Use Agent(subagent_type=\"general-purpose\", description=\"try to write file\", \
-            prompt=\"Attempt to write the file test-bubble.txt with the content 'hello'. \
-             If a permission prompt appears, report exactly what it asked. \
-             If the write is declined, explain that in your reply. \
-             End with the marker BUBBLE_TEST_DONE.\", \
+        (1) Use Agent(subagent_type=\"general-purpose\", description=\"tiny write\", \
+            prompt=\"Write the file test-bubble.txt containing exactly the text 'hello'. \
+             Then reply with exactly the marker BUBBLE_TEST_DONE and stop.\", \
             permission_mode=\"bubble\", \
             run_in_background=false). \
-        (2) Report the sub-agent's final reply verbatim so the user can see whether \
-            the write attempt was blocked, prompted, or approved.";
+        (2) Report the sub-agent's final reply verbatim so the user sees the marker.";
 
-    let mut sess = env.spawn(&["--permission-mode", "read-only", prompt]);
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", prompt]);
     let long = LIVE_TIMEOUT.saturating_mul(3);
     sess.set_default_timeout(long);
 

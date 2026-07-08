@@ -61,7 +61,7 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
     // almost certainly the fixture body, not something the model
     // hallucinated. Keep it letters-only so regex-style pty-expect
     // matchers treat it as a literal.
-    let sentinel = "SUDOCODE_CUSTOM_AGENT_SENTINEL_QWERTY";
+    let sentinel = "CUST_AG_QW";
 
     // The fixture: a naming-committee agent, restricted to read-only
     // tools so we know we're not accidentally hitting general-purpose.
@@ -89,7 +89,7 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
          to complete a small naming task. Report back briefly."
     );
 
-    let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     let long = LIVE_TIMEOUT.saturating_mul(3);
     sess.set_default_timeout(long);
 

@@ -78,7 +78,11 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
          (3) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker's final reply, then report the reply verbatim to the user."
     );
 
-    let mut sess = env.spawn(&["--permission-mode", "workspace-write", &prompt]);
+    // danger-full-access because the Agent tool itself requires it —
+    // workspace-write triggers an approval prompt that would hang the
+    // test. The subagent's WORK stays under whatever the child preset
+    // allows.
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     let long = LIVE_TIMEOUT.saturating_mul(4);
     sess.set_default_timeout(long);
 

@@ -118,16 +118,11 @@ fn run_preset(preset: &str, description: &str, worker_task: &str) {
          to run a small task, then report back briefly."
     );
 
-    // Non-interactive one-shot mode: pass the prompt as a positional
-    // argument. permission-mode=read-only for the Explore/scode-guide
-    // presets that don't need writes; workspace-write for others so
-    // Verification's bash + Plan's TodoWrite can run.
-    let permission_mode = match preset {
-        "Explore" | "scode-guide" | "statusline-setup" => "read-only",
-        _ => "workspace-write",
-    };
-
-    let mut sess = env.spawn(&["--permission-mode", permission_mode, &prompt]);
+    // danger-full-access because the Agent tool requires it to dispatch.
+    // read-only / workspace-write would hang on the initial permission
+    // prompt. The CHILD sub-agent's tool pool is restricted by its
+    // preset regardless of the PARENT's permission mode.
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     sess.set_default_timeout(preset_test_timeout());
 
     expect_completion_sentinel(&mut sess, preset);

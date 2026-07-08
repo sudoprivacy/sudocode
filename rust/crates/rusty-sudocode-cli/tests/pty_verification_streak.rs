@@ -68,7 +68,7 @@ fn three_todowrite_completions_nudge_verification_spawn() {
          (6) After the Verification agent finishes, report its final reply verbatim to the user."
     );
 
-    let mut sess = env.spawn(&["--permission-mode", "workspace-write", &prompt]);
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     let long = LIVE_TIMEOUT.saturating_mul(4);
     sess.set_default_timeout(long);
 

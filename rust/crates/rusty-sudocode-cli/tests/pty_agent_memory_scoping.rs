@@ -101,7 +101,10 @@ fn explore_and_plan_agents_have_isolated_memory() {
          to inspect each agent's memory. Report both replies verbatim."
     );
 
-    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only", &prompt], extra_env);
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access", &prompt],
+        extra_env,
+    );
     let long = LIVE_TIMEOUT.saturating_mul(3);
     sess.set_default_timeout(long);
 

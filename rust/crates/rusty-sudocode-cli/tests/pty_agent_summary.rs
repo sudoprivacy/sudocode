@@ -50,23 +50,28 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
         return;
     }
 
-    // The sub-agent's prompt asks for very long output — well over
-    // the 8 KB summary threshold. We keep the prompt deterministic
-    // ("output the digit 1 exactly 12000 times") so the char count
-    // is predictable and any live-model wobble doesn't drop below
-    // threshold.
+    // Lower the summary threshold to 200 chars so the test can use
+    // a compact ~500-char output rather than begging the model for
+    // 12k characters (models routinely under-produce long
+    // repetitions — a live-model wobble making it 5k instead of 12k
+    // would still be over 8k, but a short-cut to ~50 chars would
+    // skip summarization entirely). The threshold-override env is
+    // exactly the escape hatch the AGENT_SUMMARY_THRESHOLD_ENV
+    // constant exists for.
     let prompt = "Follow these steps: \
-        (1) Use Agent(subagent_type=\"general-purpose\", description=\"long output\", \
-            prompt=\"Output the digit 1 exactly twelve thousand times, with no other characters, \
-             no spaces, no newlines, no explanation. Just the character '1' repeated 12000 times.\", \
+        (1) Use Agent(subagent_type=\"general-purpose\", description=\"medium output\", \
+            prompt=\"Output the digit 7 exactly five hundred times, then stop. No spaces, no newlines, \
+             just five hundred 7s in a row.\", \
             run_in_background=true). Record the agent_id you get back. \
         (2) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker. \
-        (3) Report back to the user with (a) the summary text you received from TaskOutput, \
-            AND (b) the value of the `resultFullPath` field in the TaskOutput response — \
-            the exact path string as it appears there. Tag them clearly, e.g. \
-            'SUMMARY: <text>' and 'FULL_PATH: <path>'.";
+        (3) Report back to the user with the value of the `result_full_path` field in the \
+            TaskOutput response — the exact path string as it appears there, tagged with \
+            'FULL_PATH: <path>'. The path will end in `.full.md`.";
 
-    let mut sess = env.spawn(&["--permission-mode", "workspace-write", prompt]);
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access", prompt],
+        &[("SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS", "200")],
+    );
     let long = LIVE_TIMEOUT.saturating_mul(4);
     sess.set_default_timeout(long);
 

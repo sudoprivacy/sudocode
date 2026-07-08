@@ -1963,7 +1963,12 @@ fn compute_notification_duration_ms(manifest: &AgentOutput) -> Option<u64> {
 }
 
 fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
-    json!({
+    // Base fields every caller expects. Optional fields added
+    // post-Commit-5 (`result_full_path`, `color`, `total_tokens`,
+    // `tool_uses`) are inserted only when populated so a manifest
+    // that didn't touch them doesn't pollute the response with
+    // nulls the coordinator would burn tokens dissecting.
+    let mut value = json!({
         "agent_id": manifest.agent_id,
         "status": manifest.status,
         "retrieval_status": retrieval_status,
@@ -1971,7 +1976,22 @@ fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
         "error": manifest.error,
         "output_file": manifest.output_file,
         "manifest_file": manifest.manifest_file,
-    })
+    });
+    if let Some(map) = value.as_object_mut() {
+        if let Some(path) = manifest.result_full_path.as_ref() {
+            map.insert("result_full_path".into(), json!(path));
+        }
+        if let Some(color) = manifest.color.as_ref() {
+            map.insert("color".into(), json!(color));
+        }
+        if let Some(tt) = manifest.total_tokens {
+            map.insert("total_tokens".into(), json!(tt));
+        }
+        if let Some(tu) = manifest.tool_uses {
+            map.insert("tool_uses".into(), json!(tu));
+        }
+    }
+    value
 }
 
 #[allow(clippy::needless_pass_by_value)]

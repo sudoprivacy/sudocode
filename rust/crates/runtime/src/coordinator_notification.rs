@@ -93,6 +93,14 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
 /// can't be read (permissions, IO). A missing inbox / missing
 /// sidecar are treated as "nothing to drain."
 pub fn drain(workspace_root: &Path) -> Result<Vec<String>, String> {
+    // Fast-path exit under non-coord sessions — spares the stat()
+    // that `read_all` would otherwise do every user turn. The read
+    // is cheap but this hook fires per user prompt on every scode
+    // session in the world, so the "0 cost when off" invariant
+    // matters.
+    if !crate::coordinator_mode::is_coordinator_mode() {
+        return Ok(Vec::new());
+    }
     let envelopes = agent_mailbox::read_all(workspace_root, COORDINATOR_INBOX_RECIPIENT)?;
     let consumed = read_consumed_offset(workspace_root);
     if envelopes.len() <= consumed {

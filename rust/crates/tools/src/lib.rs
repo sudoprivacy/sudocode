@@ -1962,36 +1962,95 @@ fn compute_notification_duration_ms(manifest: &AgentOutput) -> Option<u64> {
     Some(delta.saturating_mul(1000))
 }
 
-fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
-    // Base fields every caller expects. Optional fields added
-    // post-Commit-5 (`result_full_path`, `color`, `total_tokens`,
-    // `tool_uses`) are inserted only when populated so a manifest
-    // that didn't touch them doesn't pollute the response with
-    // nulls the coordinator would burn tokens dissecting.
-    let mut value = json!({
-        "agent_id": manifest.agent_id,
-        "status": manifest.status,
-        "retrieval_status": retrieval_status,
-        "result": manifest.result,
-        "error": manifest.error,
-        "output_file": manifest.output_file,
-        "manifest_file": manifest.manifest_file,
-    });
-    if let Some(map) = value.as_object_mut() {
-        if let Some(path) = manifest.result_full_path.as_ref() {
-            map.insert("result_full_path".into(), json!(path));
-        }
-        if let Some(color) = manifest.color.as_ref() {
-            map.insert("color".into(), json!(color));
-        }
-        if let Some(tt) = manifest.total_tokens {
-            map.insert("total_tokens".into(), json!(tt));
-        }
-        if let Some(tu) = manifest.tool_uses {
-            map.insert("tool_uses".into(), json!(tu));
-        }
+/// Snake_case wire projection of an [`AgentOutput`] manifest that
+/// the LLM sees via `TaskOutput`. Separate from the manifest's own
+/// on-disk camelCase serde shape because the LLM contract is
+/// snake_case (see coordinator prompt + `pty_agent_summary.rs`) and
+/// changing the on-disk format would break every existing session's
+/// resume.
+///
+/// Owns `&str` slices back into `AgentOutput` — no allocations for
+/// the fields themselves.
+///
+/// **Compile-time guard against forgotten fields**: build this via
+/// [`build_agent_output_view`], which uses an EXHAUSTIVE pattern
+/// destructure of `AgentOutput`. When a future commit adds a new
+/// field to the manifest, the destructure fails to compile → the
+/// developer is forced to decide "expose in TaskOutput or not?"
+/// instead of silently omitting it (which is what caused
+/// `resultFullPath` to be missing for 4 commits).
+#[derive(Serialize)]
+struct AgentOutputView<'a> {
+    agent_id: &'a str,
+    status: &'a str,
+    retrieval_status: &'a str,
+    output_file: &'a str,
+    manifest_file: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_full_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    color: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_uses: Option<u64>,
+}
+
+fn build_agent_output_view<'a>(
+    manifest: &'a AgentOutput,
+    retrieval_status: &'a str,
+) -> AgentOutputView<'a> {
+    // Exhaustive destructure — MUST list every AgentOutput field so
+    // rustc fails compilation if a new one appears. Fields deliberately
+    // NOT surfaced to TaskOutput consumers (internal bookkeeping the
+    // LLM shouldn't burn tokens on) are bound to `_ignored_*` names.
+    let AgentOutput {
+        agent_id,
+        name: _ignored_name,
+        description: _ignored_description,
+        subagent_type: _ignored_subagent_type,
+        model: _ignored_model,
+        status,
+        output_file,
+        manifest_file,
+        created_at: _ignored_created_at,
+        started_at: _ignored_started_at,
+        completed_at: _ignored_completed_at,
+        lane_events: _ignored_lane_events,
+        current_blocker: _ignored_current_blocker,
+        derived_state: _ignored_derived_state,
+        error,
+        result,
+        result_full_path,
+        color,
+        total_tokens,
+        tool_uses,
+    } = manifest;
+    AgentOutputView {
+        agent_id,
+        status,
+        retrieval_status,
+        output_file,
+        manifest_file,
+        result: result.as_deref(),
+        error: error.as_deref(),
+        result_full_path: result_full_path.as_deref(),
+        color: color.as_deref(),
+        total_tokens: *total_tokens,
+        tool_uses: *tool_uses,
     }
-    value
+}
+
+fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
+    // Serialize the wire view. `to_value` on a Serialize impl can
+    // only fail on non-trivial types (Map key encoding); every field
+    // here is primitive so `expect` is safe.
+    serde_json::to_value(build_agent_output_view(manifest, retrieval_status))
+        .expect("AgentOutputView is trivially serializable")
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3042,6 +3101,12 @@ struct AgentInput {
     /// own inner prompter. Mirrors CC-fork's
     /// `AgentInput.permission_mode = 'bubble'`. Any other value is
     /// silently ignored — reserved for future modes.
+    ///
+    /// Accepted at the schema layer for CC-fork parity but not read
+    /// at runtime because bubble is the ONLY behavior sudocode
+    /// currently offers. The `#[allow(dead_code)]` documents that
+    /// this is intentional, not a forgotten wire.
+    #[allow(dead_code)]
     permission_mode: Option<String>,
 }
 
@@ -4663,6 +4728,10 @@ fn prepare_agent_job(
 /// Fork subagent (which needs the parent's assistant message) is
 /// unreachable from this path — asking for `subagent_type = "fork"`
 /// via this entry point errors out inside `prepare_agent_job`.
+///
+/// Only used by the inline `#[cfg(test)] mod tests` block; kept out
+/// of non-test builds so the dead-code analyzer stays quiet.
+#[cfg(test)]
 fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,

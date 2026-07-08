@@ -789,21 +789,29 @@ mod tests {
         .expect("write nested nexus AGENTS.md");
 
         let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
+        // `discover_instruction_files` walks the entire ancestor
+        // chain to `/`. On dev machines (esp. Windows where
+        // `temp_dir()` lives under `~/AppData/Local/Temp/`) the walk
+        // passes through the developer's real HOME and picks up
+        // their `~/.nexus/sudocode/AGENTS.md`. Filter to the
+        // fixture entries so the ORDER assertion this test cares
+        // about is preserved without racing the dev's global config.
+        // CI Linux runners have a pristine HOME so this filter is a
+        // no-op there.
+        let fixture_contents = [
+            "root agents",
+            "root nexus agents",
+            "apps agents",
+            "nested nexus agents",
+        ];
         let contents = context
             .instruction_files
             .iter()
             .map(|file| file.content.as_str())
+            .filter(|c| fixture_contents.contains(c))
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            contents,
-            vec![
-                "root agents",
-                "root nexus agents",
-                "apps agents",
-                "nested nexus agents",
-            ]
-        );
+        assert_eq!(contents, fixture_contents.to_vec());
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -816,11 +824,16 @@ mod tests {
         fs::write(nested.join("AGENTS.md"), "same rules\n").expect("write nested");
 
         let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
-        assert_eq!(context.instruction_files.len(), 1);
-        assert_eq!(
-            normalize_instruction_content(&context.instruction_files[0].content),
-            "same rules"
-        );
+        // Same ancestor-chain-pollution caveat as
+        // `discovers_instruction_files_from_ancestor_chain`. Filter
+        // to the fixture "same rules" content so the dev's real
+        // HOME's AGENTS.md doesn't skew the dedupe count.
+        let same_rules_count = context
+            .instruction_files
+            .iter()
+            .filter(|f| normalize_instruction_content(&f.content) == "same rules")
+            .count();
+        assert_eq!(same_rules_count, 1, "identical content dedupes to one");
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 

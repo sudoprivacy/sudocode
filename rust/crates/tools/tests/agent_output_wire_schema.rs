@@ -29,6 +29,17 @@ use tools::testing::{
     seed_agent_manifest_for_test, AgentRunTelemetryView,
 };
 
+/// Process-global lock — `SUDOCODE_AGENT_STORE` is an env var, so
+/// parallel tests setting it race each other. Serialise these tests
+/// via a mutex so each one sees its own store during its critical
+/// section.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 fn unique_workspace(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -50,6 +61,7 @@ fn task_output_for(agent_id: &str) -> serde_json::Value {
 
 #[test]
 fn wire_schema_has_snake_case_base_fields_after_terminal_state() {
+    let _g = env_lock();
     let ws = unique_workspace("base");
     let store_dir = ws.join("store");
     std::env::set_var("SUDOCODE_AGENT_STORE", &store_dir);
@@ -94,6 +106,7 @@ fn wire_schema_has_snake_case_base_fields_after_terminal_state() {
 
 #[test]
 fn wire_schema_omits_optional_fields_when_none() {
+    let _g = env_lock();
     let ws = unique_workspace("optional-absent");
     let store_dir = ws.join("store");
     std::env::set_var("SUDOCODE_AGENT_STORE", &store_dir);
@@ -126,6 +139,7 @@ fn wire_schema_surfaces_result_full_path_when_summarizer_recorded_it() {
     // to catch: manifest.result_full_path was populated on disk,
     // but agent_output_json's hard-coded field list didn't include
     // it. Locking down the fix here so it can never regress.
+    let _g = env_lock();
     let ws = unique_workspace("resultfullpath");
     let store_dir = ws.join("store");
     std::env::set_var("SUDOCODE_AGENT_STORE", &store_dir);

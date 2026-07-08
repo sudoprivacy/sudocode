@@ -114,6 +114,8 @@ mod tests {
             result: None,
             result_full_path: None,
             color: None,
+            total_tokens: None,
+            tool_uses: None,
         }
     }
 

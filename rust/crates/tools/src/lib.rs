@@ -88,6 +88,93 @@ pub mod testing {
         crate::build_forked_messages(directive, parent_assistant)
     }
 
+    /// Public projection of [`crate::AgentRunTelemetry`] for the
+    /// telemetry-pipeline integration tests.
+    #[derive(Debug, Clone, Copy)]
+    pub struct AgentRunTelemetryView {
+        pub total_tokens: u64,
+        pub tool_uses: u64,
+    }
+
+    impl From<AgentRunTelemetryView> for crate::AgentRunTelemetry {
+        fn from(v: AgentRunTelemetryView) -> Self {
+            Self {
+                total_tokens: v.total_tokens,
+                tool_uses: v.tool_uses,
+            }
+        }
+    }
+
+    /// Seed a bare-minimum AgentOutput manifest on disk for the
+    /// telemetry-pipeline tests. Returns the path to the JSON file.
+    pub fn seed_agent_manifest_for_test(
+        dir: &std::path::Path,
+        agent_id: &str,
+    ) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        let output_md = dir.join(format!("{agent_id}.md"));
+        let manifest_path = dir.join(format!("{agent_id}.json"));
+        std::fs::write(&output_md, "# seed\n").expect("seed output_md");
+        let value = serde_json::json!({
+            "agentId": agent_id,
+            "name": format!("test-{agent_id}"),
+            "description": "seed",
+            "subagentType": "general-purpose",
+            "model": "test-model",
+            "status": "running",
+            "outputFile": output_md.display().to_string(),
+            "manifestFile": manifest_path.display().to_string(),
+            "createdAt": "0",
+            "derivedState": "working",
+        });
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .expect("seed manifest");
+        manifest_path
+    }
+
+    /// Test seam for `record_agent_telemetry`.
+    pub fn record_agent_telemetry_for_test(
+        manifest_path: &std::path::Path,
+        telemetry: AgentRunTelemetryView,
+    ) -> Result<(), String> {
+        let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+        let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        crate::record_agent_telemetry(&manifest, telemetry.into())
+    }
+
+    /// Test seam for `record_full_result_path` — mirrors the private
+    /// helper used by the AgentSummary sidecar path.
+    pub fn record_full_result_path_for_test(
+        manifest_path: &std::path::Path,
+        full_path: &std::path::Path,
+    ) -> Result<(), String> {
+        let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+        let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        crate::record_full_result_path(&manifest, full_path)
+    }
+
+    /// Test seam for `persist_agent_terminal_state_with_telemetry`.
+    pub fn persist_terminal_with_telemetry_for_test(
+        manifest_path: &std::path::Path,
+        status: &str,
+        result: Option<&str>,
+        error: Option<String>,
+        telemetry: Option<AgentRunTelemetryView>,
+    ) -> Result<(), String> {
+        let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+        let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        crate::persist_agent_terminal_state_with_telemetry(
+            &manifest,
+            status,
+            result,
+            error,
+            telemetry.map(Into::into),
+        )
+    }
+
     /// Test seam: does the summary-threshold gate — mirrors the
     /// production `maybe_summarize_agent_result` decision but does
     /// NOT invoke the LLM summarizer. Instead, when the text
@@ -1830,8 +1917,8 @@ fn render_manifest_task_notification(manifest: &AgentOutput) -> String {
         result: manifest.result.as_deref(),
         color: manifest.color.as_deref(),
         duration_ms,
-        tool_uses: None,
-        total_tokens: None,
+        tool_uses: manifest.tool_uses,
+        total_tokens: manifest.total_tokens,
     };
     runtime::coordinator_mode::render_task_notification(&view)
 }
@@ -3337,6 +3424,30 @@ struct AgentOutput {
     /// the task-notification XML when coordinator mode is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     color: Option<String>,
+    /// Total tokens the sub-agent consumed across its entire run
+    /// (input + output + cache-creation + cache-read, summed over
+    /// every multi-turn iteration). Populated by
+    /// `run_agent_job_returning_text` when the agent completes and
+    /// surfaced in the task-notification `<usage>` block.
+    #[serde(
+        rename = "totalTokens",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    total_tokens: Option<u64>,
+    /// Count of tool_use blocks the sub-agent's assistant messages
+    /// emitted, summed across every multi-turn iteration.
+    #[serde(rename = "toolUses", default, skip_serializing_if = "Option::is_none")]
+    tool_uses: Option<u64>,
+}
+
+/// Telemetry captured from a sub-agent's completed run and folded
+/// into the manifest before terminal-state persistence. Mirrors the
+/// `<usage>` sub-tags the coordinator prompt teaches the model.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgentRunTelemetry {
+    pub total_tokens: u64,
+    pub tool_uses: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -4497,6 +4608,8 @@ fn prepare_agent_job(
         result: None,
         result_full_path: None,
         color: assigned_color,
+        total_tokens: None,
+        tool_uses: None,
     };
     write_agent_manifest(&manifest)?;
 
@@ -4792,6 +4905,10 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
     let workspace_root = std::env::current_dir().unwrap_or_default();
+    // Accumulate telemetry across every multi-turn iteration so a
+    // long coordinator-driven conversation reports one aggregated
+    // `<total_tokens>` / `<tool_uses>` count in the task-notification.
+    let mut cumulative_telemetry = AgentRunTelemetry::default();
     let final_text = run_multi_turn_loop(
         &job.manifest.agent_id,
         &workspace_root,
@@ -4800,9 +4917,26 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         subagent_max_multi_turns(),
         |prompt| {
             let summary = run_single_turn(&mut conv_runtime, prompt)?;
+            let (turn_tokens, turn_tool_uses) = telemetry_from_turn(&summary);
+            cumulative_telemetry.total_tokens = cumulative_telemetry
+                .total_tokens
+                .saturating_add(turn_tokens);
+            cumulative_telemetry.tool_uses = cumulative_telemetry
+                .tool_uses
+                .saturating_add(turn_tool_uses);
             Ok(final_assistant_text(&summary))
         },
     )?;
+
+    // Fold telemetry into the on-disk manifest BEFORE any downstream
+    // step (summarizer, persist) reads it, so the terminal-state
+    // write picks up the counts. Best-effort: an IO error here just
+    // means the notification will omit `<usage>` counters — not a
+    // fatal condition.
+    if let Err(err) = record_agent_telemetry(&job.manifest, cumulative_telemetry) {
+        eprintln!("sudocode: failed to record agent telemetry on manifest: {err}");
+    }
+
     // If the worker's final text exceeds the summary threshold, save
     // the FULL text to a sibling `.full.md` file (so the parent can
     // `read_file` the raw output) and condense the parent-facing
@@ -4829,6 +4963,49 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         }
     }
     Ok(parent_text)
+}
+
+/// Extract per-turn telemetry from a [`runtime::TurnSummary`].
+///
+/// - `total_tokens` sums input, output, cache-creation, and
+///   cache-read tokens — matches Anthropic's "billable tokens"
+///   accounting so a parent glancing at the `<usage>` block sees the
+///   number they'll be charged for.
+/// - `tool_uses` counts every `ToolUse` content block across every
+///   assistant message this turn produced. A single tool-loop
+///   iteration typically emits ONE `ToolUse`, but the count is exact
+///   so parallel tool_use invocations (rare but valid) don't
+///   under-report.
+fn telemetry_from_turn(summary: &runtime::TurnSummary) -> (u64, u64) {
+    let usage = summary.turn_usage;
+    let total_tokens = u64::from(usage.input_tokens)
+        .saturating_add(u64::from(usage.output_tokens))
+        .saturating_add(u64::from(usage.cache_creation_input_tokens))
+        .saturating_add(u64::from(usage.cache_read_input_tokens));
+    let tool_uses = summary
+        .assistant_messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter(|b| matches!(b, runtime::ContentBlock::ToolUse { .. }))
+        .count() as u64;
+    (total_tokens, tool_uses)
+}
+
+/// Rewrite the on-disk manifest with the accumulated run telemetry.
+/// Reads-modifies-writes so a concurrent `record_full_result_path`
+/// call doesn't clobber the pointer either direction.
+fn record_agent_telemetry(
+    manifest: &AgentOutput,
+    telemetry: AgentRunTelemetry,
+) -> Result<(), String> {
+    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let mut updated: AgentOutput = existing
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<AgentOutput>(text).ok())
+        .unwrap_or_else(|| manifest.clone());
+    updated.total_tokens = Some(telemetry.total_tokens);
+    updated.tool_uses = Some(telemetry.tool_uses);
+    write_agent_manifest(&updated)
 }
 
 /// Write `full_text` to `<agent_id>.full.md` sibling next to the
@@ -5378,12 +5555,41 @@ fn persist_agent_terminal_state(
     result: Option<&str>,
     error: Option<String>,
 ) -> Result<(), String> {
+    persist_agent_terminal_state_with_telemetry(manifest, status, result, error, None)
+}
+
+/// Terminal-state persistence with optional run telemetry.
+///
+/// Key behaviour: starts by re-reading the on-disk manifest so any
+/// mid-run mutations (result_full_path from AgentSummary, telemetry
+/// updates from earlier turns) are preserved instead of clobbered by
+/// the in-memory `manifest` snapshot the caller was holding. Falls
+/// back to the caller-supplied manifest if the disk read fails (fresh
+/// manifest, permission error, etc.).
+fn persist_agent_terminal_state_with_telemetry(
+    manifest: &AgentOutput,
+    status: &str,
+    result: Option<&str>,
+    error: Option<String>,
+    telemetry: Option<AgentRunTelemetry>,
+) -> Result<(), String> {
     let blocker = error.as_deref().map(classify_lane_blocker);
     append_agent_output(
         &manifest.output_file,
         &format_agent_terminal_output(status, result, blocker.as_ref(), error.as_deref()),
     )?;
-    let mut next_manifest = manifest.clone();
+    // Re-read the current on-disk manifest so fields mutated between
+    // spawn and terminal-state (result_full_path from AgentSummary,
+    // per-turn telemetry updates) survive the write. Fall back to the
+    // caller's snapshot when the disk state is unreadable.
+    let mut next_manifest = std::fs::read_to_string(&manifest.manifest_file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
+        .unwrap_or_else(|| manifest.clone());
+    if let Some(t) = telemetry {
+        next_manifest.total_tokens = Some(t.total_tokens);
+        next_manifest.tool_uses = Some(t.tool_uses);
+    }
     next_manifest.status = status.to_string();
     next_manifest.completed_at = Some(iso8601_now());
     next_manifest.current_blocker.clone_from(&blocker);

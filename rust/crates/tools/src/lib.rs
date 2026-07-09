@@ -2029,6 +2029,11 @@ fn build_agent_output_view<'a>(
         color,
         total_tokens,
         tool_uses,
+        // `notified` is internal bookkeeping for the coordinator
+        // push idempotency guard — deliberately NOT surfaced to
+        // TaskOutput consumers because a coordinator LLM has no
+        // business inspecting it.
+        notified: _ignored_notified,
     } = manifest;
     AgentOutputView {
         agent_id,
@@ -3524,6 +3529,22 @@ struct AgentOutput {
     /// emitted, summed across every multi-turn iteration.
     #[serde(rename = "toolUses", default, skip_serializing_if = "Option::is_none")]
     tool_uses: Option<u64>,
+    /// Per-agent idempotency flag for the coordinator-mode push
+    /// notification (see
+    /// [`runtime::coordinator_notification::emit`]). `Some(true)`
+    /// means the terminal-state emit has already fired for this
+    /// agent — subsequent persist calls MUST NOT emit again.
+    ///
+    /// Mirrors CC-fork's `LocalAgentTaskState.notified` atomic
+    /// check-and-set at `src/tasks/LocalAgentTask/LocalAgentTask.tsx:228-237`.
+    ///
+    /// Persisted on disk in the same manifest write that emits the
+    /// envelope, so a crash between "manifest written" and "envelope
+    /// appended" biases toward NOT re-emitting on restart (CC's
+    /// same trade-off: prefer under-notify to double-notify — the
+    /// coordinator can always poll `TaskOutput` if it missed one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified: Option<bool>,
 }
 
 /// Telemetry captured from a sub-agent's completed run and folded
@@ -4695,6 +4716,7 @@ fn prepare_agent_job(
         color: assigned_color,
         total_tokens: None,
         tool_uses: None,
+        notified: None,
     };
     write_agent_manifest(&manifest)?;
 
@@ -5714,20 +5736,36 @@ fn persist_agent_terminal_state_with_telemetry(
             ));
         }
     }
+
+    // Coordinator push idempotency: mirror CC-fork's atomic
+    // check-and-set on `LocalAgentTaskState.notified`
+    // (LocalAgentTask.tsx:228-237). If the flag is already set on
+    // the on-disk manifest (from a prior persist call for this same
+    // agent — should never happen today, but defensive), skip the
+    // emit. Otherwise set the flag and persist it in the SAME write
+    // as the terminal state, so a crash between "manifest written"
+    // and "envelope appended" biases toward NOT re-emitting
+    // (under-notify > double-notify; the coord can always poll
+    // TaskOutput to recover).
+    let should_emit = !next_manifest.notified.unwrap_or(false);
+    if should_emit {
+        next_manifest.notified = Some(true);
+    }
     write_agent_manifest(&next_manifest)?;
 
-    // Push side: under coordinator mode, emit a
-    // `<task-notification>` XML block into the coordinator's inbox
-    // so the coordinator's REPL picks it up on its next drain. The
-    // emit helper self-guards on `is_coordinator_mode` — no
-    // conditional needed here. Best-effort: an IO error on emit
-    // shouldn't fail the terminal persist, so we log + swallow.
-    let xml = render_manifest_task_notification(&next_manifest);
-    let workspace_root = std::env::current_dir().unwrap_or_default();
-    if let Err(err) =
-        runtime::coordinator_notification::emit(&workspace_root, &next_manifest.agent_id, &xml)
-    {
-        eprintln!("sudocode: failed to emit coordinator task-notification: {err}");
+    if should_emit {
+        // The emit helper self-guards on `is_coordinator_mode` —
+        // no conditional needed here. Best-effort: an IO error on
+        // emit shouldn't fail the terminal persist, so we log +
+        // swallow. The `notified=true` flag persists regardless so
+        // a retry doesn't double-emit.
+        let xml = render_manifest_task_notification(&next_manifest);
+        let workspace_root = std::env::current_dir().unwrap_or_default();
+        if let Err(err) =
+            runtime::coordinator_notification::emit(&workspace_root, &next_manifest.agent_id, &xml)
+        {
+            eprintln!("sudocode: failed to emit coordinator task-notification: {err}");
+        }
     }
     Ok(())
 }

@@ -116,6 +116,64 @@ fn coord_mode_off_persist_terminal_does_not_touch_inbox() {
 }
 
 #[test]
+fn double_persist_terminal_for_same_agent_emits_exactly_once() {
+    // Per-agent `notified` idempotency guard (CC parity, mirrors
+    // LocalAgentTask.tsx:228-237). If persist_terminal runs twice
+    // for the SAME agent (edge case not currently reachable but
+    // possible via future retry paths), the second call MUST NOT
+    // append a second envelope to the coordinator's inbox.
+    let _g = env_lock();
+    std::env::set_var(COORDINATOR_ENV_VAR, "1");
+
+    let ws = unique_workspace("dedup");
+    let manifest_path = seed_agent_manifest_for_test(&ws, "agent-dedup");
+    let prior_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&ws).expect("chdir");
+
+    // First call — fires the emit.
+    persist_terminal_with_telemetry_for_test(
+        &manifest_path,
+        "completed",
+        Some("first pass"),
+        None,
+        None,
+    )
+    .expect("persist ok #1");
+    // Second call — MUST skip emit thanks to the `notified` flag
+    // being persisted in call #1.
+    persist_terminal_with_telemetry_for_test(
+        &manifest_path,
+        "completed",
+        Some("second pass"),
+        None,
+        None,
+    )
+    .expect("persist ok #2");
+
+    let batch = coordinator_notification::drain(&ws).expect("drain ok");
+    assert_eq!(
+        batch.len(),
+        1,
+        "notified guard MUST prevent double-emit; got {} envelopes",
+        batch.len()
+    );
+
+    // The on-disk manifest carries the notified flag (durable
+    // across process restarts).
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        json["notified"].as_bool(),
+        Some(true),
+        "notified flag MUST persist"
+    );
+
+    std::env::set_current_dir(prior_cwd).ok();
+    std::env::remove_var(COORDINATOR_ENV_VAR);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn two_subagents_completing_produce_two_task_notifications_in_fifo_order() {
     let _g = env_lock();
     std::env::set_var(COORDINATOR_ENV_VAR, "1");

@@ -116,6 +116,7 @@ mod tests {
             color: None,
             total_tokens: None,
             tool_uses: None,
+            notified: None,
         }
     }
 

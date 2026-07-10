@@ -17,6 +17,7 @@ mod init;
 mod input;
 mod input_queue;
 mod render;
+mod repl_async;
 mod vlm_describe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1456,6 +1457,17 @@ fn run_repl(
         auth_mode,
     )?;
     cli.set_reasoning_effort(reasoning_effort);
+
+    // Env-gated opt-in to the async REPL that accepts input during a running
+    // turn (see `repl_async` module docs and
+    // `notes/plans/conversation-interrupt-queue-sudocode.md`). When set to
+    // anything other than `off` / unset, dispatch to the async loop. Default
+    // path below stays byte-identical to today's sync behavior.
+    let mode = input_queue::QueueMode::from_env();
+    if !matches!(mode, input_queue::QueueMode::Off) {
+        return run_repl_async_dispatch(cli, mode);
+    }
+
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
@@ -1572,6 +1584,78 @@ fn run_repl(
     }
 
     Ok(())
+}
+
+/// Async REPL dispatch — takes ownership of the constructed `LiveCli`, wraps it
+/// in `Arc<Mutex<>>` for the coordinator + runner thread, drives the loop, then
+/// unwraps and finalizes the session on exit. Only called when
+/// `SUDOCODE_INTERRUPT_QUEUE_MODE` is set.
+fn run_repl_async_dispatch(
+    cli: LiveCli,
+    mode: input_queue::QueueMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Capture startup state that only needs to be read once (banner + initial
+    // completion list). Completion refresh mid-loop is deferred — see the
+    // repl_async module docs §Deferred.
+    let banner = cli.startup_banner();
+    let completions = cli.repl_completion_candidates().unwrap_or_default();
+
+    let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
+    let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
+        cli: std::sync::Arc::clone(&cli_shared),
+    });
+
+    let session_start = Instant::now();
+    repl_async::run_coordinator_loop(driver, mode, banner, completions)?;
+
+    // All threads spawned by the coordinator loop have already been joined
+    // inside the loop (Exit branch + TurnDone reap). Unwrapping the Arc here
+    // is a debug assertion of that invariant — if it fails, a thread leaked.
+    let cli = std::sync::Arc::try_unwrap(cli_shared)
+        .map_err(|_| "LiveCli still shared after coordinator loop exit — thread leak")?
+        .into_inner()
+        .map_err(|e| format!("LiveCli mutex poisoned: {e}"))?;
+
+    // Session_ended telemetry parity with the sync path (`run_repl`
+    // trailing block just above): record cumulative usage + duration so the
+    // async path's users don't lose observability.
+    let duration_ms = session_start.elapsed().as_millis() as u64;
+    let usage = cli.runtime.usage().cumulative_usage();
+    let total_turns = cli.runtime.usage().turns();
+    if let Some(tracer) = cli.session_tracer() {
+        tracer.record_usage(
+            "session_summary".to_string(),
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+        tracer.record_session_ended(
+            total_turns,
+            usage.input_tokens as u64,
+            usage.output_tokens as u64,
+            duration_ms,
+        );
+    }
+
+    Ok(())
+}
+
+/// Adapts `LiveCli::run_turn` (which takes `&mut self`) to the
+/// `repl_async::TurnDriver` trait (which is Sync + call by `&self`). The
+/// mutex guarantees only one turn runs at a time, matching the coordinator's
+/// single-runner-thread invariant.
+struct LiveCliDriver {
+    cli: std::sync::Arc<std::sync::Mutex<LiveCli>>,
+}
+
+impl repl_async::TurnDriver for LiveCliDriver {
+    fn run_turn(&self, prompt: &str) {
+        let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
+        if let Err(e) = cli.run_turn(prompt) {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+        }
+    }
 }
 
 struct LiveCli {

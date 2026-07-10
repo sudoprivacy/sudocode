@@ -44,9 +44,9 @@ use async_trait::async_trait;
 use runtime::{
     coordinator_mode::COORDINATOR_ENV_VAR,
     coordinator_notification::{self, COORDINATOR_INBOX_RECIPIENT},
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ContentBlock,
-    ConversationMessage, ConversationRuntime, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, Session, StaticToolExecutor, SystemPrompt,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ContentBlock, ConversationMessage,
+    ConversationRuntime, MessageRole, PermissionMode, PermissionPolicy, RuntimeError, Session,
+    StaticToolExecutor, SystemPrompt,
 };
 
 /// Process-wide env-lock — `COORDINATOR_ENV_VAR` is process-global,
@@ -80,10 +80,7 @@ struct CapturingApiClient {
 
 #[async_trait]
 impl ApiClient for CapturingApiClient {
-    async fn stream(
-        &mut self,
-        request: ApiRequest,
-    ) -> Result<AssistantEventStream, RuntimeError> {
+    async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         self.captured
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -122,7 +119,10 @@ async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
 
     // Drop a stray sanity file so the mailbox path is verifiable.
     let mailbox = runtime::agent_mailbox::mailbox_path(&ws, COORDINATOR_INBOX_RECIPIENT);
-    assert!(mailbox.exists(), "envelope should be on disk before run_turn");
+    assert!(
+        mailbox.exists(),
+        "envelope should be on disk before run_turn"
+    );
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = ConversationRuntime::new(

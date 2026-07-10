@@ -562,10 +562,7 @@ where
     /// Workspace root defaults to the process cwd, matching the
     /// per-workspace `.sudocode-inbox/coordinator.jsonl` convention
     /// that every emit site uses (also cwd-derived).
-    fn prepend_pending_task_notifications(
-        &self,
-        blocks: Vec<ContentBlock>,
-    ) -> Vec<ContentBlock> {
+    fn prepend_pending_task_notifications(&self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
         let workspace_root = std::env::current_dir().unwrap_or_default();
         let notifications =
             crate::coordinator_notification::drain(&workspace_root).unwrap_or_default();

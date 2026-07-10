@@ -244,6 +244,57 @@ fn run_now_fires_and_records_ok() {
     let json = env.crons_json();
     assert!(json.contains("\"run_count\": 1"), "{json}");
     assert!(json.contains("\"last_status\": \"ok\""), "{json}");
+    // A recurring cron RE-ARMS after firing (stays enabled) — this is the
+    // distinction from a one-shot `at`, which self-disables.
+    assert!(
+        json.contains("\"enabled\": true"),
+        "recurring cron stays enabled after firing: {json}"
+    );
+}
+
+#[test]
+fn disabled_cron_does_not_fire_on_tick() {
+    let env = CronEnv::new("disabled-notick");
+    // Would be due right now (past `at`) — but disabled, so tick must skip it.
+    let past = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 10)
+        .to_string();
+    env.cron(&[
+        "add",
+        "--at",
+        &past,
+        "--prompt",
+        "should NOT run",
+        "--name",
+        "off",
+    ])
+    .expect("created")
+    .unwrap();
+    let id = only_id(&env);
+    env.cron(&["disable", &id]).expect("disabled").unwrap();
+
+    // tick with nothing due (disabled) prints nothing and exits — give it a
+    // beat to run, then verify no fire happened. (No agent turn, so this is
+    // fast and runs in mock/CI too.)
+    let s = env.cron(&["tick"]);
+    std::thread::sleep(Duration::from_millis(800));
+    drop(s);
+    let json = env.crons_json();
+    assert!(
+        json.contains("\"run_count\": 0"),
+        "disabled cron must not fire: {json}"
+    );
+    assert!(
+        !json.contains("\"last_status\": \"ok\""),
+        "no successful fire: {json}"
+    );
+    assert!(
+        json.contains("\"enabled\": false"),
+        "stays disabled: {json}"
+    );
 }
 
 #[test]

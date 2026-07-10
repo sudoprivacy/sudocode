@@ -103,6 +103,19 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// (natural end OR cancelled). Result is ignored by the loop — errors are
     /// printed by the driver itself, matching the sync REPL's behavior.
     fn run_turn(&self, prompt: &str);
+
+    /// Called on `/exit` / `/quit` before the coordinator loop returns. The
+    /// concrete driver flushes session state (write to disk, emit
+    /// `session_ended` telemetry, etc.). Default no-op keeps the loop
+    /// self-contained for tests.
+    fn on_exit(&self) {}
+}
+
+/// A submitted line that the coordinator loop needs to classify: is it a
+/// user-visible exit command, or a prompt to run? Kept as a helper so the
+/// classification logic has one source of truth.
+fn is_exit_command(text: &str) -> bool {
+    matches!(text.trim(), "/exit" | "/quit")
 }
 
 /// The three-role coordinator loop. Kept generic over `TurnDriver` so tests can
@@ -180,9 +193,23 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     // flushed cleanly.
                     let _ = h.join();
                 }
+                driver.on_exit();
                 break;
             }
             LoopEvent::Input(InputEvent::Submit(text)) => {
+                // Slash-command intercept: /exit and /quit are user-visible
+                // shutdown commands. They must NOT reach `TurnDriver::run_turn`
+                // (that'd send the literal text to the LLM as a turn — the
+                // regression the pty_repl_async_queue smoke caught). Handled
+                // BEFORE the coordinator matrix so an in-flight turn (if any)
+                // is joined + telemetry emits cleanly.
+                if is_exit_command(&text) {
+                    if let Some(h) = runner_handle.take() {
+                        let _ = h.join();
+                    }
+                    driver.on_exit();
+                    break;
+                }
                 if !turn_active {
                     let next = coord.lock().unwrap().submit_when_idle(text);
                     turn_active = true;

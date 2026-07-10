@@ -13,6 +13,11 @@ async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
 chrono = "0.4"
+# Cron feature: 5-field POSIX schedule parsing + next-run computation
+# (`cron` takes a 6-field expr, so the scheduler prepends a `0` seconds
+# field to the CC-standard 5-field input) and per-job IANA timezones.
+chrono-tz = "0.9"
+cron = "0.12"
 futures = "0.3"
 # Cross-platform CSPRNG. Replaces the historical Unix-only
 # `/dev/urandom` read in oauth::generate_random_token, which broke

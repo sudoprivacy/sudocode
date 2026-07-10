@@ -15,6 +15,7 @@
 mod cli;
 mod init;
 mod input;
+mod input_queue;
 mod render;
 mod vlm_describe;
 

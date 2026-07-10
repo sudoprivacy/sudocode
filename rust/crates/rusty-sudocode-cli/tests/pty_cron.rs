@@ -127,6 +127,21 @@ impl CronEnv {
     fn crons_json(&self) -> String {
         fs::read_to_string(self.config_home.join("crons.json")).unwrap_or_default()
     }
+
+    /// Spawn the interactive REPL (`scode` with no subcommand) under a PTY
+    /// with this env's isolated config home — for driving the `/cron`
+    /// slash command.
+    fn repl(&self) -> PtySession {
+        let scode = env!("CARGO_BIN_EXE_scode");
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &self.config_home);
+        std::env::set_var("HOME", &self.home);
+        std::env::set_var("NO_COLOR", "1");
+        let _ = std::env::set_current_dir(&self.workspace);
+        let args = ["--auth", "proxy", "--model", "auto"];
+        let mut sess = PtySession::spawn(scode, &args).expect("spawn scode repl");
+        sess.set_default_timeout(TIMEOUT);
+        sess
+    }
 }
 
 /// Pull the single cron's id straight from the persisted store.
@@ -295,6 +310,40 @@ fn disabled_cron_does_not_fire_on_tick() {
         json.contains("\"enabled\": false"),
         "stays disabled: {json}"
     );
+}
+
+#[test]
+fn repl_cron_slash_add_and_list() {
+    // The `/cron` slash command needs the REPL to boot (real config), so
+    // it is live-gated. Quoted multi-word values exercise the slash
+    // tokenizer end-to-end through the REPL → run_slash path.
+    if !is_live() {
+        eprintln!("skipping repl_cron_slash_add_and_list (set SCODE_TEST_BACKEND=live)");
+        return;
+    }
+    let env = CronEnv::new("repl-slash");
+    let mut s = env.repl();
+    s.expect("❯").expect("REPL prompt");
+
+    s.send("/cron add --every 3600 --prompt \"repl scheduled task\" --name viaslash\r")
+        .expect("send /cron add");
+    s.expect("created").expect("cron created via /cron");
+    s.expect("❯").expect("prompt after add");
+    s.send("/exit\r").expect("send /exit");
+    drop(s);
+    // The store proves the full slash path end-to-end: parse+dispatch reached
+    // run_slash, the quote-aware tokenizer kept the multi-word prompt intact,
+    // FlagMap parsed --name/--every, and it wrote through to crons.json.
+    let json = env.crons_json();
+    assert!(
+        json.contains("repl scheduled task"),
+        "quoted prompt tokenized + persisted: {json}"
+    );
+    assert!(
+        json.contains("\"name\": \"viaslash\""),
+        "name persisted: {json}"
+    );
+    assert!(json.contains("\"kind\": \"every\""), "kind parsed: {json}");
 }
 
 #[test]

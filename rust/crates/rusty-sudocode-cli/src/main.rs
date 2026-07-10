@@ -1278,6 +1278,11 @@ fn run_resume_command(
                 ),
             })
         }
+        SlashCommand::Cron { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(cli::cron::run_slash(args.as_deref()).map_err(std::io::Error::other)?),
+            json: None,
+        }),
         SlashCommand::Skills { args } => {
             if let SkillSlashDispatch::Invoke(_) = classify_skills_slash_command(args.as_deref()) {
                 return Err(
@@ -3477,6 +3482,13 @@ impl LiveCli {
             }
             SlashCommand::Agents { args } => {
                 Self::print_agents(args.as_deref(), CliOutputFormat::Text)?;
+                false
+            }
+            SlashCommand::Cron { args } => {
+                match cli::cron::run_slash(args.as_deref()) {
+                    Ok(text) => println!("{text}"),
+                    Err(e) => println!("cron error: {e}"),
+                }
                 false
             }
             SlashCommand::Skills { args } => {

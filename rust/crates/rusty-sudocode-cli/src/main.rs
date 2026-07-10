@@ -1591,7 +1591,7 @@ fn run_repl(
 /// unwraps and finalizes the session on exit. Only called when
 /// `SUDOCODE_INTERRUPT_QUEUE_MODE` is set.
 fn run_repl_async_dispatch(
-    cli: LiveCli,
+    mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Capture startup state that only needs to be read once (banner + initial
@@ -1599,6 +1599,11 @@ fn run_repl_async_dispatch(
     // repl_async module docs §Deferred.
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
+
+    // In async REPL mode the input thread's rustyline is the sole stdin
+    // consumer — the runner-thread's ESC listener must be disabled or it
+    // wedges the terminal on POSIX (see LiveCli::esc_monitor_enabled docs).
+    cli.esc_monitor_enabled = false;
 
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
@@ -1679,6 +1684,13 @@ struct LiveCli {
     undone_tool_use_ids: std::collections::HashSet<String>,
     /// Shared tokio runtime used to drive async `run_turn` calls.
     tokio_runtime: tokio::runtime::Runtime,
+    /// When false, `prepare_turn_runtime` spawns a no-op abort monitor instead
+    /// of the ESC-key stdin listener. Set by the async REPL dispatch so the
+    /// runner thread does NOT put stdin into raw mode — the input thread's
+    /// rustyline is the sole stdin consumer in that mode, and a competing
+    /// crossterm listener leaves the terminal wedged after the turn ends
+    /// (deadlocked the `/exit` path on POSIX CI runners in PR #298 v1).
+    esc_monitor_enabled: bool,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3009,6 +3021,7 @@ impl LiveCli {
             prompt_history: Vec::new(),
             undone_tool_use_ids: std::collections::HashSet::new(),
             tokio_runtime,
+            esc_monitor_enabled: true,
         };
         cli.persist_session()?;
 
@@ -3167,7 +3180,21 @@ impl LiveCli {
         if let Some(known) = inherited_known_date {
             runtime = runtime.with_session_known_date(known);
         }
-        let hook_abort_monitor = HookAbortMonitor::spawn(hook_abort_signal);
+        let hook_abort_monitor = if self.esc_monitor_enabled {
+            HookAbortMonitor::spawn(hook_abort_signal)
+        } else {
+            // Async REPL mode: skip the ESC-key stdin listener. The input
+            // thread's rustyline is the only stdin consumer; a competing
+            // crossterm listener wedges the terminal on POSIX (raw mode is
+            // process-wide via termios). Waiter is a plain sleep loop that
+            // just observes the stop channel — no stdin touched.
+            HookAbortMonitor::spawn_with_waiter(hook_abort_signal, |stop_rx, _abort| loop {
+                match stop_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                }
+            })
+        };
 
         Ok((runtime, hook_abort_monitor))
     }

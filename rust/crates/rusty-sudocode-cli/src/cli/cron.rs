@@ -43,7 +43,9 @@ pub(crate) fn open_registry() -> CronRegistry {
 }
 
 pub(crate) fn run(args: &[String], output_format: CliOutputFormat) -> CronResult {
-    let (sub, rest) = args.split_first().map_or(("list", &[][..]), |(s, r)| (s.as_str(), r));
+    let (sub, rest) = args
+        .split_first()
+        .map_or(("list", &[][..]), |(s, r)| (s.as_str(), r));
     let reg = open_registry();
     match sub {
         "list" | "ls" => list(&reg, output_format),
@@ -97,7 +99,10 @@ fn add(reg: &CronRegistry, rest: &[String], output_format: CliOutputFormat) -> C
         (None, Some(s), None) => (CronKind::Every, s.to_owned()),
         (None, None, Some(s)) => (CronKind::At, s.to_owned()),
         (None, None, None) => {
-            return Err("`cron add` requires one of --schedule <cron> | --every <secs> | --at <unix_ts>".into())
+            return Err(
+                "`cron add` requires one of --schedule <cron> | --every <secs> | --at <unix_ts>"
+                    .into(),
+            )
         }
         _ => return Err("`cron add` accepts exactly one of --schedule | --every | --at".into()),
     };
@@ -145,7 +150,11 @@ fn set_enabled(
         }
     }
     let entry = reg.get(id).ok_or_else(|| format!("cron not found: {id}"))?;
-    emit_entry(if enabled { "enabled" } else { "disabled" }, &entry, output_format)
+    emit_entry(
+        if enabled { "enabled" } else { "disabled" },
+        &entry,
+        output_format,
+    )
 }
 
 /// `scode cron run <id>` — fire one entry immediately (regardless of its
@@ -319,6 +328,9 @@ impl FlagMap {
     }
 
     fn get(&self, key: &str) -> Option<&str> {
-        self.map.get(key).map(String::as_str).filter(|s| !s.is_empty())
+        self.map
+            .get(key)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 }

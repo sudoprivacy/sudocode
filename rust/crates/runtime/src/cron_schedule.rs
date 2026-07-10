@@ -29,20 +29,18 @@ pub fn validate(kind: CronKind, schedule: &str, tz: Option<&str>) -> Result<(), 
             Ok(())
         }
         CronKind::Every => {
-            let secs = schedule
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| format!("`every` schedule must be integer seconds, got: {schedule:?}"))?;
+            let secs = schedule.trim().parse::<u64>().map_err(|_| {
+                format!("`every` schedule must be integer seconds, got: {schedule:?}")
+            })?;
             if secs == 0 {
                 return Err("`every` interval must be > 0 seconds".to_owned());
             }
             Ok(())
         }
         CronKind::At => {
-            schedule
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| format!("`at` schedule must be a unix timestamp, got: {schedule:?}"))?;
+            schedule.trim().parse::<u64>().map_err(|_| {
+                format!("`at` schedule must be a unix timestamp, got: {schedule:?}")
+            })?;
             Ok(())
         }
     }
@@ -56,7 +54,12 @@ pub fn next_run_after(entry: &CronEntry, after_secs: u64) -> Option<u64> {
     match entry.kind {
         CronKind::Cron => next_cron(&entry.schedule, entry.tz.as_deref(), after_secs),
         CronKind::Every => {
-            let interval = entry.schedule.trim().parse::<u64>().ok().filter(|n| *n > 0)?;
+            let interval = entry
+                .schedule
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)?;
             Some(after_secs.saturating_add(interval))
         }
         CronKind::At => {
@@ -214,8 +217,14 @@ mod tests {
         // whereas next_run_after (post-fire recompute) yields nothing.
         assert_eq!(next_run_after(&e, 5_000), None);
         // future at is armed to its time; every/cron arm to next occurrence.
-        assert_eq!(first_run_at(&entry("9000", CronKind::At, None), 5_000), Some(9_000));
-        assert_eq!(first_run_at(&entry("300", CronKind::Every, None), 1_000), Some(1_300));
+        assert_eq!(
+            first_run_at(&entry("9000", CronKind::At, None), 5_000),
+            Some(9_000)
+        );
+        assert_eq!(
+            first_run_at(&entry("300", CronKind::Every, None), 1_000),
+            Some(1_300)
+        );
     }
 
     #[test]

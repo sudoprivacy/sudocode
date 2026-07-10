@@ -114,7 +114,11 @@ impl CronInner {
             return Ok(());
         };
         let mut entries: Vec<&CronEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.cron_id.cmp(&b.cron_id)));
+        entries.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.cron_id.cmp(&b.cron_id))
+        });
         let doc = CronStoreDoc {
             version: 1,
             counter: self.counter,
@@ -123,8 +127,7 @@ impl CronInner {
         let json =
             serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize crons.json: {e}"))?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create crons.json dir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("create crons.json dir: {e}"))?;
         }
         // Atomic-ish: write to a temp sibling then rename.
         let tmp = path.with_extension("json.tmp");
@@ -231,7 +234,11 @@ impl CronRegistry {
             .filter(|e| !enabled_only || e.enabled)
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.cron_id.cmp(&b.cron_id)));
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.cron_id.cmp(&b.cron_id))
+        });
         out
     }
 
@@ -382,7 +389,9 @@ mod tests {
         let registry = CronRegistry::new();
         let c1 = registry.create("* * * * *", "Task 1", None);
         let c2 = registry.create("0 * * * *", "Task 2", None);
-        registry.disable(&c1.cron_id).expect("disable should succeed");
+        registry
+            .disable(&c1.cron_id)
+            .expect("disable should succeed");
 
         let all = registry.list(false);
         assert_eq!(all.len(), 2);
@@ -408,7 +417,9 @@ mod tests {
     fn deletes_cron_entry() {
         let registry = CronRegistry::new();
         let entry = registry.create("* * * * *", "To delete", None);
-        let deleted = registry.delete(&entry.cron_id).expect("delete should succeed");
+        let deleted = registry
+            .delete(&entry.cron_id)
+            .expect("delete should succeed");
         assert_eq!(deleted.cron_id, entry.cron_id);
         assert!(registry.get(&entry.cron_id).is_none());
         assert!(registry.is_empty());

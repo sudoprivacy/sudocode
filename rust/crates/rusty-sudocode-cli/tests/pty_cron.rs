@@ -40,9 +40,15 @@ fn is_live() -> bool {
 }
 
 fn unique_dir(label: &str) -> PathBuf {
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_millis();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("scode-cron-{label}-{}-{millis}-{n}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "scode-cron-{label}-{}-{millis}-{n}",
+        std::process::id()
+    ))
 }
 
 /// Real `~/.nexus/sudocode` on this machine (for live auth seeding).
@@ -86,7 +92,12 @@ impl CronEnv {
                 src.display()
             );
         }
-        Self { config_home, home, workspace, _guard: guard }
+        Self {
+            config_home,
+            home,
+            workspace,
+            _guard: guard,
+        }
     }
 
     /// Spawn `scode [--auth --model] cron <args...>` under a PTY with this
@@ -132,7 +143,15 @@ fn only_id(env: &CronEnv) -> String {
 #[test]
 fn add_then_list_and_persist() {
     let env = CronEnv::new("add-list");
-    let mut s = env.cron(&["add", "--schedule", "0 9 * * *", "--prompt", "daily standup", "--name", "standup"]);
+    let mut s = env.cron(&[
+        "add",
+        "--schedule",
+        "0 9 * * *",
+        "--prompt",
+        "daily standup",
+        "--name",
+        "standup",
+    ]);
     s.expect("created").unwrap();
     s.expect("standup").unwrap();
     drop(s);
@@ -141,7 +160,10 @@ fn add_then_list_and_persist() {
     s.expect("daily standup").unwrap();
     drop(s);
     let json = env.crons_json();
-    assert!(json.contains("\"schedule\": \"0 9 * * *\""), "crons.json: {json}");
+    assert!(
+        json.contains("\"schedule\": \"0 9 * * *\""),
+        "crons.json: {json}"
+    );
     assert!(json.contains("\"kind\": \"cron\""));
     assert!(json.contains("\"next_run_at\":"), "next-run seeded: {json}");
 }
@@ -149,8 +171,12 @@ fn add_then_list_and_persist() {
 #[test]
 fn add_every_and_at_kinds() {
     let env = CronEnv::new("kinds");
-    env.cron(&["add", "--every", "3600", "--prompt", "hourly"]).expect("created").unwrap();
-    env.cron(&["add", "--at", "4102444800", "--prompt", "y2100"]).expect("created").unwrap();
+    env.cron(&["add", "--every", "3600", "--prompt", "hourly"])
+        .expect("created")
+        .unwrap();
+    env.cron(&["add", "--at", "4102444800", "--prompt", "y2100"])
+        .expect("created")
+        .unwrap();
     let json = env.crons_json();
     assert!(json.contains("\"kind\": \"every\""), "{json}");
     assert!(json.contains("\"kind\": \"at\""), "{json}");
@@ -169,7 +195,9 @@ fn invalid_schedule_rejected() {
 #[test]
 fn disable_then_enable() {
     let env = CronEnv::new("toggle");
-    env.cron(&["add", "--every", "60", "--prompt", "p", "--name", "tgl"]).expect("created").unwrap();
+    env.cron(&["add", "--every", "60", "--prompt", "p", "--name", "tgl"])
+        .expect("created")
+        .unwrap();
     let id = only_id(&env);
     env.cron(&["disable", &id]).expect("disabled").unwrap();
     assert!(env.crons_json().contains("\"enabled\": false"));
@@ -180,7 +208,9 @@ fn disable_then_enable() {
 #[test]
 fn remove_deletes_entry() {
     let env = CronEnv::new("remove");
-    env.cron(&["add", "--every", "60", "--prompt", "p"]).expect("created").unwrap();
+    env.cron(&["add", "--every", "60", "--prompt", "p"])
+        .expect("created")
+        .unwrap();
     let id = only_id(&env);
     env.cron(&["remove", &id]).expect("removed").unwrap();
     env.cron(&["list"]).expect("No scheduled tasks").unwrap();
@@ -196,9 +226,17 @@ fn run_now_fires_and_records_ok() {
     }
     let env = CronEnv::new("run");
     // huge interval so it never auto-fires; we fire explicitly with `run`.
-    env.cron(&["add", "--every", "999999", "--prompt", "Reply with the single word ACK", "--name", "fire"])
-        .expect("created")
-        .unwrap();
+    env.cron(&[
+        "add",
+        "--every",
+        "999999",
+        "--prompt",
+        "Reply with the single word ACK",
+        "--name",
+        "fire",
+    ])
+    .expect("created")
+    .unwrap();
     let id = only_id(&env);
     let mut s = env.cron(&["run", &id]);
     s.expect(&format!("run {id}: ok")).unwrap(); // the agent turn completed
@@ -215,14 +253,30 @@ fn one_shot_at_past_fires_on_tick_then_self_disables() {
         return;
     }
     let env = CronEnv::new("oneshot");
-    let past = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - 10).to_string();
-    env.cron(&["add", "--at", &past, "--prompt", "Reply with the single word DONE", "--name", "once"])
-        .expect("created")
-        .unwrap();
+    let past = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 10)
+        .to_string();
+    env.cron(&[
+        "add",
+        "--at",
+        &past,
+        "--prompt",
+        "Reply with the single word DONE",
+        "--name",
+        "once",
+    ])
+    .expect("created")
+    .unwrap();
     let mut s = env.cron(&["tick"]);
     s.expect("fired").unwrap();
     drop(s);
     let json = env.crons_json();
-    assert!(json.contains("\"enabled\": false"), "one-shot self-disables: {json}");
+    assert!(
+        json.contains("\"enabled\": false"),
+        "one-shot self-disables: {json}"
+    );
     assert!(json.contains("\"run_count\": 1"), "{json}");
 }

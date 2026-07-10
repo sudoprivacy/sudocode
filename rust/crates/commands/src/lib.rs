@@ -1120,6 +1120,9 @@ pub enum SlashCommand {
     Skills {
         args: Option<String>,
     },
+    Cron {
+        args: Option<String>,
+    },
     Doctor,
     Login,
     Logout,
@@ -1300,6 +1303,7 @@ impl SlashCommand {
             Self::AddDir { .. } => "/add-dir",
             Self::Sandbox => "/sandbox",
             Self::Mcp { .. } => "/mcp",
+            Self::Cron { .. } => "/cron",
             Self::Export { .. } => "/export",
             Self::Undo => "/undo",
             #[allow(unreachable_patterns)]
@@ -1412,6 +1416,7 @@ pub fn validate_slash_command_input(
         "skills" | "skill" => SlashCommand::Skills {
             args: parse_skills_args(remainder.as_deref())?,
         },
+        "cron" => SlashCommand::Cron { args: remainder },
         "doctor" | "providers" => {
             validate_no_args(command, &args)?;
             SlashCommand::Doctor
@@ -4440,6 +4445,7 @@ pub fn handle_slash_command(
         | SlashCommand::Plugins { .. }
         | SlashCommand::Agents { .. }
         | SlashCommand::Skills { .. }
+        | SlashCommand::Cron { .. }
         | SlashCommand::Doctor
         | SlashCommand::Login
         | SlashCommand::Logout

@@ -66,6 +66,141 @@ pub(crate) fn run(args: &[String], output_format: CliOutputFormat) -> CronResult
     }
 }
 
+/// REPL `/cron ...` — CRUD management, returns text for the REPL to show.
+/// Firing (`run`/`tick`/`daemon`) is directed to the shell: a live REPL
+/// session already owns a runtime, so firing an agent turn from inside it is
+/// confusing; `scode cron run/tick/daemon` is the surface for that.
+pub(crate) fn run_slash(args: Option<&str>) -> Result<String, String> {
+    let tokens = tokenize(args.unwrap_or(""));
+    let (sub, rest) = tokens
+        .split_first()
+        .map_or(("list", &[][..]), |(s, r)| (s.as_str(), r));
+    let reg = open_registry();
+    match sub {
+        "" | "list" | "ls" => Ok(list_text(&reg)),
+        "add" | "create" => add_text(&reg, rest),
+        "remove" | "rm" | "delete" => {
+            let id = slash_id(rest)?;
+            reg.delete(id)?;
+            Ok(format!("removed cron {id}"))
+        }
+        "enable" => {
+            let id = slash_id(rest)?;
+            reg.set_enabled(id, true)?;
+            if let Some(e) = reg.get(id) {
+                if let Some(n) = cron_schedule::first_run_at(&e, now_secs()) {
+                    let _ = reg.set_next_run(id, Some(n));
+                }
+            }
+            Ok(format!("enabled cron {id}"))
+        }
+        "disable" => {
+            let id = slash_id(rest)?;
+            reg.set_enabled(id, false)?;
+            Ok(format!("disabled cron {id}"))
+        }
+        "run" | "tick" | "daemon" => Ok(format!(
+            "run `scode cron {sub}` from the shell — firing from inside a REPL session isn't supported"
+        )),
+        other => Err(format!(
+            "unknown /cron subcommand {other:?}; try: list | add | remove | enable | disable"
+        )),
+    }
+}
+
+fn list_text(reg: &CronRegistry) -> String {
+    let entries = reg.list(false);
+    if entries.is_empty() {
+        return "No scheduled tasks. Add one: /cron add --schedule \"0 9 * * *\" --prompt \"…\""
+            .to_owned();
+    }
+    entries
+        .iter()
+        .map(format_entry_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn add_text(reg: &CronRegistry, rest: &[String]) -> Result<String, String> {
+    let opts = FlagMap::parse(rest);
+    let prompt = opts
+        .get("prompt")
+        .ok_or("`/cron add` requires --prompt <text>")?
+        .to_owned();
+    let (kind, schedule) = match (opts.get("schedule"), opts.get("every"), opts.get("at")) {
+        (Some(s), None, None) => (CronKind::Cron, s.to_owned()),
+        (None, Some(s), None) => (CronKind::Every, s.to_owned()),
+        (None, None, Some(s)) => (CronKind::At, s.to_owned()),
+        (None, None, None) => {
+            return Err("`/cron add` requires one of --schedule | --every | --at".to_owned())
+        }
+        _ => {
+            return Err("`/cron add` accepts exactly one of --schedule | --every | --at".to_owned())
+        }
+    };
+    let tz = opts.get("tz").map(str::to_owned);
+    cron_schedule::validate(kind, &schedule, tz.as_deref())?;
+    let entry = reg.create_full(CronCreateParams {
+        schedule,
+        kind,
+        prompt,
+        description: opts.get("description").map(str::to_owned),
+        name: opts.get("name").map(str::to_owned),
+        tz,
+        cwd: opts.get("cwd").map(str::to_owned),
+    });
+    if let Some(n) = cron_schedule::first_run_at(&entry, now_secs()) {
+        let _ = reg.set_next_run(&entry.cron_id, Some(n));
+    }
+    let entry = reg.get(&entry.cron_id).unwrap_or(entry);
+    Ok(format!("created: {}", format_entry_line(&entry)))
+}
+
+fn slash_id(rest: &[String]) -> Result<&str, String> {
+    rest.iter()
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str)
+        .ok_or_else(|| "expected a <cron_id>".to_owned())
+}
+
+/// Quote-aware tokenizer so `/cron add --schedule "0 9 * * *" --prompt "do X"`
+/// keeps multi-word quoted values intact.
+fn tokenize(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has = false;
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                    has = true;
+                } else if c.is_whitespace() {
+                    if has {
+                        out.push(std::mem::take(&mut cur));
+                        has = false;
+                    }
+                } else {
+                    cur.push(c);
+                    has = true;
+                }
+            }
+        }
+    }
+    if has {
+        out.push(cur);
+    }
+    out
+}
+
 fn list(reg: &CronRegistry, output_format: CliOutputFormat) -> CronResult {
     let entries = reg.list(false);
     match output_format {
@@ -332,5 +467,37 @@ impl FlagMap {
             .get(key)
             .map(String::as_str)
             .filter(|s| !s.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize;
+
+    #[test]
+    fn tokenize_keeps_quoted_multiword_values() {
+        // The exact `/cron add` shape a user types in the REPL.
+        let t = tokenize("add --schedule \"0 9 * * *\" --prompt 'daily standup' --name s");
+        assert_eq!(
+            t,
+            vec![
+                "add",
+                "--schedule",
+                "0 9 * * *",
+                "--prompt",
+                "daily standup",
+                "--name",
+                "s"
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_plain_and_empty() {
+        assert_eq!(tokenize("list"), vec!["list"]);
+        assert_eq!(tokenize("   "), Vec::<String>::new());
+        assert!(tokenize("").is_empty());
+        // an explicitly empty quoted value is preserved as an empty arg.
+        assert_eq!(tokenize("--prompt \"\""), vec!["--prompt", ""]);
     }
 }

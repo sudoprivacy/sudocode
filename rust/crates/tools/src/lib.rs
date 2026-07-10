@@ -259,7 +259,12 @@ fn global_mcp_registry() -> &'static McpToolRegistry {
 fn global_cron_registry() -> &'static CronRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(CronRegistry::new)
+    // Persistent store shared with the `scode cron` CLI and the scheduler,
+    // so a cron the agent creates survives restart and actually fires —
+    // rather than living only for this process.
+    REGISTRY.get_or_init(|| {
+        CronRegistry::open(runtime::default_config_home().join("crons.json"))
+    })
 }
 
 fn global_task_registry() -> &'static TaskRegistry {
@@ -2060,15 +2065,33 @@ fn agent_output_json(manifest: &AgentOutput, retrieval_status: &str) -> Value {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
-    let entry =
-        global_cron_registry().create(&input.schedule, &input.prompt, input.description.as_deref());
+    // Validate up front so the agent gets an actionable error instead of a
+    // cron that silently never fires. The tool schedules standard 5-field
+    // cron expressions.
+    runtime::cron_schedule::validate(
+        runtime::cron_registry::CronKind::Cron,
+        &input.schedule,
+        None,
+    )?;
+    let reg = global_cron_registry();
+    let entry = reg.create(&input.schedule, &input.prompt, input.description.as_deref());
+    // Seed the first fire time so the scheduler/tick considers it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let next = runtime::cron_schedule::first_run_at(&entry, now);
+    if next.is_some() {
+        let _ = reg.set_next_run(&entry.cron_id, next);
+    }
     to_pretty_json(json!({
         "cron_id": entry.cron_id,
         "schedule": entry.schedule,
         "prompt": entry.prompt,
         "description": entry.description,
         "enabled": entry.enabled,
-        "created_at": entry.created_at
+        "created_at": entry.created_at,
+        "next_run_at": next
     }))
 }
 
@@ -9945,6 +9968,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-runner");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
+        // Cron is now persistent (crons.json under the config home); isolate
+        // it to this temp dir so the auto-disable assertions stay hermetic
+        // and never touch the developer's real ~/.nexus/sudocode store.
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &dir);
 
         let completed = execute_agent_with_spawn(
             AgentInput {

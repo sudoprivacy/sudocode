@@ -115,7 +115,7 @@ fn add(reg: &CronRegistry, rest: &[String], output_format: CliOutputFormat) -> C
     });
     // Seed the first next-run so `list` shows it immediately and the
     // scheduler considers it without a create/tick race.
-    if let Some(next) = cron_schedule::next_run_after(&entry, now_secs()) {
+    if let Some(next) = cron_schedule::first_run_at(&entry, now_secs()) {
         let _ = reg.set_next_run(&entry.cron_id, Some(next));
     }
     let entry = reg.get(&entry.cron_id).unwrap_or(entry);
@@ -139,7 +139,7 @@ fn set_enabled(
     // Re-seed next-run when (re-)enabling so it fires on schedule again.
     if enabled {
         if let Some(entry) = reg.get(id) {
-            if let Some(next) = cron_schedule::next_run_after(&entry, now_secs()) {
+            if let Some(next) = cron_schedule::first_run_at(&entry, now_secs()) {
                 let _ = reg.set_next_run(id, Some(next));
             }
         }

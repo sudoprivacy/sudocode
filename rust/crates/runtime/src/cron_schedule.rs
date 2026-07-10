@@ -66,6 +66,19 @@ pub fn next_run_after(entry: &CronEntry, after_secs: u64) -> Option<u64> {
     }
 }
 
+/// The FIRST fire time when a job is (re-)armed (create / enable):
+/// cron → next match after `now`; every → now + interval; at → the
+/// timestamp itself. A past `at` is therefore returned as-is so a
+/// one-shot missed while the scheduler was down still fires once on the
+/// next tick, then self-disables — rather than being silently lost.
+#[must_use]
+pub fn first_run_at(entry: &CronEntry, now_secs: u64) -> Option<u64> {
+    match entry.kind {
+        CronKind::At => entry.schedule.trim().parse::<u64>().ok(),
+        _ => next_run_after(entry, now_secs),
+    }
+}
+
 /// Is this entry due to fire at `now_secs`? Enabled and its scheduler-
 /// maintained `next_run_at` has arrived. Entries whose `next_run_at` is
 /// unset are NOT due until the scheduler computes it.
@@ -190,6 +203,19 @@ mod tests {
         assert!(validate(CronKind::Every, "abc", None).is_err());
         assert!(validate(CronKind::At, "1767225600", None).is_ok());
         assert!(validate(CronKind::At, "soon", None).is_err());
+    }
+
+    #[test]
+    fn first_run_arms_past_at_immediately() {
+        // a one-shot scheduled in the past is armed to its own timestamp,
+        // so it becomes due at once (missed-run catch-up) rather than lost.
+        let e = entry("1000", CronKind::At, None);
+        assert_eq!(first_run_at(&e, 5_000), Some(1_000));
+        // whereas next_run_after (post-fire recompute) yields nothing.
+        assert_eq!(next_run_after(&e, 5_000), None);
+        // future at is armed to its time; every/cron arm to next occurrence.
+        assert_eq!(first_run_at(&entry("9000", CronKind::At, None), 5_000), Some(9_000));
+        assert_eq!(first_run_at(&entry("300", CronKind::Every, None), 1_000), Some(1_300));
     }
 
     #[test]

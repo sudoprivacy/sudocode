@@ -447,6 +447,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             target,
             output_format,
         } => LiveCli::print_plugins(action.as_deref(), target.as_deref(), output_format)?,
+        CliAction::Cron {
+            args,
+            output_format,
+        } => cli::cron::run(&args, output_format)?,
         CliAction::PrintSystemPrompt {
             cwd,
             date,

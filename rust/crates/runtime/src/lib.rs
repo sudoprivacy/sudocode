@@ -61,6 +61,7 @@ pub mod session_control;
 pub mod verification_watcher;
 pub use session_control::SessionStore;
 pub mod cron_registry;
+pub mod cron_schedule;
 pub mod spawn_task;
 mod sse;
 pub mod stale_base;

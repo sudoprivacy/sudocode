@@ -178,6 +178,12 @@ enum Cmd {
         /// Plugin target
         target: Option<String>,
     },
+    /// Manage scheduled tasks (cron)
+    Cron {
+        /// Cron subcommand: add | list | remove | enable | disable | run | tick | daemon
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the full system prompt
     #[command(name = "system-prompt")]
     SystemPrompt {
@@ -239,6 +245,10 @@ pub(crate) enum CliAction {
     Plugins {
         action: Option<String>,
         target: Option<String>,
+        output_format: CliOutputFormat,
+    },
+    Cron {
+        args: Vec<String>,
         output_format: CliOutputFormat,
     },
     PrintSystemPrompt {
@@ -528,6 +538,10 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                     output_format,
                 })
             }
+            Cmd::Cron { args } => Ok(CliAction::Cron {
+                args,
+                output_format,
+            }),
             Cmd::SystemPrompt { cwd, date } => {
                 let resolved_cwd = cwd.unwrap_or(env::current_dir().map_err(|e| e.to_string())?);
                 let resolved_date = date.unwrap_or_else(runtime::today_local);

@@ -30,6 +30,11 @@ use pty_expect::PtySession;
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 const TIMEOUT: Duration = Duration::from_secs(45);
 
+/// The spawn helper sets process-global env (SUDO_CODE_CONFIG_HOME, cwd),
+/// so tests must not overlap. Each `CronEnv` holds this lock for its whole
+/// lifetime, serialising tests even under a parallel `cargo test`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn is_live() -> bool {
     std::env::var("SCODE_TEST_BACKEND").as_deref() == Ok("live")
 }
@@ -53,10 +58,12 @@ struct CronEnv {
     config_home: PathBuf,
     home: PathBuf,
     workspace: PathBuf,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl CronEnv {
     fn new(label: &str) -> Self {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_dir(label);
         let config_home = root.join("config-home");
         let home = root.join("home");
@@ -79,7 +86,7 @@ impl CronEnv {
                 src.display()
             );
         }
-        Self { config_home, home, workspace }
+        Self { config_home, home, workspace, _guard: guard }
     }
 
     /// Spawn `scode [--auth --model] cron <args...>` under a PTY with this

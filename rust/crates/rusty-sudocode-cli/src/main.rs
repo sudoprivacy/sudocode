@@ -1656,6 +1656,17 @@ impl repl_async::TurnDriver for LiveCliDriver {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }
     }
+
+    fn on_exit(&self) {
+        // Parity with sync REPL — persist the session on /exit / /quit /
+        // Ctrl-D so the next `--resume` sees the last turn's assistant
+        // reply (see the identical `cli.persist_session()?` line at the
+        // sync run_repl's /exit branch).
+        let cli = self.cli.lock().expect("LiveCli mutex poisoned");
+        if let Err(e) = cli.persist_session() {
+            eprintln!("\x1b[31m{e}\x1b[0m");
+        }
+    }
 }
 
 struct LiveCli {

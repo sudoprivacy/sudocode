@@ -1024,6 +1024,56 @@ own row.</p>
   </tbody>
 </table>
 
+<h3>Memory recall — Sonnet side-query relevance ranking (P1)</h3>
+
+<p><strong>Gap discovered:</strong> CC (confirmed present in both v2.1.87
+snapshot and CCB v2.8.2) uses a <strong>side query to Sonnet</strong> for
+memory recall. scode currently bulk-injects all entry bodies into the system
+prompt (16 KB cap). CC does not — it only injects the
+<code>MEMORY.md</code> index, then on each user turn:</p>
+
+<ol>
+  <li>Scans memory directory for <code>.md</code> file headers (filename +
+      frontmatter description)</li>
+  <li>Sends a side query to Sonnet: "which of these memories are relevant to
+      the user's query?" (max 5 selected)</li>
+  <li>Injects the selected files' full content into the conversation</li>
+</ol>
+
+<p>CC source: <code>findRelevantMemories.ts</code> (both snapshot and CCB).
+Uses <code>sideQuery()</code> utility with
+<code>getDefaultSonnetModel()</code>, structured JSON output, 256 max
+tokens.</p>
+
+<h4>scode implementation plan</h4>
+<ol>
+  <li><strong>Side-query util</strong> — lightweight Rust function: takes
+      system prompt + user message → sends to Sonnet → returns structured
+      JSON. scode has no <code>sideQuery</code> equivalent today.</li>
+  <li><strong><code>find_relevant_memories()</code></strong> — scan memory
+      dir headers, call side-query, return top-5 paths.</li>
+  <li><strong>Inject selected entries</strong> — read full files, inject into
+      conversation context (not system prompt).</li>
+  <li><strong>Remove bulk injection</strong> — stop injecting all entry bodies
+      into system prompt; keep only <code>MEMORY.md</code> index.</li>
+</ol>
+
+<h4>Risks and mitigations</h4>
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Extra Sonnet API call per turn — user-visible cost</td>
+        <td>Feature flag; auto-threshold: bulk-inject when &lt;10 entries,
+            side-query when &ge;10</td></tr>
+    <tr><td>Sonnet misjudges relevance → memory missed</td>
+        <td>MEMORY.md index always visible; model can still Grep memory dir
+            manually</td></tr>
+    <tr><td>Latency — extra round-trip per turn</td>
+        <td>Fire side-query concurrently with user message processing; Sonnet
+            is fast (256 token cap)</td></tr>
+  </tbody>
+</table>
+
 <h3>Nexus VFS migration — memory &amp; state paths</h3>
 
 <p>When scode runs inside nexusd as a linked Rust crate (not a subprocess),

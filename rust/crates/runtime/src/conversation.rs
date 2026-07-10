@@ -548,6 +548,37 @@ where
         combined
     }
 
+    /// Drain any coordinator-mode `<task-notification>` XML blocks
+    /// that background sub-agents deposited since the previous
+    /// turn.  When any arrive, prepend a single Text block carrying
+    /// the formatted batch to the FRONT of this turn's user
+    /// content.
+    ///
+    /// Non-coord sessions short-circuit inside
+    /// [`crate::coordinator_notification::drain`] (env-var
+    /// fast-path) — zero disk I/O and zero allocation for the
+    /// overwhelmingly common case.
+    ///
+    /// Workspace root defaults to the process cwd, matching the
+    /// per-workspace `.sudocode-inbox/coordinator.jsonl` convention
+    /// that every emit site uses (also cwd-derived).
+    fn prepend_pending_task_notifications(
+        &self,
+        blocks: Vec<ContentBlock>,
+    ) -> Vec<ContentBlock> {
+        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let notifications =
+            crate::coordinator_notification::drain(&workspace_root).unwrap_or_default();
+        if notifications.is_empty() {
+            return blocks;
+        }
+        let prefix = crate::coordinator_notification::format_drain_batch(&notifications);
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
+        combined.push(ContentBlock::Text { text: prefix });
+        combined.extend(blocks);
+        combined
+    }
+
     /// Run a session health probe to verify the runtime is functional after compaction.
     /// Returns Ok(()) if healthy, Err if the session appears broken.
     fn run_session_health_probe(&mut self) -> Result<(), String> {
@@ -753,6 +784,19 @@ where
         mut observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<TurnSummary, RuntimeError> {
         let blocks = self.inject_date_change_reminder(blocks);
+        // Coordinator-mode push: drain any `<task-notification>` XML
+        // blocks that background sub-agents deposited into the
+        // coordinator's inbox since the previous turn, and prepend
+        // them as an extra Text block AT THE FRONT of this turn's
+        // user message.  Wiring lives here (runtime layer) instead
+        // of at each caller because every entry point routes through
+        // `run_turn_with_blocks` — CLI REPL, one-shot `--print`,
+        // ACP stdio/WebSocket/SDK, MCP servers — and duplicating
+        // the drain across all of them was the exact anti-pattern
+        // Ethan flagged when the CLI-only wiring shipped in
+        // PR #282.  Non-coord sessions get 0 disk cost via the
+        // `is_coordinator_mode()` fast-path inside `drain()`.
+        let blocks = self.prepend_pending_task_notifications(blocks);
         let label = blocks
             .iter()
             .find_map(|b| match b {

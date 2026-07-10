@@ -261,9 +261,14 @@ fn global_cron_registry() -> &'static CronRegistry {
     static REGISTRY: OnceLock<CronRegistry> = OnceLock::new();
     // Persistent store shared with the `scode cron` CLI and the scheduler,
     // so a cron the agent creates survives restart and actually fires —
-    // rather than living only for this process.
+    // rather than living only for this process. `SUDOCODE_CRON_STORE`
+    // overrides the path (tests point it at a temp file; it is cron-only,
+    // so isolating cron never perturbs other config-home consumers).
     REGISTRY.get_or_init(|| {
-        CronRegistry::open(runtime::default_config_home().join("crons.json"))
+        let path = std::env::var_os("SUDOCODE_CRON_STORE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| runtime::default_config_home().join("crons.json"));
+        CronRegistry::open(path)
     })
 }
 
@@ -9968,10 +9973,12 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = temp_path("agent-runner");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
-        // Cron is now persistent (crons.json under the config home); isolate
-        // it to this temp dir so the auto-disable assertions stay hermetic
-        // and never touch the developer's real ~/.nexus/sudocode store.
-        std::env::set_var("SUDO_CODE_CONFIG_HOME", &dir);
+        // Cron is now persistent; point its dedicated store env at this temp
+        // dir so the auto-disable assertions stay hermetic and never touch the
+        // developer's real ~/.nexus/sudocode/crons.json. Using the cron-only
+        // SUDOCODE_CRON_STORE (not SUDO_CODE_CONFIG_HOME) keeps this isolation
+        // from perturbing other tests that read the config home.
+        std::env::set_var("SUDOCODE_CRON_STORE", dir.join("crons.json"));
 
         let completed = execute_agent_with_spawn(
             AgentInput {
@@ -10429,6 +10436,7 @@ mod tests {
         assert_eq!(spawn_error_manifest_json["derivedState"], "truly_idle");
 
         std::env::remove_var("SUDOCODE_AGENT_STORE");
+        std::env::remove_var("SUDOCODE_CRON_STORE");
         let _ = std::fs::remove_dir_all(dir);
     }
 

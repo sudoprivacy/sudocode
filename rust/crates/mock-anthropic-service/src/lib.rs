@@ -115,6 +115,7 @@ enum Scenario {
     TaskCreateThenListRoundtrip,
     SleepShortRoundtrip,
     SleepOverMaxRoundtrip,
+    ForkSubagentRecursionGuardRoundtrip,
 }
 
 impl Scenario {
@@ -147,6 +148,9 @@ impl Scenario {
             "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
             "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
+            "fork_subagent_recursion_guard_roundtrip" => {
+                Some(Self::ForkSubagentRecursionGuardRoundtrip)
+            }
             _ => None,
         }
     }
@@ -180,6 +184,7 @@ impl Scenario {
             Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
+            Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
         }
     }
 }
@@ -683,6 +688,23 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"duration_ms":400000}"#],
             ),
         },
+        Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => final_text_sse(&format!(
+                "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
+            )),
+            // The user prompt (from the test harness) already contains
+            // the `<fork-boilerplate>` tag, so the parent session's
+            // history looks like a fork child. This tool_use MUST be
+            // rejected by prepare_agent_job's recursion guard before
+            // any subagent is spawned.
+            None => tool_use_sse(
+                "toolu_fork_recursion_guard",
+                "Agent",
+                &[
+                    r#"{"subagent_type":"fork","description":"nested probe","prompt":"read a.txt and report the first line"}"#,
+                ],
+            ),
+        },
     }
 }
 
@@ -1058,6 +1080,24 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 400_000}),
             ),
         },
+        Scenario::ForkSubagentRecursionGuardRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, is_error)) => text_message_response(
+                "msg_fork_recursion_guard_final",
+                &format!(
+                    "fork recursion-guard roundtrip complete (is_error={is_error}): {tool_output}"
+                ),
+            ),
+            None => tool_message_response(
+                "msg_fork_recursion_guard_tool",
+                "toolu_fork_recursion_guard",
+                "Agent",
+                json!({
+                    "subagent_type": "fork",
+                    "description": "nested probe",
+                    "prompt": "read a.txt and report the first line"
+                }),
+            ),
+        },
     }
 }
 
@@ -1090,6 +1130,9 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TaskCreateThenListRoundtrip => "req_task_create_then_list_roundtrip",
         Scenario::SleepShortRoundtrip => "req_sleep_short_roundtrip",
         Scenario::SleepOverMaxRoundtrip => "req_sleep_over_max_roundtrip",
+        Scenario::ForkSubagentRecursionGuardRoundtrip => {
+            "req_fork_subagent_recursion_guard_roundtrip"
+        }
     }
 }
 

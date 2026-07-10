@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 
 pub use entry::{MemoryEntry, MemoryParseError, MemoryType};
 pub use index::{IndexPointer, ParsedIndex};
-pub use loader::{default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV, MEMORY_INDEX_FILE};
+pub use loader::{
+    agent_memory_dir_for, default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV,
+    MEMORY_INDEX_FILE,
+};
 
 use crate::prompt::SystemPromptBuilder;
 

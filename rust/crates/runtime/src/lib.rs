@@ -7,6 +7,8 @@
 pub mod acp_sdk_server;
 pub mod acp_stdio_server;
 pub mod acp_ws_server;
+pub mod agent_color;
+pub mod agent_mailbox;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;
@@ -15,6 +17,9 @@ mod compact;
 pub mod config;
 pub mod config_validate;
 mod conversation;
+pub mod coordinator_mode;
+pub mod coordinator_notification;
+pub mod custom_agents;
 mod file_intent;
 mod file_ops;
 mod file_redirect;
@@ -53,7 +58,9 @@ mod remote;
 pub mod sandbox;
 mod session;
 pub mod session_control;
+pub mod verification_watcher;
 pub use session_control::SessionStore;
+pub mod cron_registry;
 pub mod spawn_task;
 mod sse;
 pub mod stale_base;
@@ -61,7 +68,6 @@ pub mod stale_branch;
 pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;
-pub mod team_cron_registry;
 mod time;
 #[cfg(test)]
 mod trust_resolver;
@@ -96,7 +102,8 @@ pub use config_validate::{
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent,
     AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
-    RuntimeObserver, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
+    RuntimeObserver, StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor, TurnSummary,
+    FORK_BOILERPLATE_TAG,
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{
@@ -168,9 +175,9 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, load_system_prompt_with, prepend_bullets, ContextFile, ModelFamilyIdentity,
-    ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder, FRONTIER_MODEL_NAME,
-    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with, prepend_bullets,
+    ContextFile, ModelFamilyIdentity, ProjectContext, PromptBuildError, SystemPrompt,
+    SystemPromptBuilder, FRONTIER_MODEL_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,

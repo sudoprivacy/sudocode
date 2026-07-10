@@ -227,6 +227,23 @@ impl Session {
         self
     }
 
+    /// Pre-seed this session with a conversation prefix. Used by the fork
+    /// subagent path to hand a child runtime a copy of the parent's
+    /// in-flight assistant message + placeholder tool_results before the
+    /// first API call, matching CC-fork's `buildForkedMessages`.
+    ///
+    /// The pre-seeded messages are NOT persisted here — persistence only
+    /// engages once [`Session::with_persistence_path`] runs. Callers that
+    /// want to persist the seeded state must set persistence first, then
+    /// call [`Session::push_message`] for each message so they're written
+    /// atomically.
+    #[must_use]
+    pub fn with_messages(mut self, messages: Vec<ConversationMessage>) -> Self {
+        self.messages = messages;
+        self.touch();
+        self
+    }
+
     #[must_use]
     pub fn workspace_root(&self) -> Option<&Path> {
         self.workspace_root.as_deref()

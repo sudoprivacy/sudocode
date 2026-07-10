@@ -532,18 +532,70 @@ pub fn load_system_prompt_with(
     model_family: ModelFamilyIdentity,
     fs: &dyn FsBackend,
 ) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_impl(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        model_family,
+        fs,
+        None,
+    )
+}
+
+/// Same as [`load_system_prompt`] but injects the per-agent-type
+/// memory directory (`<workspace-base>/agent-memory/<agent_type>/`)
+/// instead of the workspace-shared `memory/` path. Sub-agent spawns
+/// route through this so agent A's remembered facts don't leak into
+/// agent B's memory index — mirrors CC-fork's `agentMemory.ts`
+/// scoping.
+///
+/// Note: `agent_type` is passed through
+/// [`crate::memory::agent_memory_dir_for`], which sanitizes it and
+/// respects `SUDOCODE_MEMORY_DIR` as the workspace base override.
+pub fn load_system_prompt_for_agent(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    model_family: ModelFamilyIdentity,
+    agent_type: &str,
+) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_impl(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        model_family,
+        &StdFsBackend,
+        Some(agent_type),
+    )
+}
+
+fn load_system_prompt_impl(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    model_family: ModelFamilyIdentity,
+    fs: &dyn FsBackend,
+    agent_type: Option<&str>,
+) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
-    let builder = crate::memory::append_to_builder(
-        SystemPromptBuilder::new()
-            .with_os(os_name, os_version)
-            .with_model_family(model_family)
-            .with_project_context(project_context)
-            .with_runtime_config(config),
-        None,
-        Some(&cwd),
-    );
+    let builder_base = SystemPromptBuilder::new()
+        .with_os(os_name, os_version)
+        .with_model_family(model_family)
+        .with_project_context(project_context)
+        .with_runtime_config(config);
+    let builder = match agent_type {
+        Some(agent) => {
+            let dir = crate::memory::agent_memory_dir_for(&cwd, agent);
+            crate::memory::append_to_builder(builder_base, Some(&dir), Some(&cwd))
+        }
+        None => crate::memory::append_to_builder(builder_base, None, Some(&cwd)),
+    };
     Ok(builder.build())
 }
 
@@ -737,21 +789,29 @@ mod tests {
         .expect("write nested nexus AGENTS.md");
 
         let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
+        // `discover_instruction_files` walks the entire ancestor
+        // chain to `/`. On dev machines (esp. Windows where
+        // `temp_dir()` lives under `~/AppData/Local/Temp/`) the walk
+        // passes through the developer's real HOME and picks up
+        // their `~/.nexus/sudocode/AGENTS.md`. Filter to the
+        // fixture entries so the ORDER assertion this test cares
+        // about is preserved without racing the dev's global config.
+        // CI Linux runners have a pristine HOME so this filter is a
+        // no-op there.
+        let fixture_contents = [
+            "root agents",
+            "root nexus agents",
+            "apps agents",
+            "nested nexus agents",
+        ];
         let contents = context
             .instruction_files
             .iter()
             .map(|file| file.content.as_str())
+            .filter(|c| fixture_contents.contains(c))
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            contents,
-            vec![
-                "root agents",
-                "root nexus agents",
-                "apps agents",
-                "nested nexus agents",
-            ]
-        );
+        assert_eq!(contents, fixture_contents.to_vec());
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -764,11 +824,16 @@ mod tests {
         fs::write(nested.join("AGENTS.md"), "same rules\n").expect("write nested");
 
         let context = ProjectContext::discover(&nested, "2026-03-31").expect("context should load");
-        assert_eq!(context.instruction_files.len(), 1);
-        assert_eq!(
-            normalize_instruction_content(&context.instruction_files[0].content),
-            "same rules"
-        );
+        // Same ancestor-chain-pollution caveat as
+        // `discovers_instruction_files_from_ancestor_chain`. Filter
+        // to the fixture "same rules" content so the dev's real
+        // HOME's AGENTS.md doesn't skew the dedupe count.
+        let same_rules_count = context
+            .instruction_files
+            .iter()
+            .filter(|f| normalize_instruction_content(&f.content) == "same rules")
+            .count();
+        assert_eq!(same_rules_count, 1, "identical content dedupes to one");
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 

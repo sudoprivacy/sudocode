@@ -834,6 +834,10 @@ fn print_system_prompt(
     if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
         prompt.dynamic_sections.push(section);
     }
+    // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
+    // prepend the CC-fork coordinator role prompt so `scode
+    // print-system-prompt` reflects what the runtime would send.
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -3098,6 +3102,23 @@ impl LiveCli {
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
+        // Coordinator push: before starting this turn, drain any
+        // `<task-notification>` blocks that background sub-agents
+        // have deposited in `<workspace>/.sudocode-inbox/coordinator.jsonl`
+        // since the previous turn, and prepend them to the user's
+        // input. Under non-coordinator sessions the drain returns
+        // empty so `input` is unchanged.
+        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let notifications =
+            runtime::coordinator_notification::drain(&workspace_root).unwrap_or_default();
+        let prepended_input = if notifications.is_empty() {
+            input.to_string()
+        } else {
+            let mut prefixed =
+                runtime::coordinator_notification::format_drain_batch(&notifications);
+            prefixed.push_str(input);
+            prefixed
+        };
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
         spinner.start(
@@ -3114,7 +3135,7 @@ impl LiveCli {
         runtime.tool_executor_mut().set_spinner_pause(pause_flag);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
+            prepended_input.as_str(),
             Some(&mut permission_prompter),
             None,
         ));
@@ -4375,13 +4396,19 @@ fn build_system_prompt_for(
     // user actually started talking. ConversationRuntime separately tracks
     // this date and emits a system-reminder if the date rolls over
     // mid-session, keeping the prompt cache prefix warm.
-    Ok(load_system_prompt(
+    let mut prompt = load_system_prompt(
         cwd.to_path_buf(),
         runtime::today_local(),
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
-    )?)
+    )?;
+    // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
+    // set, prepend the ported CC-fork coordinator role prompt so it
+    // takes primacy over the default identity. See
+    // runtime::coordinator_mode for the full port.
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
+    Ok(prompt)
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {

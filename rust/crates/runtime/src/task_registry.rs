@@ -42,7 +42,6 @@ pub struct Task {
     pub updated_at: u64,
     pub messages: Vec<TaskMessage>,
     pub output: String,
-    pub team_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +112,6 @@ impl TaskRegistry {
             updated_at: ts,
             messages: Vec::new(),
             output: String::new(),
-            team_id: None,
         };
         inner.tasks.insert(task_id, task.clone());
         task
@@ -199,17 +197,6 @@ impl TaskRegistry {
             .get_mut(task_id)
             .ok_or_else(|| format!("task not found: {task_id}"))?;
         task.status = status;
-        task.updated_at = now_secs();
-        Ok(())
-    }
-
-    pub fn assign_team(&self, task_id: &str, team_id: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().expect("registry lock poisoned");
-        let task = inner
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| format!("task not found: {task_id}"))?;
-        task.team_id = Some(team_id.to_owned());
         task.updated_at = now_secs();
         Ok(())
     }
@@ -341,16 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn assigns_team_and_removes_task() {
+    fn removes_task() {
         let registry = TaskRegistry::new();
-        let task = registry.create("Team task", None);
-        registry
-            .assign_team(&task.task_id, "team_abc")
-            .expect("assign should succeed");
-
-        let fetched = registry.get(&task.task_id).unwrap();
-        assert_eq!(fetched.team_id.as_deref(), Some("team_abc"));
-
+        let task = registry.create("Task", None);
         let removed = registry.remove(&task.task_id);
         assert!(removed.is_some());
         assert!(registry.get(&task.task_id).is_none());
@@ -477,7 +457,6 @@ mod tests {
         assert_eq!(task.task_packet, None);
         assert!(task.messages.is_empty());
         assert!(task.output.is_empty());
-        assert_eq!(task.team_id, None);
     }
 
     #[test]
@@ -490,18 +469,5 @@ mod tests {
 
         // then
         assert!(removed.is_none());
-    }
-
-    #[test]
-    fn assign_team_rejects_missing_task() {
-        // given
-        let registry = TaskRegistry::new();
-
-        // when
-        let result = registry.assign_team("missing", "team_123");
-
-        // then
-        let error = result.expect_err("missing task should be rejected");
-        assert_eq!(error, "task not found: missing");
     }
 }

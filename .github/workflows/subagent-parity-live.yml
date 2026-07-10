@@ -1,0 +1,125 @@
+name: Sub-agent Parity Live E2E
+
+# Runs the 7 PTY live e2e files covering the sub-agent CC-fork parity
+# scope (PR #282). These tests skip cleanly under
+# `SCODE_TEST_BACKEND=mock` because the mock harness has a known
+# scenario-inheritance gap on subagent-owned `/v1/messages` requests
+# (plan §6.4). This workflow flips the switch to `live` and seeds a
+# proxy config pointing at sudorouter so the tests actually exercise
+# real LLM turns.
+#
+# Trigger policy:
+#   - workflow_dispatch (manual): the default. Live tests spend
+#     tokens, so PR-time runs would balloon spend. Ethan can trigger
+#     manually before merging PR #282 (or ad-hoc for post-merge
+#     regression sanity).
+#   - No scheduled cron by default. Add one later if we want a
+#     nightly signal, but the individual tests are already
+#     verifiable locally via each file's module docstring recipe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: 'Comma-separated PTY test names to run (empty = all 7)'
+        default: ''
+        required: false
+
+concurrency:
+  group: subagent-parity-live
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: rust
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pty-live:
+    name: PTY live e2e (sudorouter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # Seed the proxy config that the live-mode TestEnv reads. Same
+      # shape as model-compat.yml but scoped to this workflow so
+      # there's no cross-contamination if secrets rotate.
+      - name: Write proxy config
+        env:
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUDOROUTER_API_KEY:-}" ]; then
+            echo "::error::SUDOROUTER_API_KEY secret is not set — cannot run live e2e"
+            exit 1
+          fi
+          CONFIG_DIR="$HOME/.nexus/sudocode"
+          mkdir -p "$CONFIG_DIR"
+          cat > "$CONFIG_DIR/sudocode.json" <<ENDJSON
+          {
+            "auth_modes": {
+              "proxy": {
+                "sudorouter": {
+                  "baseUrl": "https://hk.sudorouter.ai/v1",
+                  "apiKey": "$SUDOROUTER_API_KEY"
+                }
+              }
+            },
+            "models": {}
+          }
+          ENDJSON
+          echo "Proxy config written to $CONFIG_DIR/sudocode.json"
+
+      # The full 7-test set that covers the sub-agent parity surface.
+      # Kept as a single explicit list so it's easy to see what's
+      # covered + trim by name from the workflow_dispatch input.
+      - name: Determine tests to run
+        id: tests
+        run: |
+          set -euo pipefail
+          MANUAL="${{ github.event.inputs.tests }}"
+          if [ -n "$MANUAL" ]; then
+            echo "list=$MANUAL" >> "$GITHUB_OUTPUT"
+            echo "Using manually provided test list: $MANUAL"
+          else
+            echo "list=pty_presets_e2e,pty_custom_agents,pty_agent_memory_scoping,pty_send_message_multi_turn,pty_verification_streak,pty_agent_summary,pty_agent_permission_bubble" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Run each PTY test with SCODE_TEST_BACKEND=live. `--test-threads=1`
+      # serialises them so a rate-limit on the sudorouter side doesn't
+      # bounce concurrent turns. `--nocapture` streams the model's
+      # output into the job log so failures are debuggable without a
+      # local reproduction.
+      - name: Run PTY live e2e
+        env:
+          SCODE_TEST_BACKEND: live
+          # PTY tests use portable_pty with sh — Linux runners have sh
+          # on PATH out of the box, so no extra prepend needed.
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a TEST_NAMES <<< "${{ steps.tests.outputs.list }}"
+          FAILED=()
+          for t in "${TEST_NAMES[@]}"; do
+            t="$(echo "$t" | xargs)"  # trim
+            [ -z "$t" ] && continue
+            echo "::group::$t"
+            if cargo test -p rusty-sudocode-cli --test "$t" -- --test-threads=1 --nocapture; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              FAILED+=("$t")
+            fi
+          done
+          if [ ${#FAILED[@]} -ne 0 ]; then
+            echo "::error::Live e2e failed for: ${FAILED[*]}"
+            exit 1
+          fi
+        timeout-minutes: 45

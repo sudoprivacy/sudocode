@@ -156,6 +156,15 @@ impl CliToolExecutor {
 
 impl ToolExecutor for CliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_with_context(tool_name, input, &runtime::ToolDispatchContext::default())
+    }
+
+    fn execute_with_context(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<String, ToolError> {
         {
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -191,7 +200,12 @@ impl ToolExecutor for CliToolExecutor {
             self.execute_runtime_tool(tool_name, value)
         } else {
             self.tool_registry
-                .execute_with_abort(tool_name, &value, self.abort_signal.as_ref())
+                .execute_with_abort_and_context(
+                    tool_name,
+                    &value,
+                    self.abort_signal.as_ref(),
+                    Some(ctx),
+                )
                 .map_err(ToolError::new)
         };
         match result {

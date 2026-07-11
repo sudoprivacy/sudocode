@@ -15,6 +15,41 @@ use rustyline::{
     EventHandler, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
+/// Callback invoked by the `↑`-arrow handler when the current input buffer is
+/// empty. Returns `Some(text)` to have rustyline `Cmd::Insert(text)` splice
+/// into the buffer (typical use: pop the newest item from the async REPL's
+/// TurnInputCoordinator queue). Returns `None` to fall through to rustyline's
+/// default `↑` behavior (history navigation), matching the "only dequeue when
+/// there's something to dequeue" contract in the sudowork §3.2 muted note.
+///
+/// Signature is a `Fn` (Send + Sync + 'static) so rustyline's editor can hold
+/// it across its threads without extra ceremony.
+pub type UpArrowDequeueHook = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync + 'static>;
+
+/// Rustyline handler for `↑` on an empty prompt buffer: invokes the
+/// `UpArrowDequeueHook` and, on `Some(text)`, splices via `Cmd::Insert`.
+/// On non-empty buffer or hook returning None, returns `None` so rustyline's
+/// default history-up path runs — never breaks multi-line editing.
+struct UpArrowDequeueHandler {
+    hook: UpArrowDequeueHook,
+}
+
+impl ConditionalEventHandler for UpArrowDequeueHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if !ctx.line().is_empty() {
+            return None;
+        }
+        let text = (self.hook)()?;
+        Some(Cmd::Insert(1, text))
+    }
+}
+
 /// Accept the line only when it contains non-whitespace text.
 /// When the line is empty, Enter is a no-op.
 struct AcceptNonEmpty;
@@ -232,6 +267,19 @@ pub struct LineEditor {
 impl LineEditor {
     #[must_use]
     pub fn new(prompt: impl Into<String>, completions: Vec<(String, String)>) -> Self {
+        Self::new_with_dequeue_hook(prompt, completions, None)
+    }
+
+    /// Same as [`new`] but binds `↑` (on an empty buffer) to `dequeue_hook`.
+    /// The async REPL uses this to pop the newest queued input back into the
+    /// editor for editing; sync REPL passes `None` and gets the default
+    /// history-only `↑` behavior.
+    #[must_use]
+    pub fn new_with_dequeue_hook(
+        prompt: impl Into<String>,
+        completions: Vec<(String, String)>,
+        dequeue_hook: Option<UpArrowDequeueHook>,
+    ) -> Self {
         let config = Config::builder()
             .completion_type(CompletionType::List)
             .edit_mode(EditMode::Emacs)
@@ -245,6 +293,13 @@ impl LineEditor {
             KeyEvent(KeyCode::Enter, Modifiers::NONE),
             EventHandler::Conditional(Box::new(AcceptNonEmpty)),
         );
+
+        if let Some(hook) = dequeue_hook {
+            editor.bind_sequence(
+                KeyEvent(KeyCode::Up, Modifiers::NONE),
+                EventHandler::Conditional(Box::new(UpArrowDequeueHandler { hook })),
+            );
+        }
 
         let images: ImageMap = Arc::new(Mutex::new(HashMap::new()));
 

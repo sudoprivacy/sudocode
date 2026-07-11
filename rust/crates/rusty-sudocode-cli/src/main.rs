@@ -1614,9 +1614,16 @@ fn run_repl_async_dispatch(
     // wedges the terminal on POSIX (see LiveCli::esc_monitor_enabled docs).
     cli.esc_monitor_enabled = false;
 
+    // Auto-interrupt wiring: install a persistent HookAbortSignal so main can
+    // call `.abort()` mid-turn without ever locking cli. `prepare_turn_runtime`
+    // resets the signal before each turn (see the branch we added there).
+    let abort_signal = runtime::HookAbortSignal::new();
+    cli.persistent_abort_signal = Some(abort_signal.clone());
+
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
+        abort_signal,
     });
 
     let session_start = Instant::now();
@@ -1658,9 +1665,11 @@ fn run_repl_async_dispatch(
 /// Adapts `LiveCli::run_turn` (which takes `&mut self`) to the
 /// `repl_async::TurnDriver` trait (which is Sync + call by `&self`). The
 /// mutex guarantees only one turn runs at a time, matching the coordinator's
-/// single-runner-thread invariant.
+/// single-runner-thread invariant. Holds a clone of the persistent abort
+/// signal so `abort_current_turn` can fire without ever touching the mutex.
 struct LiveCliDriver {
     cli: std::sync::Arc<std::sync::Mutex<LiveCli>>,
+    abort_signal: runtime::HookAbortSignal,
 }
 
 impl repl_async::TurnDriver for LiveCliDriver {
@@ -1681,6 +1690,13 @@ impl repl_async::TurnDriver for LiveCliDriver {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }
     }
+
+    fn abort_current_turn(&self) {
+        // Idempotent by design (HookAbortSignal::abort just sets a bool +
+        // notifies waiters). No cli-lock needed — the runner thread already
+        // holds it while streaming, and would deadlock if we tried.
+        self.abort_signal.abort();
+    }
 }
 
 struct LiveCli {
@@ -1700,6 +1716,12 @@ struct LiveCli {
     /// crossterm listener leaves the terminal wedged after the turn ends
     /// (deadlocked the `/exit` path on POSIX CI runners in PR #298 v1).
     esc_monitor_enabled: bool,
+    /// When `Some`, `prepare_turn_runtime` resets and reuses THIS signal
+    /// instead of creating a fresh one per turn. Set by the async REPL
+    /// dispatch so main can hold a clone and call `.abort()` mid-turn
+    /// without ever locking the `LiveCli` mutex — the runner thread holds
+    /// that lock while `run_turn` streams.
+    persistent_abort_signal: Option<runtime::HookAbortSignal>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3031,6 +3053,7 @@ impl LiveCli {
             undone_tool_use_ids: std::collections::HashSet::new(),
             tokio_runtime,
             esc_monitor_enabled: true,
+            persistent_abort_signal: None,
         };
         cli.persist_session()?;
 
@@ -3166,7 +3189,18 @@ impl LiveCli {
         &mut self,
         emit_output: bool,
     ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
-        let hook_abort_signal = runtime::HookAbortSignal::new();
+        // Async REPL mode installs a persistent abort signal so main can call
+        // `.abort()` mid-turn without racing the runner thread. Reset the flag
+        // here — the previous turn may have aborted it (that's how we got
+        // this new turn scheduled), and the runtime treats `is_aborted() ==
+        // true` as "cancel immediately", which would collapse the fresh turn.
+        let hook_abort_signal = match &self.persistent_abort_signal {
+            Some(sig) => {
+                sig.reset();
+                sig.clone()
+            }
+            None => runtime::HookAbortSignal::new(),
+        };
         // `build_runtime` stamps `prompt_known_date` with today's local date,
         // which is correct only for a freshly-created runtime. The REPL
         // rebuilds the runtime on every turn, so without carrying this date

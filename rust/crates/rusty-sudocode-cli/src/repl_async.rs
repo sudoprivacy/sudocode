@@ -4,16 +4,18 @@
 //! Only activated when `SUDOCODE_INTERRUPT_QUEUE_MODE` is set to a non-off value.
 //! The default REPL (`run_repl`) is unchanged and remains the sync path.
 //!
-//! ## Scope of this cut
+//! ## Modes
 //!
-//! Queue-mode (`SUDOCODE_INTERRUPT_QUEUE_MODE=queue`) only: input typed while a
-//! turn is running is accumulated in the [`TurnInputCoordinator`]; on turn end
-//! (natural OR cancelled) the queue is flushed as ONE combined `run_turn`
-//! matching sudowork's post-#983 batched-flush semantics.
-//!
-//! Auto-interrupt (`interrupt` / `both`) is **not** wired here — the coordinator
-//! records the intent (Interrupt outcome), but this loop treats it identically
-//! to Queue for now. See §Deferred below.
+//! - `queue` — input typed while a turn is running is accumulated in the
+//!   [`TurnInputCoordinator`]; on turn end (natural OR cancelled) the queue is
+//!   flushed as ONE combined `run_turn` matching sudowork's post-#983
+//!   batched-flush semantics.
+//! - `interrupt` / `both` — same as `queue` for the queue side, PLUS the
+//!   coordinator's `SubmitOutcome::Interrupt` calls
+//!   [`TurnDriver::abort_current_turn`]. The runner's in-flight `run_turn`
+//!   observes the aborted [`runtime::HookAbortSignal`] and returns a cancelled
+//!   `TurnSummary`, which propagates as `TurnEvent::Done`; the drain then picks
+//!   up the interrupter as a fresh solo turn per §3.2 row 2.
 //!
 //! Slash commands (/exit, /clear, ...) still work: they are intercepted before
 //! being handed to the coordinator and dispatched under the same cli lock the
@@ -109,6 +111,17 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// `session_ended` telemetry, etc.). Default no-op keeps the loop
     /// self-contained for tests.
     fn on_exit(&self) {}
+
+    /// Auto-interrupt the currently running turn. Called from main when the
+    /// coordinator matrix decides `SubmitOutcome::Interrupt` — the runner
+    /// thread's `run_turn` will observe the abort and return with a
+    /// cancelled `TurnSummary`, then the drain picks up the interrupter
+    /// (already `solo`-tagged at the queue head by `submit_during_turn`).
+    /// Must NOT block on the runner (main is holding the coordinator loop).
+    /// Idempotent: safe to call when no turn is active — the next
+    /// `LiveCli::prepare_turn_runtime` resets the shared signal before use.
+    /// Default no-op for test drivers that don't wire abort.
+    fn abort_current_turn(&self) {}
 }
 
 /// A submitted line that the coordinator loop needs to classify: is it a
@@ -227,11 +240,15 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         // for the CLI we punt to a status line in a follow-up.
                     }
                     SubmitOutcome::Interrupt => {
-                        // Coordinator recorded solo intent, but auto-interrupt
-                        // wiring (abort signal exposure) is deferred — see
-                        // module docs §Deferred. Behaves as Queued for now.
+                        // Coordinator has already placed the interrupter at the
+                        // queue head with `solo: true`. Now cancel the running
+                        // turn via the driver's abort handle — the runner's
+                        // `run_turn` observes the abort, returns a cancelled
+                        // TurnSummary, sends `TurnEvent::Done`, and the drain
+                        // picks up the interrupter as a fresh solo run.
+                        driver.abort_current_turn();
                         eprintln!(
-                            "\x1b[2m(queued; auto-interrupt not yet wired in this build — the solo turn will run after the current one ends)\x1b[0m"
+                            "\x1b[2m(interrupting current turn; interrupter will run as a solo new turn)\x1b[0m"
                         );
                     }
                     SubmitOutcome::Rejected => {
@@ -294,10 +311,13 @@ mod loop_docs {
 
     /// A `TurnDriver` that just records the prompts it's called with and
     /// blocks for `turn_ms` before returning — mimics an LLM turn taking time.
+    /// Also counts `abort_current_turn` calls so the matrix doc can verify
+    /// the auto-interrupt hook fires as expected.
     struct RecordingDriver {
         prompts: Mutex<Vec<String>>,
         turn_ms: u64,
         run_count: AtomicUsize,
+        abort_count: AtomicUsize,
     }
 
     impl RecordingDriver {
@@ -306,6 +326,7 @@ mod loop_docs {
                 prompts: Mutex::new(Vec::new()),
                 turn_ms,
                 run_count: AtomicUsize::new(0),
+                abort_count: AtomicUsize::new(0),
             })
         }
         fn prompts(&self) -> Vec<String> {
@@ -318,6 +339,10 @@ mod loop_docs {
             self.prompts.lock().unwrap().push(prompt.to_string());
             self.run_count.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(self.turn_ms));
+        }
+
+        fn abort_current_turn(&self) {
+            self.abort_count.fetch_add(1, Ordering::SeqCst);
         }
     }
 

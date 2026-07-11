@@ -78,6 +78,26 @@ use std::time::Duration;
 use crate::input::{LineEditor, ReadOutcome};
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
 
+/// Builds the `↑`-arrow dequeue hook that the input thread's rustyline binds
+/// to `KeyCode::Up` on an empty buffer. Kept as a free function so both the
+/// production wiring and the future PTY test infrastructure can construct one
+/// from the same `Arc<Mutex<TurnInputCoordinator>>` main uses.
+///
+/// Semantics (per shareone §3.2 muted note):
+/// - Buffer non-empty → returns `None`, rustyline runs default history-up.
+/// - Buffer empty + queue empty → returns `None`, same fall-through.
+/// - Buffer empty + queue non-empty → pops NEWEST queued item; caller
+///   `Cmd::Insert`s it for further editing. LIFO so the user gets back the
+///   thing they most recently queued.
+fn make_up_arrow_hook(coord: Arc<Mutex<TurnInputCoordinator>>) -> crate::input::UpArrowDequeueHook {
+    Arc::new(move || {
+        coord
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dequeue_last()
+    })
+}
+
 /// Events flowing from the input thread to the main coordinator.
 enum InputEvent {
     Submit(String),
@@ -153,11 +173,16 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
 
     // Input thread — owns its rustyline LineEditor. Sends every submitted line
     // to main via a bounded channel. Exits cleanly on Exit / channel closed.
+    // The `↑`-arrow dequeue hook is bound here so the input thread can pop
+    // the newest queued input back into the buffer without needing a
+    // channel round-trip to main.
     let input_tx_clone = input_tx.clone();
+    let dequeue_hook = make_up_arrow_hook(Arc::clone(&coord));
     thread::Builder::new()
         .name("repl-input".into())
         .spawn(move || {
-            let mut editor = LineEditor::new("❯ ", initial_completions);
+            let mut editor =
+                LineEditor::new_with_dequeue_hook("❯ ", initial_completions, Some(dequeue_hook));
             loop {
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
@@ -215,8 +240,15 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 // (that'd send the literal text to the LLM as a turn — the
                 // regression the pty_repl_async_queue smoke caught). Handled
                 // BEFORE the coordinator matrix so an in-flight turn (if any)
-                // is joined + telemetry emits cleanly.
+                // is aborted + joined + telemetry emits cleanly.
                 if is_exit_command(&text) {
+                    if runner_handle.is_some() {
+                        // Turn still running — abort it first so the join below
+                        // returns quickly, not after the full LLM/tool wall
+                        // clock. Idempotent + safe to call when no runner is
+                        // active (driver default is no-op).
+                        driver.abort_current_turn();
+                    }
                     if let Some(h) = runner_handle.take() {
                         let _ = h.join();
                     }

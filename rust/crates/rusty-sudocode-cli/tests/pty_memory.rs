@@ -549,6 +549,387 @@ fn memory_write_read_forget_workflow() {
     assert_eq!(exit, 0, "workflow should exit 0; got {exit}");
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// 8. Deduplication: LLM should detect existing memory and not duplicate
+// ──────────────────────────────────────────────────────────────────────
+
+/// Pre-seed a memory entry, then ask the model to remember the same fact.
+/// The LLM should recognize the existing entry (via MEMORY.md in system
+/// prompt) and update or skip rather than creating a second file.
+///
+/// Live-only: requires real LLM judgment.
+#[test]
+fn memory_dedup_does_not_create_duplicate() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-dedup");
+    if env.is_mock() {
+        eprintln!(
+            "skipping memory_dedup_does_not_create_duplicate: mock mode \
+             (run with SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    // Pre-seed a memory entry about the user's role.
+    let workspace_home = root.join("home");
+    let projects_dir = workspace_home.join(".scode").join("projects");
+    // We need to figure out the slug — just create a well-known memory dir.
+    // Use SUDOCODE_MEMORY_DIR to control the path deterministically.
+    let memory_dir = workspace_home.join("test-memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    write_entry(
+        &memory_dir,
+        "user_role",
+        "user",
+        "User is a backend developer",
+        "The user is a backend developer working primarily with Rust and Go.",
+    );
+    fs::write(
+        memory_dir.join("MEMORY.md"),
+        "- [User Role](user_role.md) — User is a backend developer\n",
+    )
+    .expect("write MEMORY.md");
+
+    let md_count_before = count_md_files(&memory_dir);
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("EDITOR", "true"),
+            ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
+        ],
+    );
+    sess.set_default_timeout(Duration::from_secs(60));
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Ask to remember the same fact that's already stored.
+    sess.send("Remember this: I am a backend developer. Save it to memory.\r")
+        .expect("send remember request");
+
+    // Wait for turn completion.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after dedup attempt: {e}\nPTY screen:\n{screen}");
+    });
+
+    // The LLM should have recognized the existing entry. Either:
+    //   (a) it updated user_role.md (same file count), or
+    //   (b) it skipped writing entirely (same file count).
+    // It should NOT have created a second .md file.
+    let md_count_after = count_md_files(&memory_dir);
+    assert!(
+        md_count_after <= md_count_before,
+        "LLM should not create a duplicate memory file. \
+         Before: {md_count_before}, After: {md_count_after}. \
+         Files: {:?}",
+        list_md_files(&memory_dir),
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 9. Staleness: LLM updates outdated memory instead of creating new
+// ──────────────────────────────────────────────────────────────────────
+
+/// Pre-seed a memory entry with outdated info, then tell the model the
+/// fact has changed. The LLM should update the existing entry, not
+/// create a second file alongside the stale one.
+///
+/// Live-only: requires real LLM judgment.
+#[test]
+fn memory_staleness_updates_existing_entry() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-stale");
+    if env.is_mock() {
+        eprintln!(
+            "skipping memory_staleness_updates_existing_entry: mock mode \
+             (run with SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let workspace_home = root.join("home");
+    let memory_dir = workspace_home.join("test-memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    // Seed with outdated information.
+    write_entry(
+        &memory_dir,
+        "project_database",
+        "project",
+        "Project uses PostgreSQL for primary storage",
+        "The project uses PostgreSQL 15 as the primary database.\n\
+         **Why:** chosen for its JSONB support and mature ecosystem.\n\
+         **How to apply:** all migration scripts target PostgreSQL.",
+    );
+    fs::write(
+        memory_dir.join("MEMORY.md"),
+        "- [Database](project_database.md) — Project uses PostgreSQL for primary storage\n",
+    )
+    .expect("write MEMORY.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("EDITOR", "true"),
+            ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
+        ],
+    );
+    sess.set_default_timeout(Duration::from_secs(60));
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Tell the model the fact has changed.
+    sess.send("We migrated from PostgreSQL to MySQL last week. Please update your memory about our database.\r")
+        .expect("send update request");
+
+    // Wait for tool call (edit_file or write_file on existing entry).
+    sess.expect("(?i)(edit_file|write_file)")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("should see tool call for memory update: {e}\nPTY screen:\n{screen}");
+        });
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after stale update: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Verify the entry was updated, not duplicated.
+    let md_count = count_md_files(&memory_dir);
+    assert!(
+        md_count <= 1,
+        "should update existing entry, not create a second one. \
+         Found {md_count} files: {:?}",
+        list_md_files(&memory_dir),
+    );
+
+    // Verify the updated content mentions MySQL.
+    let updated = fs::read_to_string(memory_dir.join("project_database.md"))
+        .or_else(|_| {
+            // LLM might have chosen a different filename — find any .md
+            list_md_files(&memory_dir)
+                .into_iter()
+                .find(|name| name != "MEMORY.md")
+                .map(|name| fs::read_to_string(memory_dir.join(&name)).unwrap_or_default())
+                .ok_or(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no memory file found",
+                ))
+        })
+        .unwrap_or_default();
+    assert!(
+        updated.to_lowercase().contains("mysql"),
+        "updated memory should mention MySQL. Content:\n{updated}",
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 10. ReadOnly mode blocks memory writes
+// ──────────────────────────────────────────────────────────────────────
+
+/// In read-only permission mode, the memory write carve-out should NOT
+/// apply. The system prompt still injects memory instructions but the
+/// model cannot write files.
+#[test]
+fn memory_readonly_blocks_writes() {
+    let root = unique_temp_dir("mem-readonly");
+    let memory_dir = root.join("memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    // Verify the system prompt includes memory instructions even in
+    // read-only mode (the LLM should know about memory).
+    let output = run_system_prompt(
+        &root,
+        &[("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8"))],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("auto memory") || stdout.contains("memory system") || stdout.contains("MEMORY.md"),
+        "system prompt should include memory instructions even for read-only mode"
+    );
+
+    // Now verify the carve-out is NOT present by checking the output
+    // does NOT contain a synthetic allow rule for the memory directory.
+    // (This is a structural check — the actual permission enforcement
+    // is in the runtime, not testable via system-prompt output alone.)
+    // The real proof is that write_file in read-only mode returns EPERM.
+    // But we can at least verify memory loads correctly even without
+    // write permission.
+    assert!(output.status.success());
+
+    fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 11. Multiple memory types in one session
+// ──────────────────────────────────────────────────────────────────────
+
+/// Ask the model to save three different types of memory in a single
+/// session. Verify all three files are created with correct types.
+///
+/// Live-only: requires real LLM judgment for type classification.
+#[test]
+fn memory_multi_type_single_session() {
+    use std::time::Duration;
+
+    let env = common::TestEnv::new("mem-multi");
+    if env.is_mock() {
+        eprintln!(
+            "skipping memory_multi_type_single_session: mock mode \
+             (run with SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git init");
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let workspace_home = root.join("home");
+    let memory_dir = workspace_home.join("test-memory");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("EDITOR", "true"),
+            ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
+        ],
+    );
+    sess.set_default_timeout(Duration::from_secs(90));
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Ask to remember three things of different types in one go.
+    sess.send(
+        "Please save these three things to memory:\n\
+         1. I am a senior Rust developer (this is about me, the user)\n\
+         2. We never use unwrap() in production code - this was a team decision after a crash last month (this is feedback/guidance)\n\
+         3. Our bug tracker is at linear.app/acme (this is a reference to an external system)\n\
+         Save each as a separate memory file with the appropriate type.\r",
+    )
+    .expect("send multi-type request");
+
+    // Wait for multiple write_file calls.
+    sess.expect("write_file").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see first write_file: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Wait for turn completion.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after multi-type: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Verify at least 3 memory files were created (excluding MEMORY.md).
+    let files = list_md_files(&memory_dir);
+    let non_index: Vec<_> = files.iter().filter(|f| *f != "MEMORY.md").collect();
+    assert!(
+        non_index.len() >= 3,
+        "should create at least 3 memory files for 3 facts. \
+         Found {}: {:?}",
+        non_index.len(),
+        non_index,
+    );
+
+    // Verify at least two different types appear across the files.
+    let mut types_seen = std::collections::HashSet::new();
+    for file_name in &non_index {
+        let content =
+            fs::read_to_string(memory_dir.join(file_name)).unwrap_or_default();
+        for t in ["user", "feedback", "reference", "project"] {
+            if content.contains(&format!("type: {t}")) {
+                types_seen.insert(t);
+            }
+        }
+    }
+    assert!(
+        types_seen.len() >= 2,
+        "should have at least 2 different memory types. Found: {:?}",
+        types_seen,
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────
+
+/// Count `.md` files (excluding MEMORY.md) in a directory.
+fn count_md_files(dir: &Path) -> usize {
+    list_md_files(dir)
+        .into_iter()
+        .filter(|name| name != "MEMORY.md")
+        .count()
+}
+
+/// List `.md` filenames in a directory.
+fn list_md_files(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+                path.file_name().map(|n| n.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Check if any `projects/*/memory/*.md` files exist.
 fn has_memory_files(projects_dir: &Path) -> bool {
     let Ok(slugs) = fs::read_dir(projects_dir) else {

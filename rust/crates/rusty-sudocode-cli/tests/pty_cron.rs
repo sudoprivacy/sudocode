@@ -128,6 +128,34 @@ impl CronEnv {
         fs::read_to_string(self.config_home.join("crons.json")).unwrap_or_default()
     }
 
+    /// Run a one-shot agent prompt (`scode "<text>"`) with tools enabled,
+    /// optionally with the host-owns-scheduling gate set — to prove the agent
+    /// can (or cannot) reach the cron tools.
+    fn prompt_run(&self, text: &str, disable_cron_tools: bool) -> PtySession {
+        let scode = env!("CARGO_BIN_EXE_scode");
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &self.config_home);
+        std::env::set_var("HOME", &self.home);
+        std::env::set_var("NO_COLOR", "1");
+        if disable_cron_tools {
+            std::env::set_var("SUDOCODE_DISABLE_CRON_TOOLS", "1");
+        } else {
+            std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
+        }
+        let _ = std::env::set_current_dir(&self.workspace);
+        let args = [
+            "--auth",
+            "proxy",
+            "--model",
+            "auto",
+            "--permission-mode",
+            "danger-full-access",
+            text,
+        ];
+        let mut sess = PtySession::spawn(scode, &args).expect("spawn scode prompt");
+        sess.set_default_timeout(TIMEOUT);
+        sess
+    }
+
     /// Spawn the interactive REPL (`scode` with no subcommand) under a PTY
     /// with this env's isolated config home — for driving the `/cron`
     /// slash command.
@@ -344,6 +372,42 @@ fn repl_cron_slash_add_and_list() {
         "name persisted: {json}"
     );
     assert!(json.contains("\"kind\": \"every\""), "kind parsed: {json}");
+}
+
+/// A host that owns scheduling (sudowork) sets SUDOCODE_DISABLE_CRON_TOOLS so
+/// the agent can't "schedule" a task that would persist but never fire — an
+/// orphan. Contrast proves the gate is load-bearing: same prompt, tool absent
+/// vs present.
+#[test]
+fn cron_tools_gated_when_host_owns_scheduling() {
+    if !is_live() {
+        eprintln!("skipping cron_tools_gated_when_host_owns_scheduling (set SCODE_TEST_BACKEND=live)");
+        return;
+    }
+    let env = CronEnv::new("tool-gate");
+    let ask = "Use the CronCreate tool now to schedule a task with schedule \"0 9 * * *\" and prompt \"daily report\". Do it, then stop.";
+
+    // 1. Gated (what an embedding host sets): the tool isn't advertised, so the
+    //    agent cannot create a cron — nothing is persisted.
+    let mut s = env.prompt_run(ask, true);
+    let _ = s.expect_eof();
+    drop(s);
+    std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
+    let gated = env.crons_json();
+    assert!(
+        !gated.contains("daily report"),
+        "gated host: agent must not be able to schedule an orphan cron: {gated}"
+    );
+
+    // 2. Ungated (standalone scode): the tool IS available, so the agent schedules it.
+    let mut s = env.prompt_run(ask, false);
+    let _ = s.expect_eof();
+    drop(s);
+    let ungated = env.crons_json();
+    assert!(
+        ungated.contains("daily report"),
+        "standalone: agent should schedule via CronCreate: {ungated}"
+    );
 }
 
 #[test]

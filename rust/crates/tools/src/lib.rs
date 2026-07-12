@@ -742,7 +742,7 @@ fn permission_mode_from_plugin(value: &str) -> Result<PermissionMode, String> {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn mvp_tool_specs() -> Vec<ToolSpec> {
-    vec![
+    let mut specs = vec![
         ToolSpec {
             name: "bash",
             description: "Execute a shell command in the current workspace.",
@@ -1388,7 +1388,31 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
-    ]
+    ];
+    if cron_tools_disabled() {
+        specs.retain(|s| !is_cron_tool(s.name));
+    }
+    specs
+}
+
+/// Agent-facing cron tools (`CronCreate`/`CronDelete`/`CronList`).
+fn is_cron_tool(name: &str) -> bool {
+    matches!(name, "CronCreate" | "CronDelete" | "CronList")
+}
+
+/// A host that owns scheduling itself (e.g. sudowork, which runs its own
+/// scheduler and never ticks `crons.json`) sets `SUDOCODE_DISABLE_CRON_TOOLS=1`
+/// when it spawns scode. Without this the agent could "schedule" a task via
+/// `CronCreate` that persists but is never fired by that host — an orphan.
+/// Only the agent-facing TOOLS are hidden; the `scode cron` CLI (a deliberate
+/// user/host surface) is untouched.
+pub fn cron_tools_disabled() -> bool {
+    std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
 }
 
 /// Check permission before executing a tool. Returns Err with denial reason if blocked.
@@ -1495,6 +1519,12 @@ fn execute_tool_with_enforcer(
         "TaskStop" => from_value::<TaskIdInput>(input).and_then(run_task_stop),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
         "TaskOutput" => from_value::<TaskOutputInput>(input).and_then(run_task_output),
+        // Defense in depth: the specs are already hidden when the host owns
+        // scheduling, so refuse a stale/rogue call rather than persisting a
+        // cron nothing will ever fire.
+        "CronCreate" | "CronDelete" | "CronList" if cron_tools_disabled() => Err(String::from(
+            "cron tools are disabled: this host owns scheduling and will never fire scode crons — use the host's scheduler instead",
+        )),
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
@@ -8762,6 +8792,39 @@ mod tests {
             .fold(PermissionPolicy::new(mode), |policy, spec| {
                 policy.with_tool_requirement(spec.name, spec.required_permission)
             })
+    }
+
+    /// A host that owns scheduling (sudowork runs its own scheduler and never
+    /// ticks scode's crons.json) sets SUDOCODE_DISABLE_CRON_TOOLS so the agent
+    /// cannot "schedule" a task that would persist but never fire — an orphan.
+    #[test]
+    fn cron_tools_hidden_when_host_owns_scheduling() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
+        let default_names: Vec<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
+        assert!(
+            default_names.contains(&"CronCreate"),
+            "cron tools are advertised by default (standalone scode)"
+        );
+
+        std::env::set_var("SUDOCODE_DISABLE_CRON_TOOLS", "1");
+        let gated: Vec<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
+        assert!(!gated.contains(&"CronCreate"), "CronCreate must be hidden");
+        assert!(!gated.contains(&"CronDelete"), "CronDelete must be hidden");
+        assert!(!gated.contains(&"CronList"), "CronList must be hidden");
+        assert!(gated.contains(&"bash"), "non-cron tools are unaffected");
+
+        // Defense in depth: a stale/rogue call is refused, not persisted.
+        let err = execute_tool(
+            "CronCreate",
+            &json!({"schedule": "0 9 * * *", "prompt": "orphan"}),
+        )
+        .expect_err("gated CronCreate must fail");
+        assert!(err.contains("disabled"), "{err}");
+
+        std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
     }
 
     #[test]

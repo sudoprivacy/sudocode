@@ -381,7 +381,9 @@ fn repl_cron_slash_add_and_list() {
 #[test]
 fn cron_tools_gated_when_host_owns_scheduling() {
     if !is_live() {
-        eprintln!("skipping cron_tools_gated_when_host_owns_scheduling (set SCODE_TEST_BACKEND=live)");
+        eprintln!(
+            "skipping cron_tools_gated_when_host_owns_scheduling (set SCODE_TEST_BACKEND=live)"
+        );
         return;
     }
     let env = CronEnv::new("tool-gate");

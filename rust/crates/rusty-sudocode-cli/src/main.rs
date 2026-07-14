@@ -77,7 +77,7 @@ use cli::help::{
     render_diff_report, render_diff_report_for, render_last_tool_debug_report, render_memory_json,
     render_memory_report, render_repl_help, render_teleport_report, validate_no_args,
 };
-use cli::mcp::{build_runtime_mcp_state, RuntimeMcpState};
+use cli::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
 use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
@@ -4919,15 +4919,23 @@ fn build_runtime_for_cwd(
     let file_config = loader.load()?;
     let runtime_plugin_state =
         build_runtime_plugin_state_with_loader(cwd, &loader, &file_config, session_mcp)?;
-    build_runtime_with_plugin_state(cwd, session, session_id, config, runtime_plugin_state)
+    build_runtime_with_plugin_state(
+        cwd,
+        session,
+        session_id,
+        config,
+        runtime_plugin_state,
+        session_mcp,
+    )
 }
 
 fn build_runtime_with_plugin_state(
     cwd: &Path,
     mut session: Session,
     session_id: &str,
-    config: RuntimeConfig,
+    mut config: RuntimeConfig,
     runtime_plugin_state: RuntimePluginState,
+    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     // Persist the model in session metadata so resumed sessions can report it.
     if session.model.is_none() {
@@ -4940,6 +4948,20 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // per-session injected MCP tools bypass the global --allowed-tools gate:
+    // they are explicitly requested for this session and their names are only
+    // known at runtime, so add their qualified names to the allow-list when
+    // one is active. The prefix uses `runtime::mcp_tool_prefix`, which
+    // normalizes server names the same way the tool index does (e.g.
+    // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
+    // are matched correctly.
+    if let Some(allowed) = config.allowed_tools.as_mut() {
+        let candidate_names = tool_registry
+            .definitions(None)
+            .into_iter()
+            .map(|definition| definition.name);
+        allowed.extend(session_mcp_tool_names(candidate_names, session_mcp));
+    }
     let policy =
         match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
             Ok(policy) => policy,

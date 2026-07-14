@@ -55,7 +55,10 @@ struct Cli {
     #[arg(long, global = true)]
     dangerously_skip_permissions: bool,
 
-    /// Allowed tools (repeatable)
+    /// Allowed tools (repeatable). Note: MCP servers injected per-session via
+    /// ACP `session/new`/`session/load` (`mcp_servers`) bypass this list —
+    /// they are always available to the session that requested them, since
+    /// their names are only known at runtime (after the client sends them).
     #[arg(long = "allowedTools", alias = "allowed-tools", global = true)]
     allowed_tools: Vec<String>,
 

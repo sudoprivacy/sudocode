@@ -13,6 +13,7 @@ use agent_client_protocol::role::acp::{Agent, Client};
 // NOTE: `ConnectTo` and `ConnectionTo` are different SDK concepts:
 //   - `ConnectTo<R>`:    trait for wiring up a transport (Stdio, Lines, etc.)
 //   - `ConnectionTo<R>`: runtime handle passed to handlers for sending messages
+use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
 use crate::conversation::RuntimeObserver;
 use crate::hooks::HookAbortSignal;
 use crate::permissions::{
@@ -35,10 +36,9 @@ use agent_client_protocol_schema::{
     SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent, ToolCall,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
-use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use serde_json::{json, Map};
+use std::collections::BTreeMap;
 
 /// Error type returned by ACP agent implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,7 +493,9 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
 
 #[cfg(test)]
 mod tests {
-    use super::{acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage};
+    use super::{
+        acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage,
+    };
     use crate::config::{ConfigSource, McpServerConfig};
     use crate::usage::UsageCostCurrency;
     use agent_client_protocol_schema::{
@@ -561,13 +563,13 @@ mod tests {
 
     #[test]
     fn acp_mcp_servers_env() {
-        let server = McpServer::Stdio(
-            McpServerStdio::new("srv", PathBuf::from("/bin/x")).env(vec![
+        let server = McpServer::Stdio(McpServerStdio::new("srv", PathBuf::from("/bin/x")).env(
+            vec![
                 EnvVariable::new("A", "1"),
                 EnvVariable::new("B", "2"),
                 EnvVariable::new("C", "3"),
-            ]),
-        );
+            ],
+        ));
         let out = acp_mcp_servers_to_scoped(&[server], Path::new("/tmp"));
         let McpServerConfig::Stdio(stdio) = &out["srv"].config else {
             panic!("expected stdio");

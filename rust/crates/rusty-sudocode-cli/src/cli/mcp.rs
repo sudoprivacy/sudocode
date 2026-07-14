@@ -272,6 +272,24 @@ pub(crate) fn apply_session_mcp_servers(
     }
 }
 
+/// Collect the qualified tool names that belong to per-session injected MCP
+/// servers, for extending an active `--allowedTools` allow-list. Server names
+/// are normalized via `runtime::mcp_tool_prefix` (so e.g. `github.com` matches
+/// `mcp__github_com__*`), matching how the tool index names them.
+pub(crate) fn session_mcp_tool_names(
+    all_tool_names: impl IntoIterator<Item = String>,
+    session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
+) -> BTreeSet<String> {
+    let prefixes: Vec<String> = session_mcp
+        .keys()
+        .map(|server| runtime::mcp_tool_prefix(server))
+        .collect();
+    all_tool_names
+        .into_iter()
+        .filter(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
+        .collect()
+}
+
 pub(crate) fn build_runtime_mcp_state(
     runtime_config: &runtime::RuntimeConfig,
     plugin_load_outcome: &PluginLoadOutcome,
@@ -397,7 +415,7 @@ mod tests {
         PluginLoadOutcome, PluginMetadata, PluginSummary,
     };
 
-    use super::{apply_session_mcp_servers, merged_mcp_servers};
+    use super::{apply_session_mcp_servers, merged_mcp_servers, session_mcp_tool_names};
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -618,5 +636,35 @@ mod tests {
             stdio.command, "session-server",
             "session mcp must override disk/plugin server with the same name"
         );
+    }
+
+    #[test]
+    fn session_mcp_tool_names_normalizes_server_name() {
+        // Server names with non-alphanumeric chars (`.`, space) must be
+        // normalized the same way the tool index names them, otherwise the
+        // allow-list prefix match would miss them.
+        let mut session_mcp = BTreeMap::new();
+        session_mcp.insert(
+            "github.com".to_string(),
+            runtime::ScopedMcpServerConfig {
+                scope: runtime::ConfigSource::Local,
+                config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
+                    command: "x".to_string(),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    current_dir: None,
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        );
+        let all = vec![
+            "mcp__github_com__echo".to_string(),
+            "mcp__other__x".to_string(),
+            "Read".to_string(),
+        ];
+        let result = session_mcp_tool_names(all, &session_mcp);
+        assert!(result.contains("mcp__github_com__echo"));
+        assert!(!result.contains("mcp__other__x"));
+        assert!(!result.contains("Read"));
     }
 }

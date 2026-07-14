@@ -1252,6 +1252,49 @@ fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
     }
 }
 
+/// Like [`spawn_stdio_client_danger`] but also enables a global
+/// `--allowedTools` allow-list, to verify per-session injected MCP tools stay
+/// available under an allow-list (they are added to it at runtime build time).
+fn spawn_stdio_client_danger_with_allowed(
+    workspace: &TestWorkspace,
+    allowed: &str,
+) -> AcpTestClient {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(&workspace.root)
+        .env_clear()
+        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
+        .env("HOME", &workspace.home)
+        .env("NO_COLOR", "1")
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            allowed,
+            "acp",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn scode acp stdio (danger+allowed)");
+    let stdin = child.stdin.take().expect("stdin should be piped");
+    let stdout = child.stdout.take().expect("stdout should be piped");
+
+    AcpTestClient {
+        transport: Transport::Stdio {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        },
+        next_id: 1,
+    }
+}
+
 /// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
 /// runtime build (proof written) and its `echo` tool round-trips through the
 /// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).
@@ -1508,6 +1551,80 @@ async fn acp_session_new_mcp_isolated_per_session() {
     assert!(
         blob_b.contains("echo MISSING"),
         "session B should NOT see A's parity (per-session isolation); got: {blob_b}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Per-session MCP tools remain available under a global `--allowedTools`
+/// allow-list: `build_runtime_with_plugin_state` adds the injected tools'
+/// qualified names (`mcp__<server>__<tool>`) to the allow-list, so they are
+/// neither hidden from the model nor rejected at execution. Regression guard
+/// for the allowed-tools × session-mcp incompatibility.
+#[tokio::test]
+async fn acp_session_new_mcp_available_under_allowed_tools() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("mcp-allowed");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let dummy = workspace.root.join("dummy-mcp.py");
+    fs::write(&dummy, MCP_DUMMY_SCRIPT).expect("write dummy script");
+    let proof = workspace.root.join("dummy-proof.txt");
+    let token = "token-allowed-9c2f";
+
+    // Active allow-list naming only `Read`; the injected parity tool is not
+    // listed, so without the fix it would be filtered out and rejected.
+    let mut client = spawn_stdio_client_danger_with_allowed(&workspace, "Read");
+    scenario_initialize(&mut client).await;
+
+    let (_, new_resp) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(),
+                "mcpServers": [{
+                    "name": "parity",
+                    "command": "python3",
+                    "args": [dummy.to_string_lossy()],
+                    "env": [
+                        {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},
+                        {"name": "DUMMY_TOKEN", "value": token},
+                    ],
+                }],
+            }),
+        )
+        .await;
+    let session_id = new_resp["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId should be present")
+        .to_string();
+
+    let proof_content = fs::read_to_string(&proof).expect("proof should exist");
+    assert_eq!(proof_content, token);
+
+    // With the fix, mcp__parity__echo is auto-added to the allow-list, so the
+    // mock's tool_use round-trips. Without the fix it would be filtered out
+    // (echo MISSING / tool rejected).
+    let (notifs, _) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}mcp_tool_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let blob = serde_json::to_string(&notifs).unwrap_or_default();
+    assert!(
+        blob.contains("echo:hello from mcp parity"),
+        "session mcp tool must remain available under --allowedTools; got: {blob}"
     );
 
     client.shutdown().await;

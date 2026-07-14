@@ -798,7 +798,14 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  --dangerously-skip-permissions  Skip all permission checks"
     )?;
-    writeln!(out, "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases supported)")?;
+    writeln!(
+        out,
+        "  --allowedTools TOOLS       Restrict enabled tools (repeatable; comma-separated aliases"
+    )?;
+    writeln!(
+        out,
+        "                              supported). ACP session-injected MCP servers bypass this."
+    )?;
     writeln!(
         out,
         "  --version, -V              Print version and build information locally"

@@ -162,8 +162,8 @@ pub(crate) struct SetPermissionModeResponse {}
 /// `cwd` becomes each stdio server's `current_dir` so relative `command`
 /// paths resolve against the session working directory.
 ///
-/// Only the `Stdio` variant is loaded. `Http`/`Sse` and any future variant
-/// are silently skipped.
+/// Only the `Stdio` variant is loaded. `Http`/`Sse` log a warning and are
+/// skipped; any future variant is silently skipped.
 fn acp_mcp_servers_to_scoped(
     acp_servers: &[McpServer],
     cwd: &std::path::Path,
@@ -190,6 +190,11 @@ fn acp_mcp_servers_to_scoped(
                         scope: ConfigSource::Local,
                         config,
                     },
+                );
+            }
+            McpServer::Http(_) | McpServer::Sse(_) => {
+                eprintln!(
+                    "[acp] session mcp_servers: http/sse transport skipped (scode loads stdio MCP only)"
                 );
             }
             _ => {}

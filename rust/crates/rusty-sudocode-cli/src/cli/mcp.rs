@@ -273,20 +273,17 @@ pub(crate) fn apply_session_mcp_servers(
 }
 
 /// Collect the qualified tool names that belong to per-session injected MCP
-/// servers, for extending an active `--allowedTools` allow-list. Server names
-/// are normalized via `runtime::mcp_tool_prefix` (so e.g. `github.com` matches
-/// `mcp__github_com__*`), matching how the tool index names them.
+/// servers, for extending an active `--allowedTools` allow-list. Tools are
+/// attributed by their original (pre-normalization) server name, so names that
+/// normalize identically (e.g. `github.com` vs `github_com`) do not collide.
 pub(crate) fn session_mcp_tool_names(
-    all_tool_names: impl IntoIterator<Item = String>,
+    all_tools: impl IntoIterator<Item = (String, String)>,
     session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> BTreeSet<String> {
-    let prefixes: Vec<String> = session_mcp
-        .keys()
-        .map(|server| runtime::mcp_tool_prefix(server))
-        .collect();
-    all_tool_names
+    all_tools
         .into_iter()
-        .filter(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
+        .filter(|(_, server)| session_mcp.contains_key(server))
+        .map(|(qualified, _)| qualified)
         .collect()
 }
 
@@ -639,10 +636,10 @@ mod tests {
     }
 
     #[test]
-    fn session_mcp_tool_names_normalizes_server_name() {
-        // Server names with non-alphanumeric chars (`.`, space) must be
-        // normalized the same way the tool index names them, otherwise the
-        // allow-list prefix match would miss them.
+    fn session_mcp_tool_names_attributes_by_original_server_name() {
+        // Tools are attributed by the original (pre-normalization) server
+        // name, so `github.com` (session) and `github_com` (disk) — which
+        // normalize to the same `mcp__github_com__` prefix — are not confused.
         let mut session_mcp = BTreeMap::new();
         session_mcp.insert(
             "github.com".to_string(),
@@ -657,14 +654,24 @@ mod tests {
                 }),
             },
         );
+        // (qualified_name, original server_name)
         let all = vec![
-            "mcp__github_com__echo".to_string(),
-            "mcp__other__x".to_string(),
-            "Read".to_string(),
+            (
+                "mcp__github_com__echo".to_string(),
+                "github.com".to_string(),
+            ),
+            (
+                "mcp__github_com__other".to_string(),
+                "github_com".to_string(),
+            ),
+            ("mcp__other__x".to_string(), "other".to_string()),
         ];
         let result = session_mcp_tool_names(all, &session_mcp);
         assert!(result.contains("mcp__github_com__echo"));
+        assert!(
+            !result.contains("mcp__github_com__other"),
+            "disk server `github_com` must not be pulled in by session `github.com`"
+        );
         assert!(!result.contains("mcp__other__x"));
-        assert!(!result.contains("Read"));
     }
 }

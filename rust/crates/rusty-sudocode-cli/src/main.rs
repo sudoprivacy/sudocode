@@ -4956,11 +4956,14 @@ fn build_runtime_with_plugin_state(
     // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
     // are matched correctly.
     if let Some(allowed) = config.allowed_tools.as_mut() {
-        let candidate_names = tool_registry
-            .definitions(None)
-            .into_iter()
-            .map(|definition| definition.name);
-        allowed.extend(session_mcp_tool_names(candidate_names, session_mcp));
+        if let Some(mcp_state) = &mcp_state {
+            let tools = mcp_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .manager
+                .tools_with_server();
+            allowed.extend(session_mcp_tool_names(tools, session_mcp));
+        }
     }
     let policy =
         match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {

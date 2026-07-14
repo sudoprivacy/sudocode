@@ -1378,7 +1378,7 @@ async fn acp_session_new_mcp_survives_model_switch() {
     // the runtime rebuild in handle_acp_model_switch.
     let (_, set_resp) = client
         .send_request(
-            "session/setModel",
+            "session/set_model",
             json!({"sessionId": session_id, "modelId": "haiku"}),
         )
         .await;

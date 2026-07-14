@@ -1866,6 +1866,10 @@ struct AcpCliSession {
     abort_signal: runtime::HookAbortSignal,
     /// Session start time for duration tracking.
     started_at: Instant,
+    /// per-session injected MCP servers (from session/new or session/load),
+    /// reused when the runtime is rebuilt (e.g. model switch) so they
+    /// survive across the session's lifetime.
+    session_mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 }
 
 struct AcpCliAgent {
@@ -1901,7 +1905,11 @@ impl AcpCliAgent {
         }
     }
 
-    fn build_session(&self, cwd: &Path) -> Result<AcpCliSession, AcpError> {
+    fn build_session(
+        &self,
+        cwd: &Path,
+        mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    ) -> Result<AcpCliSession, AcpError> {
         let cwd = canonical_session_cwd(cwd)?;
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
@@ -1934,6 +1942,7 @@ impl AcpCliAgent {
                     sudocode_config,
                 }
             },
+            mcp_servers,
         )
         .map_err(|error| AcpError::internal(format!("failed to build runtime: {error}")))?;
         let abort_signal = runtime::HookAbortSignal::new();
@@ -1964,6 +1973,7 @@ impl AcpCliAgent {
             runtime,
             abort_signal,
             started_at: Instant::now(),
+            session_mcp_servers: mcp_servers.clone(),
         })
     }
 
@@ -2026,6 +2036,7 @@ impl AcpCliAgent {
         cloned_session.model = Some(resolved.clone());
         let cwd = session.cwd.clone();
         let handle_id = session.handle.id.clone();
+        let session_mcp = session.session_mcp_servers.clone();
 
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
@@ -2048,6 +2059,7 @@ impl AcpCliAgent {
                 auth_mode,
                 sudocode_config,
             },
+            &session_mcp,
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
 
@@ -2264,8 +2276,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     fn new_session(
         &mut self,
         cwd: PathBuf,
+        mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
-        let session = self.inner.build_session(&cwd)?;
+        let session = self.inner.build_session(&cwd, &mcp_servers)?;
         let session_id = session.handle.id.clone();
         let session_cwd = session.cwd.clone();
         let abort_signal = session.abort_signal.clone();
@@ -2578,6 +2591,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &mut self,
         session_id: &str,
         cwd: PathBuf,
+        mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
         let cwd = canonical_session_cwd(&cwd)?;
         let _guard = ScopedCurrentDir::change_to(&cwd)
@@ -2613,6 +2627,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 auth_mode,
                 sudocode_config,
             },
+            &mcp_servers,
         )
         .map_err(|e| runtime::AcpError::internal(format!("failed to build runtime: {e}")))?;
 
@@ -2633,6 +2648,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 runtime,
                 abort_signal,
                 started_at: Instant::now(),
+                session_mcp_servers: mcp_servers,
             },
         );
         Ok((loaded_session_id, cwd, signal))
@@ -4576,7 +4592,9 @@ fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error
     let cwd = env::current_dir()?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader.load()?;
-    build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config)
+    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
+        std::collections::BTreeMap::new();
+    build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config, &session_mcp)
 }
 
 fn plugin_load_outcome_for_cwd(
@@ -4592,6 +4610,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     cwd: &Path,
     loader: &ConfigLoader,
     runtime_config: &runtime::RuntimeConfig,
+    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
     let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
     let plugin_registry_report = plugin_manager.plugin_registry_report()?;
@@ -4604,7 +4623,8 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         .clone()
         .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
     let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?;
-    let (mcp_state, runtime_tools) = build_runtime_mcp_state(runtime_config, &plugin_load_outcome)?;
+    let (mcp_state, runtime_tools) =
+        build_runtime_mcp_state(runtime_config, &plugin_load_outcome, session_mcp)?;
     let tool_registry = match tool_registry.with_runtime_tools(runtime_tools) {
         Ok(tool_registry) => tool_registry,
         Err(error) => {
@@ -4883,7 +4903,9 @@ fn build_runtime(
     config: RuntimeConfig,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    build_runtime_for_cwd(&cwd, session, session_id, config)
+    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
+        std::collections::BTreeMap::new();
+    build_runtime_for_cwd(&cwd, session, session_id, config, &session_mcp)
 }
 
 fn build_runtime_for_cwd(
@@ -4891,10 +4913,12 @@ fn build_runtime_for_cwd(
     session: Session,
     session_id: &str,
     config: RuntimeConfig,
+    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     let loader = ConfigLoader::default_for(cwd);
     let file_config = loader.load()?;
-    let runtime_plugin_state = build_runtime_plugin_state_with_loader(cwd, &loader, &file_config)?;
+    let runtime_plugin_state =
+        build_runtime_plugin_state_with_loader(cwd, &loader, &file_config, session_mcp)?;
     build_runtime_with_plugin_state(cwd, session, session_id, config, runtime_plugin_state)
 }
 

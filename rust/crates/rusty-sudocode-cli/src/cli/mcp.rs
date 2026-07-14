@@ -22,8 +22,10 @@ impl RuntimeMcpState {
     pub(crate) fn new(
         runtime_config: &runtime::RuntimeConfig,
         plugin_load_outcome: &PluginLoadOutcome,
+        session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<Option<(Self, runtime::McpToolDiscoveryReport)>, Box<dyn std::error::Error>> {
-        let servers = merged_mcp_servers(runtime_config, plugin_load_outcome)?;
+        let mut servers = merged_mcp_servers(runtime_config, plugin_load_outcome)?;
+        apply_session_mcp_servers(&mut servers, session_mcp);
         let mut manager = McpServerManager::from_servers(&servers);
         if manager.server_names().is_empty() && manager.unsupported_servers().is_empty() {
             return Ok(None);
@@ -257,11 +259,26 @@ pub(crate) fn merged_mcp_servers(
     Ok(servers)
 }
 
+/// Overlay per-session injected MCP servers onto the disk/plugin-merged
+/// result. Session servers take precedence over disk/plugin servers with
+/// the same name. Extracted as a pure function for direct unit testing of
+/// the session-precedence rule.
+pub(crate) fn apply_session_mcp_servers(
+    servers: &mut BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
+) {
+    for (name, config) in session_mcp {
+        servers.insert(name.clone(), config.clone());
+    }
+}
+
 pub(crate) fn build_runtime_mcp_state(
     runtime_config: &runtime::RuntimeConfig,
     plugin_load_outcome: &PluginLoadOutcome,
+    session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<RuntimePluginStateBuildOutput, Box<dyn std::error::Error>> {
-    let Some((mcp_state, discovery)) = RuntimeMcpState::new(runtime_config, plugin_load_outcome)?
+    let Some((mcp_state, discovery)) =
+        RuntimeMcpState::new(runtime_config, plugin_load_outcome, session_mcp)?
     else {
         return Ok((None, Vec::new()));
     };
@@ -370,6 +387,7 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -379,7 +397,7 @@ mod tests {
         PluginLoadOutcome, PluginMetadata, PluginSummary,
     };
 
-    use super::merged_mcp_servers;
+    use super::{apply_session_mcp_servers, merged_mcp_servers};
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -565,6 +583,40 @@ mod tests {
         assert_eq!(
             result, 42,
             "isolated block_on should drive the future to completion"
+        );
+    }
+
+    #[test]
+    fn apply_session_mcp_servers_overrides_on_name_collision() {
+        let disk = runtime::ScopedMcpServerConfig {
+            scope: runtime::ConfigSource::Project,
+            config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
+                command: "disk-server".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                current_dir: None,
+                tool_call_timeout_ms: None,
+            }),
+        };
+        let session = runtime::ScopedMcpServerConfig {
+            scope: runtime::ConfigSource::Local,
+            config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
+                command: "session-server".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                current_dir: None,
+                tool_call_timeout_ms: None,
+            }),
+        };
+        let mut servers = BTreeMap::from([("shared".to_string(), disk)]);
+        let session_mcp = BTreeMap::from([("shared".to_string(), session)]);
+        apply_session_mcp_servers(&mut servers, &session_mcp);
+        let runtime::McpServerConfig::Stdio(stdio) = &servers["shared"].config else {
+            panic!("expected stdio config after overlay");
+        };
+        assert_eq!(
+            stdio.command, "session-server",
+            "session mcp must override disk/plugin server with the same name"
         );
     }
 }

@@ -1148,9 +1148,15 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
     let cwd = env::current_dir().map_err(|e| e.to_string())?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
-    let state =
-        super::super::build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config)
-            .map_err(|e| e.to_string())?;
+    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
+        std::collections::BTreeMap::new();
+    let state = super::super::build_runtime_plugin_state_with_loader(
+        &cwd,
+        &loader,
+        &runtime_config,
+        &session_mcp,
+    )
+    .map_err(|e| e.to_string())?;
     let registry = state.tool_registry.clone();
     if let Some(mcp_state) = state.mcp_state {
         mcp_state

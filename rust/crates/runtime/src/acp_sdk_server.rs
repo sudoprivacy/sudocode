@@ -28,14 +28,16 @@ use agent_client_protocol_schema::{
     AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest,
     CloseSessionResponse, ContentBlock, ContentChunk, ExtRequest, Implementation,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
     SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent, ToolCall,
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
 };
+use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use serde_json::{json, Map};
 
 /// Error type returned by ACP agent implementations.
@@ -155,14 +157,58 @@ pub(crate) struct SetPermissionModeRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct SetPermissionModeResponse {}
 
+/// Convert the ACP `mcp_servers` carried by `session/new` / `session/load`
+/// into scode-internal scoped MCP configs, keyed by server name. The session
+/// `cwd` becomes each stdio server's `current_dir` so relative `command`
+/// paths resolve against the session working directory.
+///
+/// Only the `Stdio` variant is loaded. `Http`/`Sse` and any future variant
+/// are silently skipped.
+fn acp_mcp_servers_to_scoped(
+    acp_servers: &[McpServer],
+    cwd: &std::path::Path,
+) -> BTreeMap<String, ScopedMcpServerConfig> {
+    let mut out = BTreeMap::new();
+    for server in acp_servers {
+        match server {
+            McpServer::Stdio(stdio) => {
+                let env = stdio
+                    .env
+                    .iter()
+                    .map(|variable| (variable.name.clone(), variable.value.clone()))
+                    .collect();
+                let config = McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: stdio.command.to_string_lossy().into_owned(),
+                    args: stdio.args.clone(),
+                    env,
+                    current_dir: Some(cwd.to_path_buf()),
+                    tool_call_timeout_ms: None,
+                });
+                out.insert(
+                    stdio.name.clone(),
+                    ScopedMcpServerConfig {
+                        scope: ConfigSource::Local,
+                        config,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Callback trait that the CLI crate implements to provide session
 /// construction and prompt execution, keeping runtime/provider deps out of
 /// this crate.
 pub trait SdkAcpDelegate: Send + 'static {
     /// Create a new session for the given working directory, returning
     /// `(session_id, cwd, abort_signal)` on success.
-    fn new_session(&mut self, cwd: PathBuf)
-        -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
+    fn new_session(
+        &mut self,
+        cwd: PathBuf,
+        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
+    ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
 
     /// Run a prompt turn. The implementation should call observer methods
     /// to stream session updates.
@@ -231,6 +277,7 @@ pub trait SdkAcpDelegate: Send + 'static {
         &mut self,
         session_id: &str,
         cwd: PathBuf,
+        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
 }
 
@@ -446,8 +493,13 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
 
 #[cfg(test)]
 mod tests {
-    use super::{sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage};
+    use super::{acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage};
+    use crate::config::{ConfigSource, McpServerConfig};
     use crate::usage::UsageCostCurrency;
+    use agent_client_protocol_schema::{
+        EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    };
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn prompt_usage_meta_includes_cost_without_standard_usage_tokens() {
@@ -477,6 +529,71 @@ mod tests {
             meta["cumulativeUsage"]["totalTokens"],
             serde_json::json!(14)
         );
+    }
+
+    #[test]
+    fn acp_mcp_servers_empty() {
+        let out = acp_mcp_servers_to_scoped(&[], Path::new("/tmp"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn acp_mcp_servers_stdio() {
+        let cwd = Path::new("/session/cwd");
+        let server = McpServer::Stdio(
+            McpServerStdio::new("srv", PathBuf::from("/bin/echo"))
+                .args(vec!["a".to_string(), "b".to_string()])
+                .env(vec![EnvVariable::new("K", "v")]),
+        );
+        let out = acp_mcp_servers_to_scoped(&[server], cwd);
+        assert_eq!(out.len(), 1);
+        let scoped = &out["srv"];
+        assert_eq!(scoped.scope, ConfigSource::Local);
+        let McpServerConfig::Stdio(stdio) = &scoped.config else {
+            panic!("expected stdio config");
+        };
+        assert_eq!(stdio.command, "/bin/echo");
+        assert_eq!(stdio.args, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(stdio.env.get("K"), Some(&"v".to_string()));
+        assert_eq!(stdio.current_dir.as_deref(), Some(cwd));
+        assert!(stdio.tool_call_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn acp_mcp_servers_env() {
+        let server = McpServer::Stdio(
+            McpServerStdio::new("srv", PathBuf::from("/bin/x")).env(vec![
+                EnvVariable::new("A", "1"),
+                EnvVariable::new("B", "2"),
+                EnvVariable::new("C", "3"),
+            ]),
+        );
+        let out = acp_mcp_servers_to_scoped(&[server], Path::new("/tmp"));
+        let McpServerConfig::Stdio(stdio) = &out["srv"].config else {
+            panic!("expected stdio");
+        };
+        assert_eq!(stdio.env.len(), 3);
+        assert_eq!(stdio.env.get("A"), Some(&"1".to_string()));
+        assert_eq!(stdio.env.get("B"), Some(&"2".to_string()));
+        assert_eq!(stdio.env.get("C"), Some(&"3".to_string()));
+    }
+
+    #[test]
+    fn acp_mcp_servers_skips_http_sse() {
+        let http = McpServer::Http(McpServerHttp::new("h", "https://e"));
+        let sse = McpServer::Sse(McpServerSse::new("s", "https://e"));
+        let out = acp_mcp_servers_to_scoped(&[http, sse], Path::new("/tmp"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn acp_mcp_servers_mixed() {
+        let stdio = McpServer::Stdio(McpServerStdio::new("keep", PathBuf::from("/bin/k")));
+        let http = McpServer::Http(McpServerHttp::new("drop", "https://e"));
+        let out = acp_mcp_servers_to_scoped(&[stdio, http], Path::new("/tmp"));
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key("keep"));
+        assert!(!out.contains_key("drop"));
     }
 }
 
@@ -734,9 +851,10 @@ pub(crate) async fn run_acp_on_transport(
                     let registry = Arc::clone(&abort_registry);
                     cx.spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
+                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
                             d.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .new_session(req.cwd)
+                                .new_session(req.cwd, mcp_servers)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
@@ -1216,9 +1334,10 @@ pub(crate) async fn run_acp_on_transport(
                     let cwd = req.cwd;
                     cx.spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
+                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
                             d.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .load_session(&sid, cwd)
+                                .load_session(&sid, cwd, mcp_servers)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));

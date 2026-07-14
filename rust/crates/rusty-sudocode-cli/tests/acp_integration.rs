@@ -1163,3 +1163,353 @@ async fn acp_ws_integration() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+// ---------------------------------------------------------------------------
+// session/new mcp_servers injection (per-session stdio MCP)
+// ---------------------------------------------------------------------------
+
+/// Minimal NDJSON MCP server (python3). Writes a proof file on startup
+/// (proving spawn + env passthrough), and exposes an `echo` tool whose
+/// `tools/call` result shape is what `mcp_echo_verdict` extracts. scode's
+/// MCP client performs initialize → tools/list → tools/call and sends no
+/// notifications, so those three methods are all this server handles.
+const MCP_DUMMY_SCRIPT: &str = r#"import json, os, sys
+
+proof = os.environ.get("DUMMY_PROOF")
+if proof:
+    with open(proof, "w") as f:
+        f.write(os.environ.get("DUMMY_TOKEN", ""))
+
+def read_msg():
+    line = sys.stdin.buffer.readline()
+    return None if not line else json.loads(line.decode())
+
+def send_msg(m):
+    sys.stdout.buffer.write(json.dumps(m).encode() + b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    req = read_msg()
+    if req is None:
+        break
+    method = req.get("method")
+    if method == "initialize":
+        send_msg({"jsonrpc": "2.0", "id": req["id"], "result": {
+            "protocolVersion": req["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "parity-mcp", "version": "0.1.0"}}})
+    elif method == "tools/list":
+        send_msg({"jsonrpc": "2.0", "id": req["id"], "result": {"tools": [{
+            "name": "echo",
+            "inputSchema": {"type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"]}}]}})
+    elif method == "tools/call":
+        args = req["params"].get("arguments") or {}
+        text = args.get("text", "")
+        send_msg({"jsonrpc": "2.0", "id": req["id"], "result": {
+            "content": [{"type": "text", "text": f"echo:{text}"}],
+            "isError": False}})
+    elif "id" in req:
+        send_msg({"jsonrpc": "2.0", "id": req["id"],
+            "error": {"code": -32601, "message": f"unknown method: {method}"}})
+"#;
+
+/// Like `spawn_stdio_client` but with `--permission-mode danger-full-access`
+/// so MCP tool calls are not gated behind an interactive permission prompt.
+fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(&workspace.root)
+        .env_clear()
+        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
+        .env("HOME", &workspace.home)
+        .env("NO_COLOR", "1")
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "danger-full-access",
+            "acp",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn scode acp stdio (danger)");
+    let stdin = child.stdin.take().expect("stdin should be piped");
+    let stdout = child.stdout.take().expect("stdout should be piped");
+
+    AcpTestClient {
+        transport: Transport::Stdio {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        },
+        next_id: 1,
+    }
+}
+
+/// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
+/// runtime build (proof written) and its `echo` tool round-trips through the
+/// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).
+#[tokio::test]
+async fn acp_session_new_injects_stdio_mcp() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("mcp-inject");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let dummy = workspace.root.join("dummy-mcp.py");
+    fs::write(&dummy, MCP_DUMMY_SCRIPT).expect("write dummy script");
+    let proof = workspace.root.join("dummy-proof.txt");
+    let token = "token-7f3a91c2";
+
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+
+    let (_, new_resp) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(),
+                "mcpServers": [{
+                    "name": "parity",
+                    "command": "python3",
+                    "args": [dummy.to_string_lossy()],
+                    "env": [
+                        {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},
+                        {"name": "DUMMY_TOKEN", "value": token},
+                    ],
+                }],
+            }),
+        )
+        .await;
+    let session_id = new_resp["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId should be present")
+        .to_string();
+
+    // spawn + env passthrough: proof written with the injected DUMMY_TOKEN.
+    let proof_content = fs::read_to_string(&proof).expect("proof should exist after session/new");
+    assert_eq!(proof_content, token);
+
+    // tool round-trip: mock calls mcp__parity__echo, dummy returns echo:...,
+    // mcp_echo_verdict surfaces `echo:hello from mcp parity` (not MISSING).
+    let (notifs, _) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}mcp_tool_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let blob = serde_json::to_string(&notifs).unwrap_or_default();
+    assert!(
+        blob.contains("echo:hello from mcp parity"),
+        "dummy echo should round-trip; got: {blob}"
+    );
+    assert!(
+        !blob.contains("echo MISSING"),
+        "dummy not invoked or bad result shape; got: {blob}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Injected mcp survives a model switch: handle_acp_model_switch rebuilds the
+/// runtime and reuses the session's mcp_servers (stored on AcpCliSession), so
+/// the dummy is respawned (proof rewritten) and the tool still works.
+#[tokio::test]
+async fn acp_session_new_mcp_survives_model_switch() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("mcp-modelswitch");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let dummy = workspace.root.join("dummy-mcp.py");
+    fs::write(&dummy, MCP_DUMMY_SCRIPT).expect("write dummy script");
+    let proof = workspace.root.join("dummy-proof.txt");
+    let token = "token-mswitch-44";
+
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+
+    let mcp_servers = json!([{
+        "name": "parity",
+        "command": "python3",
+        "args": [dummy.to_string_lossy()],
+        "env": [
+            {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},
+            {"name": "DUMMY_TOKEN", "value": token},
+        ],
+    }]);
+
+    let (_, new_resp) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(),
+                "mcpServers": mcp_servers,
+            }),
+        )
+        .await;
+    let session_id = new_resp["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId should be present")
+        .to_string();
+
+    // Delete the proof so a rewritten file proves a re-spawn after setModel.
+    let _ = fs::remove_file(&proof);
+
+    // Switch to a model != the startup `sonnet`; main.rs:2009 short-circuits
+    // when resolved == self.model, so a different model is required to trigger
+    // the runtime rebuild in handle_acp_model_switch.
+    let (_, set_resp) = client
+        .send_request(
+            "session/setModel",
+            json!({"sessionId": session_id, "modelId": "haiku"}),
+        )
+        .await;
+    assert!(
+        set_resp.get("error").is_none(),
+        "session/setModel should succeed; got: {set_resp}"
+    );
+
+    // Re-spawn: proof rewritten with the same token.
+    let proof_content =
+        fs::read_to_string(&proof).expect("proof should be rewritten after model switch");
+    assert_eq!(proof_content, token);
+
+    // Tool still available after the rebuild.
+    let (notifs, _) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}mcp_tool_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let blob = serde_json::to_string(&notifs).unwrap_or_default();
+    assert!(
+        blob.contains("echo:hello from mcp parity"),
+        "mcp should remain available after model switch; got: {blob}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Per-session isolation: session A injects `parity`, session B does not.
+/// A sees the tool; B does not (mcp__parity__echo missing → echo MISSING).
+#[tokio::test]
+async fn acp_session_new_mcp_isolated_per_session() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("mcp-isolation");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let dummy = workspace.root.join("dummy-mcp.py");
+    fs::write(&dummy, MCP_DUMMY_SCRIPT).expect("write dummy script");
+    let proof_a = workspace.root.join("dummy-proof-a.txt");
+    let token_a = "token-a";
+
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+
+    // Session A: inject parity.
+    let (_, new_a) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(),
+                "mcpServers": [{
+                    "name": "parity",
+                    "command": "python3",
+                    "args": [dummy.to_string_lossy()],
+                    "env": [
+                        {"name": "DUMMY_PROOF", "value": proof_a.to_string_lossy()},
+                        {"name": "DUMMY_TOKEN", "value": token_a},
+                    ],
+                }],
+            }),
+        )
+        .await;
+    let sid_a = new_a["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId A")
+        .to_string();
+
+    // Session B: no injection.
+    let (_, new_b) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": workspace.root.to_string_lossy(),
+                "mcpServers": [],
+            }),
+        )
+        .await;
+    let sid_b = new_b["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId B")
+        .to_string();
+
+    // A can see parity.
+    let (notifs_a, _) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": sid_a,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}mcp_tool_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let blob_a = serde_json::to_string(&notifs_a).unwrap_or_default();
+    assert!(
+        blob_a.contains("echo:hello from mcp parity"),
+        "session A should see its injected parity; got: {blob_a}"
+    );
+
+    // B cannot: the tool is absent on B's runtime → echo MISSING.
+    let (notifs_b, _) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": sid_b,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}mcp_tool_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let blob_b = serde_json::to_string(&notifs_b).unwrap_or_default();
+    assert!(
+        blob_b.contains("echo MISSING"),
+        "session B should NOT see A's parity (per-session isolation); got: {blob_b}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}

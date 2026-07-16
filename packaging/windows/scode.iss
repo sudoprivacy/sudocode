@@ -4,12 +4,12 @@
 ; appends that directory to the user's PATH, so `scode` works from any
 ; new terminal after install. No administrator rights required.
 ;
-; It also runs a first-run configuration wizard: the user enters their
-; sudorouter API key, the installer fetches the available model list over
-; HTTPS, and writes ready-to-use sudocode.json + settings.json into the
-; per-user config home (~/.nexus/sudocode) so `scode` works with no extra
-; manual setup. The wizard is skipped when a sudocode.json already exists.
-; Launch with /CONFIGONLY to run the same configuration wizard without
+; It also lets the user choose whether to install/update the scode program or
+; only update configuration files. The configuration wizard fetches the
+; available model list over HTTPS and writes ready-to-use sudocode.json +
+; settings.json into the per-user config home (~/.nexus/sudocode). In normal
+; install mode, the wizard is skipped when a sudocode.json already exists.
+; Launch with /CONFIGONLY to go directly through config-only mode without
 ; installing or overwriting scode.exe and without changing PATH.
 ;
 ; Defines are supplied by CI via ISCC command-line flags:
@@ -75,6 +75,9 @@ const
   DefaultModel = 'deepseek-v4-pro';
 
 var
+  ModePage: TWizardPage;
+  InstallModeRadio: TNewRadioButton;
+  ConfigOnlyModeRadio: TNewRadioButton;
   ConfigPage: TWizardPage;
   BaseUrlEdit: TNewEdit;
   ApiKeyEdit: TPasswordEdit;
@@ -82,18 +85,24 @@ var
   ModelCombo: TNewComboBox;
   SearchCheck: TNewCheckBox;
   StatusLabel: TNewStaticText;
+  ConfigOnlySelected: Boolean;
   ConfigDone: Boolean;
 
 { ---- Mode selection ----------------------------------------------------- }
 
 function IsConfigOnlyMode: Boolean;
 begin
-  Result := Pos('/CONFIGONLY', Uppercase(GetCmdTail)) > 0;
+  Result := ConfigOnlySelected or (Pos('/CONFIGONLY', Uppercase(GetCmdTail)) > 0);
 end;
 
 function ShouldInstallProgram: Boolean;
 begin
   Result := not IsConfigOnlyMode;
+end;
+
+procedure ModeOptionClick(Sender: TObject);
+begin
+  ConfigOnlySelected := ConfigOnlyModeRadio.Checked;
 end;
 
 { ---- PATH helper ------------------------------------------------------- }
@@ -386,17 +395,63 @@ end;
 
 { ---- Wizard page wiring ----------------------------------------------- }
 
+procedure CreateModePage;
+var
+  Y: Integer;
+  Hint: TNewStaticText;
+begin
+  ModePage := CreateCustomPage(wpWelcome, '选择操作',
+    '安装或覆盖更新 scode，也可以只重新拉取模型并更新配置文件');
+
+  Y := ScaleY(8);
+
+  Hint := TNewStaticText.Create(WizardForm);
+  Hint.Parent := ModePage.Surface;
+  Hint.Top := Y;
+  Hint.Width := ModePage.SurfaceWidth;
+  Hint.AutoSize := False;
+  Hint.Height := ScaleY(34);
+  Hint.WordWrap := True;
+  Hint.Caption := '如果已经安装过 scode，需要换 API Key、Base URL 或默认模型，请选择“只更新配置文件”。';
+  Y := Y + Hint.Height + ScaleY(10);
+
+  InstallModeRadio := TNewRadioButton.Create(WizardForm);
+  InstallModeRadio.Parent := ModePage.Surface;
+  InstallModeRadio.Top := Y;
+  InstallModeRadio.Width := ModePage.SurfaceWidth;
+  InstallModeRadio.Caption := '安装/覆盖更新 scode 程序（默认，会安装 scode.exe，可选择加入 PATH）';
+  InstallModeRadio.Checked := not IsConfigOnlyMode;
+  InstallModeRadio.OnClick := @ModeOptionClick;
+  Y := Y + InstallModeRadio.Height + ScaleY(8);
+
+  ConfigOnlyModeRadio := TNewRadioButton.Create(WizardForm);
+  ConfigOnlyModeRadio.Parent := ModePage.Surface;
+  ConfigOnlyModeRadio.Top := Y;
+  ConfigOnlyModeRadio.Width := ModePage.SurfaceWidth;
+  ConfigOnlyModeRadio.Caption := '只更新配置文件（不覆盖 scode.exe，不修改 PATH，会覆盖本地 sudocode.json/settings.json）';
+  ConfigOnlyModeRadio.Checked := IsConfigOnlyMode;
+  ConfigOnlyModeRadio.OnClick := @ModeOptionClick;
+  Y := Y + ConfigOnlyModeRadio.Height + ScaleY(12);
+
+  Hint := TNewStaticText.Create(WizardForm);
+  Hint.Parent := ModePage.Surface;
+  Hint.Top := Y;
+  Hint.Width := ModePage.SurfaceWidth;
+  Hint.AutoSize := False;
+  Hint.Height := ScaleY(52);
+  Hint.WordWrap := True;
+  Hint.Caption :=
+    '步骤：安装/覆盖更新会继续选择安装目录和 PATH；只更新配置会跳过安装步骤，直接进入拉取模型页面。' +
+    '也可以从命令行运行安装包并附加 /CONFIGONLY 直接进入配置更新模式。';
+end;
+
 procedure CreateConfigPage;
 var
   Y: Integer;
   Hint: TNewStaticText;
 begin
-  if IsConfigOnlyMode then
-    ConfigPage := CreateCustomPage(wpWelcome, '更新 scode 配置',
-      '填写 API Key 并拉取模型，安装器只更新 ~/.nexus/sudocode 配置文件')
-  else
-    ConfigPage := CreateCustomPage(wpSelectDir, '配置 scode',
-      '填写 API Key 并拉取模型，安装时将自动生成配置文件到 ~/.nexus/sudocode');
+  ConfigPage := CreateCustomPage(wpSelectDir, '配置 scode',
+    '填写 API Key 并拉取模型，生成或更新 ~/.nexus/sudocode 配置文件');
 
   Y := ScaleY(8);
 
@@ -474,7 +529,9 @@ end;
 
 procedure InitializeWizard;
 begin
+  ConfigOnlySelected := False;
   ConfigDone := False;
+  CreateModePage;
   CreateConfigPage;
 end;
 
@@ -483,8 +540,9 @@ begin
   Result := False;
   if IsConfigOnlyMode then
   begin
-    { /CONFIGONLY only updates config files; no directory/task/ready pages. }
-    if (PageID = wpSelectDir) or (PageID = wpSelectTasks) or (PageID = wpReady) then
+    { Config-only mode only updates config files; no directory/task/ready pages. }
+    if (PageID = wpSelectDir) or (PageID = wpSelectTasks) or (PageID = wpReady) or
+       ((PageID = ModePage.ID) and (Pos('/CONFIGONLY', Uppercase(GetCmdTail)) > 0)) then
       Result := True;
     exit;
   end;

@@ -9,6 +9,8 @@
 ; HTTPS, and writes ready-to-use sudocode.json + settings.json into the
 ; per-user config home (~/.nexus/sudocode) so `scode` works with no extra
 ; manual setup. The wizard is skipped when a sudocode.json already exists.
+; Launch with /CONFIGONLY to run the same configuration wizard without
+; installing or overwriting scode.exe and without changing PATH.
 ;
 ; Defines are supplied by CI via ISCC command-line flags:
 ;   /DAppVersion=<version>   e.g. 0.1.12
@@ -54,10 +56,10 @@ Name: "chinesesimp"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 ; Default-checked: append the install dir to the user's PATH.
-Name: "addtopath"; Description: "将安装目录加入 PATH（推荐，新开终端即可运行 scode）"
+Name: "addtopath"; Description: "将安装目录加入 PATH（推荐，新开终端即可运行 scode）"; Check: ShouldInstallProgram
 
 [Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "scode.exe"; Flags: ignoreversion
+Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "scode.exe"; Flags: ignoreversion; Check: ShouldInstallProgram
 
 [Registry]
 ; Append the install dir to the per-user PATH (HKA resolves to HKCU for a
@@ -82,6 +84,18 @@ var
   StatusLabel: TNewStaticText;
   ConfigDone: Boolean;
 
+{ ---- Mode selection ----------------------------------------------------- }
+
+function IsConfigOnlyMode: Boolean;
+begin
+  Result := Pos('/CONFIGONLY', Uppercase(GetCmdTail)) > 0;
+end;
+
+function ShouldInstallProgram: Boolean;
+begin
+  Result := not IsConfigOnlyMode;
+end;
+
 { ---- PATH helper ------------------------------------------------------- }
 
 function ShouldAddPath(Param: string): Boolean;
@@ -89,6 +103,11 @@ var
   OrigPath: string;
   AlreadyPresent: Boolean;
 begin
+  if IsConfigOnlyMode then
+  begin
+    Result := False;
+    exit;
+  end;
   if not WizardIsTaskSelected('addtopath') then
   begin
     Result := False;
@@ -372,8 +391,12 @@ var
   Y: Integer;
   Hint: TNewStaticText;
 begin
-  ConfigPage := CreateCustomPage(wpSelectDir, '配置 scode',
-    '填写 API Key 并拉取模型，安装时将自动生成配置文件到 ~/.nexus/sudocode');
+  if IsConfigOnlyMode then
+    ConfigPage := CreateCustomPage(wpWelcome, '更新 scode 配置',
+      '填写 API Key 并拉取模型，安装器只更新 ~/.nexus/sudocode 配置文件')
+  else
+    ConfigPage := CreateCustomPage(wpSelectDir, '配置 scode',
+      '填写 API Key 并拉取模型，安装时将自动生成配置文件到 ~/.nexus/sudocode');
 
   Y := ScaleY(8);
 
@@ -458,7 +481,15 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
-  { Skip the wizard entirely if the user already has a sudocode.json. }
+  if IsConfigOnlyMode then
+  begin
+    { /CONFIGONLY only updates config files; no directory/task/ready pages. }
+    if (PageID = wpSelectDir) or (PageID = wpSelectTasks) or (PageID = wpReady) then
+      Result := True;
+    exit;
+  end;
+
+  { Normal install: skip the wizard entirely if the user already has a sudocode.json. }
   if (PageID = ConfigPage.ID) and ConfigAlreadyExists then
     Result := True;
 end;

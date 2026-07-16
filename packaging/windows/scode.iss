@@ -78,6 +78,7 @@ var
   ModePage: TWizardPage;
   InstallModeRadio: TNewRadioButton;
   ConfigOnlyModeRadio: TNewRadioButton;
+  UpdateConfigCheck: TNewCheckBox;
   ConfigPage: TWizardPage;
   BaseUrlEdit: TNewEdit;
   ApiKeyEdit: TPasswordEdit;
@@ -86,6 +87,7 @@ var
   SearchCheck: TNewCheckBox;
   StatusLabel: TNewStaticText;
   ConfigOnlySelected: Boolean;
+  UpdateConfigSelected: Boolean;
   ConfigDone: Boolean;
 
 { ---- Mode selection ----------------------------------------------------- }
@@ -103,6 +105,16 @@ end;
 procedure ModeOptionClick(Sender: TObject);
 begin
   ConfigOnlySelected := ConfigOnlyModeRadio.Checked;
+  if InstallModeRadio.Checked then
+    UpdateConfigSelected := UpdateConfigCheck.Checked
+  else
+    UpdateConfigSelected := False;
+  UpdateConfigCheck.Enabled := InstallModeRadio.Checked;
+end;
+
+procedure UpdateConfigCheckClick(Sender: TObject);
+begin
+  UpdateConfigSelected := UpdateConfigCheck.Checked;
 end;
 
 { ---- PATH helper ------------------------------------------------------- }
@@ -188,6 +200,21 @@ end;
 function ConfigAlreadyExists: Boolean;
 begin
   Result := FileExists(ConfigDir + '\sudocode.json');
+end;
+
+function ShouldRunConfigWizard: Boolean;
+begin
+  if IsConfigOnlyMode then
+  begin
+    Result := True;
+    exit;
+  end;
+  if not ConfigAlreadyExists then
+  begin
+    Result := True;
+    exit;
+  end;
+  Result := UpdateConfigSelected;
 end;
 
 { ---- Model list fetching ---------------------------------------------- }
@@ -401,7 +428,7 @@ var
   Hint: TNewStaticText;
 begin
   ModePage := CreateCustomPage(wpWelcome, '选择操作',
-    '安装或覆盖更新 scode，也可以只重新拉取模型并更新配置文件');
+    '支持首次安装、覆盖安装并更新配置、以及只调整配置文件');
 
   Y := ScaleY(8);
 
@@ -410,25 +437,38 @@ begin
   Hint.Top := Y;
   Hint.Width := ModePage.SurfaceWidth;
   Hint.AutoSize := False;
-  Hint.Height := ScaleY(34);
+  Hint.Height := ScaleY(50);
   Hint.WordWrap := True;
-  Hint.Caption := '如果已经安装过 scode，需要换 API Key、Base URL 或默认模型，请选择“只更新配置文件”。';
+  Hint.Caption :=
+    '首次安装：选择安装/覆盖程序，安装器会自动进入配置页。' +
+    '已安装后需要更新程序和配置：选择安装/覆盖程序，并勾选“同时更新配置文件”。';
   Y := Y + Hint.Height + ScaleY(10);
 
   InstallModeRadio := TNewRadioButton.Create(WizardForm);
   InstallModeRadio.Parent := ModePage.Surface;
   InstallModeRadio.Top := Y;
   InstallModeRadio.Width := ModePage.SurfaceWidth;
-  InstallModeRadio.Caption := '安装/覆盖更新 scode 程序（默认，会安装 scode.exe，可选择加入 PATH）';
+  InstallModeRadio.Caption := '安装/覆盖 scode 程序（默认，会安装 scode.exe，可选择加入 PATH）';
   InstallModeRadio.Checked := not IsConfigOnlyMode;
   InstallModeRadio.OnClick := @ModeOptionClick;
   Y := Y + InstallModeRadio.Height + ScaleY(8);
+
+  UpdateConfigCheck := TNewCheckBox.Create(WizardForm);
+  UpdateConfigCheck.Parent := ModePage.Surface;
+  UpdateConfigCheck.Top := Y;
+  UpdateConfigCheck.Left := ScaleX(18);
+  UpdateConfigCheck.Width := ModePage.SurfaceWidth - ScaleX(18);
+  UpdateConfigCheck.Caption := '同时拉取模型并更新配置文件（已有 sudocode.json/settings.json 会被覆盖）';
+  UpdateConfigCheck.Checked := False;
+  UpdateConfigCheck.Enabled := InstallModeRadio.Checked;
+  UpdateConfigCheck.OnClick := @UpdateConfigCheckClick;
+  Y := Y + UpdateConfigCheck.Height + ScaleY(8);
 
   ConfigOnlyModeRadio := TNewRadioButton.Create(WizardForm);
   ConfigOnlyModeRadio.Parent := ModePage.Surface;
   ConfigOnlyModeRadio.Top := Y;
   ConfigOnlyModeRadio.Width := ModePage.SurfaceWidth;
-  ConfigOnlyModeRadio.Caption := '只更新配置文件（不覆盖 scode.exe，不修改 PATH，会覆盖本地 sudocode.json/settings.json）';
+  ConfigOnlyModeRadio.Caption := '只调整配置文件（不覆盖 scode.exe，不修改 PATH，会覆盖本地 sudocode.json/settings.json）';
   ConfigOnlyModeRadio.Checked := IsConfigOnlyMode;
   ConfigOnlyModeRadio.OnClick := @ModeOptionClick;
   Y := Y + ConfigOnlyModeRadio.Height + ScaleY(12);
@@ -438,11 +478,11 @@ begin
   Hint.Top := Y;
   Hint.Width := ModePage.SurfaceWidth;
   Hint.AutoSize := False;
-  Hint.Height := ScaleY(52);
+  Hint.Height := ScaleY(68);
   Hint.WordWrap := True;
   Hint.Caption :=
-    '步骤：安装/覆盖更新会继续选择安装目录和 PATH；只更新配置会跳过安装步骤，直接进入拉取模型页面。' +
-    '也可以从命令行运行安装包并附加 /CONFIGONLY 直接进入配置更新模式。';
+    '三种路径：1. 首次安装：拉取配置/更新，然后安装；2. 覆盖安装：勾选同时更新配置后，拉取配置/更新并安装；' +
+    '3. 调整配置：选择只调整配置文件，只拉取配置/更新。也可以附加 /CONFIGONLY 直接进入配置更新模式。';
 end;
 
 procedure CreateConfigPage;
@@ -530,6 +570,7 @@ end;
 procedure InitializeWizard;
 begin
   ConfigOnlySelected := False;
+  UpdateConfigSelected := False;
   ConfigDone := False;
   CreateModePage;
   CreateConfigPage;
@@ -547,8 +588,8 @@ begin
     exit;
   end;
 
-  { Normal install: skip the wizard entirely if the user already has a sudocode.json. }
-  if (PageID = ConfigPage.ID) and ConfigAlreadyExists then
+  { Normal install: existing config is preserved unless the user opts in. }
+  if (PageID = ConfigPage.ID) and (not ShouldRunConfigWizard) then
     Result := True;
 end;
 

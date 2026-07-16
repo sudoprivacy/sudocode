@@ -1,71 +1,44 @@
-; Inno Setup script for the `scode` CLI.
+; Inno Setup script for the standalone scode configuration tool.
 ;
-; Builds a per-user installer that drops scode.exe into a directory and
-; appends that directory to the user's PATH, so `scode` works from any
-; new terminal after install. No administrator rights required.
-;
-; It also runs a first-run configuration wizard: the user enters their
-; sudorouter API key, the installer fetches the available model list over
-; HTTPS, and writes ready-to-use sudocode.json + settings.json into the
-; per-user config home (~/.nexus/sudocode) so `scode` works with no extra
-; manual setup. The wizard is skipped when a sudocode.json already exists.
+; This builds a small Windows setup executable named scode_config_setting.
+; It does not install or overwrite scode.exe, does not touch PATH, and does
+; not create an uninstall entry. It only fetches the model list and writes
+; sudocode.json + settings.json into ~/.nexus/sudocode.
 ;
 ; Defines are supplied by CI via ISCC command-line flags:
 ;   /DAppVersion=<version>   e.g. 0.1.12
-;   /DSourceExe=<path>       absolute path to the built scode.exe
 ;   /DOutputDir=<dir>        directory to write the setup .exe into
 ;   /DOutputBase=<name>      output filename without extension
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
-#ifndef SourceExe
-  #define SourceExe "scode.exe"
-#endif
 #ifndef OutputDir
   #define OutputDir "."
 #endif
 #ifndef OutputBase
-  #define OutputBase "scode-setup"
+  #define OutputBase "scode_config_setting"
 #endif
 
 [Setup]
-AppId={{9C2E7B7A-1F2D-4C3E-9A5B-5C0DE0000001}
-AppName=scode
+AppId={{7D8E3B9A-51F8-40A6-AE4B-5C0DEC0F1A01}
+AppName=scode_config_setting
 AppVersion={#AppVersion}
 AppPublisher=sudocode
-DefaultDirName={localappdata}\Programs\scode
+CreateAppDir=no
+Uninstallable=no
 DisableProgramGroupPage=yes
-UninstallDisplayName=scode
-UninstallDisplayIcon={app}\scode.exe
+DisableReadyPage=yes
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
-ChangesEnvironment=yes
 ShowLanguageDialog=no
 
 [Languages]
-; Simplified Chinese for the whole wizard (welcome, dir page, tasks, buttons).
-; The .isl ships alongside this script in packaging/windows/.
 Name: "chinesesimp"; MessagesFile: "ChineseSimplified.isl"
-
-[Tasks]
-; Default-checked: append the install dir to the user's PATH.
-Name: "addtopath"; Description: "将安装目录加入 PATH（推荐，新开终端即可运行 scode）"
-
-[Files]
-Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "scode.exe"; Flags: ignoreversion
-
-[Registry]
-; Append the install dir to the per-user PATH (HKA resolves to HKCU for a
-; per-user install). Only added when the task is selected and it is not
-; already present.
-Root: HKA; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
-    ValueData: "{olddata};{app}"; \
-    Check: ShouldAddPath('{app}')
 
 [Code]
 const
@@ -82,28 +55,6 @@ var
   StatusLabel: TNewStaticText;
   ConfigDone: Boolean;
 
-{ ---- PATH helper ------------------------------------------------------- }
-
-function ShouldAddPath(Param: string): Boolean;
-var
-  OrigPath: string;
-  AlreadyPresent: Boolean;
-begin
-  if not WizardIsTaskSelected('addtopath') then
-  begin
-    Result := False;
-    exit;
-  end;
-  if not RegQueryStringValue(HKA, 'Environment', 'Path', OrigPath) then
-  begin
-    Result := True;
-    exit;
-  end;
-  { Wrap in semicolons so we match whole path segments, not substrings. }
-  AlreadyPresent := Pos(';' + Uppercase(Param) + ';', ';' + Uppercase(OrigPath) + ';') > 0;
-  Result := not AlreadyPresent;
-end;
-
 { ---- Small string / JSON helpers -------------------------------------- }
 
 function TrimTrailingSlashes(S: string): string;
@@ -113,7 +64,6 @@ begin
   Result := S;
 end;
 
-{ Minimal JSON string escaping (backslash + double quote), wrapped in quotes. }
 function JsonStr(S: string): string;
 var
   I: Integer;
@@ -134,7 +84,6 @@ begin
   Result := '"' + R + '"';
 end;
 
-{ Name-based inference of image-input support, mirroring config-tool.html. }
 function IsVisionModel(Id: string): Boolean;
 var
   S: string;
@@ -153,19 +102,11 @@ end;
 
 function ConfigDir: string;
 begin
-  { scode's default config home when SUDO_CODE_CONFIG_HOME is unset. }
   Result := ExpandConstant('{%USERPROFILE}') + '\.nexus\sudocode';
-end;
-
-function ConfigAlreadyExists: Boolean;
-begin
-  Result := FileExists(ConfigDir + '\sudocode.json');
 end;
 
 { ---- Model list fetching ---------------------------------------------- }
 
-{ GET BaseUrl + /models with a bearer token via WinHTTP. Returns True on
-  HTTP 200 with the body in Body; otherwise Body carries an error message. }
 function HttpGetModels(BaseUrl, ApiKey: string; var Body: string): Boolean;
 var
   WinHttp: Variant;
@@ -188,7 +129,6 @@ begin
   end;
 end;
 
-{ Scan an OpenAI-style /models response for each "id":"..." value. }
 procedure ParseModelIds(Json: string; List: TStringList);
 var
   Rest, Id: string;
@@ -215,7 +155,6 @@ begin
   until False;
 end;
 
-{ Fill the dropdown from a list of model ids; preselect DefaultModel. }
 procedure PopulateModelCombo(List: TStringList);
 var
   I, DefIdx: Integer;
@@ -254,7 +193,7 @@ begin
     StatusLabel.Caption := '请先填写 API Key';
     exit;
   end;
-  StatusLabel.Caption := '正在拉取模型列表…';
+  StatusLabel.Caption := '正在拉取模型列表...';
   List := TStringList.Create;
   try
     if HttpGetModels(BaseUrl, ApiKey, Body) then
@@ -265,7 +204,7 @@ begin
       else
       begin
         PopulateModelCombo(List);
-        StatusLabel.Caption := '✓ 已拉取 ' + IntToStr(List.Count) + ' 个模型';
+        StatusLabel.Caption := '已拉取 ' + IntToStr(List.Count) + ' 个模型';
       end;
     end
     else
@@ -275,9 +214,6 @@ begin
   end;
 end;
 
-{ Auto-fetch when the user finishes entering the API key (focus leaves the
-  field). The manual 拉取模型 button remains available; FetchButtonClick
-  ignores its Sender so passing nil is fine. }
 procedure ApiKeyEditExit(Sender: TObject);
 begin
   if Trim(ApiKeyEdit.Text) <> '' then
@@ -372,15 +308,15 @@ var
   Y: Integer;
   Hint: TNewStaticText;
 begin
-  ConfigPage := CreateCustomPage(wpSelectDir, '配置 scode',
-    '填写 API Key 并拉取模型，安装时将自动生成配置文件到 ~/.nexus/sudocode');
+  ConfigPage := CreateCustomPage(wpWelcome, 'scode 配置设置',
+    '拉取模型列表，并更新本机 ~/.nexus/sudocode 配置文件');
 
   Y := ScaleY(8);
 
-  { Base URL }
   Hint := TNewStaticText.Create(WizardForm);
   Hint.Parent := ConfigPage.Surface;
   Hint.Top := Y;
+  Hint.Width := ConfigPage.SurfaceWidth;
   Hint.Caption := 'Base URL（API 服务地址，通常以 /v1 结尾）';
   Y := Y + Hint.Height + ScaleY(2);
 
@@ -391,7 +327,6 @@ begin
   BaseUrlEdit.Text := DefaultBaseUrl;
   Y := Y + BaseUrlEdit.Height + ScaleY(12);
 
-  { API Key }
   Hint := TNewStaticText.Create(WizardForm);
   Hint.Parent := ConfigPage.Surface;
   Hint.Top := Y;
@@ -405,7 +340,6 @@ begin
   ApiKeyEdit.OnExit := @ApiKeyEditExit;
   Y := Y + ApiKeyEdit.Height + ScaleY(12);
 
-  { Fetch button }
   FetchButton := TNewButton.Create(WizardForm);
   FetchButton.Parent := ConfigPage.Surface;
   FetchButton.Top := Y;
@@ -415,7 +349,6 @@ begin
   FetchButton.OnClick := @FetchButtonClick;
   Y := Y + FetchButton.Height + ScaleY(12);
 
-  { Default model dropdown }
   Hint := TNewStaticText.Create(WizardForm);
   Hint.Parent := ConfigPage.Surface;
   Hint.Top := Y;
@@ -429,7 +362,6 @@ begin
   ModelCombo.Style := csDropDownList;
   Y := Y + ModelCombo.Height + ScaleY(12);
 
-  { web_search }
   SearchCheck := TNewCheckBox.Create(WizardForm);
   SearchCheck.Parent := ConfigPage.Surface;
   SearchCheck.Top := Y;
@@ -438,7 +370,6 @@ begin
   SearchCheck.Checked := True;
   Y := Y + SearchCheck.Height + ScaleY(12);
 
-  { Status line }
   StatusLabel := TNewStaticText.Create(WizardForm);
   StatusLabel.Parent := ConfigPage.Surface;
   StatusLabel.Top := Y;
@@ -453,14 +384,6 @@ procedure InitializeWizard;
 begin
   ConfigDone := False;
   CreateConfigPage;
-end;
-
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  Result := False;
-  { Skip the wizard entirely if the user already has a sudocode.json. }
-  if (PageID = ConfigPage.ID) and ConfigAlreadyExists then
-    Result := True;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;

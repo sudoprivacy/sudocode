@@ -117,3 +117,52 @@ jobs:
           name: ${{ matrix.installer_name }}
           path: rust/dist/${{ matrix.installer_name }}
           if-no-files-found: error
+
+  build-config-setting:
+    name: installer-windows-config-setting
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage dist dir
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Windows config setting installer (Inno Setup)
+        shell: pwsh
+        run: |
+          # This package only contains the configuration wizard; it does not
+          # bundle scode.exe or touch PATH.
+          choco install innosetup --version=6.5.4 -y --no-progress --allow-downgrade
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          $name = "scode_config_setting-windows-setup.exe"
+          $base = $name -replace '\.exe$', ''
+          & $iscc `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "/DOutputDir=$((Resolve-Path 'dist').Path)" `
+            "/DOutputBase=$base" `
+            "../packaging/windows/scode_config_setting.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Upload config setting artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode_config_setting-windows-setup.exe
+          path: rust/dist/scode_config_setting-windows-setup.exe
+          if-no-files-found: error

@@ -782,7 +782,9 @@ fn memory_readonly_blocks_writes() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("auto memory") || stdout.contains("memory system") || stdout.contains("MEMORY.md"),
+        stdout.contains("auto memory")
+            || stdout.contains("memory system")
+            || stdout.contains("MEMORY.md"),
         "system prompt should include memory instructions even for read-only mode"
     );
 
@@ -880,8 +882,7 @@ fn memory_multi_type_single_session() {
     // Verify at least two different types appear across the files.
     let mut types_seen = std::collections::HashSet::new();
     for file_name in &non_index {
-        let content =
-            fs::read_to_string(memory_dir.join(file_name)).unwrap_or_default();
+        let content = fs::read_to_string(memory_dir.join(file_name)).unwrap_or_default();
         for t in ["user", "feedback", "reference", "project"] {
             if content.contains(&format!("type: {t}")) {
                 types_seen.insert(t);

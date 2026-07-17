@@ -55,7 +55,10 @@ struct Cli {
     #[arg(long, global = true)]
     dangerously_skip_permissions: bool,
 
-    /// Allowed tools (repeatable)
+    /// Allowed tools (repeatable). Note: MCP servers injected per-session via
+    /// ACP `session/new`/`session/load` (`mcp_servers`) bypass this list —
+    /// they are always available to the session that requested them, since
+    /// their names are only known at runtime (after the client sends them).
     #[arg(long = "allowedTools", alias = "allowed-tools", global = true)]
     allowed_tools: Vec<String>,
 
@@ -1148,9 +1151,15 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
     let cwd = env::current_dir().map_err(|e| e.to_string())?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
-    let state =
-        super::super::build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config)
-            .map_err(|e| e.to_string())?;
+    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
+        std::collections::BTreeMap::new();
+    let state = super::super::build_runtime_plugin_state_with_loader(
+        &cwd,
+        &loader,
+        &runtime_config,
+        &session_mcp,
+    )
+    .map_err(|e| e.to_string())?;
     let registry = state.tool_registry.clone();
     if let Some(mcp_state) = state.mcp_state {
         mcp_state

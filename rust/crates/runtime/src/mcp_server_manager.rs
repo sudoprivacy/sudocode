@@ -589,6 +589,19 @@ impl McpServerManager {
         self.servers.keys().cloned().collect()
     }
 
+    /// All registered tools as `(qualified_name, server_name)` pairs, where
+    /// `server_name` is the original (pre-normalization) server name. Lets
+    /// callers attribute a tool to its server exactly, without reverse-
+    /// engineering the normalized `mcp__<server>__` prefix (which collides for
+    /// names like `foo.bar` vs `foo_bar`).
+    #[must_use]
+    pub fn tools_with_server(&self) -> Vec<(String, String)> {
+        self.tool_index
+            .iter()
+            .map(|(qualified, route)| (qualified.clone(), route.server_name.clone()))
+            .collect()
+    }
+
     pub async fn discover_tools(&mut self) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         let mut discovered_tools = Vec::new();

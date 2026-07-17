@@ -52,19 +52,6 @@ const INTERRUPT_MARKER: &str = "INTERRUPT_TRIGGER_MARKER";
 fn submit_during_turn_in_interrupt_mode_aborts_running_turn() {
     let env = TestEnv::new("repl-async-interrupt");
 
-    // Mock-only: the in-flight signal this test waits for ("interrupt-start")
-    // is printed by the mock's canned bash command. A live model has no reason
-    // to emit it, and there's no deterministic way to hold a real turn in-flight
-    // for a fixed window — so run this only under the mock backend. (Same shape
-    // as pty_repl_async_batched_flush's mock-only guard.)
-    if !env.is_mock() {
-        eprintln!(
-            "SKIP: interrupt-during-turn assertion is mock-only \
-             (needs the mock's deterministic in-flight bash window)."
-        );
-        return;
-    }
-
     let mut sess = env.spawn_with_env(
         // danger-full-access so the mock's canned bash command actually runs
         // (the tool call is denied under read-only). Same flag the sibling
@@ -78,19 +65,27 @@ fn submit_during_turn_in_interrupt_mode_aborts_running_turn() {
     sess.expect("❯")
         .expect("async REPL should render the initial prompt");
 
-    // Step 2: fire the long-running bash prompt.
+    // Step 2: fire the long-running bash prompt. The natural-language text is
+    // EXPLICIT about the exact command so this works in BOTH backends: under
+    // mock the `bash_interrupt_long_running` scenario returns the canned
+    // `printf 'interrupt-start'; sleep 30` tool_use (prompt text ignored);
+    // under live the real model runs the command we spell out here, so it
+    // emits the same "interrupt-start" marker. (The env drops the scenario
+    // token in live — see TestEnv::prompt.) Same "Run this exact bash command"
+    // shape pty_bash_execution uses to drive live models deterministically.
     let prompt = env.prompt(
-        "Use the bash tool to run a background sleep and let me know when \
-         you started it.",
+        "Run exactly this bash command, nothing else: \
+         printf 'interrupt-start'; sleep 30",
         "bash_interrupt_long_running",
     );
     sess.send(&format!("{prompt}\r"))
         .expect("send long-running prompt");
 
-    // Step 3: wait for the tool to actually start. The mock's canned command
-    // does `printf 'interrupt-start'` before the sleep, and PTY captures the
-    // bash stdout. Seeing this string proves the runner thread reached the
-    // tool execution + subprocess is actually sleeping.
+    // Step 3: wait for the tool to actually start. The command prints
+    // `interrupt-start` before the sleep, and PTY captures the bash stdout.
+    // Seeing this string proves the runner thread reached tool execution +
+    // the subprocess is actually sleeping — the real in-flight window we
+    // interrupt into. Works identically mock and live.
     sess.expect("interrupt-start")
         .expect("bash tool should print interrupt-start before the sleep");
 

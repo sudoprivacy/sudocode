@@ -221,7 +221,7 @@ flowchart LR
       F1 --> F2 --> F3 --> F4 --> F5
     end
 
-    Today ==>|"hydra 底层改, becomes thin"| Future
+    Today ==>|"hydra internals rewritten, becomes thin"| Future
 ```
 
 Sudo Code is the agent unit underneath that whole future picture.

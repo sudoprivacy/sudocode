@@ -57,6 +57,18 @@ const MARKER: &str = "MARKER_QUEUED_INPUT";
 fn up_arrow_on_empty_buffer_dequeues_last_queued_input() {
     let env = TestEnv::new("repl-async-up-dequeue");
 
+    // Mock-only: this journey keys on "interrupt-start" (printed by the mock's
+    // canned bash command) to know the turn is in-flight before queuing. A live
+    // model won't emit it and can't be held in-flight deterministically, so run
+    // only under the mock backend. (Same guard as pty_repl_async_batched_flush.)
+    if !env.is_mock() {
+        eprintln!(
+            "SKIP: up-arrow-dequeue journey is mock-only \
+             (needs the mock's deterministic in-flight bash window)."
+        );
+        return;
+    }
+
     let mut sess = env.spawn_with_env(
         // danger-full-access so the mock's canned bash command actually runs —
         // pty_core_conversation's bash_interrupt_long_running case uses the

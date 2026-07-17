@@ -3071,7 +3071,19 @@ fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn io_to_string(error: std::io::Error) -> String {
-    error.to_string()
+    // `std::io::Error::to_string()` is the OS-localized message (e.g. on a
+    // zh_CN Windows a missing file reads "系统找不到指定的文件"), which is
+    // unstable across locales for both the model and tests. Prefix a stable,
+    // English kind label for the common cases so the error is recognizable
+    // regardless of OS locale; keep the OS detail after it for specifics.
+    use std::io::ErrorKind;
+    let label = match error.kind() {
+        ErrorKind::NotFound => "file not found",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::AlreadyExists => "already exists",
+        _ => return error.to_string(),
+    };
+    format!("{label}: {error}")
 }
 
 #[derive(Debug, Deserialize)]

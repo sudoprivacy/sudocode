@@ -52,6 +52,19 @@ const INTERRUPT_MARKER: &str = "INTERRUPT_TRIGGER_MARKER";
 fn submit_during_turn_in_interrupt_mode_aborts_running_turn() {
     let env = TestEnv::new("repl-async-interrupt");
 
+    // Mock-only: the in-flight signal this test waits for ("interrupt-start")
+    // is printed by the mock's canned bash command. A live model has no reason
+    // to emit it, and there's no deterministic way to hold a real turn in-flight
+    // for a fixed window — so run this only under the mock backend. (Same shape
+    // as pty_repl_async_batched_flush's mock-only guard.)
+    if !env.is_mock() {
+        eprintln!(
+            "SKIP: interrupt-during-turn assertion is mock-only \
+             (needs the mock's deterministic in-flight bash window)."
+        );
+        return;
+    }
+
     let mut sess = env.spawn_with_env(
         // danger-full-access so the mock's canned bash command actually runs
         // (the tool call is denied under read-only). Same flag the sibling

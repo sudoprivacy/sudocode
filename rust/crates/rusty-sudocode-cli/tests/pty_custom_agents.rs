@@ -76,9 +76,10 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
          tools: [read_file, glob_search, grep_search]\n",
         &format!(
             "You are a naming committee.\n\
-             When you have finished, include the token {sentinel} in \
-             your final reply so callers can prove you ran.\n\
-             Reply with three unique names, one per line.\n"
+             Your reply MUST begin with this exact token on its own first line: \
+             {sentinel}\n\
+             After that token, reply with three unique names, one per line. \
+             The token is mandatory — it is how callers prove you ran.\n"
         ),
     );
 

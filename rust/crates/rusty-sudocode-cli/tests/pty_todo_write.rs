@@ -89,21 +89,19 @@ fn todo_write_pending_list_persists_verbatim() {
         3,
         "store must contain exactly 3 items after the pending list write; got: {todos:?}"
     );
-    let statuses: Vec<&str> = todos
-        .iter()
-        .filter_map(|t| t.get("status").and_then(|v| v.as_str()))
-        .collect();
-    assert!(
-        statuses.iter().any(|s| *s == "pending"),
-        "at least one pending item expected; got statuses: {statuses:?}"
-    );
-    assert!(
-        statuses.iter().any(|s| *s == "in_progress"),
-        "at least one in_progress item expected; got statuses: {statuses:?}"
-    );
-    // Every item must have the required schema fields — regression against
-    // silently dropping activeForm/content on serialization.
+    // Every item must carry a valid status enum plus the required schema fields.
+    // We intentionally do NOT require a specific status mix: the prompt asks only
+    // for "a 3-item todo list", so a fresh all-`pending` list is correct model
+    // behavior (and matches this test's name). The regression guard is that
+    // status/content/activeForm survive serialization — not which status the
+    // model happened to choose.
+    const VALID_STATUSES: [&str; 3] = ["pending", "in_progress", "completed"];
     for (i, item) in todos.iter().enumerate() {
+        let status = item.get("status").and_then(|v| v.as_str());
+        assert!(
+            status.is_some_and(|s| VALID_STATUSES.contains(&s)),
+            "todo[{i}] has a missing/invalid status: {item}"
+        );
         assert!(
             item.get("content").and_then(|v| v.as_str()).is_some(),
             "todo[{i}] missing content: {item}"

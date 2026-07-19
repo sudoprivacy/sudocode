@@ -331,9 +331,7 @@ impl LineEditor {
         // Matches Claude Code's arrow-key UX.
         editor.bind_sequence(
             KeyEvent(KeyCode::Up, Modifiers::NONE),
-            EventHandler::Conditional(Box::new(UpArrowHandler {
-                dequeue_hook,
-            })),
+            EventHandler::Conditional(Box::new(UpArrowHandler { dequeue_hook })),
         );
         editor.bind_sequence(
             KeyEvent(KeyCode::Down, Modifiers::NONE),

@@ -12,29 +12,24 @@ use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, EditMode, Editor, EventContext,
-    EventHandler, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
+    EventHandler, Helper, KeyCode, KeyEvent, Modifiers, Movement, RepeatCount,
 };
 
-/// Callback invoked by the `↑`-arrow handler when the current input buffer is
-/// empty. Returns `Some(text)` to have rustyline `Cmd::Insert(text)` splice
-/// into the buffer (typical use: pop the newest item from the async REPL's
-/// TurnInputCoordinator queue). Returns `None` to fall through to rustyline's
-/// default `↑` behavior (history navigation), matching the "only dequeue when
-/// there's something to dequeue" contract in the sudowork §3.2 muted note.
-///
-/// Signature is a `Fn` (Send + Sync + 'static) so rustyline's editor can hold
-/// it across its threads without extra ceremony.
+/// Callback invoked by `UpArrowHandler` when the input buffer is empty.
+/// Returns `Some(text)` to splice into the buffer (async REPL dequeue);
+/// returns `None` to fall through to history navigation.
 pub type UpArrowDequeueHook = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync + 'static>;
 
-/// Rustyline handler for `↑` on an empty prompt buffer: invokes the
-/// `UpArrowDequeueHook` and, on `Some(text)`, splices via `Cmd::Insert`.
-/// On non-empty buffer or hook returning None, returns `None` so rustyline's
-/// default history-up path runs — never breaks multi-line editing.
-struct UpArrowDequeueHandler {
-    hook: UpArrowDequeueHook,
+/// Rustyline handler for `↑`: moves cursor to the line above (or to the
+/// beginning of the current line on single-line input), and only navigates
+/// history when the cursor is already at the top-left.  When an async REPL
+/// dequeue hook is installed, an empty buffer triggers dequeue instead of
+/// history.  This matches Claude Code's arrow-key UX.
+struct UpArrowHandler {
+    dequeue_hook: Option<UpArrowDequeueHook>,
 }
 
-impl ConditionalEventHandler for UpArrowDequeueHandler {
+impl ConditionalEventHandler for UpArrowHandler {
     fn handle(
         &self,
         _evt: &rustyline::Event,
@@ -42,11 +37,48 @@ impl ConditionalEventHandler for UpArrowDequeueHandler {
         _positive: bool,
         ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        if !ctx.line().is_empty() {
-            return None;
+        // Empty buffer: try dequeue (async REPL), then history.
+        if ctx.line().is_empty() {
+            if let Some(ref hook) = self.dequeue_hook {
+                if let Some(text) = (hook)() {
+                    return Some(Cmd::Insert(1, text));
+                }
+            }
+            return Some(Cmd::PreviousHistory);
         }
-        let text = (self.hook)()?;
-        Some(Cmd::Insert(1, text))
+        // Non-empty, cursor not at beginning: move to beginning of line.
+        if ctx.pos() > 0 {
+            return Some(Cmd::Move(Movement::BeginningOfLine));
+        }
+        // Cursor already at beginning: navigate history.
+        Some(Cmd::PreviousHistory)
+    }
+}
+
+/// Rustyline handler for `↓`: moves cursor to the line below (or to the
+/// end of the current line on single-line input), and only navigates
+/// history when the cursor is already at the bottom-right.
+struct DownArrowHandler;
+
+impl ConditionalEventHandler for DownArrowHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let line = ctx.line();
+        // Empty buffer: history navigation.
+        if line.is_empty() {
+            return Some(Cmd::NextHistory);
+        }
+        // Cursor not at end: move to end of line.
+        if ctx.pos() < line.len() {
+            return Some(Cmd::Move(Movement::EndOfLine));
+        }
+        // Cursor already at end: navigate history.
+        Some(Cmd::NextHistory)
     }
 }
 
@@ -294,12 +326,19 @@ impl LineEditor {
             EventHandler::Conditional(Box::new(AcceptNonEmpty)),
         );
 
-        if let Some(hook) = dequeue_hook {
-            editor.bind_sequence(
-                KeyEvent(KeyCode::Up, Modifiers::NONE),
-                EventHandler::Conditional(Box::new(UpArrowDequeueHandler { hook })),
-            );
-        }
+        // ↑: beginning-of-line first, then history (+ optional dequeue for async REPL).
+        // ↓: end-of-line first, then history.
+        // Matches Claude Code's arrow-key UX.
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Up, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(UpArrowHandler {
+                dequeue_hook,
+            })),
+        );
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Down, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(DownArrowHandler)),
+        );
 
         let images: ImageMap = Arc::new(Mutex::new(HashMap::new()));
 

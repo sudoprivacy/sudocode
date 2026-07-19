@@ -417,32 +417,32 @@ pub fn spawn_scode_in_dir(
     let bin_str = bin.to_string_lossy().to_string();
     let dir_str = dir.display().to_string();
 
-    #[cfg(unix)]
-    {
-        let mut cmd = format!(
-            "cd {} && exec {}",
-            shell_quote(&dir_str),
-            shell_quote(&bin_str)
-        );
-        for arg in args {
-            cmd.push_str(&format!(" {}", shell_quote(arg)));
-        }
-        let sh = resolve_sh();
-        let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
-        sess.set_default_timeout(timeout);
-        Ok(sess)
+    // Run `sh -c "cd <dir> && exec /usr/bin/env <scode> <args>"` on ALL
+    // platforms. On Windows this uses Git Bash's `sh.exe` (via `resolve_sh`) —
+    // the same mechanism `spawn_with_workspace` already relies on.
+    //
+    // The previous `#[cfg(windows)]` branch spawned `cmd /c "cd /d \"dir\" &&
+    // \"scode\" ..."`, which portable_pty passes to `CreateProcessW` with
+    // MSVC-style quoting — embedded quotes become `\"`. `cmd.exe` does NOT
+    // understand backslash-escaped quotes, so it saw `cd /d \"dir\"` as an
+    // invalid path, printed "the filename, directory name, or volume label
+    // syntax is incorrect", and exited 1 WITHOUT ever launching scode. Tests
+    // then saw a non-zero exit (and a false "4" match on the `ESC[?1004h`
+    // terminal escape). Routing through `sh -c` + `/usr/bin/env` quotes
+    // reliably and resolves the scode path identically on Linux, macOS, and
+    // Git Bash (see the note in `spawn_with_workspace`).
+    let mut cmd = format!(
+        "cd {} && exec /usr/bin/env {}",
+        shell_quote(&dir_str),
+        shell_quote(&bin_str)
+    );
+    for arg in args {
+        cmd.push_str(&format!(" {}", shell_quote(arg)));
     }
-
-    #[cfg(windows)]
-    {
-        let mut cmd = format!("cd /d \"{}\" && \"{}\"", dir_str, bin_str);
-        for arg in args {
-            cmd.push_str(&format!(" \"{}\"", arg));
-        }
-        let mut sess = PtySession::spawn("cmd", &["/c", &cmd])?;
-        sess.set_default_timeout(timeout);
-        Ok(sess)
-    }
+    let sh = resolve_sh();
+    let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
+    sess.set_default_timeout(timeout);
+    Ok(sess)
 }
 
 fn shell_quote(s: &str) -> String {

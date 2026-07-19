@@ -19,10 +19,7 @@ fn up_arrow_moves_cursor_to_beginning_before_history() {
     let root = env.workspace_root().to_path_buf();
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("EDITOR", "true")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(10));
 
     sess.expect("❯").unwrap_or_else(|e| {
@@ -72,10 +69,7 @@ fn up_arrow_navigates_history_on_empty_buffer() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let prompt = env.prompt("say OK", "single_turn_text");
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("EDITOR", "true")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(15));
 
     sess.expect("❯").unwrap_or_else(|e| {
@@ -122,10 +116,7 @@ fn down_arrow_moves_cursor_to_end() {
     let root = env.workspace_root().to_path_buf();
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("EDITOR", "true")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(10));
 
     sess.expect("❯").unwrap_or_else(|e| {

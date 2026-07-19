@@ -411,10 +411,18 @@ fn memory_tab_completion() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     sess.send("\r").expect("send Enter");
 
-    // `/memory` should execute — expect "Opened memory file" or
-    // "No instruction files found" (depending on whether AGENTS.md exists).
+    // `/memory` opens the resolved instruction file in $EDITOR (set to `true`,
+    // a no-op). When more than one instruction file is discoverable — which
+    // happens in live runs whose temp workspace is nested under a HOME that owns
+    // a global `~/.nexus/sudocode/AGENTS.md` — edit_memory first shows an
+    // interactive "Select memory file" menu (matched by "memory" below). Send
+    // Enter to accept the default so the flow is deterministic whether one or
+    // many instruction files are found; at a bare prompt the Enter is a harmless
+    // empty submit.
     sess.expect("(?i)(opened.*memory|no instruction|memory)")
         .expect("/memory should execute after tab completion");
+    sess.send("\r")
+        .expect("accept memory-file selection (or no-op at prompt)");
 
     // Wait for prompt, then exit.
     sess.expect("❯").expect("prompt after /memory");
@@ -513,9 +521,14 @@ fn memory_write_read_forget_workflow() {
     }
 
     // ── Step 2: /memory shows instruction files ──────────────────────
+    // See memory_tab_completion: `/memory` may show an interactive
+    // "Select memory file" menu when multiple instruction files are
+    // discoverable; accept the default with Enter so the flow is deterministic.
     sess.send("/memory\r").expect("send /memory");
-    sess.expect("(?i)(opened.*memory|agents\\.md|memory.*file)")
+    sess.expect("(?i)(opened.*memory|agents\\.md|memory.*file|select memory)")
         .expect("/memory should reference a file");
+    sess.send("\r")
+        .expect("accept memory-file selection (or no-op at prompt)");
     sess.expect("❯").expect("prompt after /memory");
 
     // ── Step 3: Forget memory ────────────────────────────────────────

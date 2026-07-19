@@ -2,8 +2,11 @@
 //! served by sudorouter can be used via proxy passthrough.
 //!
 //! The model list is read from the `SCODE_COMPAT_MODELS` environment
-//! variable (comma-separated model IDs). When the variable is unset
-//! or empty, no models are tested and the test passes vacuously.
+//! variable (comma-separated model IDs). When the variable is unset or
+//! empty, a small built-in default set (`DEFAULT_COMPAT_MODELS`) is used
+//! so a bare live run still exercises real passthrough instead of passing
+//! vacuously. CI's `model-compat.yml` overrides the default with the full
+//! model list fetched from sudorouter's `/v1/models` endpoint.
 //!
 //! These are **live-only** tests — passthrough requires a real proxy.
 //! In mock mode the test exits immediately (no mock scenario needed).
@@ -150,15 +153,32 @@ fn test_one_model(model: &str) -> ModelResult {
     }
 }
 
-/// Parse the `SCODE_COMPAT_MODELS` env var into a list of model IDs.
+/// Model IDs exercised when `SCODE_COMPAT_MODELS` is unset or empty, so a
+/// bare `SCODE_TEST_BACKEND=live cargo test --test pty_model_compat` run
+/// verifies real passthrough instead of passing vacuously. Both are
+/// unconfigured-in-`sudocode.json` IDs that sudorouter serves (spanning two
+/// model families), so `--auth proxy` genuinely goes down the passthrough
+/// path. CI's `model-compat.yml` overrides this with the full endpoint list.
+const DEFAULT_COMPAT_MODELS: &[&str] = &["o3-mini", "doubao-seed-1-6-251015"];
+
+/// Parse the `SCODE_COMPAT_MODELS` env var into a list of model IDs,
+/// falling back to [`DEFAULT_COMPAT_MODELS`] when it is unset or empty.
 fn compat_models() -> Vec<String> {
-    std::env::var("SCODE_COMPAT_MODELS")
+    let from_env: Vec<String> = std::env::var("SCODE_COMPAT_MODELS")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
-        .collect()
+        .collect();
+    if from_env.is_empty() {
+        DEFAULT_COMPAT_MODELS
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    } else {
+        from_env
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -181,11 +201,9 @@ fn model_compat_sweep() {
         return;
     }
 
+    // Never empty: falls back to DEFAULT_COMPAT_MODELS when the env is unset,
+    // so a live run always exercises at least the built-in default set.
     let models = compat_models();
-    if models.is_empty() {
-        eprintln!("model_compat_sweep: SCODE_COMPAT_MODELS is empty, skipping");
-        return;
-    }
 
     eprintln!(
         "model_compat_sweep: testing {} model(s): {}",

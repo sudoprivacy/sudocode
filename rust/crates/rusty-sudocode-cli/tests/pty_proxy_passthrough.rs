@@ -13,7 +13,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{spawn_scode_in_dir, HarnessWorkspace, TestEnv, DEFAULT_TIMEOUT};
+use common::{spawn_scode_in_dir, HarnessWorkspace, TestEnv};
 
 /// Returns true if a proxy provider is configured (live mode with
 /// sudorouter). Passthrough tests only make sense in this mode.

@@ -333,6 +333,11 @@ impl CliStreamState {
                         .map_err(|error| RuntimeError::new(error.to_string()))?;
                 }
                 if let Some((id, name, input, thought_signature)) = self.pending_tool.take() {
+                    let input = if input.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        input
+                    };
                     if let Some(progress_reporter) = &self.progress_reporter {
                         progress_reporter.mark_tool_phase(&name, &input);
                     }

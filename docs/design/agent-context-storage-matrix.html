@@ -42,7 +42,9 @@
   .tip{position:relative;border-bottom:1px dotted var(--q);cursor:help;color:var(--q)}
   .tip .tipbox{visibility:hidden;opacity:0;transition:.12s;position:absolute;left:0;top:1.6em;z-index:9;
     width:340px;background:#0b1220;border:1px solid var(--q);border-radius:8px;padding:10px 12px;
-    color:#e2e8f0;font-weight:400;box-shadow:0 8px 30px rgba(0,0,0,.5);font-size:12.5px;line-height:1.5}
+    color:#e2e8f0;font-weight:400;box-shadow:0 8px 30px rgba(0,0,0,.5);font-size:12.5px;line-height:1.5;
+    white-space:normal;overflow-wrap:break-word;word-break:break-word}
+  .tip .tipbox code{white-space:normal;overflow-wrap:break-word;word-break:break-word}
   .tip:hover .tipbox{visibility:visible;opacity:1}
   .qbox{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--q);
     border-radius:8px;padding:8px 14px;margin:10px 0}

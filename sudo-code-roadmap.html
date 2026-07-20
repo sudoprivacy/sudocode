@@ -123,6 +123,15 @@
   td[data-status="gap"]     { color: var(--warn-fg); }
   td[data-status="gap-l2"]  { color: var(--muted); }
   td[data-status="na"]      { color: var(--muted); font-style: italic; }
+  /* Live-verification badge — rendered straight from the data-live-verified
+     attribute (the SSOT), so the live/mock/pending state is visible in the
+     Status column without any per-row markup. */
+  td[data-live-verified]::after { display: block; margin-top: 3px; font-weight: 400; font-size: 0.78em; letter-spacing: 0.02em; }
+  td[data-live-verified="live-verified"]::after                   { content: "\25CF live-verified"; color: #34d399; }
+  td[data-live-verified="live-required-mock-verified"]::after     { content: "\25D0 live-required \00B7 mock-only"; color: var(--warn-fg); }
+  td[data-live-verified="live-not-required-mock-verified"]::after { content: "\25CB live N/A \00B7 mock"; color: var(--muted); }
+  td[data-live-verified="pending"]::after                         { content: "\25CC live-pending"; color: var(--warn-fg); }
+  td[data-live-verified="live-failing"]::after                    { content: "\2717 live-failing"; color: #f87171; }
   /* Priority badges */
   td[data-priority="must-have"] { color: #f87171; font-weight: 600; }
   td[data-priority="nice"]      { color: var(--muted); }

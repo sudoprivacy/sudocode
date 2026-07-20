@@ -355,7 +355,10 @@ fn spawn_with_workspace(
         " GIT_AUTHOR_EMAIL={}",
         shell_quote("scode-test@example.com")
     ));
-    cmd.push_str(&format!(" GIT_COMMITTER_NAME={}", shell_quote("Scode Test")));
+    cmd.push_str(&format!(
+        " GIT_COMMITTER_NAME={}",
+        shell_quote("Scode Test")
+    ));
     cmd.push_str(&format!(
         " GIT_COMMITTER_EMAIL={}",
         shell_quote("scode-test@example.com")

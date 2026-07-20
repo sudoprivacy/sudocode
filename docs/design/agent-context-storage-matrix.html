@@ -14,16 +14,16 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
-  .wrap{max-width:1500px;margin:0 auto;padding:28px 22px 80px}
+  .wrap{max-width:1640px;margin:0 auto;padding:28px 22px 80px}
   h1{font-size:24px;margin:0 0 4px}
   h2{font-size:18px;margin:34px 0 10px;color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:6px}
   .sub{color:var(--muted);margin:0 0 18px}
   code,.mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
-  code{background:var(--code);padding:1px 5px;border-radius:4px;color:#cbd5e1}
+  code{background:var(--code);padding:1px 5px;border-radius:4px;color:#cbd5e1;overflow-wrap:anywhere;word-break:break-word}
   .lead{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
-    border-radius:8px;padding:14px 16px;margin:0 0 18px}
+    border-radius:8px;padding:14px 16px;margin:0 0 16px}
   .lead b{color:var(--accent2)}
-  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 18px;color:var(--muted);font-size:12.5px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:8px 0 16px;color:var(--muted);font-size:12.5px}
   .b{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
   .b.ok{background:rgba(52,211,153,.15);color:var(--ok)}
   .b.partial{background:rgba(251,191,36,.15);color:var(--partial)}
@@ -31,21 +31,28 @@
   .b.q{background:rgba(192,132,252,.16);color:var(--q)}
   .b.dup{background:rgba(251,146,60,.15);color:var(--dup)}
   .b.na{background:rgba(148,163,184,.12);color:var(--muted)}
+  .b.ref{background:rgba(96,165,250,.14);color:var(--accent)}
   table{border-collapse:collapse;width:100%;margin:6px 0 6px;font-size:13px}
-  th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+  th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left;overflow-wrap:anywhere}
   th{background:var(--panel2);color:#cbd5e1;position:sticky;top:0;z-index:2;font-weight:600}
-  tbody tr:nth-child(odd){background:rgba(30,41,59,.35)}
-  td.mega{font-weight:700;color:var(--accent2);white-space:nowrap;background:rgba(23,32,51,.6)}
-  td.item{font-weight:600;color:#f1f5f9;white-space:nowrap}
-  .path{color:#a5b4fc}
+  th .h2{display:block;font-weight:400;color:var(--muted);font-size:11px;margin-top:2px}
+  tbody tr:nth-child(odd){background:rgba(30,41,59,.28)}
+  td.mega{font-weight:700;color:var(--accent2);white-space:nowrap;background:rgba(23,32,51,.6);
+    writing-mode:vertical-rl;text-orientation:mixed;text-align:center;letter-spacing:1px;padding:8px 4px}
+  td.item{font-weight:600;color:#f1f5f9;background:rgba(23,32,51,.35)}
+  td.cc{color:#cbd5e1}
+  .path{color:#a5b4fc;overflow-wrap:anywhere}
   /* hover tooltip for uncertain / notes */
   .tip{position:relative;border-bottom:1px dotted var(--q);cursor:help;color:var(--q)}
   .tip .tipbox{visibility:hidden;opacity:0;transition:.12s;position:absolute;left:0;top:1.6em;z-index:9;
-    width:340px;background:#0b1220;border:1px solid var(--q);border-radius:8px;padding:10px 12px;
+    width:340px;max-width:80vw;background:#0b1220;border:1px solid var(--q);border-radius:8px;padding:10px 12px;
     color:#e2e8f0;font-weight:400;box-shadow:0 8px 30px rgba(0,0,0,.5);font-size:12.5px;line-height:1.5;
     white-space:normal;overflow-wrap:break-word;word-break:break-word}
   .tip .tipbox code{white-space:normal;overflow-wrap:break-word;word-break:break-word}
   .tip:hover .tipbox{visibility:visible;opacity:1}
+  .callout{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent2);
+    border-radius:8px;padding:12px 16px;margin:14px 0}
+  .callout b{color:var(--accent2)}
   .qbox{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--q);
     border-radius:8px;padding:8px 14px;margin:10px 0}
   .qbox .qn{color:var(--q);font-weight:700;margin-right:6px}
@@ -57,241 +64,243 @@
 <div class="wrap">
 
 <h1>Agent Context / Image / Profile — Unified Storage Matrix</h1>
-<p class="sub">A 1:1 mapping of Claude Code's on-disk context model onto the Nexus <code>/agents/{name}/</code>+<code>/proc/{pid}/</code> design, tracked through to sudocode &amp; sudowork. Draft for consensus — not yet merged into the doc.</p>
+<p class="sub">Map Claude Code's on-disk context model onto the <b>given</b> Nexus two-layer design (<code>/agents/{name}/</code> image + <code>/proc/{pid}/</code> runtime), and track how sudocode &amp; sudowork store the same things today (for dedup / migration). Draft for consensus — not yet merged into <code>nexus-integration-architecture</code>.</p>
 
 <div class="lead">
-<b>The one principle.</b> Nexus splits an agent the way an OS splits an <i>executable on disk</i> from a <i>running process</i>:
-<b>image / static / class layer = <code>/agents/{name}/</code></b> (config · prompts · skills · memory · sessions — persistent, Metastore, the addressable identity; one name → many pids) vs
-<b>runtime / dynamic / object layer = <code>/proc/{pid}/</code></b> (status · agent-link · chat-with-me · workspace/ — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = AgentRegistry SSOT = the session id).
+<b>The frame (read first).</b> Nexus's two namespaces are the <i>given</i> end-state, not an open question — same split an OS makes between an <i>executable on disk</i> and a <i>running process</i> (<code>nexus-integration-architecture</code> §2):
+<b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> · <code>sessions/</code> — persistent, Metastore, the addressable identity) vs
+<b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = <code>AgentRegistry</code> SSOT = the session id).
 <br><br>
-<b>Claude Code is a flat special case of this:</b> its <code>~/.claude/projects/&lt;sanitized-cwd&gt;/</code> collapses image+runtime into one cwd-keyed folder — one implicit agent per project. Everything CC persists therefore has a home in our two-layer model. This table is that map, and the SSOT for the <span class="b dup">dup</span> that sudowork &amp; sudocode carry today and must merge long-term.
+<b>Primary key = <code>agent-name</code></b> (one name → many pids across worktrees). The <code>workspace_hash</code> you'll see under <code>sessions/</code> is <i>not</i> a cwd-primary key — it is a <b>per-repo sub-partition</b> so one profile talking to many repos keeps its sessions sorted (§2.4). This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
+<br><br>
+<b>This table's job:</b> put CC's flat <code>~/.claude/projects/&lt;cwd&gt;/</code> model on each row, then read across — (1) does the Nexus end-state <i>cover</i> it? (2) how do sudocode &amp; sudowork store it today, and what's <span class="b dup">dup</span> to merge? CC is the <span class="b ref">reference</span> we map from; Nexus is the target all three converge to.
 </div>
 
 <div class="legend">
-  <span><span class="b ok">done</span> implemented</span>
-  <span><span class="b partial">partial</span> partially / differently</span>
-  <span><span class="b miss">missing</span> not built</span>
-  <span><span class="b q">open?</span> design question (hover for detail)</span>
-  <span><span class="b dup">dup</span> duplicated, long-term merge</span>
+  <span><span class="b ref">reference</span> CC — the model we map from</span>
+  <span><span class="b ok">done</span> built</span>
+  <span><span class="b partial">partial</span> partial / differs</span>
+  <span><span class="b miss">gap</span> not built</span>
+  <span><span class="b dup">dup</span> duplicated, merge long-term</span>
+  <span><span class="b q">open?</span> design question (hover)</span>
   <span><span class="b na">n/a</span> not applicable</span>
 </div>
 
 <h2>The matrix</h2>
 <table>
 <thead><tr>
-  <th style="width:9%">mega-type</th>
-  <th style="width:15%">CC item (source of truth)</th>
-  <th style="width:24%">Nexus end-state (concrete path)</th>
-  <th style="width:26%">sudocode (current → target)</th>
-  <th style="width:26%">sudowork (current, dedup-track)</th>
+  <th style="width:6%">mega-type</th>
+  <th style="width:11%">item</th>
+  <th style="width:21%">Claude Code <span class="h2">current — reference model</span></th>
+  <th style="width:21%">sudocode <span class="h2">current — standalone (StdFsBackend)</span></th>
+  <th style="width:18%">sudowork <span class="h2">current — SQLite</span></th>
+  <th style="width:23%">Nexus end-state <span class="h2">target — all converge here</span></th>
 </tr></thead>
 <tbody>
 
-<!-- IDENTITY & LAYERING -->
+<!-- IDENTITY -->
 <tr>
-  <td class="mega" rowspan="2">Identity<br>&amp; layering</td>
+  <td class="mega" rowspan="2">Identity</td>
   <td class="item">Primary key</td>
-  <td>Sanitized <b>cwd</b> → <span class="path">~/.claude/projects/&lt;C--Users-…&gt;/</span> (Win) / <span class="path">-Users-…</span> (POSIX). One implicit agent per project.</td>
-  <td><b>agent-name</b> (image) + <b>pid</b> (runtime). <span class="path">/agents/{name}/</span> · <span class="path">/proc/{pid}/</span>. One name → many pids across repos. <span class="b ok">done (design)</span></td>
-  <td>cwd fingerprint. <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span> (flat, local FS). Nexus-managed layer scaffolded but dormant (CLI uses StdFsBackend). <span class="b partial">partial</span></td>
-  <td>conversation-id (SQLite row); <code>extra.workspace</code> + <code>extra.acpSessionId</code> point at the engine. <span class="b partial">partial</span></td>
+  <td class="cc">Sanitized <b>cwd</b> → <span class="path">~/.claude/projects/&lt;C--Users-…&gt;/</span> (Win) / <span class="path">-Users-…</span> (POSIX). One implicit agent per project.</td>
+  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span></td>
+  <td>conversation-id (SQLite row) + <code>extra.workspace</code> / <code>extra.backend</code>. <span class="b partial">partial</span></td>
+  <td><b>agent-name</b> (image, primary) + <b>pid</b> (runtime). <span class="path">/agents/{name}/</span> · <span class="path">/proc/{pid}/</span>. One name → many pids. <span class="b ok">given</span></td>
 </tr>
 <tr>
   <td class="item">Image vs runtime split</td>
-  <td>None — flat. (bridge-pointer is the only "runtime pointer".)</td>
-  <td><b>image</b>=<span class="path">/agents/{name}/</span> (config/prompts/skills/memory/sessions); <b>runtime</b>=<span class="path">/proc/{pid}/</span> (status/agent→link/chat-with-me/workspace). <span class="b ok">done (design)</span></td>
-  <td>No explicit split yet — sessions on disk, config in <span class="path">~/.scode/</span> + AGENTS.md. Target: fold into <span class="path">/agents/{name}/</span>. <span class="b miss">gap</span></td>
-  <td>All in SQLite <code>conversations.extra</code> (mixes static+runtime). <span class="b dup">dup</span></td>
+  <td class="cc">None — flat. (<code>bridge-pointer.json</code> is the only runtime pointer.)</td>
+  <td>No explicit split: sessions on disk under cwd; config in <span class="path">~/.scode/</span>; <code>AGENTS.md</code> in repo. <span class="b miss">gap</span></td>
+  <td>All in SQLite <code>conversations.extra</code> — mixes static + runtime. <span class="b dup">dup</span></td>
+  <td><b>image</b> <span class="path">/agents/{name}/</span> vs <b>runtime</b> <span class="path">/proc/{pid}/</span>. <span class="b ok">given</span></td>
 </tr>
 
 <!-- SESSION -->
 <tr>
-  <td class="mega" rowspan="2">Session /<br>transcript</td>
+  <td class="mega" rowspan="2">Session</td>
   <td class="item">Transcript file</td>
-  <td><span class="path">~/.claude/projects/&lt;key&gt;/&lt;uuid&gt;.jsonl</span> (JSONL, up to multi-GB; parentUuid DAG)</td>
-  <td><span class="path">/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</span> (same FNV-1a hash) <span class="b ok">done (design)</span></td>
-  <td><span class="path">&lt;cwd&gt;/.scode/sessions/&lt;FNV-16hex&gt;/&lt;id&gt;.jsonl</span> (session_meta/compaction/prompt_history/message; 256KB rotate×3) — <b>the local precursor</b>. <span class="b ok">done</span></td>
-  <td><code>messages</code> table = full UI copy of the same conversation, joined by <code>acpSessionId</code>. <span class="b dup">dup — primary</span></td>
+  <td class="cc"><span class="path">~/.claude/projects/&lt;key&gt;/&lt;uuid&gt;.jsonl</span> — JSONL, up to multi-GB, parentUuid DAG.</td>
+  <td><span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span>. Typed records in one file: <code>session_meta</code> / <code>compaction</code> / <code>prompt_history</code> / <code>message</code>; rotate 256 KiB × 3. <span class="b ok">done</span></td>
+  <td><code>messages</code> table = full UI copy of the conversation (assistant + tool calls/results), joined by <code>acpSessionId</code>. <span class="b dup">dup — primary</span></td>
+  <td><span class="path">/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</span> — <code>session-id</code> = pid; <code>workspace_hash</code> = per-repo partition (§2.4). <span class="b ok">given</span></td>
 </tr>
 <tr>
-  <td class="item">Cross-agent session search
-    <span class="tip">?<span class="tipbox">CC stores every agent's sessions under one <code>projects/&lt;cwd&gt;/</code> path — flat, so the user can search across sessions. In our per-agent model, can we DT_LINK each <code>/agents/{name}/sessions/…</code> into a shared <code>/agents/sessions/</code> (or <code>/sessions/</code>) index for cross-agent search, keeping per-agent SSOT? (needs cross-node DT_LINK — see Workspace row.)</span></span>
+  <td class="item">Cross-agent /<br>cross-session search
+    <span class="tip">?<span class="tipbox">CC keeps every session flat under one <code>projects/&lt;cwd&gt;/</code>, so search across sessions is trivial. In the per-agent model each agent's sessions live under its own <code>/agents/{name}/sessions/</code>. Do we DT_LINK them into a shared <code>/agents/sessions/</code> (or <code>/sessions/</code>) index for cross-agent search while keeping per-agent SSOT? (needs the cross-node DT_LINK story — see Workspace row.)</span></span>
   </td>
-  <td>Implicit — all sessions flat under project dir; easy cross-session listing.</td>
-  <td><span class="b q">open?</span> DT_LINK per-agent <span class="path">/agents/{name}/sessions/</span> → shared <span class="path">/agents/sessions/</span> for cross-agent search?</td>
-  <td>SessionStore per workspace-fp; <code>latest</code>/<code>list</code>. <span class="b partial">partial</span></td>
-  <td>sudowork lists conversations from SQLite (its own index). <span class="b dup">dup</span></td>
+  <td class="cc">Implicit — all sessions flat under the project dir; easy cross-session listing.</td>
+  <td><code>SessionStore</code> per workspace-fp; <code>--resume latest</code> / <code>list</code> (computed by scanning + mtime sort). <span class="b partial">partial</span></td>
+  <td>Own SQLite index (<code>getUserConversations</code>, <code>ORDER BY updated_at</code>); never enumerates engine files. <span class="b dup">dup</span></td>
+  <td><span class="b q">open?</span> DT_LINK per-agent <span class="path">/agents/{name}/sessions/</span> → shared <span class="path">/agents/sessions/</span>?</td>
 </tr>
 
-<!-- SUBAGENT / FORK -->
+<!-- SUBAGENT -->
 <tr>
-  <td class="mega" rowspan="2">Subagent /<br>fork</td>
+  <td class="mega" rowspan="2">Subagent<br>/ fork</td>
   <td class="item">Subagent transcript + meta</td>
-  <td><span class="path">&lt;uuid&gt;/subagents/agent-&lt;id&gt;.jsonl</span> + <span class="path">.meta.json</span> (sidechain; <code>agentType</code>/<code>worktreePath</code>)</td>
-  <td>Each subagent = its own <b>pid</b> sharing the agent profile (<span class="path">/proc/{pid'}/</span>, session under <span class="path">/agents/{name}/sessions/</span>). <span class="b ok">done (design)</span></td>
-  <td><span class="path">&lt;cwd&gt;/.sudocode-agents/&lt;id&gt;.md</span> + <span class="path">&lt;id&gt;.json</span> — <b>NOT</b> CC's jsonl+.meta.json; no per-subagent jsonl transcript. <span class="b partial">partial — storage differs</span></td>
+  <td class="cc"><span class="path">&lt;uuid&gt;/subagents/agent-&lt;id&gt;.jsonl</span> + <span class="path">.meta.json</span> — full sidechain transcript (<code>agentType</code> / <code>worktreePath</code>).</td>
+  <td><span class="path">&lt;cwd&gt;/.sudocode-agents/agent-&lt;id&gt;.md</span> + <span class="path">.json</span> (+ optional <span class="path">.full.md</span>). Subagent <code>Session</code> is <b>in-memory only</b> — <b>no per-subagent jsonl transcript</b>. <span class="b partial">partial — differs</span></td>
   <td>—<span class="b na"> n/a</span> (relies on engine)</td>
+  <td>Each subagent = its own <b>pid</b> sharing the profile; session under <span class="path">/agents/{name}/sessions/</span>. <span class="b ok">given</span></td>
 </tr>
 <tr>
-  <td class="item">Fork inheritance + spawn path
-    <span class="tip">?<span class="tipbox">Two design directions: (1) CC's fork inherits the FULL parent transcript; scode's fork inherits only the last-assistant cache-prefix — do we want full-transcript parity? (2) scode spawns subagents INTERNALLY today; the end-state likely makes them real nexus-managed pids, i.e. <b>sudocode calls <code>ManagedAgentService::start_session</code></b> to spawn a child (this is the legit "sudocode → nexus service" call the layering allows).</span></span>
+  <td class="item">Fork inheritance + spawn
+    <span class="tip">?<span class="tipbox">scode has <b>two</b> forks: (1) session <code>--fork</code> clones the FULL parent transcript (parity with CC); (2) the <code>Agent</code> tool's <code>subagent_type=fork</code> inherits only the last-assistant <b>cache-prefix</b> (2 messages, byte-identical across parallel forks for prompt-cache sharing). Open: do we also persist a per-subagent jsonl (CC parity), and do subagent forks become real nexus pids via <b>sudocode → <code>ManagedAgentService::start_session</code></b>?</span></span>
   </td>
-  <td>Fork inherits full parent transcript + rendered system-prompt bytes (<code>agentType:'fork'</code>).</td>
-  <td>Subagent = real pid via <b>sudocode → MAS::start_session</b> (spawn child). <span class="b q">open? (direction)</span></td>
-  <td>scode fork inherits <b>last-assistant cache-prefix only</b> (not full); internal spawn, not MAS. <span class="b partial">partial</span></td>
+  <td class="cc">Fork inherits full parent transcript + rendered system-prompt bytes (<code>agentType:'fork'</code>).</td>
+  <td>Session <code>--fork</code> = <b>FULL</b> transcript (<code>messages.clone()</code>). Subagent fork = <b>last-assistant cache-prefix only</b>. Internal spawn (not MAS). <span class="b partial">partial</span></td>
   <td>—<span class="b na"> n/a</span></td>
+  <td>Subagent = real pid via <b>sudocode → MAS::start_session</b>. <span class="b q">open? (direction)</span></td>
 </tr>
 
 <!-- TOOL OUTPUT -->
 <tr>
-  <td class="mega">Oversized<br>tool output</td>
-  <td class="item">Offload + replacement
-    <span class="tip">?<span class="tipbox">CC spills any tool result over ~50k chars to <code>tool-results/&lt;toolUseId&gt;.txt|.json</code> and injects a <code>&lt;persisted-output&gt;</code> replacement + a <code>content-replacement</code> transcript record so resume rebuilds a byte-identical prompt-cache prefix. scode has the schema fields (<code>persistedOutputPath/Size</code>) but always None — 16KB truncate + compact only. Do we adopt CC's disk-offload? Where on VFS — <code>/agents/{name}/sessions/&lt;hash&gt;/tool-results/</code>?</span></span>
+  <td class="mega">Tool<br>output</td>
+  <td class="item">Oversized offload + replacement
+    <span class="tip">?<span class="tipbox">CC spills any tool result over ~50k chars to <code>tool-results/&lt;toolUseId&gt;.txt|.json</code> and injects a <code>&lt;persisted-output&gt;</code> replacement + a <code>content-replacement</code> transcript record, so resume rebuilds a byte-identical prompt-cache prefix. scode has the schema fields (<code>persistedOutputPath/Size</code>) but they are ALWAYS <code>None</code> — it hard-truncates at 16 KiB instead. Adopt CC's disk-offload? Where on VFS?</span></span>
   </td>
-  <td><span class="path">&lt;uuid&gt;/tool-results/&lt;toolUseId&gt;.txt|.json</span> + <code>content-replacement</code> record (byte-identical resume)</td>
+  <td class="cc"><span class="path">&lt;uuid&gt;/tool-results/&lt;toolUseId&gt;.txt|.json</span> + <code>content-replacement</code> record → byte-identical resume.</td>
+  <td>Fields <code>persistedOutputPath/Size</code> exist but always <code>None</code>; 16 KiB hard-truncate, no offload, no replacement record. <span class="b miss">gap</span></td>
+  <td>—<span class="b na"> n/a</span> (tool results inline in <code>messages.content</code> = <span class="b dup">dup</span>)</td>
   <td><span class="b q">open?</span> proposed <span class="path">/agents/{name}/sessions/&lt;hash&gt;/tool-results/</span></td>
-  <td><b>Missing</b> — fields exist, always <code>None</code>; 16KB truncate + compaction only. <span class="b miss">gap</span></td>
-  <td>—<span class="b na"> n/a</span> (relies on engine)</td>
 </tr>
 
-<!-- MEMORY (one row each) -->
+<!-- MEMORY -->
 <tr>
   <td class="mega" rowspan="8">Memory</td>
   <td class="item">Auto-memory (4 types)</td>
-  <td><span class="path">projects/&lt;git-root&gt;/memory/</span> — user/feedback/project/reference + MEMORY.md index (keyed by <b>git root</b>)</td>
-  <td><span class="path">/agents/{name}/memory/</span> (agent-keyed)</td>
-  <td><span class="path">~/.scode/projects/&lt;slug&gt;/memory/</span> + MEMORY.md, 4 types, prompt-driven Write (PR #229/236). <span class="b ok">done</span></td>
-  <td><b>None.</b> <span class="b miss">gap</span></td>
+  <td class="cc"><span class="path">projects/&lt;git-root&gt;/memory/</span> — user/feedback/project/reference + <code>MEMORY.md</code> index (keyed by git root).</td>
+  <td><span class="path">~/.scode/projects/&lt;slug&gt;/memory/</span> + <code>MEMORY.md</code>, 4 types, prompt-driven Write, slug = git root. <span class="b ok">done</span></td>
+  <td><b>None</b> of its own. <span class="b na">n/a (relies on engine)</span></td>
+  <td><span class="path">/agents/{name}/memory/</span> (agent-keyed). <span class="b ok">design</span></td>
 </tr>
 <tr>
   <td class="item">Agent memory (per agent-type)</td>
-  <td><span class="path">agent-memory/&lt;type&gt;/</span> (user) · <span class="path">.claude/agent-memory[-local]/&lt;type&gt;/</span> (project/local) + git-distributable snapshots</td>
-  <td><span class="path">/agents/{name}/memory/</span> is already per-agent; scopes via workspace-mount. <span class="b ok">done (design)</span></td>
-  <td><span class="path">&lt;base&gt;/agent-memory/&lt;agent_type&gt;/</span> wired into per-agent system prompt. <span class="b ok">done</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td class="cc"><span class="path">agent-memory/&lt;type&gt;/</span> (user) · <span class="path">.claude/agent-memory[-local]/&lt;type&gt;/</span> + git-distributable snapshots.</td>
+  <td><span class="path">&lt;base&gt;/agent-memory/&lt;agent_type&gt;/</span>, routed per-subagent (no cross-leak). <span class="b ok">done</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td><span class="path">/agents/{name}/memory/</span> is already per-agent. <span class="b ok">design</span></td>
 </tr>
 <tr>
   <td class="item">extractMemories (turn-end auto-writer)</td>
-  <td>Forked subagent at <code>handleStopHooks</code> writes durable memories; cursor + mutual-exclusion with main agent.</td>
+  <td class="cc">Forked subagent at <code>handleStopHooks</code> writes durable memories; cursor + mutual-exclusion with main agent.</td>
+  <td><b>Missing</b> — memory is prompt-driven only, no auto-fork writer at turn end. <span class="b miss">gap</span></td>
+  <td>None. <span class="b na">n/a</span></td>
   <td><span class="path">/proc/{pid}/</span> fork writing to <span class="path">/agents/{name}/memory/</span>. <span class="b q">open?</span></td>
-  <td><b>Missing</b> — memory is prompt-driven only, no auto-fork writer. <span class="b miss">gap</span></td>
-  <td>None. <span class="b miss">gap</span></td>
 </tr>
 <tr>
   <td class="item">Session memory (running summary)</td>
-  <td><code>getSessionMemoryDir()</code> markdown notes for <i>this</i> convo → feeds compaction; <code>/summary</code>.</td>
-  <td><span class="path">/proc/{pid}/</span> or session sidecar under <span class="path">/agents/{name}/sessions/&lt;hash&gt;/</span>. <span class="b q">open?</span></td>
-  <td><b>Missing</b> (roadmap "gap — needs forked-agent infra"). <span class="b miss">gap</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td class="cc"><code>getSessionMemoryDir()</code> markdown notes for <i>this</i> convo → feeds compaction; <code>/summary</code>.</td>
+  <td><b>Missing</b> (needs forked-agent infra). <span class="b miss">gap</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td><span class="path">/proc/{pid}/</span> or session sidecar under <span class="path">sessions/&lt;hash&gt;/</span>. <span class="b q">open?</span></td>
 </tr>
 <tr>
   <td class="item">Team memory (org-shared)</td>
-  <td><span class="path">&lt;mem&gt;/team/</span> + server <code>/api/…/team_memory</code>; keyed by GitHub repo slug; server-authoritative, ETag, secret-scan.</td>
-  <td><span class="path">/agents/{name}/memory/team/</span> replicated via <b>zone raft / federation</b> (native — no API needed). <span class="b q">open?</span></td>
-  <td><b>Missing</b> (roadmap "gap — enterprise"). <span class="b miss">gap</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td class="cc"><span class="path">&lt;mem&gt;/team/</span> + server <code>/api/…/team_memory</code>; repo-slug keyed; server-authoritative, ETag, secret-scan.</td>
+  <td><b>Missing</b> (enterprise). <span class="b miss">gap</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td><span class="path">/agents/{name}/memory/team/</span> via <b>zone raft / federation</b> (native — no API). <span class="b q">open?</span></td>
 </tr>
 <tr>
   <td class="item">Auto-dream (consolidation)</td>
-  <td>Nightly forked <code>/dream</code> rewrites memory topic files + MEMORY.md; gates ≥24h &amp; ≥5 sessions; <code>.consolidate-lock</code>.</td>
-  <td>Background <span class="path">/proc/{pid}/</span> job over <span class="path">/agents/{name}/sessions/</span> → <span class="path">memory/</span>. <span class="b q">open?</span></td>
+  <td class="cc">Nightly forked <code>/dream</code> rewrites memory topic files + <code>MEMORY.md</code>; gates ≥24h &amp; ≥5 sessions; <code>.consolidate-lock</code>.</td>
   <td><b>Missing.</b> <span class="b miss">gap</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td>Background <span class="path">/proc/{pid}/</span> job over <span class="path">sessions/</span> → <span class="path">memory/</span>. <span class="b q">open?</span></td>
 </tr>
 <tr>
   <td class="item">Daily logs (KAIROS)</td>
-  <td><span class="path">&lt;mem&gt;/logs/YYYY/MM/YYYY-MM-DD.md</span> append-only; nightly <code>/dream</code> distills.</td>
-  <td><span class="path">/agents/{name}/memory/logs/YYYY/MM/…</span> (append-only DT_FILE or DT_STREAM). <span class="b q">open?</span></td>
+  <td class="cc"><span class="path">&lt;mem&gt;/logs/YYYY/MM/YYYY-MM-DD.md</span> append-only; nightly <code>/dream</code> distills.</td>
   <td><b>Missing.</b> <span class="b miss">gap</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td><span class="path">/agents/{name}/memory/logs/YYYY/MM/…</span> (append-only DT_FILE/DT_STREAM). <span class="b q">open?</span></td>
 </tr>
 <tr>
   <td class="item">Manual layer (/remember, CLAUDE.md)</td>
-  <td><code>CLAUDE.md</code>/<code>CLAUDE.local.md</code> static; <code>/remember</code> reviews+promotes across layers.</td>
-  <td>Repo-mounted files under <span class="path">/proc/{pid}/workspace/{repo}/</span>. <span class="b ok">design</span></td>
-  <td><code>AGENTS.md</code> scan (repo cwd). <code>/remember</code>? <span class="b partial">partial</span></td>
-  <td>None. <span class="b miss">gap</span></td>
+  <td class="cc"><code>CLAUDE.md</code> / <code>CLAUDE.local.md</code> static; <code>/remember</code> reviews + promotes across layers.</td>
+  <td><code>AGENTS.md</code> scan (repo cwd); <code>/remember</code>? <span class="b partial">partial</span></td>
+  <td>None. <span class="b na">n/a</span></td>
+  <td>Repo-mounted under <span class="path">/proc/{pid}/workspace/{repo}/</span>. <span class="b ok">design</span></td>
 </tr>
 
-<!-- RESUME / POINTER -->
+<!-- RESUME -->
 <tr>
-  <td class="mega">Resume /<br>live pointer</td>
-  <td class="item">Persistent-assistant pointer
-    <span class="tip">?<span class="tipbox">CC's Kairos <code>bridge-pointer.json {sessionId,environmentId,source}</code> answers "which session is the live persistent assistant" for crash-recovery, with an mtime-TTL heartbeat (4h) and a cross-worktree "pick the freshest" scan. Nexus's AgentRegistry (pid FSM) is the SSOT for "which pid is live". Do we adopt CC's mtime-heartbeat + cross-worktree-freshest for the STANDALONE/offline scode case (no nexus)? A zero-infra file pointer is nice offline.</span></span>
+  <td class="mega">Resume</td>
+  <td class="item">Live / persistent-assistant pointer
+    <span class="tip">?<span class="tipbox">CC's Kairos <code>bridge-pointer.json {sessionId,environmentId,source}</code> answers "which session is the live persistent assistant" with an mtime-TTL heartbeat (4h) + cross-worktree "pick freshest" scan. Nexus's <code>AgentRegistry</code> (pid FSM) is the SSOT for "which pid is live". Do we adopt CC's file-pointer for the STANDALONE/offline scode case (no nexus)? scode currently has NO stored pointer — it recomputes "latest" by scanning + mtime.</span></span>
   </td>
-  <td><span class="path">&lt;cwd&gt;/bridge-pointer.json</span> — <code>{sessionId,environmentId,source}</code>, mtime TTL 4h heartbeat, cross-worktree freshest.</td>
-  <td><b>AgentRegistry</b> (pid FSM, kernel SSOT) = "which pid is live"; <span class="path">/proc/{pid}/</span> is the live session. <span class="b ok">done (design)</span></td>
-  <td><code>--resume &lt;id&gt;</code> / <code>latest</code> (SessionStore.latest_session). Standalone file-pointer? <span class="b q">open?</span> <span class="b partial">partial</span></td>
-  <td><code>extra.acpSessionId</code> = sudowork's resume pointer (its bridge-pointer analogue). <span class="b dup">dup</span></td>
+  <td class="cc"><span class="path">&lt;cwd&gt;/bridge-pointer.json</span> — <code>{sessionId,environmentId,source}</code>, mtime TTL 4h, cross-worktree freshest.</td>
+  <td><code>--resume &lt;id|latest|last|recent&gt;</code>; "latest" recomputed by scanning + mtime — <b>no stored file pointer</b>. <span class="b partial">partial</span></td>
+  <td><code>extra.acpSessionId</code> (acp) / <code>extra.mossSessionId</code> (remote) = the resume pointer. <span class="b dup">dup</span></td>
+  <td><b>AgentRegistry</b> (pid FSM, kernel SSOT) = "which pid is live"; <span class="path">/proc/{pid}/</span> is the live session. <span class="b ok">given</span></td>
 </tr>
 
 <!-- A2A -->
 <tr>
-  <td class="mega">A2A /<br>mailbox</td>
+  <td class="mega">A2A</td>
   <td class="item">Agent-to-agent messaging</td>
-  <td><span class="b na">n/a</span> (single machine, no native A2A)</td>
-  <td><b>chat-with-me DT_STREAM</b> + kernel-tier <code>a2a</code> substrate (MailboxStampingHook = unforgeable <code>from</code>) + raft cross-node wake. Substrate <span class="b ok">done</span>; agent-binding pending.</td>
-  <td><span class="path">/proc/{pid}/chat-with-me</span> (nexus-managed, spawn_task) + <span class="path">&lt;ws&gt;/.sudocode-inbox/&lt;recipient&gt;.jsonl</span> (standalone). <span class="b ok">done</span></td>
-  <td>IM channels (Telegram/Lark/DingTalk) — separate surface. <span class="b na">n/a</span></td>
+  <td class="cc"><span class="b na">n/a</span> (single machine, no native A2A)</td>
+  <td><span class="path">&lt;ws&gt;/.sudocode-inbox/&lt;recipient&gt;.jsonl</span> (append-only, <code>MailboxEnvelope</code>) — standalone. <span class="b ok">done</span></td>
+  <td>IM channels (Telegram / Lark / DingTalk) — separate surface. <span class="b na">n/a</span></td>
+  <td><b>chat-with-me DT_STREAM</b> + kernel-tier <code>a2a</code> crate: <code>MailboxStampingHook</code> stamps unforgeable <code>from</code>, armed at boot, universal for all writers; raft cross-node (§3.3). <span class="b ok">substrate done</span></td>
 </tr>
 
-<!-- WORKSPACE (finalize after DT_LINK dive) -->
+<!-- WORKSPACE -->
 <tr>
   <td class="mega">Workspace</td>
   <td class="item">Workspace &amp; multi-path
-    <span class="tip">?<span class="tipbox">DT_LINK follow = full syscall re-entry on the target, so a link to a <b>federation-mounted</b> path resolves cross-node for FREE (inherits DT_FILE <code>try_remote_fetch</code> via <code>last_writer_address</code>). So workspace/ linking repos across a distributed VFS works today for mounted targets; default-mount the launch path (project root) as workspace[0] is trivially local. Only a target on a node with NO local mount/zone needs genuinely-new owner-discovery (none of DT_STREAM/PIPE/FILE provide "who owns X") — see Q6.</span></span>
+    <span class="tip">?<span class="tipbox">DT_LINK follow = full syscall re-entry on the target, so a link to a <b>federation-mounted</b> path resolves cross-node for free (inherits DT_FILE <code>try_remote_fetch</code> via <code>last_writer_address</code>). So <code>workspace/</code> linking repos across a distributed VFS works today for mounted targets; default-mount the launch path (project root) as <code>workspace[0]</code> is trivially local. Only a target on a node with NO local mount/zone needs genuinely-new owner-discovery ("who owns X", which no primitive provides) — see Q6.</span></span>
   </td>
-  <td>cwd IS the (single) workspace.</td>
-  <td><span class="path">/proc/{pid}/workspace/</span> (DT_DIR) + <span class="path">workspace/{alias}</span> → DT_LINK → mount_path. <b>Multi-repo cross-node works today</b> for federation-mounted targets (syscall re-entry). Default mount launch-path (≈ project root) as first. <span class="b ok">done (design)</span></td>
+  <td class="cc">cwd IS the (single) workspace.</td>
   <td>cwd = workspace (single); <code>workspace_fingerprint</code>. <span class="b partial">partial</span></td>
   <td><code>extra.workspace</code> / <code>customWorkspace</code> / <code>mossWorkDir</code>. <span class="b dup">dup</span></td>
+  <td><span class="path">/proc/{pid}/workspace/</span> (DT_DIR) + <span class="path">workspace/{alias}</span> → DT_LINK → mount_path. Multi-repo cross-node works today for federation-mounted targets. <span class="b ok">given</span></td>
 </tr>
 
 <!-- CROSS-MACHINE -->
 <tr>
   <td class="mega">Cross-<br>machine</td>
   <td class="item">Sync</td>
-  <td><span class="b na">n/a</span> (single machine)</td>
-  <td><b>Native</b> — distributed VFS: zone raft replication + federation mounts + LocalConnector (write) + FUSE (unified read) over Tailscale (Mac↔Win verified byte-exact). <span class="b ok">done</span></td>
-  <td>Inherits nexus VFS when embedded; standalone = local FS only. <span class="b partial">partial</span></td>
+  <td class="cc"><span class="b na">n/a</span> (single machine)</td>
+  <td>Inherits nexus VFS when embedded (<code>KernelFsBackend</code>); standalone = local FS only. <span class="b partial">partial</span></td>
   <td>—<span class="b na"> n/a</span></td>
-</tr>
-
-<!-- DEPENDENCY DIRECTION -->
-<tr>
-  <td class="mega">Dependency<br>direction</td>
-  <td class="item">Who calls whom</td>
-  <td><span class="b na">n/a</span></td>
-  <td colspan="1"><b>sudocode → nexus</b> for VFS syscalls (<code>KernelAbi</code> sys_*) and for services (A2A write; spawn-child via <code>MAS::start_session</code>). <b>nexus → sudocode</b> only via the <code>SpawnTask&lt;K&gt;</code> DI trait (sudocode-host registers the adapter at boot — no compile-edge reversal). <b>Self lifecycle state</b>: sudocode reports up via a <code>state_callback</code>; MAS (owns AgentRegistry) writes it — the kernel owns its task table (FSM enforced), like a process not editing its own task_struct. <span class="b ok">clean</span></td>
-  <td colspan="2"><small>Confirmed on origin/main v0.1.15: no <code>AgentRegistry</code>/<code>ManagedAgentService</code> type refs in sudocode; only <code>KernelAbi</code> + <code>AgentDescriptor</code>. CLI still runs StdFsBackend (seam dormant).</small></td>
+  <td><b>Native</b> — distributed VFS: zone raft + federation mounts + FUSE over Tailscale (Mac↔Win byte-exact). <span class="b ok">done</span></td>
 </tr>
 
 <!-- MIGRATION -->
 <tr>
   <td class="mega">Migration</td>
   <td class="item">Path to end-state</td>
-  <td><span class="b na">n/a</span></td>
-  <td><b>Nexus end-state</b> = the superset all others migrate toward.</td>
-  <td>flat <span class="path">.scode/sessions/</span> (StdFsBackend) → <span class="path">/agents/{name}/sessions/&lt;hash&gt;/</span> (KernelFsBackend). Seam scaffolded, dormant → wire it. <span class="b q">open? (priority)</span></td>
+  <td class="cc"><span class="b ref">reference</span> — the model, not a migrator.</td>
+  <td>flat <span class="path">.scode/sessions/</span> (StdFsBackend) → <span class="path">/agents/{name}/sessions/&lt;hash&gt;/</span> (KernelFsBackend). Seam exists but <b>dormant</b> (CLI defaults StdFs; <code>KernelFsBackend</code> instantiated unused) → wire it. <span class="b q">open? (priority)</span></td>
   <td><code>messages</code> table → view over engine JSONL keyed by <code>acpSessionId</code>; keep only UI-unique fields (position/status/pin/cron/channel/user_id). <span class="b dup">dup → merge</span></td>
+  <td><b>The superset</b> all others migrate toward.</td>
 </tr>
 
 </tbody>
 </table>
 
-<h2>Open questions (for consensus)</h2>
-<div class="qbox"><span class="qn">Q1</span> Adopt <b>agent-name as primary key</b> (Nexus superset) as canonical — a real shift from CC/scode's cwd-primary? <small>(§ Identity)</small></div>
-<div class="qbox"><span class="qn">Q2</span> <b>Memory tiers</b>: agent-memory (<code>/agents/{name}/memory/</code>) + project-memory. Given workspace can DT_LINK multiple repos, where does <b>project-memory</b> live — at the workspace's primary mount root (≈ launch path)? Which of the 6 missing memory rows do we build, and in what order?</div>
-<div class="qbox"><span class="qn">Q3</span> <b>Cross-agent session search</b> via DT_LINK <code>/agents/{name}/sessions/</code> → shared <code>/agents/sessions/</code>? <small>(depends on Q6)</small></div>
-<div class="qbox"><span class="qn">Q4</span> <b>Oversized tool-output offload</b> (CC's tool-results/ + content-replacement) into scode — adopt? Path under <code>/agents/{name}/sessions/&lt;hash&gt;/tool-results/</code>?</div>
-<div class="qbox"><span class="qn">Q5</span> <b>Subagent</b>: full-transcript fork parity (vs cache-prefix)? Move subagents to nexus-managed pids (sudocode → <code>MAS::start_session</code>)? Storage → <code>agent-&lt;id&gt;.jsonl</code>+<code>.meta.json</code> parity?</div>
-<div class="qbox"><span class="qn">Q6</span> <b>Workspace &amp; DT_LINK</b> — confirm default-mount of the launch path (≈ project root) as <code>workspace[0]</code> + multi-repo via <code>workspace/{alias}</code>→DT_LINK→mount_path. Cross-node resolved: a link to a <b>federation-mounted</b> target already resolves cross-node <b>today, zero change</b> (the follow is a syscall re-entry that inherits DT_FILE's <code>try_remote_fetch</code>/<code>last_writer_address</code>; DT_STREAM/PIPE similarly "just work" as replicate-everywhere). The <i>only</i> new work is a link to a target on a node with <b>no local mount/zone</b> → needs genuinely-new <b>owner-discovery</b> ("who owns path X"), which no primitive provides (read-miss path contractually refuses peer fan-out). <b>Decision:</b> constrain workspace/link targets to federation-mounted paths (ship now, zero change), or invest in owner-discovery for arbitrary remote targets (separate design)?</div>
-<div class="qbox"><span class="qn">Q7</span> <b>Persistent-assistant pointer</b>: adopt CC's mtime-heartbeat + cross-worktree-freshest for the standalone/offline scode case (AgentRegistry is SSOT when nexus present)?</div>
-<div class="qbox"><span class="qn">Q8</span> <b>Doc drift</b>: nexus-integration §3.3 says the mailbox stamp hook is "owned by ManagedAgentService" — code moved it to the kernel-tier <code>a2a</code> substrate (armed at boot, for all writers incl. matrix humans). Update §3.3.</div>
-<div class="qbox"><span class="qn">Q9</span> <b>Migration &amp; dedup sequencing</b> — priority/order of: (a) wire scode's dormant nexus <code>KernelFsBackend</code> seam (flat <code>.scode/sessions/</code> → <code>/agents/{name}/</code> layered); (b) collapse sudowork <code>messages</code> → a view over the engine JSONL keyed by <code>acpSessionId</code> (keep only UI-unique fields); (c) build the missing memory features. Which first?</div>
+<div class="callout">
+<b>Dependency direction</b> (not a storage row — the rule that keeps the above honest).
+<b>sudocode → nexus</b> for VFS syscalls (<code>KernelAbi</code> <code>sys_read/write/watch</code>) and for services (A2A write; spawn-child via <code>MAS::start_session</code>).
+<b>nexus → sudocode</b> only through the <code>SpawnTask&lt;K&gt;</code> DI trait — <code>sudocode-host</code> registers a concrete adapter at boot; one vtable dispatch per session start, no compile-edge reversal.
+<b>Self lifecycle state</b>: sudocode reports up via a <code>state_callback</code> closure; <code>ManagedAgentService</code> (which owns <code>AgentRegistry</code>) writes the FSM transition — the kernel owns its task table, like a process not editing its own <code>task_struct</code>.
+<small>Confirmed on sudocode origin/main v0.1.15: no <code>AgentRegistry</code> / <code>ManagedAgentService</code> type refs in sudocode; only <code>KernelAbi</code> + <code>AgentDescriptor</code>. CLI still runs <code>StdFsBackend</code> (seam dormant).</small>
+</div>
 
-<p class="note"><b>Repo SSOT:</b> <code>sudoprivacy/sudocode : docs/design/agent-context-storage-matrix.html</code> — this ShareOne view is remote-url-backed by that file, so comment here and the repo file is updated. Once consensus lands, this table gets tracked into <code>nexus-integration-architecture</code>.</p>
-<p class="note">Sources: Claude Code src/ (session/memory/bridge), sudocode origin/main v0.1.15 (runtime/tools), nexus-integration-architecture.html, nexus-vfs a2a/kernel, hydra (copilot/worker/planner roles). Draft 2026-07 — sudowork-win-pc-4.</p>
+<h2>Open questions (for consensus)</h2>
+<div class="qbox"><span class="qn">Q1</span> <b>workspace_hash semantics — confirm.</b> agent-name is primary; <code>workspace_hash</code> is a per-repo session sub-partition under the profile (§2.4), <i>not</i> a cwd-primary key. Confirm this is the intended model (and that cross-agent search, Q3, is the only thing layered on top). <small>(This replaces the earlier mistaken "remove workspace_hash" — the design is correct.)</small></div>
+<div class="qbox"><span class="qn">Q2</span> <b>Memory build-out.</b> Which of the 5 missing memory features (extractMemories · session-memory · team-memory · auto-dream · daily-logs) does scode build, and in what order? And where does <b>project-memory</b> live when a workspace DT_LINKs several repos — at the primary mount root (≈ launch path)?</div>
+<div class="qbox"><span class="qn">Q3</span> <b>Cross-agent session search</b> via DT_LINK <code>/agents/{name}/sessions/</code> → shared <code>/agents/sessions/</code> index? <small>(depends on Q6)</small></div>
+<div class="qbox"><span class="qn">Q4</span> <b>Oversized tool-output offload</b> (CC's <code>tool-results/</code> + <code>content-replacement</code>) into scode — adopt? Path under <code>/agents/{name}/sessions/&lt;hash&gt;/tool-results/</code>?</div>
+<div class="qbox"><span class="qn">Q5</span> <b>Subagent parity.</b> (a) Persist a per-subagent jsonl transcript (CC's <code>agent-&lt;id&gt;.jsonl</code>+<code>.meta.json</code>) vs today's md/json artifacts? (b) Keep subagent-fork at cache-prefix, or make it full-transcript like session <code>--fork</code>? (c) Move subagents to nexus-managed pids (sudocode → <code>MAS::start_session</code>)?</div>
+<div class="qbox"><span class="qn">Q6</span> <b>Workspace &amp; DT_LINK.</b> Confirm default-mount of the launch path as <code>workspace[0]</code> + multi-repo via <code>workspace/{alias}</code>→DT_LINK→mount_path. Cross-node is already free for <b>federation-mounted</b> targets (syscall re-entry inherits DT_FILE <code>try_remote_fetch</code>). Decision: constrain link targets to federation-mounted paths (ship now, zero change), or invest in <b>owner-discovery</b> for arbitrary remote targets (separate design)?</div>
+<div class="qbox"><span class="qn">Q7</span> <b>Standalone resume pointer.</b> Adopt CC's <code>bridge-pointer.json</code> (mtime-heartbeat + cross-worktree-freshest) for the offline scode case? (<code>AgentRegistry</code> is SSOT when nexus is present; standalone has no stored pointer today.)</div>
+<div class="qbox"><span class="qn">Q8</span> <b>Migration sequencing.</b> Order of: (a) wire scode's dormant <code>KernelFsBackend</code> seam (flat <code>.scode/sessions/</code> → layered <code>/agents/{name}/</code>); (b) collapse sudowork <code>messages</code> → a view over the engine JSONL keyed by <code>acpSessionId</code>; (c) build the missing memory features. Which first?</div>
+
+<p class="note"><b>Repo SSOT:</b> <code>sudoprivacy/sudocode : docs/design/agent-context-storage-matrix.html</code> — this ShareOne view is remote-url-backed by that file, so comment here and the repo file is the source of record. Once consensus lands, this table gets tracked into <code>nexus-integration-architecture</code>.</p>
+<p class="note">Sources: Claude Code src/ (session/memory/bridge); sudocode origin/main v0.1.15 code-verified (session_control.rs / session.rs / tools / bash.rs / memory / agent_mailbox.rs); sudowork (database/schema.ts / storage.ts / AcpAgent.ts); <code>nexus-integration-architecture</code> §2–3. §3.3 verified current (a2a stamp hook in kernel <code>a2a</code> crate, armed at boot — no drift). Draft 2026-07 — sudowork-win-pc-4.</p>
 
 </div>
 </body>

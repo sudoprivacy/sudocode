@@ -267,6 +267,12 @@ pub(crate) enum CliAction {
         session_path: PathBuf,
         commands: Vec<String>,
         output_format: CliOutputFormat,
+        model: String,
+        permission_mode: PermissionMode,
+        auth_mode: Option<AuthMode>,
+    },
+    ListSessions {
+        output_format: CliOutputFormat,
     },
     Status {
         model: String,
@@ -469,7 +475,14 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
 
     // --resume takes priority over subcommands
     if let Some(resume_value) = cli.resume {
-        return parse_resume_from_clap(&resume_value, &cli.prompt_words, output_format);
+        return parse_resume_from_clap(
+            &resume_value,
+            &cli.prompt_words,
+            output_format,
+            model.clone(),
+            permission_mode,
+            auth_mode,
+        );
     }
 
     // Subcommand dispatch
@@ -704,27 +717,43 @@ fn parse_resume_from_clap(
     session_str: &str,
     trailing: &[String],
     output_format: CliOutputFormat,
+    model: String,
+    permission_mode: PermissionMode,
+    auth_mode: Option<AuthMode>,
 ) -> Result<CliAction, String> {
-    let (session_path, command_tokens) = if session_str.is_empty() {
-        // `--resume` without value
+    let (session_path, command_tokens) = if session_str.is_empty() && trailing.is_empty() {
+        // `--resume` without value and no trailing commands — list sessions.
+        return Ok(CliAction::ListSessions { output_format });
+    } else if session_str.is_empty() {
+        // `--resume /status` etc — resume latest with commands
         (PathBuf::from(LATEST_SESSION_REFERENCE), trailing)
     } else if looks_like_slash_command_token(session_str) {
         // `--resume /status` — session_str is actually a command
         let all: Vec<String> = std::iter::once(session_str.to_string())
             .chain(trailing.iter().cloned())
             .collect();
-        return parse_resume_commands(PathBuf::from(LATEST_SESSION_REFERENCE), &all, output_format);
+        return parse_resume_commands(
+            PathBuf::from(LATEST_SESSION_REFERENCE),
+            &all,
+            output_format,
+            model,
+            permission_mode,
+            auth_mode,
+        );
     } else {
         (PathBuf::from(session_str), trailing)
     };
 
-    parse_resume_commands(session_path, command_tokens, output_format)
+    parse_resume_commands(session_path, command_tokens, output_format, model, permission_mode, auth_mode)
 }
 
 fn parse_resume_commands(
     session_path: PathBuf,
     command_tokens: &[String],
     output_format: CliOutputFormat,
+    model: String,
+    permission_mode: PermissionMode,
+    auth_mode: Option<AuthMode>,
 ) -> Result<CliAction, String> {
     let mut commands = Vec::new();
     let mut current_command = String::new();
@@ -759,6 +788,9 @@ fn parse_resume_commands(
         session_path,
         commands,
         output_format,
+        model,
+        permission_mode,
+        auth_mode,
     })
 }
 

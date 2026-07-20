@@ -65,7 +65,8 @@ use cli::format::{
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_timeline, format_turn_status_line_with_branch,
+    format_sandbox_report, format_tool_call_start, format_tool_result, format_tool_timeline, render_messages,
+    format_turn_status_line_with_branch,
     format_ultraplan_report, render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
@@ -462,7 +463,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session_path,
             commands,
             output_format,
-        } => resume_session(&session_path, &commands, output_format),
+            model,
+            permission_mode,
+            auth_mode,
+        } => resume_session(&session_path, &commands, output_format, model, permission_mode, auth_mode),
+        CliAction::ListSessions { output_format } => {
+            list_sessions_cli(output_format)?;
+        }
         CliAction::Status {
             model,
             model_flag_raw,
@@ -863,8 +870,71 @@ fn print_system_prompt(
     Ok(())
 }
 
+/// `--resume` without arguments: list available sessions so the user can
+/// pick one to resume.  Prints id, age, message count, and branch — enough
+/// context to identify the right session.
+fn list_sessions_cli(
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use cli::session::list_managed_sessions;
+
+    let sessions = list_managed_sessions()?;
+    if sessions.is_empty() {
+        if output_format == CliOutputFormat::Json {
+            println!("{}", serde_json::json!({ "sessions": [] }));
+        } else {
+            println!("No saved sessions found.");
+            println!("Start a session first, then use `scode --resume latest` or `scode --resume <id>`.");
+        }
+        return Ok(());
+    }
+
+    if output_format == CliOutputFormat::Json {
+        let entries: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "messages": s.message_count,
+                    "modified_ms": s.modified_epoch_millis as u64,
+                    "branch": s.branch_name,
+                    "path": s.path.display().to_string(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "sessions": entries }));
+        return Ok(());
+    }
+
+    println!("Available sessions (use `scode --resume <id>`):\n");
+    for (i, session) in sessions.iter().enumerate() {
+        let age = cli::session::format_session_modified_age(session.modified_epoch_millis);
+        let branch = session
+            .branch_name
+            .as_deref()
+            .map(|b| format!("  branch={b}"))
+            .unwrap_or_default();
+        let latest = if i == 0 { "  (latest)" } else { "" };
+        println!(
+            "  {id}  {msgs} msgs  {age}{branch}{latest}",
+            id = session.id,
+            msgs = session.message_count,
+        );
+    }
+    println!();
+    println!("Tip: `scode --resume latest` resumes the most recent session.");
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
-fn resume_session(session_path: &Path, commands: &[String], output_format: CliOutputFormat) {
+fn resume_session(
+    session_path: &Path,
+    commands: &[String],
+    output_format: CliOutputFormat,
+    model: String,
+    permission_mode: PermissionMode,
+    auth_mode: Option<AuthMode>,
+) {
     let session_reference = session_path.display().to_string();
     let (handle, session) = match load_session_reference(&session_reference) {
         Ok(loaded) => loaded,
@@ -902,12 +972,37 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                     "message_count": session.messages.len(),
                 })
             );
-        } else {
-            println!(
-                "Restored session from {} ({} messages).",
-                handle.path.display(),
-                session.messages.len()
-            );
+            return;
+        }
+        // No commands — enter the interactive REPL with the restored session.
+        let resolved_model = resolve_repl_model(model);
+        let mut cli = match LiveCli::new(
+            resolved_model,
+            true,
+            None,
+            permission_mode,
+            auth_mode,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("failed to initialize: {e}");
+                std::process::exit(1);
+            }
+        };
+        // Load the restored session into the running CLI.
+        let session_ref = resolved_path.display().to_string();
+        if let Err(e) = cli.resume_session(Some(session_ref)) {
+            eprintln!("failed to resume: {e}");
+            std::process::exit(1);
+        }
+        // Enter the REPL loop (it renders banner + any existing messages).
+        let mode = input_queue::QueueMode::from_env();
+        if !matches!(mode, input_queue::QueueMode::Off) {
+            if let Err(e) = run_repl_async_dispatch(cli, mode) {
+                eprintln!("\x1b[31m{e}\x1b[0m");
+            }
+        } else if let Err(e) = run_repl_loop(cli) {
+            eprintln!("\x1b[31m{e}\x1b[0m");
         }
         return;
     }
@@ -1477,9 +1572,30 @@ fn run_repl(
         return run_repl_async_dispatch(cli, mode);
     }
 
+    run_repl_loop(cli)
+}
+
+/// The synchronous REPL loop. Handles both new sessions and resumed
+/// sessions identically: banner → existing messages (if any) → prompt.
+fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
+
+    // Render any existing messages from the session. For a new session
+    // this is empty (zero cost). For a resumed session this replays
+    // the conversation using the same format pipeline as live output.
+    let messages = &cli.runtime.session().messages;
+    if !messages.is_empty() {
+        let term_width = crossterm::terminal::size()
+            .map(|(cols, _)| cols as usize)
+            .unwrap_or(80);
+        let renderer = render::TerminalRenderer::new();
+        let rendered = render_messages(messages, term_width, &renderer);
+        if !rendered.is_empty() {
+            println!("{rendered}");
+        }
+    }
 
     // Track session metrics for session_ended event
     let session_start = Instant::now();
@@ -3941,6 +4057,23 @@ impl LiveCli {
             )
         );
         Ok(true)
+    }
+
+    /// Replace the current session with a pre-loaded one (for `--resume`).
+    fn replace_with_session(
+        &mut self,
+        session: runtime::Session,
+        handle: SessionHandle,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let session_id = session.session_id.clone();
+        let runtime =
+            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
+        self.replace_runtime(runtime)?;
+        self.session = SessionHandle {
+            id: session_id,
+            path: handle.path,
+        };
+        Ok(())
     }
 
     fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {

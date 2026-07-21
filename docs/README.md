@@ -8,6 +8,8 @@ the content.
 
 - [`usage.md`](./usage.md) — REPL, one-shot prompts, JSON output,
   session resume, `scode doctor`.
+- [`linux-deb-install.md`](./linux-deb-install.md) — install, configure,
+  validate, upgrade, and uninstall the Ubuntu/Debian package.
 - [`authentication.md`](./authentication.md) — subscription / proxy /
   api-key modes, environment variables, endpoints.
 - [`permissions-and-sandbox.md`](./permissions-and-sandbox.md) —

@@ -144,7 +144,7 @@ jobs:
           "$binary" --version
           ldd_output="$(ldd "$binary" 2>&1 || true)"
           echo "$ldd_output"
-          if ! grep -q "not a dynamic executable" <<< "$ldd_output"; then
+          if ! grep -Eq "not a dynamic executable|statically linked" <<< "$ldd_output"; then
             echo "Expected musl build to be a static binary" >&2
             exit 1
           fi

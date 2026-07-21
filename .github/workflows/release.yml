@@ -14,7 +14,6 @@ on:
         options:
           - all
           - linux-x64
-          - linux-x64-musl
 
 permissions:
   contents: write
@@ -30,83 +29,6 @@ jobs:
   build-linux-x64:
     name: build-linux-x64
     if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-x64'
-    runs-on: ubuntu-24.04
-    container:
-      image: ubuntu:20.04
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Install build dependencies
-        shell: bash
-        working-directory: /
-        run: |
-          set -euo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bash \
-            binutils \
-            build-essential \
-            ca-certificates \
-            curl \
-            git \
-            gzip \
-            pkg-config \
-            tar \
-            xz-utils
-
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
-
-      - name: Build release binary
-        run: cargo build --locked --release -p rusty-sudocode-cli --bin scode
-
-      - name: Verify Ubuntu 20.04 glibc compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
-          ldd --version
-          ./target/release/scode --version
-          max_glibc="$(objdump -T target/release/scode | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -n 1)"
-          if [[ -z "$max_glibc" ]]; then
-            echo "Unable to determine GLIBC symbol requirements" >&2
-            exit 1
-          fi
-          echo "Max GLIBC symbol required: $max_glibc"
-          if [[ "$(printf '%s\n%s\n' '2.31' "$max_glibc" | sort -V | tail -n 1)" != "2.31" ]]; then
-            echo "Binary requires GLIBC_$max_glibc, which is newer than Ubuntu 20.04's GLIBC_2.31" >&2
-            exit 1
-          fi
-
-      - name: Stage release payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "dist/scode-linux-x64"
-          cp "target/release/scode" "dist/scode-linux-x64/scode"
-          cp "../README.md" "dist/scode-linux-x64/README.md"
-          chmod +x "dist/scode-linux-x64/scode"
-
-      - name: Archive release payload (tar.gz)
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -C dist -czf "dist/scode-linux-x64.tar.gz" "scode-linux-x64"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: scode-linux-x64
-          path: rust/dist/scode-linux-x64.tar.gz
-
-  build-linux-x64-musl:
-    name: build-linux-x64-musl
-    if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-x64-musl'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -157,22 +79,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "dist/scode-linux-x64-musl"
-          cp "target/x86_64-unknown-linux-musl/release/scode" "dist/scode-linux-x64-musl/scode"
-          cp "../README.md" "dist/scode-linux-x64-musl/README.md"
-          chmod +x "dist/scode-linux-x64-musl/scode"
+          mkdir -p "dist/scode-linux-x64"
+          cp "target/x86_64-unknown-linux-musl/release/scode" "dist/scode-linux-x64/scode"
+          cp "../README.md" "dist/scode-linux-x64/README.md"
+          chmod +x "dist/scode-linux-x64/scode"
 
       - name: Archive release payload (tar.gz)
         shell: bash
         run: |
           set -euo pipefail
-          tar -C dist -czf "dist/scode-linux-x64-musl.tar.gz" "scode-linux-x64-musl"
+          tar -C dist -czf "dist/scode-linux-x64.tar.gz" "scode-linux-x64"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: scode-linux-x64-musl
-          path: rust/dist/scode-linux-x64-musl.tar.gz
+          name: scode-linux-x64
+          path: rust/dist/scode-linux-x64.tar.gz
 
   build:
     name: build-${{ matrix.name }}
@@ -260,7 +182,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
       - build-linux-x64
-      - build-linux-x64-musl
       - build
     runs-on: ubuntu-latest
     steps:

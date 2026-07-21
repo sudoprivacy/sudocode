@@ -19,10 +19,7 @@ fn resume_no_args_lists_sessions() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     // Create a session by entering then exiting the REPL.
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("EDITOR", "true")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(10));
     sess.expect("❯").expect("REPL prompt");
     sess.send("/exit\r").expect("send exit");
@@ -59,10 +56,7 @@ fn resume_latest_renders_messages_after_banner() {
 
     // First: run a session with a turn so it has messages.
     let prompt = env.prompt("say hello world", "single_turn_text");
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "read-only"],
-        &[("EDITOR", "true")],
-    );
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(15));
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
@@ -105,4 +99,3 @@ fn resume_latest_renders_messages_after_banner() {
     });
     assert_eq!(exit, 0);
 }
-

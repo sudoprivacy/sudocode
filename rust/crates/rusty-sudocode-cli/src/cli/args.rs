@@ -744,7 +744,14 @@ fn parse_resume_from_clap(
         (PathBuf::from(session_str), trailing)
     };
 
-    parse_resume_commands(session_path, command_tokens, output_format, model, permission_mode, auth_mode)
+    parse_resume_commands(
+        session_path,
+        command_tokens,
+        output_format,
+        model,
+        permission_mode,
+        auth_mode,
+    )
 }
 
 fn parse_resume_commands(

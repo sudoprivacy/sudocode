@@ -154,6 +154,30 @@ impl CliToolExecutor {
     }
 }
 
+/// Parse a model-supplied tool-call argument string into a JSON value.
+///
+/// A tool invoked with no arguments arrives as an empty string or the literal
+/// `null`: the streaming openai-completions wire form for "no arguments"
+/// accumulates an empty `partial_json`, and non-streaming providers can send
+/// `null`. A plain `from_str` rejects both, which broke every no-argument tool
+/// (`EnterPlanMode`, `ExitPlanMode`, …) with "invalid tool input JSON" before
+/// the call ever reached dispatch. Normalize empty / `null` to an empty
+/// argument object here — the single point where the CLI turns a tool-call
+/// argument string into a value — so no-arg tools dispatch. Tools with required
+/// fields still fail later with a clear "missing field"; genuinely malformed
+/// JSON still errors here.
+fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Null) => Ok(serde_json::Value::Object(serde_json::Map::new())),
+        Ok(value) => Ok(value),
+        Err(error) => Err(ToolError::new(format!("invalid tool input JSON: {error}"))),
+    }
+}
+
 impl ToolExecutor for CliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.execute_with_context(tool_name, input, &runtime::ToolDispatchContext::default())
@@ -165,21 +189,6 @@ impl ToolExecutor for CliToolExecutor {
         input: &str,
         ctx: &runtime::ToolDispatchContext,
     ) -> Result<String, ToolError> {
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/scode-acp-diag.log")
-            {
-                let _ = writeln!(
-                    f,
-                    "[ACP-DIAG] execute tool_name={} prompter_set={}",
-                    tool_name,
-                    self.question_prompter.is_some()
-                );
-            }
-        }
         if self
             .allowed_tools
             .as_ref()
@@ -189,8 +198,7 @@ impl ToolExecutor for CliToolExecutor {
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
         }
-        let value = serde_json::from_str(input)
-            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        let value = parse_tool_call_input(input)?;
         if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
             return self.execute_ask_user_question(value);
         }
@@ -280,16 +288,6 @@ struct AskUserQuestionCliOption {
 
 impl CliToolExecutor {
     fn execute_ask_user_question(&mut self, value: serde_json::Value) -> Result<String, ToolError> {
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/scode-acp-diag.log")
-            {
-                let _ = writeln!(f, "[ACP-DIAG] execute_ask_user_question invoked");
-            }
-        }
         let input: AskUserQuestionCliInput = serde_json::from_value(value)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
 
@@ -420,4 +418,40 @@ pub(crate) fn permission_policy(
             policy.with_tool_requirement(name, required_permission)
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_call_input;
+    use serde_json::json;
+
+    #[test]
+    fn empty_or_null_arguments_normalize_to_empty_object() {
+        // No-argument tool calls stream an empty arguments string (the
+        // openai-completions wire form) or the literal `null`. Both must
+        // dispatch as `{}` so no-arg tools (EnterPlanMode, ExitPlanMode, …)
+        // deserialize into their empty input structs instead of being rejected
+        // with "invalid tool input JSON" before dispatch.
+        for raw in ["", "   ", "\n\t", "null", "  null  "] {
+            assert_eq!(
+                parse_tool_call_input(raw).expect("no-arg input must parse"),
+                json!({}),
+                "input {raw:?} should normalize to an empty object",
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_arguments_pass_through_unchanged() {
+        assert_eq!(
+            parse_tool_call_input(r#"{"path":"a.txt","limit":5}"#).unwrap(),
+            json!({ "path": "a.txt", "limit": 5 }),
+        );
+    }
+
+    #[test]
+    fn genuinely_malformed_json_still_errors() {
+        assert!(parse_tool_call_input("{ not json").is_err());
+        assert!(parse_tool_call_input("[1, 2").is_err());
+    }
 }

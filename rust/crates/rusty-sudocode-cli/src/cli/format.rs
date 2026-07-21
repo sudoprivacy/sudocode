@@ -5,12 +5,160 @@ use std::fmt::Write as _;
 use api::{self, AuthMode, ProviderKind};
 use runtime::{self, TokenUsage};
 use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
+
+// ---------------------------------------------------------------------------
+// Display width helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the display width of a string, stripping ANSI escape sequences
+/// and accounting for unicode character widths (CJK = 2 columns, etc.).
+///
+/// This is the single source of truth for terminal column calculations.
+/// Use this instead of `chars().count()` or `.len()` whenever sizing
+/// borders, padding, or alignment.
+pub(crate) fn display_width(s: &str) -> usize {
+    strip_ansi_codes(s).width()
+}
+
+/// Strip ANSI SGR escape sequences (`ESC[...m`) from a string.
+fn strip_ansi_codes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
 
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
     PRIMARY_SESSION_EXTENSION, VERSION,
 };
+
+// ---------------------------------------------------------------------------
+// Unified message rendering pipeline
+// ---------------------------------------------------------------------------
+
+/// Render a single `ConversationMessage` into styled terminal output.
+///
+/// This is the SSOT for "how does a completed message look on screen."
+/// Both session replay (`--resume`) and any future message display
+/// (e.g. `/history`, export) should call this instead of hand-rolling
+/// role/block matching.
+///
+/// The live REPL uses a different path (streaming event callbacks) for
+/// progressive rendering during a turn, but the *final* visual result
+/// is the same because both paths call the same per-block format
+/// functions (`format_input_echo`, `format_tool_call_start`, etc.).
+pub(crate) fn render_message(
+    msg: &runtime::ConversationMessage,
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+) -> Option<String> {
+    let mut out = String::new();
+
+    match msg.role {
+        runtime::MessageRole::User => {
+            let text = text_from_blocks(&msg.blocks);
+            if text.is_empty() {
+                return None;
+            }
+            let sep = format!("\x1b[2m{}\x1b[0m", "─".repeat(term_width));
+            out.push_str(&sep);
+            out.push('\n');
+            let (echo, _) = format_input_echo(&text, term_width);
+            out.push_str(&echo);
+            out.push('\n');
+            out.push_str(&sep);
+        }
+        runtime::MessageRole::Assistant => {
+            for block in &msg.blocks {
+                match block {
+                    runtime::ContentBlock::Text { text } if !text.is_empty() => {
+                        let rendered = renderer.render_markdown(text);
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&rendered);
+                    }
+                    runtime::ContentBlock::ToolUse { name, input, .. } => {
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&format_tool_call_start(name, input));
+                    }
+                    _ => {}
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+        }
+        runtime::MessageRole::Tool => {
+            for block in &msg.blocks {
+                if let runtime::ContentBlock::ToolResult {
+                    tool_name,
+                    output,
+                    is_error,
+                    ..
+                } = block
+                {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&format_tool_result(tool_name, output, *is_error));
+                }
+            }
+            if out.is_empty() {
+                return None;
+            }
+        }
+        runtime::MessageRole::System => return None,
+    }
+
+    Some(out)
+}
+
+/// Render a slice of messages into a single string. Convenience wrapper
+/// over [`render_message`] for session replay.
+pub(crate) fn render_messages(
+    messages: &[runtime::ConversationMessage],
+    term_width: usize,
+    renderer: &crate::render::TerminalRenderer,
+) -> String {
+    let mut parts = Vec::new();
+    for msg in messages {
+        if let Some(rendered) = render_message(msg, term_width, renderer) {
+            parts.push(rendered);
+        }
+    }
+    parts.join("\n")
+}
+
+/// Extract concatenated text content from a message's blocks.
+fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str =
     "\x1b[2m… output truncated for display; full result preserved in session.\x1b[0m";
@@ -487,7 +635,7 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     for (idx, line) in raw_lines.iter().enumerate() {
         let prefix = if idx == 0 { " › " } else { "   " };
         let body = format!("{prefix}{line}");
-        let visible = body.chars().count();
+        let visible = display_width(&body);
         let pad = term_width.saturating_sub(visible);
         if idx > 0 {
             rendered.push('\n');
@@ -701,7 +849,9 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         _ => summarize_tool_payload(input),
     };
 
-    let border = "─".repeat(name.len() + 8);
+    // Top: ╭─ {name} ─╮  →  visual width of inner = name_width + 4 (─ SP name SP ─)
+    let name_width = display_width(name);
+    let border = "─".repeat(name_width + 4);
     let detail_indented = detail.replace('\n', "\n  ");
     format!(
         "  \x1b[38;5;245m╭─ \x1b[1;36m{name}\x1b[0;38;5;245m ─╮\x1b[0m\n  \x1b[38;5;245m│\x1b[0m {detail_indented}\n  \x1b[38;5;245m╰{border}╯\x1b[0m"
@@ -915,14 +1065,21 @@ fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> Str
         return header;
     }
 
+    let term_width = crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80);
+    // 4 = indent ("  └ " or "    "), plus safety margin to avoid wrapping
+    let max_content_width = term_width.saturating_sub(6);
+
     let preview_count = TOOL_OUTPUT_DISPLAY_MAX_LINES;
     let mut result = header;
 
     for (i, line) in all_output.iter().take(preview_count).enumerate() {
+        let truncated = truncate_to_width(line, max_content_width);
         if i == 0 {
-            write!(&mut result, "\n  └ {line}").expect("write to string");
+            write!(&mut result, "\n  └ {truncated}").expect("write to string");
         } else {
-            write!(&mut result, "\n    {line}").expect("write to string");
+            write!(&mut result, "\n    {truncated}").expect("write to string");
         }
     }
 
@@ -937,6 +1094,29 @@ fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> Str
     }
 
     result
+}
+
+/// Truncate a string to fit within `max_width` display columns, appending `…`
+/// if truncated. Strips ANSI codes for width calculation but preserves them in
+/// output up to the cut point.
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let stripped = strip_ansi_codes(s);
+    if UnicodeWidthStr::width(stripped.as_str()) <= max_width {
+        return s.to_string();
+    }
+    // Walk characters of the stripped version, accumulating display width.
+    let mut width = 0usize;
+    let mut byte_end = 0usize;
+    for ch in stripped.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + 1 > max_width {
+            // +1 for the trailing `…`
+            break;
+        }
+        width += ch_width;
+        byte_end += ch.len_utf8();
+    }
+    format!("{}…", &stripped[..byte_end])
 }
 
 pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {

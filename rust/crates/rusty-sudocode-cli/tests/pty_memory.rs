@@ -411,10 +411,20 @@ fn memory_tab_completion() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     sess.send("\r").expect("send Enter");
 
-    // `/memory` should execute — expect "Opened memory file" or
-    // "No instruction files found" (depending on whether AGENTS.md exists).
-    sess.expect("(?i)(opened.*memory|no instruction|memory)")
+    // `/memory` opens the resolved instruction file in $EDITOR (set to `true`,
+    // a no-op). When MORE THAN ONE instruction file is discoverable — which
+    // happens in live runs whose temp workspace is nested under a HOME that owns
+    // a global `~/.nexus/sudocode/AGENTS.md` — edit_memory first shows an
+    // interactive "Select memory file" menu that blocks for a keypress. Only in
+    // that case do we send Enter to accept the default. With a single file (the
+    // common CI case) there is no menu, so we must NOT send a stray Enter — it
+    // would submit an empty turn at the prompt and hang.
+    let matched = sess
+        .expect("(?i)(select memory file|opened.*memory|no instruction)")
         .expect("/memory should execute after tab completion");
+    if matched.to_lowercase().contains("select memory file") {
+        sess.send("\r").expect("accept memory-file selection");
+    }
 
     // Wait for prompt, then exit.
     sess.expect("❯").expect("prompt after /memory");
@@ -513,9 +523,17 @@ fn memory_write_read_forget_workflow() {
     }
 
     // ── Step 2: /memory shows instruction files ──────────────────────
+    // See memory_tab_completion: `/memory` shows an interactive "Select memory
+    // file" menu ONLY when multiple instruction files are discoverable. Accept
+    // the default with Enter in that case; with a single file, do not send a
+    // stray Enter (it would submit an empty turn and hang).
     sess.send("/memory\r").expect("send /memory");
-    sess.expect("(?i)(opened.*memory|agents\\.md|memory.*file)")
+    let matched = sess
+        .expect("(?i)(select memory file|opened.*memory|agents\\.md|memory.*file)")
         .expect("/memory should reference a file");
+    if matched.to_lowercase().contains("select memory file") {
+        sess.send("\r").expect("accept memory-file selection");
+    }
     sess.expect("❯").expect("prompt after /memory");
 
     // ── Step 3: Forget memory ────────────────────────────────────────

@@ -344,6 +344,25 @@ fn spawn_with_workspace(
     cmd.push_str(" NO_COLOR=1");
     cmd.push_str(&format!(" PATH={}", shell_quote(&path)));
     cmd.push_str(" TERM=xterm");
+    // Provide a git identity via the environment (which git honors directly,
+    // regardless of HOME/.gitconfig resolution). Without it, tests that drive
+    // `git commit` (e.g. pty_bash_execution::git_init_write_commit_verify) hit
+    // "git has no author identity configured" — the isolated HOME carries no
+    // global gitconfig, and on Windows git does not resolve it to the workspace
+    // HOME. GIT_*_NAME/EMAIL are inherited by the model's bash subprocess.
+    cmd.push_str(&format!(" GIT_AUTHOR_NAME={}", shell_quote("Scode Test")));
+    cmd.push_str(&format!(
+        " GIT_AUTHOR_EMAIL={}",
+        shell_quote("scode-test@example.com")
+    ));
+    cmd.push_str(&format!(
+        " GIT_COMMITTER_NAME={}",
+        shell_quote("Scode Test")
+    ));
+    cmd.push_str(&format!(
+        " GIT_COMMITTER_EMAIL={}",
+        shell_quote("scode-test@example.com")
+    ));
     for (k, v) in env_vars {
         cmd.push_str(&format!(" {}={}", k, shell_quote(v)));
     }

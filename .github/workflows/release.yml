@@ -14,6 +14,7 @@ on:
         options:
           - all
           - linux-x64
+          - linux-x64-musl
 
 permissions:
   contents: write
@@ -103,6 +104,76 @@ jobs:
           name: scode-linux-x64
           path: rust/dist/scode-linux-x64.tar.gz
 
+  build-linux-x64-musl:
+    name: build-linux-x64-musl
+    if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-x64-musl'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Install musl build dependencies
+        shell: bash
+        working-directory: /
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils \
+            musl-tools \
+            pkg-config
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Build static musl release binary
+        run: cargo build --locked --release -p rusty-sudocode-cli --bin scode --target x86_64-unknown-linux-musl
+
+      - name: Verify static musl binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/x86_64-unknown-linux-musl/release/scode"
+          "$binary" --version
+          ldd_output="$(ldd "$binary" 2>&1 || true)"
+          echo "$ldd_output"
+          if ! grep -q "not a dynamic executable" <<< "$ldd_output"; then
+            echo "Expected musl build to be a static binary" >&2
+            exit 1
+          fi
+          if readelf -l "$binary" | grep -q "Requesting program interpreter"; then
+            echo "Static musl binary unexpectedly has a dynamic interpreter" >&2
+            exit 1
+          fi
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/scode-linux-x64-musl"
+          cp "target/x86_64-unknown-linux-musl/release/scode" "dist/scode-linux-x64-musl/scode"
+          cp "../README.md" "dist/scode-linux-x64-musl/README.md"
+          chmod +x "dist/scode-linux-x64-musl/scode"
+
+      - name: Archive release payload (tar.gz)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C dist -czf "dist/scode-linux-x64-musl.tar.gz" "scode-linux-x64-musl"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-linux-x64-musl
+          path: rust/dist/scode-linux-x64-musl.tar.gz
+
   build:
     name: build-${{ matrix.name }}
     if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all'
@@ -189,6 +260,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
       - build-linux-x64
+      - build-linux-x64-musl
       - build
     runs-on: ubuntu-latest
     steps:

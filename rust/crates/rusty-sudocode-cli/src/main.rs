@@ -65,9 +65,9 @@ use cli::format::{
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_call_start, format_tool_result, format_tool_timeline, render_messages,
-    format_turn_status_line_with_branch,
-    format_ultraplan_report, render_resume_usage, render_version_report, truncate_for_summary,
+    format_sandbox_report, format_tool_call_start, format_tool_result, format_tool_timeline,
+    format_turn_status_line_with_branch, format_ultraplan_report, render_messages,
+    render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -466,7 +466,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
-        } => resume_session(&session_path, &commands, output_format, model, permission_mode, auth_mode),
+        } => resume_session(
+            &session_path,
+            &commands,
+            output_format,
+            model,
+            permission_mode,
+            auth_mode,
+        ),
         CliAction::ListSessions { output_format } => {
             list_sessions_cli(output_format)?;
         }
@@ -873,9 +880,7 @@ fn print_system_prompt(
 /// `--resume` without arguments: list available sessions so the user can
 /// pick one to resume.  Prints id, age, message count, and branch — enough
 /// context to identify the right session.
-fn list_sessions_cli(
-    output_format: CliOutputFormat,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     use cli::session::list_managed_sessions;
 
     let sessions = list_managed_sessions()?;
@@ -884,7 +889,9 @@ fn list_sessions_cli(
             println!("{}", serde_json::json!({ "sessions": [] }));
         } else {
             println!("No saved sessions found.");
-            println!("Start a session first, then use `scode --resume latest` or `scode --resume <id>`.");
+            println!(
+                "Start a session first, then use `scode --resume latest` or `scode --resume <id>`."
+            );
         }
         return Ok(());
     }
@@ -976,13 +983,7 @@ fn resume_session(
         }
         // No commands — enter the interactive REPL with the restored session.
         let resolved_model = resolve_repl_model(model);
-        let mut cli = match LiveCli::new(
-            resolved_model,
-            true,
-            None,
-            permission_mode,
-            auth_mode,
-        ) {
+        let mut cli = match LiveCli::new(resolved_model, true, None, permission_mode, auth_mode) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("failed to initialize: {e}");

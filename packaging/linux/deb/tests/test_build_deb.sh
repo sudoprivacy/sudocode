@@ -75,3 +75,30 @@ postinst_output="$(
   "$ROOT/packaging/linux/deb/postinst" configure
 )"
 printf '%s\n' "$postinst_output" | grep -q 'No interactive terminal detected, skipped setup.'
+
+interactive_home="$TMP/interactive-home"
+fake_path="$TMP/fake-path"
+mkdir -p "$interactive_home" "$fake_path"
+cat > "$fake_path/curl" <<'BIN'
+#!/usr/bin/env sh
+cat <<'JSON'
+{"data":[{"id":"codex-auto-review"},{"id":"gpt-5"}]}
+JSON
+BIN
+chmod +x "$fake_path/curl"
+
+printf '\ntest-api-key\n2\nn\n' | \
+  HOME="$interactive_home" \
+  PATH="$fake_path:$PATH" \
+  "$ROOT/packaging/linux/deb/scode-setup"
+
+test -f "$interactive_home/.nexus/sudocode/settings.json"
+grep -qx '{ "model": "gpt-5" }' "$interactive_home/.nexus/sudocode/settings.json"
+! grep -q '编号' "$interactive_home/.nexus/sudocode/settings.json"
+! grep -q 'providers' "$interactive_home/.nexus/sudocode/settings.json"
+
+printf '1\n2\n5\n' | \
+  HOME="$setup_home" \
+  "$ROOT/packaging/linux/deb/scode-setup" >/dev/null
+grep -qx '{ "model": "vision-model" }' "$setup_home/.nexus/sudocode/settings.json"
+! grep -q '"model": "providers"' "$setup_home/.nexus/sudocode/settings.json"

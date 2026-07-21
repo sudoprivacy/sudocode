@@ -77,8 +77,8 @@ extract_api_key() {
 
 extract_models() {
   [ -f "$CONFIG_DIR/sudocode.json" ] || return 1
-  sed -nE 's/^[[:space:]]*"([^"]+)"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/\1/p' "$CONFIG_DIR/sudocode.json" \
-    | awk '$0 != "models" && $0 != "auth_modes" && $0 != "proxy" && $0 != "sudorouter" && $0 != "web_search"'
+  sed -n '/^[[:space:]]*"models"[[:space:]]*:[[:space:]]*{[[:space:]]*$/,/^[[:space:]]*"auth_modes"[[:space:]]*:/p' "$CONFIG_DIR/sudocode.json" \
+    | sed -nE 's/^    "([^"]+)"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/\1/p'
 }
 
 has_web_search() {
@@ -92,7 +92,7 @@ choose_model_from_list() {
   i=1
   while IFS= read -r model; do
     [ -n "$model" ] || continue
-    printf '  %2d) %s\n' "$i" "$model"
+    printf '  %2d) %s\n' "$i" "$model" >&2
     if [ "$model" = "$preferred" ]; then
       def_index="$i"
     fi
@@ -102,7 +102,7 @@ $models
 EOF
   total=$((i - 1))
   [ "$total" -gt 0 ] || return 1
-  printf '编号 [%s]: ' "${def_index:-1}"
+  printf '编号 [%s]: ' "${def_index:-1}" >&2
   read -r selected
   selected="${selected:-${def_index:-1}}"
   if ! printf '%s' "$selected" | grep -qE '^[0-9]+$' || [ "$selected" -lt 1 ] || [ "$selected" -gt "$total" ]; then

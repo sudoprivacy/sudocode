@@ -99,4 +99,3 @@ fn resume_latest_renders_messages_after_banner() {
     });
     assert_eq!(exit, 0);
 }
-

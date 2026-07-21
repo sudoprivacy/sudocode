@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_BASE_URL="https://hk.sudorouter.ai/v1"
+DEFAULT_MODEL="deepseek-v4-pro"
+SEARCH_API_URL="https://hk.sudorouter.ai/search/tavily/search"
+CONFIG_DIR="${SUDO_CODE_CONFIG_HOME:-$HOME/.nexus/sudocode}"
+NON_INTERACTIVE=0
+INSTALL_MODE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --non-interactive)
+      NON_INTERACTIVE=1
+      shift
+      ;;
+    --install)
+      INSTALL_MODE=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: scode-setup [--install] [--non-interactive]
+
+Configure scode models, credentials, and web_search.
+
+Environment for --non-interactive:
+  SCODE_BASE_URL       Default: https://hk.sudorouter.ai/v1
+  SCODE_API_KEY        Required
+  SCODE_MODEL          Optional default model
+  SCODE_MODELS         Optional comma or newline separated model list
+  SCODE_ENABLE_SEARCH  1 or 0, default 1
+EOF
+      exit 0
+      ;;
+    *)
+      printf 'unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+is_vision() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *gpt-5*|*gpt-4o*|*gpt-4.1*|*gemini*|*claude-3*|*claude-opus*|*claude-sonnet*|*claude-haiku*|*vision*|*-vl*|*llava*|*pixtral*|*-image*|*multimodal*|*omni*)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_models() {
+  tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF && !seen[$0]++'
+}
+
+fetch_models() {
+  base_url="${1%/}"
+  api_key="$2"
+  curl -fsS -H "Authorization: Bearer $api_key" "$base_url/models" 2>/dev/null \
+    | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -E 's/.*"([^"]*)"$/\1/' \
+    | awk 'NF && !seen[$0]++'
+}
+
+extract_base_url() {
+  [ -f "$CONFIG_DIR/sudocode.json" ] || return 1
+  sed -nE 's/.*"baseUrl"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_DIR/sudocode.json" | head -n 1
+}
+
+extract_api_key() {
+  [ -f "$CONFIG_DIR/sudocode.json" ] || return 1
+  sed -nE 's/.*"apiKey"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$CONFIG_DIR/sudocode.json" | head -n 1
+}
+
+extract_models() {
+  [ -f "$CONFIG_DIR/sudocode.json" ] || return 1
+  sed -nE 's/^[[:space:]]*"([^"]+)"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/\1/p' "$CONFIG_DIR/sudocode.json" \
+    | awk '$0 != "models" && $0 != "auth_modes" && $0 != "proxy" && $0 != "sudorouter" && $0 != "web_search"'
+}
+
+has_web_search() {
+  [ -f "$CONFIG_DIR/sudocode.json" ] && grep -q '"web_search"' "$CONFIG_DIR/sudocode.json"
+}
+
+choose_model_from_list() {
+  models="$1"
+  preferred="${2:-$DEFAULT_MODEL}"
+  def_index=""
+  i=1
+  while IFS= read -r model; do
+    [ -n "$model" ] || continue
+    printf '  %2d) %s\n' "$i" "$model"
+    if [ "$model" = "$preferred" ]; then
+      def_index="$i"
+    fi
+    i=$((i + 1))
+  done <<EOF
+$models
+EOF
+  total=$((i - 1))
+  [ "$total" -gt 0 ] || return 1
+  printf '编号 [%s]: ' "${def_index:-1}"
+  read -r selected
+  selected="${selected:-${def_index:-1}}"
+  if ! printf '%s' "$selected" | grep -qE '^[0-9]+$' || [ "$selected" -lt 1 ] || [ "$selected" -gt "$total" ]; then
+    selected="${def_index:-1}"
+  fi
+  printf '%s\n' "$models" | awk 'NF' | sed -n "${selected}p"
+}
+
+build_models_block() {
+  models="$1"
+  first=1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if is_vision "$id"; then
+      input='["text", "image"]'
+    else
+      input='["text"]'
+    fi
+    eid="$(json_escape "$id")"
+    entry=$(printf '    "%s": {\n      "alias": "%s",\n      "name": "%s",\n      "input": %s,\n      "providers": {\n        "proxy": { "provider": "sudorouter", "model": "%s", "api": "openai-completions" }\n      }\n    }' "$eid" "$eid" "$eid" "$input" "$eid")
+    if [ "$first" -eq 1 ]; then
+      printf '%s' "$entry"
+      first=0
+    else
+      printf ',\n%s' "$entry"
+    fi
+  done <<EOF
+$models
+EOF
+}
+
+write_config() {
+  base_url="${1%/}"
+  api_key="$2"
+  models="$3"
+  chosen_model="$4"
+  enable_search="$5"
+
+  models_block="$(build_models_block "$models")"
+  if [ "$enable_search" = "1" ]; then
+    web_search=$(cat <<EOF
+,
+  "web_search": {
+    "provider": "tavily",
+    "apiUrl": "$SEARCH_API_URL",
+    "apiKey": ""
+  }
+EOF
+)
+  else
+    web_search=""
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  cat > "$CONFIG_DIR/sudocode.json" <<EOF
+{
+  "models": {
+$models_block
+  },
+  "auth_modes": {
+    "proxy": {
+      "sudorouter": { "baseUrl": "$(json_escape "$base_url")", "apiKey": "$(json_escape "$api_key")" }
+    }
+  }$web_search
+}
+EOF
+  chmod 600 "$CONFIG_DIR/sudocode.json"
+  printf '{ "model": "%s" }\n' "$(json_escape "$chosen_model")" > "$CONFIG_DIR/settings.json"
+  chmod 600 "$CONFIG_DIR/settings.json"
+}
+
+non_interactive_setup() {
+  base_url="${SCODE_BASE_URL:-$DEFAULT_BASE_URL}"
+  api_key="${SCODE_API_KEY:-}"
+  enable_search="${SCODE_ENABLE_SEARCH:-1}"
+  [ -n "$api_key" ] || { printf 'SCODE_API_KEY is required for --non-interactive\n' >&2; exit 2; }
+  case "$enable_search" in
+    1|true|TRUE|yes|YES) enable_search=1 ;;
+    0|false|FALSE|no|NO) enable_search=0 ;;
+    *) printf 'SCODE_ENABLE_SEARCH must be 1 or 0\n' >&2; exit 2 ;;
+  esac
+  if [ -n "${SCODE_MODELS:-}" ]; then
+    models="$(printf '%s\n' "$SCODE_MODELS" | normalize_models)"
+  else
+    models="$(fetch_models "$base_url" "$api_key" || true)"
+  fi
+  [ -n "$models" ] || { printf 'model list is empty\n' >&2; exit 1; }
+  chosen_model="${SCODE_MODEL:-}"
+  if [ -z "$chosen_model" ]; then
+    if printf '%s\n' "$models" | grep -qx "$DEFAULT_MODEL"; then
+      chosen_model="$DEFAULT_MODEL"
+    else
+      chosen_model="$(printf '%s\n' "$models" | awk 'NF' | sed -n '1p')"
+    fi
+  fi
+  if ! printf '%s\n' "$models" | grep -qx "$chosen_model"; then
+    models="$(printf '%s\n%s\n' "$chosen_model" "$models" | awk 'NF && !seen[$0]++')"
+  fi
+  write_config "$base_url" "$api_key" "$models" "$chosen_model" "$enable_search"
+  printf 'scode configuration written to %s\n' "$CONFIG_DIR"
+}
+
+full_interactive_setup() {
+  printf 'Base URL [%s]: ' "$DEFAULT_BASE_URL"
+  read -r base_url
+  base_url="${base_url:-$DEFAULT_BASE_URL}"
+  base_url="${base_url%/}"
+  case "$base_url" in
+    http://*|https://*) ;;
+    *) printf 'Base URL must start with http:// or https://\n' >&2; exit 1 ;;
+  esac
+
+  printf 'API Key: '
+  read -r -s api_key
+  printf '\n'
+  [ -n "$api_key" ] || { printf 'API Key cannot be empty.\n' >&2; exit 1; }
+
+  printf '正在拉取模型列表...\n'
+  models="$(fetch_models "$base_url" "$api_key" || true)"
+  [ -n "$models" ] || { printf '拉取失败或列表为空，请检查网络和 API Key 后重试。\n' >&2; exit 1; }
+  printf '已拉取 %s 个模型\n\n' "$(printf '%s\n' "$models" | awk 'NF' | wc -l | tr -d ' ')"
+
+  printf '请选择默认模型（回车默认 %s）：\n' "$DEFAULT_MODEL"
+  chosen_model="$(choose_model_from_list "$models" "$DEFAULT_MODEL")"
+  printf '默认模型：%s\n' "$chosen_model"
+
+  printf '启用联网搜索 web_search？[Y/n] '
+  read -r search_answer
+  case "$search_answer" in
+    n|N|no|NO) enable_search=0 ;;
+    *) enable_search=1 ;;
+  esac
+
+  write_config "$base_url" "$api_key" "$models" "$chosen_model" "$enable_search"
+  printf '\n配置已写入：\n'
+  printf '  %s/sudocode.json\n' "$CONFIG_DIR"
+  printf '  %s/settings.json\n' "$CONFIG_DIR"
+}
+
+update_default_model() {
+  models="$(extract_models || true)"
+  [ -n "$models" ] || { printf '未找到模型列表，请选择重新拉取模型列表。\n' >&2; return 1; }
+  printf '请选择默认模型：\n'
+  chosen_model="$(choose_model_from_list "$models" "$DEFAULT_MODEL")"
+  printf '{ "model": "%s" }\n' "$(json_escape "$chosen_model")" > "$CONFIG_DIR/settings.json"
+  chmod 600 "$CONFIG_DIR/settings.json"
+  printf '默认模型已更新：%s\n' "$chosen_model"
+}
+
+refresh_models() {
+  base_url="$(extract_base_url || true)"
+  api_key="$(extract_api_key || true)"
+  [ -n "$base_url" ] || base_url="$DEFAULT_BASE_URL"
+  [ -n "$api_key" ] || { printf '未找到 API Key，请选择修改 Base URL / API Key。\n' >&2; return 1; }
+  printf '正在拉取模型列表...\n'
+  models="$(fetch_models "$base_url" "$api_key" || true)"
+  [ -n "$models" ] || { printf '拉取失败或列表为空。\n' >&2; return 1; }
+  printf '请选择默认模型：\n'
+  chosen_model="$(choose_model_from_list "$models" "$DEFAULT_MODEL")"
+  if has_web_search; then enable_search=1; else enable_search=0; fi
+  write_config "$base_url" "$api_key" "$models" "$chosen_model" "$enable_search"
+  printf '模型列表已刷新。\n'
+}
+
+toggle_web_search() {
+  base_url="$(extract_base_url || true)"
+  api_key="$(extract_api_key || true)"
+  models="$(extract_models || true)"
+  [ -n "$base_url" ] || base_url="$DEFAULT_BASE_URL"
+  [ -n "$api_key" ] || { printf '未找到 API Key，请先重建配置。\n' >&2; return 1; }
+  [ -n "$models" ] || { printf '未找到模型列表，请先重建配置。\n' >&2; return 1; }
+  current_model="$(sed -nE 's/.*"model"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_DIR/settings.json" 2>/dev/null | head -n 1)"
+  [ -n "$current_model" ] || current_model="$(printf '%s\n' "$models" | awk 'NF' | sed -n '1p')"
+  if has_web_search; then
+    printf '当前 web_search 已启用，是否关闭？[y/N] '
+    read -r answer
+    case "$answer" in y|Y|yes|YES) enable_search=0 ;; *) enable_search=1 ;; esac
+  else
+    printf '当前 web_search 未启用，是否开启？[Y/n] '
+    read -r answer
+    case "$answer" in n|N|no|NO) enable_search=0 ;; *) enable_search=1 ;; esac
+  fi
+  write_config "$base_url" "$api_key" "$models" "$current_model" "$enable_search"
+  printf 'web_search 配置已更新。\n'
+}
+
+interactive_menu() {
+  printf '================================================\n'
+  printf '     Sudo Code · scode 配置向导\n'
+  printf '================================================\n\n'
+
+  if [ ! -f "$CONFIG_DIR/sudocode.json" ]; then
+    full_interactive_setup
+    return
+  fi
+
+  if [ "$INSTALL_MODE" -eq 1 ]; then
+    printf '检测到已有配置：%s/sudocode.json\n' "$CONFIG_DIR"
+    printf '安装过程不会覆盖已有配置。如需更新模型，请运行 scode-setup。\n'
+    return
+  fi
+
+  while true; do
+    printf '\n检测到已有配置：%s/sudocode.json\n\n' "$CONFIG_DIR"
+    printf '请选择操作：\n'
+    printf '  1) 只修改默认模型\n'
+    printf '  2) 重新拉取模型列表并选择默认模型\n'
+    printf '  3) 修改 Base URL / API Key 并重建配置\n'
+    printf '  4) 开启/关闭 web_search\n'
+    printf '  5) 退出\n'
+    printf '编号 [1]: '
+    read -r choice
+    choice="${choice:-1}"
+    case "$choice" in
+      1) update_default_model ;;
+      2) refresh_models ;;
+      3) full_interactive_setup ;;
+      4) toggle_web_search ;;
+      5) return ;;
+      *) printf '无效选择。\n' ;;
+    esac
+  done
+}
+
+if [ "$NON_INTERACTIVE" -eq 1 ]; then
+  non_interactive_setup
+else
+  interactive_menu
+fi

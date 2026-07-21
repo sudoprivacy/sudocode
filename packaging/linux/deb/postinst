@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${1:-}" != "configure" ]; then
+  exit 0
+fi
+
+if [ "${DEBIAN_FRONTEND:-}" = "noninteractive" ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+  printf '%s\n' "scode installed."
+  printf '%s\n' "No interactive terminal detected, skipped setup."
+  printf '%s\n' "Run 'scode-setup' as the target user to configure models."
+  exit 0
+fi
+
+target_user=""
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  target_user="$SUDO_USER"
+elif command -v logname >/dev/null 2>&1; then
+  target_user="$(logname 2>/dev/null || true)"
+fi
+
+if [ -n "$target_user" ] && command -v getent >/dev/null 2>&1; then
+  target_home="$(getent passwd "$target_user" | awk -F: '{print $6}' | head -n 1)"
+else
+  target_home=""
+fi
+
+if [ "$(id -u)" -eq 0 ] && [ -n "$target_user" ] && [ "$target_user" != "root" ]; then
+  if [ -z "$target_home" ]; then
+    printf '%s\n' "scode installed."
+    printf '%s\n' "Could not resolve home directory for '$target_user'. Run 'scode-setup' as that user."
+    exit 0
+  fi
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$target_user" -- env HOME="$target_home" USER="$target_user" LOGNAME="$target_user" /usr/lib/scode/scode-setup --install </dev/tty >/dev/tty 2>&1 || true
+  elif command -v su >/dev/null 2>&1; then
+    su "$target_user" -c "HOME='$target_home' USER='$target_user' LOGNAME='$target_user' /usr/lib/scode/scode-setup --install" </dev/tty >/dev/tty 2>&1 || true
+  else
+    printf '%s\n' "scode installed."
+    printf '%s\n' "Could not switch to target user '$target_user'. Run 'scode-setup' as that user."
+  fi
+else
+  /usr/lib/scode/scode-setup --install </dev/tty >/dev/tty 2>&1 || true
+fi
+
+exit 0

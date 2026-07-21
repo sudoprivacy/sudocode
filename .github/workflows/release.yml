@@ -162,6 +162,21 @@ jobs:
           set -euo pipefail
           tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"
 
+      - name: Build deb installer
+        if: matrix.name == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          ../packaging/linux/deb/build-deb.sh \
+            --version "$version" \
+            --binary target/release/scode \
+            --output dist
+
       - name: Archive release payload (zip)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -176,6 +191,13 @@ jobs:
         with:
           name: ${{ matrix.package_dir }}
           path: rust/dist/${{ matrix.archive_name }}
+
+      - name: Upload deb workflow artifact
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-linux-x64-deb
+          path: rust/dist/scode_*_amd64.deb
 
   publish-release:
     name: publish-release
@@ -196,13 +218,14 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum scode-* > SHA256SUMS.txt
+          sha256sum scode-* scode_*.deb > SHA256SUMS.txt
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/scode-*
+            dist/scode_*.deb
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
@@ -219,7 +242,7 @@ jobs:
             -s "$TENCENT_SECRET_KEY" \
             -b sudowork-release-1309794936 \
             -e cos.accelerate.myqcloud.com
-          for file in dist/scode-*.tar.gz dist/scode-*.zip; do
+          for file in dist/scode-*.tar.gz dist/scode-*.zip dist/scode_*.deb; do
             [ -f "$file" ] || continue
             filename=$(basename "$file")
             echo "Uploading $filename"

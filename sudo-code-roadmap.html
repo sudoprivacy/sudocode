@@ -707,6 +707,10 @@ features. <strong>Current coverage: <span id="cov-numerator">—</span> / <span 
 <code>L2 deferred</code> items (LSP, MCP/plugin lifecycle) are tracked
 but do not count toward the 90% target.</p>
 
+<p><strong>Live-verified: <span id="lv-numerator">—</span> / <span id="lv-denominator">—</span> live-requiring rows (<span id="lv-percent">—</span>).</strong>
+Auto-computed from the <code>data-live-verified</code> attribute — denominator is the rows that require live verification
+(<code>live-verified</code> + <code>pending</code> + <code>live-failing</code>); <code>live-not-required-mock-verified</code> rows are excluded.</p>
+
 <script>
   // Coverage denominator auto-calc. Sums the per-category rows'
   // 5 numeric columns into the Total row + rewrites the "90% target"
@@ -748,6 +752,19 @@ but do not count toward the 90% target.</p>
     if (byId('cov-numerator')) byId('cov-numerator').textContent = String(covered);
     if (byId('cov-denominator-2')) byId('cov-denominator-2').textContent = String(denom);
     if (byId('cov-percent')) byId('cov-percent').textContent = pct + '%';
+
+    // Live-verified ratio — counted straight from the data-live-verified
+    // attribute so it never drifts. Denominator = rows that REQUIRE live
+    // verification; "live-not-required-mock-verified" rows are excluded.
+    var qsa = function (v) {
+      return document.querySelectorAll('td[data-live-verified="' + v + '"]').length;
+    };
+    var lvVerified = qsa('live-verified');
+    var lvRequired = lvVerified + qsa('pending') + qsa('live-failing');
+    var lvPct = lvRequired > 0 ? Math.round((lvVerified / lvRequired) * 100) : 0;
+    if (byId('lv-numerator')) byId('lv-numerator').textContent = String(lvVerified);
+    if (byId('lv-denominator')) byId('lv-denominator').textContent = String(lvRequired);
+    if (byId('lv-percent')) byId('lv-percent').textContent = lvPct + '%';
   })();
 </script>
 

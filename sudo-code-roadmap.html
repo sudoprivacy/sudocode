@@ -1643,6 +1643,48 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   needs to do nothing to participate.</li>
 </ul>
 
+<h3 id="linkage">Linkage: <code>sudocode-host</code> links the kernel statically</h3>
+
+<p><code>sudocode-host</code> is a single binary that links the nexus
+kernel crate directly and monomorphises
+<code>KernelFsBackend&lt;Kernel&gt;</code>, so an agent's file operations
+are ordinary in-process Rust calls. nexus also offers a C-ABI dylib
+plugin boundary (<code>plugin-abi</code>), which FUSE and the vault use.
+sudocode does not: <strong>the dylib boundary is reserved for code that
+is third-party, untrusted, or must stay ABI-stable across independent
+release cycles.</strong> Our own runtime, sitting on the agent's IOPS
+path, links statically.</p>
+
+<p>The cost is in the marshalling, and it lands hardest on exactly the
+operations a coding agent issues most. Per-call overhead versus the
+same operation monomorphised in-process:</p>
+
+<table>
+  <thead>
+    <tr><th>Syscall</th><th>C-ABI shape</th><th>Overhead vs in-process</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>sys_write</code></td><td><code>data: *const u8, len</code> — zero-copy</td><td>&lt; 10%</td></tr>
+    <tr><td><code>sys_read</code></td><td><code>out_buf: *mut *mut u8</code> — kernel heap-allocs + memcpy, plugin <code>nexus_free</code>s</td><td>~10–30%</td></tr>
+    <tr><td><code>sys_stat</code> / <code>sys_readdir</code></td><td><code>out_json: *mut *mut u8</code> — serialize + alloc + plugin-side parse</td><td><strong>100%–1000%</strong></td></tr>
+  </tbody>
+</table>
+
+<p>An agent's working set is dominated by <code>stat</code>,
+<code>readdir</code>, and small reads — the three worst rows. FUSE
+tolerates the same marshalling only because its baseline already
+includes an OS FUSE round-trip (a ~5–20&nbsp;µs context switch) that
+dwarfs the JSON hop; against a sub-microsecond in-process baseline that
+tolerance disappears.</p>
+
+<p>There is a second, harder reason. <code>plugin-abi</code> carries no
+hook or observer surface — <code>register_service_hook</code> is an
+in-process Rust API. A dylib therefore cannot register a kernel dispatch
+hook, and <code>MailboxStampingHook</code> (the thing that makes the
+envelope's <code>from</code> unforgeable, contract item 3 above) is a
+dispatch hook. <strong>A2A participation requires static linkage; it is
+not expressible as a plugin.</strong></p>
+
 <h3>Sequencing</h3>
 
 <p>The work falls into a few sequenced chunks; each ships its own

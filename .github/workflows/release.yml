@@ -104,6 +104,20 @@ jobs:
             --binary target/x86_64-unknown-linux-musl/release/scode \
             --output dist
 
+      - name: Build bundle installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          ../packaging/linux/bundle/build-bundle.sh \
+            --version "$version" \
+            --binary target/x86_64-unknown-linux-musl/release/scode \
+            --output dist
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -115,6 +129,12 @@ jobs:
         with:
           name: scode-linux-x64-deb
           path: rust/dist/scode_*_amd64.deb
+
+      - name: Upload bundle workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-linux-x64-bundle
+          path: rust/dist/scode-linux-x64-bundle.tar.gz
 
   build:
     name: build-${{ matrix.name }}

@@ -5,11 +5,18 @@ DEFAULT_BASE_URL="https://hk.sudorouter.ai/v1"
 DEFAULT_MODEL="deepseek-v4-pro"
 SEARCH_API_URL="https://hk.sudorouter.ai/search/tavily/search"
 CONFIG_DIR="${SUDO_CODE_CONFIG_HOME:-$HOME/.nexus/sudocode}"
+COMMAND="configure"
 NON_INTERACTIVE=0
 INSTALL_MODE=0
+INSTALL_BIN_DIR="/usr/local/bin"
+ASSUME_YES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    install|configure|doctor|uninstall)
+      COMMAND="$1"
+      shift
+      ;;
     --non-interactive)
       NON_INTERACTIVE=1
       shift
@@ -18,11 +25,35 @@ while [ $# -gt 0 ]; do
       INSTALL_MODE=1
       shift
       ;;
+    --bin-dir)
+      [ $# -ge 2 ] || { printf '%s\n' "--bin-dir requires a directory" >&2; exit 2; }
+      INSTALL_BIN_DIR="${2%/}"
+      shift 2
+      ;;
+    --bin-dir=*)
+      INSTALL_BIN_DIR="${1#--bin-dir=}"
+      INSTALL_BIN_DIR="${INSTALL_BIN_DIR%/}"
+      shift
+      ;;
+    --yes|-y)
+      ASSUME_YES=1
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
-Usage: scode-setup [--install] [--non-interactive]
+Usage: scode-setup [command] [options]
 
-Configure scode models, credentials, and web_search.
+Commands:
+  install      Install sibling scode + scode-setup globally, then configure
+  configure    Configure or update models, credentials, and web_search
+  doctor       Check installed scode/scode-setup files
+  uninstall    Remove files installed by `scode-setup install`
+
+Options:
+  --bin-dir DIR        Install directory for install command, default /usr/local/bin
+  --yes, -y           Do not prompt before uninstall
+  --install           Debian package post-install configure mode
+  --non-interactive   Generate config from environment variables
 
 Environment for --non-interactive:
   SCODE_BASE_URL       Default: https://hk.sudorouter.ai/v1
@@ -30,6 +61,10 @@ Environment for --non-interactive:
   SCODE_MODEL          Optional default model
   SCODE_MODELS         Optional comma or newline separated model list
   SCODE_ENABLE_SEARCH  1 or 0, default 1
+
+Environment for install tests/automation:
+  SCODE_INSTALL_ROOT   Prefix filesystem root for installed files
+  SCODE_SKIP_CONFIG    Set to 1 to skip post-install configuration
 EOF
       exit 0
       ;;
@@ -328,8 +363,160 @@ interactive_menu() {
   done
 }
 
-if [ "$NON_INTERACTIVE" -eq 1 ]; then
-  non_interactive_setup
-else
-  interactive_menu
-fi
+install_root() {
+  printf '%s' "${SCODE_INSTALL_ROOT:-}"
+}
+
+rooted_path() {
+  root="$(install_root)"
+  path="$1"
+  if [ -n "$root" ]; then
+    printf '%s/%s' "${root%/}" "${path#/}"
+  else
+    printf '%s' "$path"
+  fi
+}
+
+manifest_path() {
+  rooted_path "/usr/local/lib/scode/install-manifest"
+}
+
+script_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+resolve_target_user() {
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    printf '%s' "$SUDO_USER"
+  elif command -v logname >/dev/null 2>&1; then
+    logname 2>/dev/null || true
+  else
+    id -un 2>/dev/null || true
+  fi
+}
+
+home_for_user() {
+  user="$1"
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd "$user" | awk -F: '{print $6}' | head -n 1
+  else
+    eval "printf '%s' ~$(printf '%s' "$user")" 2>/dev/null || true
+  fi
+}
+
+install_files() {
+  src_dir="$(script_dir)"
+  src_scode="$src_dir/scode"
+  src_setup="$src_dir/scode-setup"
+  [ -f "$src_scode" ] || { printf 'scode binary not found next to scode-setup: %s\n' "$src_scode" >&2; exit 1; }
+  [ -x "$src_scode" ] || { printf 'scode binary is not executable: %s\n' "$src_scode" >&2; exit 1; }
+  [ -f "$src_setup" ] || { printf 'scode-setup script not found: %s\n' "$src_setup" >&2; exit 1; }
+
+  dest_bin_dir="$(rooted_path "$INSTALL_BIN_DIR")"
+  dest_lib_dir="$(rooted_path "/usr/local/lib/scode")"
+  mkdir -p "$dest_bin_dir" "$dest_lib_dir"
+  cp "$src_scode" "$dest_bin_dir/scode"
+  cp "$src_setup" "$dest_bin_dir/scode-setup"
+  chmod 0755 "$dest_bin_dir/scode" "$dest_bin_dir/scode-setup"
+
+  manifest="$(manifest_path)"
+  mkdir -p "$(dirname "$manifest")"
+  cat > "$manifest" <<EOF
+version=$(cat "$src_dir/VERSION" 2>/dev/null || printf 'unknown')
+installed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+bin_dir=$INSTALL_BIN_DIR
+installed_files=$INSTALL_BIN_DIR/scode $INSTALL_BIN_DIR/scode-setup
+manifest=/usr/local/lib/scode/install-manifest
+EOF
+  chmod 0644 "$manifest"
+
+  printf 'scode installed to %s\n' "$INSTALL_BIN_DIR"
+}
+
+run_post_install_config() {
+  [ "${SCODE_SKIP_CONFIG:-}" != "1" ] || return 0
+  if [ -n "$(install_root)" ]; then
+    return 0
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    printf 'No interactive terminal detected, skipped setup. Run scode-setup configure later.\n'
+    return 0
+  fi
+
+  target_user="$(resolve_target_user)"
+  if [ "$(id -u)" -eq 0 ] && [ -n "$target_user" ] && [ "$target_user" != "root" ]; then
+    target_home="$(home_for_user "$target_user")"
+    if [ -n "$target_home" ] && command -v runuser >/dev/null 2>&1; then
+      runuser -u "$target_user" -- env HOME="$target_home" USER="$target_user" LOGNAME="$target_user" "$INSTALL_BIN_DIR/scode-setup" configure
+      return 0
+    fi
+    printf 'Could not switch to target user. Run scode-setup configure as the target user.\n'
+    return 0
+  fi
+
+  "$INSTALL_BIN_DIR/scode-setup" configure
+}
+
+install_command() {
+  case "$INSTALL_BIN_DIR" in
+    /*) ;;
+    *) printf '%s\n' '--bin-dir must be an absolute path' >&2; exit 2 ;;
+  esac
+  install_files
+  run_post_install_config
+}
+
+doctor_command() {
+  scode_path="$(rooted_path "$INSTALL_BIN_DIR/scode")"
+  setup_path="$(rooted_path "$INSTALL_BIN_DIR/scode-setup")"
+  manifest="$(manifest_path)"
+  status=0
+  if [ -x "$scode_path" ]; then
+    printf 'ok: %s\n' "$scode_path"
+  else
+    printf 'missing: %s\n' "$scode_path" >&2
+    status=1
+  fi
+  if [ -x "$setup_path" ]; then
+    printf 'ok: %s\n' "$setup_path"
+  else
+    printf 'missing: %s\n' "$setup_path" >&2
+    status=1
+  fi
+  if [ -f "$manifest" ]; then
+    printf 'ok: %s\n' "$manifest"
+  else
+    printf 'missing: %s\n' "$manifest" >&2
+    status=1
+  fi
+  return "$status"
+}
+
+uninstall_command() {
+  manifest="$(manifest_path)"
+  [ -f "$manifest" ] || { printf 'install manifest not found: %s\n' "$manifest" >&2; exit 1; }
+  if [ "$ASSUME_YES" -ne 1 ]; then
+    printf 'Remove files installed by scode-setup? [y/N] '
+    read -r answer
+    case "$answer" in y|Y|yes|YES) ;; *) printf 'Canceled.\n'; return 0 ;; esac
+  fi
+  rm -f "$(rooted_path "$INSTALL_BIN_DIR/scode")" "$(rooted_path "$INSTALL_BIN_DIR/scode-setup")"
+  rm -f "$manifest"
+  printf 'scode uninstalled from %s\n' "$INSTALL_BIN_DIR"
+}
+
+configure_command() {
+  if [ "$NON_INTERACTIVE" -eq 1 ]; then
+    non_interactive_setup
+  else
+    interactive_menu
+  fi
+}
+
+case "$COMMAND" in
+  install) install_command ;;
+  configure) configure_command ;;
+  doctor) doctor_command ;;
+  uninstall) uninstall_command ;;
+  *) printf 'unknown command: %s\n' "$COMMAND" >&2; exit 2 ;;
+esac

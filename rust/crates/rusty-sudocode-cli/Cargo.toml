@@ -18,9 +18,6 @@ clap = { version = "4", features = ["derive"] }
 commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["term", "poll"] }
 futures = "0.3"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
@@ -49,4 +46,7 @@ serde_json.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-tungstenite = "0.29"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["term", "poll"] }
 

@@ -21,6 +21,12 @@ scode --model sonnet --auth subscription
 
 For the canonical live alias list, run `scode --help`.
 
+> **These are convenience aliases, not the full model list.** `scode`
+> routes through the backend (sudorouter), whose live catalog has 170+
+> models - including Gemini (`gemini-3.5-flash`, ...), GPT-5, DeepSeek,
+> GLM, Kimi, MiniMax, and more. Use any catalog model by its full name,
+> e.g. `scode --model gemini-3.5-flash`.
+
 ## Provider-specific handling
 
 Translating Claude-style messages to OpenAI-compatible chat completion

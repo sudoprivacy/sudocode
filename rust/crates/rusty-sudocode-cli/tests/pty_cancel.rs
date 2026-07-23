@@ -56,15 +56,28 @@ fn esc_cancels_turn_in_repl() {
             panic!("should see turn activity: {e}\nPTY screen:\n{screen}");
         });
 
-    // Small delay to ensure the abort monitor is polling.
-    std::thread::sleep(Duration::from_millis(500));
+    // In live mode, wait longer for the API stream to actually start.
+    // The abort signal can only cancel once tokio::select! is polling
+    // the stream — during TLS/connection setup the future hasn't yielded
+    // yet, so the cancel has no effect until streaming begins.
+    let pre_esc_delay = if env.is_live() {
+        Duration::from_secs(8)
+    } else {
+        Duration::from_millis(500)
+    };
+    std::thread::sleep(pre_esc_delay);
 
     // Press ESC to cancel the turn.
     sess.send("\x1b").expect("send ESC");
 
     // Wait for the cancel to complete and REPL prompt to return.
     // The cancellation marker or prompt confirms the turn was aborted.
-    sess.set_default_timeout(Duration::from_secs(15));
+    let cancel_timeout = if env.is_live() {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(15)
+    };
+    sess.set_default_timeout(cancel_timeout);
     sess.expect("(?i)(cancelled|interrupted|❯)")
         .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
@@ -103,10 +116,18 @@ fn resume_seeds_history_for_up_arrow() {
 
     // Session 1: submit a prompt, then exit.
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(15));
+    let turn_timeout = if env.is_live() {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(15)
+    };
+    sess.set_default_timeout(turn_timeout);
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    sess.expect("❯").expect("second prompt after turn");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("second prompt after turn: {e}\nPTY screen:\n{screen}");
+    });
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
 

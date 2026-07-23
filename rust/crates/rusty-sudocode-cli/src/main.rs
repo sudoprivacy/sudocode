@@ -466,7 +466,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
-        } => resume_session(
+        } => run_resume(
             &session_path,
             &commands,
             output_format,
@@ -934,7 +934,14 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
 }
 
 #[allow(clippy::too_many_lines)]
-fn resume_session(
+/// CLI entry point for `--resume <id> [commands...]`.
+///
+/// - With commands: load session, run commands, exit (non-interactive).
+/// - Without commands: load session, enter REPL with messages rendered.
+///
+/// This is the CLI dispatch function; `LiveCli::load_session` handles the
+/// data-only operation (no I/O side effects). Display is the caller's job.
+fn run_resume(
     session_path: &Path,
     commands: &[String],
     output_format: CliOutputFormat,
@@ -992,7 +999,7 @@ fn resume_session(
         };
         // Load the restored session into the running CLI.
         let session_ref = resolved_path.display().to_string();
-        if let Err(e) = cli.resume_session(Some(session_ref)) {
+        if let Err(e) = cli.load_session(Some(session_ref)) {
             eprintln!("failed to resume: {e}");
             std::process::exit(1);
         }
@@ -1583,9 +1590,9 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
 
-    // Render any existing messages from the session. For a new session
-    // this is empty (zero cost). For a resumed session this replays
-    // the conversation using the same format pipeline as live output.
+    // Render existing messages and seed editor history from user prompts.
+    // Same code path for new sessions (messages empty → no-op) and resumed
+    // sessions (messages present → render + populate history).
     let messages = &cli.runtime.session().messages;
     if !messages.is_empty() {
         let term_width = crossterm::terminal::size()
@@ -1595,6 +1602,23 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         let rendered = render_messages(messages, term_width, &renderer);
         if !rendered.is_empty() {
             println!("{rendered}");
+        }
+        // Seed rustyline history so ↑ recalls previous prompts.
+        for msg in messages {
+            if msg.role == runtime::MessageRole::User {
+                let text = msg
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        runtime::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.trim().is_empty() {
+                    editor.push_history(text);
+                }
+            }
         }
     }
 
@@ -3007,42 +3031,35 @@ impl HookAbortMonitor {
                 return;
             };
 
-            // Enable raw mode so crossterm can detect ESC keypresses
-            // during streaming / tool execution (CC parity). The
-            // rendering layer uses ANSI cursor control (not println!)
-            // during a turn, so raw mode is safe here. Restored when
-            // the monitor stops.
             let is_tty = io::stdin().is_terminal();
+
+            // On Unix, bypass crossterm for raw mode and key detection.
+            // Crossterm's lazy global `InternalEventSource` becomes stale
+            // after rustyline (which also uses crossterm internally) toggles
+            // raw mode on the main thread between REPL prompts — causing
+            // `event::poll` to miss keypresses in subsequent turns.
+            // Reading raw bytes via termios + `poll(2)` is immune to this.
+            #[cfg(unix)]
+            let raw_enabled = is_tty && enable_raw_mode_unix();
+
+            #[cfg(not(unix))]
             let raw_enabled = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
 
             runtime.block_on(async move {
                 let esc_abort = abort_signal.clone();
-                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || {
-                    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-                    loop {
-                        if stop_rx.try_recv().is_ok() {
-                            return;
+                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || loop {
+                    if stop_rx.try_recv().is_ok() {
+                        return;
+                    }
+                    if !raw_enabled {
+                        match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                            Err(RecvTimeoutError::Timeout) => continue,
                         }
-                        if !raw_enabled {
-                            match stop_rx.recv_timeout(Duration::from_millis(50)) {
-                                Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
-                                Err(RecvTimeoutError::Timeout) => continue,
-                            }
-                        }
-                        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                            if let Ok(Event::Key(key)) = event::read() {
-                                if key.kind != KeyEventKind::Press {
-                                    continue;
-                                }
-                                let is_esc = key.code == KeyCode::Esc;
-                                let is_ctrl_c = key.code == KeyCode::Char('c')
-                                    && key.modifiers.contains(event::KeyModifiers::CONTROL);
-                                if is_esc || is_ctrl_c {
-                                    esc_abort.abort();
-                                    return;
-                                }
-                            }
-                        }
+                    }
+                    if poll_abort_key(Duration::from_millis(50)) {
+                        esc_abort.abort();
+                        return;
                     }
                 });
 
@@ -3056,6 +3073,12 @@ impl HookAbortMonitor {
                 }
             });
 
+            #[cfg(unix)]
+            if raw_enabled {
+                disable_raw_mode_unix();
+            }
+
+            #[cfg(not(unix))]
             if raw_enabled {
                 let _ = crossterm::terminal::disable_raw_mode();
             }
@@ -3083,6 +3106,104 @@ impl HookAbortMonitor {
             let _ = join_handle.join();
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Raw-mode helpers for `HookAbortMonitor`
+//
+// On Unix, we manage raw mode via `nix` (safe termios wrappers) instead
+// of crossterm to avoid the stale-event-source bug described in
+// `HookAbortMonitor::spawn`. On Windows, crossterm is used unchanged.
+// ──────────────────────────────────────────────────────────────────────
+
+// Thread-local storage for the original termios settings saved by
+// `enable_raw_mode_unix`. Each monitor thread saves its own copy so
+// concurrent monitors (hypothetical) don't clobber each other.
+#[cfg(unix)]
+std::thread_local! {
+    static ORIGINAL_TERMIOS: std::cell::RefCell<Option<nix::sys::termios::Termios>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Enable raw mode via `nix::sys::termios` — no crossterm involvement.
+/// Returns `true` on success. Call `disable_raw_mode_unix()` to restore.
+#[cfg(unix)]
+fn enable_raw_mode_unix() -> bool {
+    use nix::sys::termios::{self, SetArg, SpecialCharacterIndices};
+    use std::os::fd::AsFd;
+
+    let stdin = std::io::stdin();
+    let Ok(original) = termios::tcgetattr(&stdin) else {
+        return false;
+    };
+    ORIGINAL_TERMIOS.with(|cell| *cell.borrow_mut() = Some(original.clone()));
+
+    let mut raw = original;
+    termios::cfmakeraw(&mut raw);
+    // Non-blocking: VMIN=0, VTIME=0 means read() returns immediately
+    // with 0 bytes if nothing is available — poll() handles the wait.
+    raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
+    raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+    termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw).is_ok()
+}
+
+/// Restore original terminal settings saved by `enable_raw_mode_unix`.
+#[cfg(unix)]
+fn disable_raw_mode_unix() {
+    use nix::sys::termios::{self, SetArg};
+    use std::os::fd::AsFd;
+
+    let stdin = std::io::stdin();
+    ORIGINAL_TERMIOS.with(|cell| {
+        if let Some(original) = cell.borrow().as_ref() {
+            let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, original);
+        }
+    });
+}
+
+/// Poll stdin for an abort key (ESC = 0x1b, Ctrl-C = 0x03).
+/// Returns `true` if an abort key was detected within `timeout`.
+#[cfg(unix)]
+fn poll_abort_key(timeout: Duration) -> bool {
+    use nix::poll::{self, PollFd, PollFlags, PollTimeout};
+    use std::os::fd::AsFd;
+    use std::os::unix::io::AsRawFd;
+
+    let stdin = std::io::stdin();
+    let poll_timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::from(50u16));
+    let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+    let ready = poll::poll(&mut fds, poll_timeout).unwrap_or(0);
+    if ready <= 0 {
+        return false;
+    }
+    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+    if !revents.contains(PollFlags::POLLIN) {
+        return false;
+    }
+    let mut buf = [0u8; 1];
+    match nix::unistd::read(stdin.as_raw_fd(), &mut buf) {
+        Ok(1) => buf[0] == 0x1b || buf[0] == 0x03,
+        _ => false,
+    }
+}
+
+/// Poll stdin for an abort key using crossterm's event system (Windows).
+#[cfg(not(unix))]
+fn poll_abort_key(timeout: Duration) -> bool {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    if !event::poll(timeout).unwrap_or(false) {
+        return false;
+    }
+    if let Ok(Event::Key(key)) = event::read() {
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        let is_esc = key.code == KeyCode::Esc;
+        let is_ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
+        return is_esc || is_ctrl_c;
+    }
+    false
 }
 
 /// Measure visible string width by stripping ANSI escape sequences.
@@ -3640,7 +3761,20 @@ impl LiveCli {
                 self.print_cost();
                 false
             }
-            SlashCommand::Resume { session_path } => self.resume_session(session_path)?,
+            SlashCommand::Resume { session_path } => {
+                let resumed = self.load_session(session_path)?;
+                if resumed {
+                    println!(
+                        "{}",
+                        format_resume_report(
+                            &self.session.path.display().to_string(),
+                            self.runtime.session().messages.len(),
+                            self.runtime.usage().turns(),
+                        )
+                    );
+                }
+                resumed
+            }
             SlashCommand::Config { section } => {
                 Self::print_config(section.as_deref())?;
                 false
@@ -4014,7 +4148,10 @@ impl LiveCli {
         println!("{}", format_cost_report(cumulative));
     }
 
-    fn resume_session(
+    /// Load a session by reference (id, path, or "latest"), replacing the
+    /// current runtime. Pure data operation — no terminal output.
+    /// Callers decide how to report the result.
+    fn load_session(
         &mut self,
         session_path: Option<String>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -4034,7 +4171,7 @@ impl LiveCli {
                 .default(0)
                 .interact_opt()?;
             return match selection {
-                Some(idx) => self.resume_session(Some(sessions[idx].id.clone())),
+                Some(idx) => self.load_session(Some(sessions[idx].id.clone())),
                 None => Ok(false),
             };
         };
@@ -4049,14 +4186,6 @@ impl LiveCli {
             id: session_id,
             path: handle.path,
         };
-        println!(
-            "{}",
-            format_resume_report(
-                &self.session.path.display().to_string(),
-                message_count,
-                self.runtime.usage().turns(),
-            )
-        );
         Ok(true)
     }
 

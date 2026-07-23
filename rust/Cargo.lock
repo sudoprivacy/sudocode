@@ -3226,6 +3226,7 @@ dependencies = [
  "futures",
  "futures-util",
  "mock-anthropic-service",
+ "nix 0.29.0",
  "plugins",
  "pty-expect",
  "pulldown-cmark",

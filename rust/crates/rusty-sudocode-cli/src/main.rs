@@ -3047,21 +3047,19 @@ impl HookAbortMonitor {
 
             runtime.block_on(async move {
                 let esc_abort = abort_signal.clone();
-                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || {
-                    loop {
-                        if stop_rx.try_recv().is_ok() {
-                            return;
+                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || loop {
+                    if stop_rx.try_recv().is_ok() {
+                        return;
+                    }
+                    if !raw_enabled {
+                        match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                            Err(RecvTimeoutError::Timeout) => continue,
                         }
-                        if !raw_enabled {
-                            match stop_rx.recv_timeout(Duration::from_millis(50)) {
-                                Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
-                                Err(RecvTimeoutError::Timeout) => continue,
-                            }
-                        }
-                        if poll_abort_key(Duration::from_millis(50)) {
-                            esc_abort.abort();
-                            return;
-                        }
+                    }
+                    if poll_abort_key(Duration::from_millis(50)) {
+                        esc_abort.abort();
+                        return;
                     }
                 });
 

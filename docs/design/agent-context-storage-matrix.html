@@ -103,7 +103,7 @@
   <td class="mega" rowspan="2">Identity</td>
   <td class="item">Primary key</td>
   <td class="cc">Sanitized <b>cwd</b> → <span class="path">~/.claude/projects/&lt;C--Users-…&gt;/</span> (Win) / <span class="path">-Users-…</span> (POSIX). One implicit agent per project.</td>
-  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span></td>
+  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span><br><small><b>mirror →</b> the fingerprint <i>is</i> the end-state <code>workspace_hash</code> (per-repo partition); <code>agent-name</code> is new (today implicit = one profile); <code>session-id</code> already exists. So: fp → <code>workspace_hash</code>, add <code>agent-name</code>, session-id → pid.</small></td>
   <td>conversation-id (SQLite row) + <code>extra.workspace</code> / <code>extra.backend</code>. <span class="b partial">partial</span></td>
   <td><b>agent-name</b> (image, primary) + <b>pid</b> (runtime). <span class="path">/agents/{name}/</span> · <span class="path">/proc/{pid}/</span>. One name → many pids. <span class="b ok">given</span></td>
 </tr>
@@ -255,7 +255,7 @@
   <td class="cc">cwd IS the (single) workspace.</td>
   <td>cwd = workspace (single); <code>workspace_fingerprint</code>. <span class="b partial">partial</span></td>
   <td><code>extra.workspace</code> / <code>customWorkspace</code> / <code>mossWorkDir</code>. <span class="b dup">dup</span></td>
-  <td><span class="path">/proc/{pid}/workspace/</span> (DT_DIR) + <span class="path">workspace/{alias}</span> → DT_LINK → mount_path. Multi-repo cross-node works today for federation-mounted targets. <span class="b ok">given</span></td>
+  <td><b>Per-agent worktree, per-pid view</b> — <i>not</i> a mismatch. The repo worktree is persistent + <b>agent-name-owned</b> (<span class="path">/repos/{owner}/{repo}/</span>, rev4); <span class="path">/proc/{pid}/workspace/{alias}</span> is just an <b>ephemeral per-pid DT_LINK</b> into it (§2.2, reaped on exit). The pid path is a <i>view</i>, not the store. Multi-repo cross-node works for federation-mounted targets. <span class="b ok">given</span></td>
 </tr>
 
 <!-- CROSS-MACHINE -->
@@ -273,8 +273,8 @@
   <td class="mega">Migration</td>
   <td class="item">Path to end-state</td>
   <td class="cc"><span class="b ref">reference</span> — the model, not a migrator.</td>
-  <td>flat <span class="path">.scode/sessions/</span> (StdFsBackend) → <span class="path">/agents/{name}/sessions/&lt;hash&gt;/</span> (KernelFsBackend). Seam exists but <b>dormant</b> (CLI defaults StdFs; <code>KernelFsBackend</code> instantiated unused) → wire it. <span class="b q">open? (priority)</span></td>
-  <td><code>messages</code> table → view over engine JSONL keyed by <code>acpSessionId</code>; keep only UI-unique fields (position/status/pin/cron/channel/user_id). <span class="b dup">dup → merge</span></td>
+  <td>flat <span class="path">.scode/sessions/</span> (StdFsBackend) → <span class="path">/agents/{name}/sessions/&lt;hash&gt;/</span> (KernelFsBackend). Seam dormant (CLI defaults StdFs) → wire it, <b>cherry-pickable per surface</b>. <b>Caveat:</b> only <code>SessionStore</code>/<code>ConfigLoader</code>/<code>file_ops</code> route through <code>FsBackend</code>; <b>subagent store · mailbox · memory bypass it</b> (direct <code>std::fs</code>) → separate work to nexus-back those. <span class="b q">open? (priority)</span></td>
+  <td><code>messages</code> table → view over engine JSONL keyed by <code>acpSessionId</code>; keep only UI-unique fields (position/status/pin/cron/channel/user_id) — i.e. <b>sudowork becomes a thin UI over the engine transcript</b> (à la Claude Desktop). <span class="b dup">dup → merge</span></td>
   <td><b>The superset</b> all others migrate toward.</td>
 </tr>
 

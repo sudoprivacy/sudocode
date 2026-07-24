@@ -74,6 +74,8 @@
 <b>Primary key = <code>agent-name</code></b> (one name → many pids across worktrees). The <code>workspace_hash</code> you'll see under <code>sessions/</code> is <i>not</i> a cwd-primary key — it is a <b>per-repo sub-partition</b> so one profile talking to many repos keeps its sessions sorted (§2.4). This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
 <br><br>
 <b>This table's job:</b> put CC's flat <code>~/.claude/projects/&lt;cwd&gt;/</code> model on each row, then read across — (1) does the Nexus end-state <i>cover</i> it? (2) how do sudocode &amp; sudowork store it today, and what's <span class="b dup">dup</span> to merge? CC is the <span class="b ref">reference</span> we map from; Nexus is the target all three converge to.
+<br><br>
+<b>This is a working doc (migration burndown), not a snapshot.</b> CC (reference) and the Nexus end-state (target) are fixed; the two <b>current</b> columns — sudocode &amp; sudowork — are live. As each migration lands, advance that cell + its badge (<span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span>); a row is finished when its <i>current</i> = the Nexus <i>target</i>. Update the cell in the same edit that lands the code.
 </div>
 
 <div class="legend">

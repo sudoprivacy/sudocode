@@ -623,7 +623,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>Memory write path ("remember X" / "forget X")</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Permission carve-out auto-allows writes to memory dir (PR #231). Full auto-memory system prompt instructs model to write/delete directly (PR #236).</td></tr>
     <tr><td><code>/memory</code> slash command</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Opens instruction files (AGENTS.md) in $EDITOR. CC parity. PR #231.</td></tr>
     <tr><td>Project-scoped memory</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-not-required-mock-verified"><strong>Covered</strong></td><td><code>pty_memory::memory_project_scoped_path</code>, <code>pty_memory::memory_directory_auto_created</code></td><td>CC: <code>~/.claude/projects/&lt;slug&gt;/memory/</code>; scode: <code>~/.scode/projects/&lt;slug&gt;/memory/</code>. PR #229.</td></tr>
-    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Full CC auto-memory instructions (~3500 chars) ported from claude-trace capture of CC v2.1.87. PR #236.</td></tr>
+    <tr><td>Memory system prompt (full CC parity)</td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_memory::memory_write_read_forget_workflow</code> (live-only)</td><td>Full CC <code># auto memory</code> block (measured 12,525 chars) ported from CC v2.1.87. PR #236. Per-model bloat audit + CC's lean <code># Memory</code> variant: see <a href="#system-prompt-alignment">System prompt — CC alignment</a>.</td></tr>
     <tr><td>Context window management</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Study how CC manages context budget across system prompt + memory + conversation. Some models only have 200K — need discard policy when pre-loaded content exceeds budget.</td></tr>
     <tr><td>Session memory</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: background subagent extracts structured notes per-session. Requires forked-agent infra.</td></tr>
     <tr><td>Background extract-memories agent</td><td data-priority="nice">nice</td><td data-status="gap">Gap</td><td>—</td><td>CC: separate post-sampling subagent proactively mines conversation for memory-worthy facts.</td></tr>
@@ -882,7 +882,7 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
   <li><strong>Configuration surface</strong> — <code>.scode.json</code> file layout, key names, precedence rules.</li>
 </ol>
 
-<h3>Reference sources</h3>
+<h3 id="reference-sources">Reference sources</h3>
 
 <h4>Tier 1 — sources of truth (multiple, peer-priority)</h4>
 
@@ -900,8 +900,8 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
       <td>The CC source-leak snapshot, kept private per community rules. As of the snapshot date it <em>is</em> CC's source of truth; reading it inside the private repo is fine. <strong>Current alignment plan:</strong> walk the snapshot-date CC surface one entry at a time and checkpoint where <code>scode</code> matches and where we deliberately diverge.</td>
     </tr>
     <tr>
-      <td>Runtime-observation combo — locally-run CC + <code>cchistory</code> + <code>claude-trace</code></td>
-      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction), capture history with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>), and inspect tokens-in / tokens-out with <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> from <a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a>. Behavioral facts, not source-level — but observed truth nonetheless.</td>
+      <td>Runtime-observation combo — locally-run CC + logging proxy + <code>cchistory</code></td>
+      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction) and capture the exact request via a logging HTTP proxy on <code>ANTHROPIC_BASE_URL</code> — see <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/capture_cc_system_prompt.py"><code>scripts/capture_cc_system_prompt.py</code></a>, used for the per-model <a href="#system-prompt-alignment">system-prompt alignment</a> capture. History can be scanned with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>). Note: <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> does <em>not</em> instrument the native CC&nbsp;2.x binary (logs 0 request pairs) — the proxy is the working substitute. Behavioral facts, not source-level — but observed truth nonetheless.</td>
     </tr>
   </tbody>
 </table>
@@ -1036,7 +1036,7 @@ injection, 3 PTY tests). The following gaps remain for full CC parity:</p>
   <tbody>
     <tr><td><code>/memory</code> slash command</td><td>Opens instruction files in <code>$EDITOR</code></td><td>Done — PR #231. Opens AGENTS.md via <code>$VISUAL</code> &gt; <code>$EDITOR</code> &gt; <code>vi</code>.</td></tr>
     <tr><td>Write path</td><td>LLM writes memory files via the <code>Write</code> tool; also responds to "remember X" / "forget X"</td><td>Done — PR #231 (permission carve-out) + PR #236 (system prompt instructs model to write/delete directly).</td></tr>
-    <tr><td>System prompt instructions</td><td>Detailed instructions telling the LLM when/how to save, update, and delete memory</td><td>Done — PR #236. Full CC auto-memory instructions (~3500 chars) ported from claude-trace capture of CC v2.1.87.</td></tr>
+    <tr><td>System prompt instructions</td><td>Detailed instructions telling the LLM when/how to save, update, and delete memory</td><td>Done — PR #236. Full CC <code># auto memory</code> block (measured 12,525 chars) ported from CC v2.1.87. CC has since collapsed this to a lean <code># Memory</code> (2,099) for its lean-variant models — see <a href="#system-prompt-alignment">System prompt — CC alignment</a>.</td></tr>
     <tr><td>Project-scoped memory</td><td><code>~/.claude/projects/&lt;slug&gt;/memory/</code> — isolated per workspace</td><td>Done — <code>~/.scode/projects/&lt;slug&gt;/memory/</code>, PTY tests <code>memory_project_scoped_path</code> + <code>memory_directory_auto_created</code> (PR #229)</td></tr>
     <tr><td>Session memory</td><td>Background subagent extracts structured notes per-session into <code>summary.md</code> (9 sections, fires after token/tool-call thresholds). Used for compaction. Behind <code>tengu_session_memory</code> flag.</td><td>Gap — requires forked-agent infrastructure</td></tr>
     <tr><td>Background extract-memories agent</td><td>Separate post-sampling subagent with Read/Grep/Glob/Edit/Write tools, parallelized 2-turn strategy. Behind <code>tengu_passport_quail</code> flag.</td><td>Gap — proactively mines conversation for memory-worthy facts</td></tr>
@@ -1046,30 +1046,91 @@ injection, 3 PTY tests). The following gaps remain for full CC parity:</p>
   </tbody>
 </table>
 
-<h3>System prompt — CC alignment</h3>
+<h3 id="system-prompt-alignment">System prompt — CC alignment (per-model bloat audit)</h3>
 
 <p>The scode system prompt is assembled by <code>SystemPromptBuilder</code>
-(Rust, <code>runtime/src/prompt.rs</code>). CC's is assembled in TypeScript
-across <code>main.tsx</code>, <code>memdir.ts</code>,
-<code>memoryTypes.ts</code>, etc. The latest CC system prompt can be
-captured via <code>claude-trace</code> (Tier-1 runtime-observation source)
-and compared against <code>scode system-prompt</code> output.</p>
+(Rust, <code>runtime/src/prompt.rs</code> <code>build()</code>). Sections were
+originally written to mirror CC's <em>verbose</em> prompt. CC has since split
+its prompt <strong>per model</strong>: its top-end opus reasoning models get a
+lean ~5.9&nbsp;KB prompt, while every sonnet + haiku + older model keeps the
+full ~27&nbsp;KB verbose prompt. scode currently serves the full verbose
+variant to <em>all</em> models — <code>build()</code> pushes all seven sections
+unconditionally; <code>model_family</code> flows in but only feeds the identity
+line, never gates section inclusion. This section captures what CC actually
+serves each model (the SSOT to mirror) and the scode sections that are
+over-written against it.</p>
 
-<p><strong>Alignment methodology:</strong> capture CC prompt via
-<code>claude-trace</code> → diff against <code>scode system-prompt</code>
-→ track deltas per section. Each major section (intro, system, doing tasks,
-actions, tools, tone, output efficiency, auto memory, environment) gets its
-own row.</p>
+<p><strong>Capture method (corrected):</strong> <code>claude-trace</code> does
+<em>not</em> instrument the native CC 2.x binary (logs 0 request pairs). The
+working runtime-observation method is a tiny logging HTTP proxy on
+<code>ANTHROPIC_BASE_URL</code> that dumps the first request body and returns a
+<code>400</code>; run <code>claude --model &lt;id&gt; -p hi</code> (with the
+<code>CLAUDE_CODE_*</code> child-session env cleared) and read the
+<code>system</code> field CC assembled client-side for that model. All figures
+below were captured first-hand against <strong>CC&nbsp;2.1.207</strong>. This is
+automated in <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/capture_cc_system_prompt.py"><code>scripts/capture_cc_system_prompt.py</code></a>
+— re-run it after upgrading the local CC binary to refresh Table&nbsp;A.
+Verbatim CC prompt text is kept local (not committed), treated like the private
+CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
+
+<p><strong>Table A — what CC serves each model (SSOT reference, CC&nbsp;2.1.207).</strong>
+The lean/full boundary is <em>model-specific, not generational</em>: sonnet-5
+and haiku-4-5 are new but still get the full 27&nbsp;KB prompt.</p>
 
 <table>
-  <thead><tr><th>Section</th><th>CC status (v2.1.87)</th><th>scode status</th></tr></thead>
+  <thead><tr><th>Model</th><th>CC variant</th><th>System-prompt size</th><th>Memory block</th><th>Distinctive sections</th></tr></thead>
   <tbody>
-    <tr><td>Auto memory instructions</td><td>~3500 chars, 4-type taxonomy, write/forget, staleness verification</td><td>Done — ported 1:1 from claude-trace capture (PR #236). <strong>Future:</strong> CCB v2.8.2 significantly compresses type descriptions (deletes <code>&lt;when_to_save&gt;</code>, <code>&lt;how_to_use&gt;</code>, <code>&lt;examples&gt;</code>; ~20 lines vs current ~65). Also adds <code>&lt;scope&gt;</code> tags for team memory (not yet implemented in scode). Decision: hold — current prompt matches locally-verifiable CC v2.1.87 (Tier-1). Revisit after upgrading local CC to 2.8.x and re-capturing via claude-trace.</td></tr>
-    <tr><td>Intro / identity</td><td>"You are Claude Code"</td><td>"You are Sudo Code" — aligned</td></tr>
-    <tr><td>System / tools / tasks / actions / tone / output</td><td>CC-specific sections</td><td>Gap — partially aligned, needs section-by-section diff</td></tr>
-    <tr><td>Environment context</td><td>Model family, cwd, date, platform, git status</td><td>Aligned — same structure</td></tr>
+    <tr><td><code>opus-4-8</code>, <code>opus-5</code></td><td data-status="covered"><strong>Lean</strong></td><td>~5.9 KB</td><td><code># Memory</code> (2,099)</td><td><code># Harness</code> only — no Doing&nbsp;tasks / Actions / Using&nbsp;tools / Tone / Text&nbsp;output</td></tr>
+    <tr><td><code>opus-4-1</code>, <code>opus-4</code></td><td data-status="covered"><strong>Lean</strong></td><td>~5.9 KB</td><td><code># Memory</code> (2,099)</td><td>Request model is <em>remapped</em> to <code>opus-4-8</code> in the body → lean</td></tr>
+    <tr><td><code>fable-5</code></td><td data-status="gap-l2"><strong>Mid</strong></td><td>~10.4 KB</td><td><code># Memory</code> (2,099)</td><td><code># Harness</code> (661) + extra <code># Communicating with the user</code> (3,734) — explicit comms scaffolding the top opus models don't get</td></tr>
+    <tr><td><code>sonnet-5</code>, <code>sonnet-4-5</code>, <code>sonnet-4</code>, <code>sonnet-3-7</code>, <code>sonnet-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections</td></tr>
+    <tr><td><code>opus-4-5</code>, <code>haiku-4-5</code>, <code>haiku-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections — newest haiku still gets the full prompt</td></tr>
   </tbody>
 </table>
+
+<p>CC's three variants share the same lean <code># Memory</code> (2,099) across
+Lean+Mid, but sonnet/haiku/older keep the full <code># auto memory</code>
+(12,834). CC's cut for its lean models: delete <code># Doing tasks</code> /
+<code># Executing actions with care</code> / <code># Using your tools</code> /
+<code># Tone and style</code> / <code># Text output</code> entirely, collapse
+<code># auto memory</code> → <code># Memory</code>. Net 27,385 → 5,889 chars
+(−78.5%).</p>
+
+<p><strong>Table B — scode section-by-section bloat vs CC.</strong> Sizes are
+the measured char length of each Rust prompt literal. "Serve Lean" = the action
+for models CC serves lean (opus-4-8 / opus-5); older models keep today's full
+text unchanged.</p>
+
+<table>
+  <thead><tr><th>scode section (file)</th><th>Now</th><th>CC-full parity</th><th>CC-lean (opus-4-8/5)</th><th>Action to mirror CC</th></tr></thead>
+  <tbody>
+    <tr><td><code>get_simple_intro_section</code> — identity + safety (<code>prompt.rs:621</code>)</td><td>910</td><td>preamble</td><td>folded into <code># Harness</code></td><td data-status="covered">Keep — core identity/safety</td></tr>
+    <tr><td><code>get_simple_system_section</code> — <code># System</code> (<code>:637</code>)</td><td>1,239</td><td><code># System</code> 1,619</td><td>reframed → <code># Harness</code> 1,334</td><td data-status="gap-l2">Slim + reframe to <code># Harness</code></td></tr>
+    <tr><td><code>get_simple_doing_tasks_section</code> — <code># Doing tasks</code> (<code>:648</code>)</td><td>2,196</td><td>3,308</td><td>removed</td><td data-status="gap">Drop for lean models</td></tr>
+    <tr><td><code>get_actions_section</code> — <code># Executing actions with care</code> (<code>:664</code>)</td><td>1,575</td><td>3,556</td><td>removed</td><td data-status="gap">Drop (incl. the <code>Examples:</code> block — examples hurt newest models)</td></tr>
+    <tr><td><code>get_using_tools_section</code> — <code># Using your tools</code> + git-commit + PR procedure (<code>:676</code>)</td><td><strong>3,657</strong></td><td>746 (scode is 5× larger than CC-full)</td><td>removed</td><td data-status="gap">Drop procedure; keep one "prefer dedicated tools / batch independent calls" line in Harness; move git/PR steps to a <code>/commit</code> skill / dynamic injection</td></tr>
+    <tr><td><code>get_tone_style_section</code> — <code># Tone and style</code> (<code>:715</code>)</td><td>564</td><td>541</td><td>removed</td><td data-status="gap">Drop; fold <code>file_path:line_number</code> + no-colon-before-tool-calls into Harness</td></tr>
+    <tr><td><code>get_output_efficiency_section</code> — <code># Output efficiency</code> (<code>:724</code>)</td><td>749</td><td>≈ <code># Text output</code> 1,298</td><td>removed</td><td data-status="gap">Drop for lean models</td></tr>
+    <tr><td><code># auto memory</code> (<code>memory/mod.rs:180</code>) — 6 subsections + <code>&lt;examples&gt;</code></td><td><strong>12,525</strong></td><td><code># auto memory</code> 12,834</td><td>collapsed → <code># Memory</code> 2,099</td><td data-status="gap">Collapse to lean <code># Memory</code> for lean models — drop all <code>&lt;examples&gt;</code> + spelled-out 2-step walkthroughs; keep frontmatter format + 4 type one-liners + condensed what-not / access rules</td></tr>
+    <tr><td>coordinator prompt (<code>coordinator_mode.rs:125</code>)</td><td>10,996</td><td>no CC-public equivalent (CC-old style: turn-by-turn <code>## Example</code> + code samples)</td><td>—</td><td data-status="gap-l2">Trim examples for lean models; <strong>fix <code>"You are Claude Code"</code> → <code>"Sudo Code"</code></strong> (naming bug, all models)</td></tr>
+    <tr><td>summarizer (<code>lib.rs:5308</code>) + subagent role hints (<code>:5551</code>)</td><td>~600 / 1 line</td><td>n/a</td><td>already lean</td><td data-status="covered">Keep as-is</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Net for lean models:</strong> main prompt 10,890 → ~2,120 (−80.5%)
++ memory 12,525 → ~2,100 (−83%) ⇒ root prompt ~23,400 → ~4,220 (−82%), landing
+on CC's ~5,889. Because every sub-agent reuses <code>build()</code> via
+<code>load_system_prompt_for_agent</code>, the saving multiplies across each
+spawn.</p>
+
+<p><strong>Approach:</strong> mirror CC's observed per-model mapping (Table&nbsp;A)
+— serve Lean to <code>opus-4-8</code>/<code>opus-5</code>, Mid to
+<code>fable-5</code>, Full to the rest — rather than invent a scode-specific
+boundary. The one hook needed is per-model gating in <code>build()</code>
+(today it is unconditional). Older models keep today's full prompt, so the
+change is zero-risk for them. Intro/identity and Environment context are already
+aligned; the <code>opus-4-1</code>→<code>opus-4-8</code> remap is CC's, not
+something scode needs to replicate.</p>
 
 <h3>Memory recall — Sonnet side-query relevance ranking (P1)</h3>
 

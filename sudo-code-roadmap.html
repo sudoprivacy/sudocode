@@ -1123,6 +1123,32 @@ on CC's ~5,889. Because every sub-agent reuses <code>build()</code> via
 <code>load_system_prompt_for_agent</code>, the saving multiplies across each
 spawn.</p>
 
+<p><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong>
+Tables A/B are about <em>size</em>; this one is about <em>content set
+difference</em>. Most of what lean-CC keeps (reversibility guidance,
+dedicated-tools preference, <code>file:line</code>, memory) scode also has —
+just in verbose form (row group ②). But lean-CC <em>added</em> a few small,
+high-value instructions for newest models that scode lacks entirely (row group
+①, each confirmed absent by grep of <code>prompt.rs</code> + <code>memory/mod.rs</code>).</p>
+
+<table>
+  <thead><tr><th>Direction</th><th>Content</th><th>Other side</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="5" data-status="gap-l2"><strong>① In lean-CC,<br>NOT in scode</strong><br>(adopt candidates)</td><td>"Report outcomes <strong>faithfully</strong> — if tests fail say so with output; if a step was skipped say that; state done plainly <strong>without hedging</strong>" (<code># Harness</code>)</td><td>absent</td><td>Adopt — honesty / anti-hedge instruction</td></tr>
+    <tr><td>"Write code that <strong>reads like the surrounding code</strong>: match comment density, naming, idiom" (<code># Harness</code>)</td><td>absent (scode only says "comment where non-obvious")</td><td>Adopt — idiom matching</td></tr>
+    <tr><td><code># Context management</code> behavioral guidance: "when you have enough info, <strong>act</strong>; don't re-derive / re-litigate; give a <strong>recommendation, not an exhaustive survey</strong>"</td><td>absent (scode has only a 1-line auto-compress note)</td><td>Adopt — already flagged as "Context window management" Gap in the Memory table</td></tr>
+    <tr><td><code># Session-specific guidance</code>: <code>/&lt;skill-name&gt;</code> → invoke via Skill, only listed skills</td><td>absent</td><td>Adopt if scode surfaces user-invocable skills</td></tr>
+    <tr><td>Dual-use security clause: "C2 frameworks, credential testing, exploit development require clear authorization context: pentesting, CTF, research" (IMPORTANT)</td><td>absent (scode's security line is shorter)</td><td>Adopt — sharper safety scoping</td></tr>
+    <tr><td rowspan="7" data-status="gap"><strong>② In scode,<br>NOT in lean-CC</strong><br>(cut / compress)</td><td><code># Doing tasks</code> (2,196)</td><td>dropped entirely</td><td>Cut for lean models</td></tr>
+    <tr><td><code># Executing actions with care</code> + <code>Examples:</code> list (1,575)</td><td><strong>compressed to one <code># Harness</code> paragraph</strong></td><td>Replace verbose+Examples with the one-liner</td></tr>
+    <tr><td><code># Using your tools</code> + git-commit + PR procedure (3,657)</td><td>dropped; kept only "prefer dedicated tools" one-liner</td><td>Cut procedure</td></tr>
+    <tr><td><code># Tone and style</code> (564)</td><td>dropped; kept only <code>file_path:line_number</code></td><td>Cut emoji / short / no-colon rules</td></tr>
+    <tr><td><code># Output efficiency</code> (749)</td><td>dropped; brevity folded into <code># Context management</code></td><td>Cut</td></tr>
+    <tr><td><code># auto memory</code> verbose delta (~10,400 over lean)</td><td>collapsed to <code># Memory</code> (2,099)</td><td>Collapse</td></tr>
+    <tr><td><code>IMPORTANT: never generate/guess URLs</code> (intro)</td><td>dropped</td><td>Drop for lean models</td></tr>
+  </tbody>
+</table>
+
 <p><strong>Approach:</strong> mirror CC's observed per-model mapping (Table&nbsp;A)
 — serve Lean to <code>opus-4-8</code>/<code>opus-5</code>, Mid to
 <code>fable-5</code>, Full to the rest — rather than invent a scode-specific

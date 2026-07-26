@@ -882,7 +882,7 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
   <li><strong>Configuration surface</strong> — <code>.scode.json</code> file layout, key names, precedence rules.</li>
 </ol>
 
-<h3>Reference sources</h3>
+<h3 id="reference-sources">Reference sources</h3>
 
 <h4>Tier 1 — sources of truth (multiple, peer-priority)</h4>
 
@@ -900,8 +900,8 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
       <td>The CC source-leak snapshot, kept private per community rules. As of the snapshot date it <em>is</em> CC's source of truth; reading it inside the private repo is fine. <strong>Current alignment plan:</strong> walk the snapshot-date CC surface one entry at a time and checkpoint where <code>scode</code> matches and where we deliberately diverge.</td>
     </tr>
     <tr>
-      <td>Runtime-observation combo — locally-run CC + <code>cchistory</code> + <code>claude-trace</code></td>
-      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction), capture history with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>), and inspect tokens-in / tokens-out with <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> from <a href="https://github.com/badlogic/lemmy">badlogic/lemmy</a>. Behavioral facts, not source-level — but observed truth nonetheless.</td>
+      <td>Runtime-observation combo — locally-run CC + logging proxy + <code>cchistory</code></td>
+      <td>Run real CC locally (we can drive it through <code>sudocode</code>'s PTY architecture for full cloud reproduction) and capture the exact request via a logging HTTP proxy on <code>ANTHROPIC_BASE_URL</code> — see <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/capture_cc_system_prompt.py"><code>scripts/capture_cc_system_prompt.py</code></a>, used for the per-model <a href="#system-prompt-alignment">system-prompt alignment</a> capture. History can be scanned with <a href="https://github.com/badlogic/cchistory">badlogic/cchistory</a> (<a href="https://cchistory.mariozechner.at/">live site</a>). Note: <a href="https://github.com/badlogic/lemmy/tree/main/apps/claude-trace">claude-trace</a> does <em>not</em> instrument the native CC&nbsp;2.x binary (logs 0 request pairs) — the proxy is the working substitute. Behavioral facts, not source-level — but observed truth nonetheless.</td>
     </tr>
   </tbody>
 </table>
@@ -1067,7 +1067,11 @@ working runtime-observation method is a tiny logging HTTP proxy on
 <code>400</code>; run <code>claude --model &lt;id&gt; -p hi</code> (with the
 <code>CLAUDE_CODE_*</code> child-session env cleared) and read the
 <code>system</code> field CC assembled client-side for that model. All figures
-below were captured first-hand against <strong>CC&nbsp;2.1.207</strong>.</p>
+below were captured first-hand against <strong>CC&nbsp;2.1.207</strong>. This is
+automated in <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/capture_cc_system_prompt.py"><code>scripts/capture_cc_system_prompt.py</code></a>
+— re-run it after upgrading the local CC binary to refresh Table&nbsp;A.
+Verbatim CC prompt text is kept local (not committed), treated like the private
+CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
 
 <p><strong>Table A — what CC serves each model (SSOT reference, CC&nbsp;2.1.207).</strong>
 The lean/full boundary is <em>model-specific, not generational</em>: sonnet-5

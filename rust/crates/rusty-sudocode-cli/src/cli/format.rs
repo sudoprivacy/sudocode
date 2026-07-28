@@ -236,13 +236,13 @@ pub(crate) fn format_connected_line_with_config(
 
 pub(crate) fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
     let config = load_sudocode_config_for_current_dir();
+    let model_lower = model.to_ascii_lowercase();
+
+    // Config aliases with display names + provider info.
     let mut available_lines = String::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (alias, entry) in &config.models {
-        let marker = if alias == &model.to_ascii_lowercase() {
-            " *"
-        } else {
-            ""
-        };
+        let marker = if alias == &model_lower { " *" } else { "" };
         let provider_modes: Vec<&str> = entry.providers.keys().map(String::as_str).collect();
         write!(
             available_lines,
@@ -252,16 +252,25 @@ pub(crate) fn format_model_report(model: &str, message_count: usize, turns: u32)
             provider_modes.join(", ")
         )
         .expect("write to string");
+        seen.insert(alias.to_ascii_lowercase());
     }
-    let available = if available_lines.is_empty() {
-        String::from("opus, sonnet, haiku")
-    } else {
-        available_lines
-    };
+
+    // Capabilities SSOT models not already covered by config aliases.
+    for id in runtime::model_capabilities::all_model_ids() {
+        if !seen.contains(&id.to_ascii_lowercase()) {
+            let marker = if id.eq_ignore_ascii_case(model) {
+                " *"
+            } else {
+                ""
+            };
+            write!(available_lines, "\n    {id}{marker}").expect("write to string");
+        }
+    }
+
     format!(
         "Model
   Current model    {model}
-  Available models{available}
+  Available models{available_lines}
   Session messages {message_count}
   Session turns    {turns}
 

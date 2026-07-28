@@ -2185,7 +2185,7 @@ impl AcpCliAgent {
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
         let system_prompt = build_system_prompt_for(&cwd, &resolved)
             .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
-        let runtime = build_runtime_for_cwd(
+        let mut runtime = build_runtime_for_cwd(
             &cwd,
             cloned_session,
             &handle_id,
@@ -2203,6 +2203,10 @@ impl AcpCliAgent {
             &session_mcp,
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
+        if let Some(rt) = runtime.runtime.as_mut() {
+            rt.api_client_mut()
+                .set_reasoning_effort(self.reasoning_effort.clone());
+        }
 
         let session = self.sessions.get_mut(session_id).unwrap();
         session.runtime = runtime;

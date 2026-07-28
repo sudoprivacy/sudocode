@@ -315,6 +315,12 @@ impl SdkSessionObserver {
 }
 
 impl RuntimeObserver for SdkSessionObserver {
+    fn on_thinking_delta(&mut self, delta: &str) {
+        self.push(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new(delta)),
+        )));
+    }
+
     fn on_text_delta(&mut self, delta: &str) {
         self.push(SessionUpdate::AgentMessageChunk(ContentChunk::new(
             ContentBlock::Text(TextContent::new(delta)),
@@ -500,11 +506,14 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
 mod tests {
     use super::{
         acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage,
+        SdkSessionObserver,
     };
     use crate::config::{ConfigSource, McpServerConfig};
+    use crate::conversation::RuntimeObserver;
     use crate::usage::UsageCostCurrency;
     use agent_client_protocol_schema::{
-        EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+        ContentBlock, EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+        SessionUpdate,
     };
     use std::path::{Path, PathBuf};
 
@@ -536,6 +545,26 @@ mod tests {
             meta["cumulativeUsage"]["totalTokens"],
             serde_json::json!(14)
         );
+    }
+
+    #[test]
+    fn sdk_session_observer_streams_thinking_as_agent_thought_chunk() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut observer = SdkSessionObserver::new("session-1", tx);
+
+        observer.on_thinking_delta("hidden reasoning");
+
+        let notification = rx.try_recv().expect("thought notification");
+        assert_eq!(&*notification.session_id.0, "session-1");
+        match notification.update {
+            SessionUpdate::AgentThoughtChunk(chunk) => match chunk.content {
+                ContentBlock::Text(text) => {
+                    assert_eq!(text.text, "hidden reasoning");
+                }
+                other => panic!("expected text thought chunk, got {other:?}"),
+            },
+            other => panic!("expected agent thought chunk, got {other:?}"),
+        }
     }
 
     #[test]

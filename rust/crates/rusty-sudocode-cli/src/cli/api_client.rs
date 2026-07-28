@@ -303,7 +303,7 @@ impl CliStreamState {
                         input.push_str(&partial_json);
                     }
                 }
-                ContentBlockDelta::ThinkingDelta { .. } => {
+                ContentBlockDelta::ThinkingDelta { thinking } => {
                     if !self.block_has_thinking_summary {
                         self.pause_spinner();
                         render_thinking_block_summary(out, None, false)?;
@@ -316,6 +316,7 @@ impl CliStreamState {
                         self.set_thinking_indicator(true);
                         self.resume_spinner();
                     }
+                    push_thinking_event(&mut self.buffer, thinking, None);
                 }
                 ContentBlockDelta::SignatureDelta { .. } => {}
             },
@@ -788,10 +789,14 @@ pub(crate) fn push_output_block(
             };
             *pending_tool = Some((id, name, initial_input, thought_signature));
         }
-        OutputContentBlock::Thinking { thinking, .. } => {
+        OutputContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
             render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
             *block_has_thinking_summary = true;
             glyph_state.visible_col = 0;
+            push_thinking_event(events, thinking, signature);
         }
         OutputContentBlock::RedactedThinking { .. } => {
             render_thinking_block_summary(out, None, true)?;
@@ -800,6 +805,19 @@ pub(crate) fn push_output_block(
         }
     }
     Ok(())
+}
+
+fn push_thinking_event(
+    events: &mut VecDeque<AssistantEvent>,
+    thinking: String,
+    signature: Option<String>,
+) {
+    if !thinking.is_empty() {
+        events.push_back(AssistantEvent::Thinking {
+            thinking,
+            signature,
+        });
+    }
 }
 
 pub(crate) fn response_to_events(
@@ -939,6 +957,61 @@ pub(crate) fn filter_tool_specs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_thinking_event_buffers_runtime_thinking() {
+        let mut events = VecDeque::new();
+
+        push_thinking_event(
+            &mut events,
+            "hidden reasoning".to_string(),
+            Some("sig".to_string()),
+        );
+        push_thinking_event(&mut events, String::new(), None);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.pop_front(),
+            Some(AssistantEvent::Thinking {
+                thinking,
+                signature: Some(signature),
+            }) if thinking == "hidden reasoning" && signature == "sig"
+        ));
+    }
+
+    #[test]
+    fn response_to_events_preserves_thinking_block() {
+        let response = MessageResponse {
+            id: "msg-1".to_string(),
+            kind: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                OutputContentBlock::Thinking {
+                    thinking: "considering".to_string(),
+                    signature: None,
+                },
+                OutputContentBlock::Text {
+                    text: "done".to_string(),
+                },
+            ],
+            model: "model".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: Default::default(),
+            request_id: None,
+        };
+        let mut out = io::sink();
+
+        let events = response_to_events(response, &mut out).expect("response should convert");
+
+        assert!(matches!(
+            events.front(),
+            Some(AssistantEvent::Thinking { thinking, .. }) if thinking == "considering"
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AssistantEvent::TextDelta(text) if text == "done")));
+    }
 
     fn tool_use(id: &str, name: &str) -> ConversationMessage {
         ConversationMessage {

@@ -311,6 +311,170 @@ async fn openai_streaming_requests_opt_into_usage_chunks() {
 }
 
 #[tokio::test]
+async fn send_message_uses_responses_endpoint_when_configured() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let sse = concat!(
+        "event: response.created\n",
+        "data: {\"id\":\"resp_test\",\"model\":\"gpt-5.5\"}\n\n",
+        "event: response.content_part.added\n",
+        "data: {}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Hello from Responses\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {}\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":5}}}\n\n"
+    );
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response_with_headers(
+            "200 OK",
+            "text/event-stream",
+            sse,
+            &[("x-request-id", "req_responses_send")],
+        )],
+    )
+    .await;
+
+    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+        .with_api_format(ApiFormat::OpenAiResponses)
+        .with_base_url(server.base_url());
+    let response = client
+        .send_message(&sample_request(false), None)
+        .await
+        .expect("responses request should succeed");
+
+    assert_eq!(response.model, "gpt-5.5");
+    assert_eq!(response.total_tokens(), 16);
+    assert_eq!(
+        response.content,
+        vec![OutputContentBlock::Text {
+            text: "Hello from Responses".to_string(),
+        }]
+    );
+    assert_eq!(response.request_id.as_deref(), Some("req_responses_send"));
+
+    let captured = state.lock().await;
+    let request = captured.first().expect("server should capture request");
+    assert_eq!(request.path, "/responses");
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["model"], json!("grok-3"));
+    assert_eq!(body["input"][0]["role"], json!("user"));
+    assert_eq!(body["instructions"], json!("Use tools when needed"));
+    assert_eq!(body["tools"][0]["type"], json!("function"));
+    assert_eq!(body["tool_choice"], json!("auto"));
+    assert_eq!(body["stream"], json!(true));
+    assert_eq!(body["max_output_tokens"], json!(64));
+}
+
+#[tokio::test]
+async fn stream_message_normalizes_responses_text_and_tool_calls() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let sse = concat!(
+        "event: response.created\n",
+        "data: {\"id\":\"resp_stream\",\"model\":\"gpt-5.5\"}\n\n",
+        "event: response.content_part.added\n",
+        "data: {}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Hello\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"weather\"}}\n\n",
+        "event: response.function_call_arguments.delta\n",
+        "data: {\"output_index\":0,\"delta\":\"{\\\"city\\\":\\\"Paris\\\"}\"}\n\n",
+        "event: response.function_call_arguments.done\n",
+        "data: {\"output_index\":0}\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":4}}}\n\n"
+    );
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response_with_headers(
+            "200 OK",
+            "text/event-stream",
+            sse,
+            &[("x-request-id", "req_responses_stream")],
+        )],
+    )
+    .await;
+
+    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+        .with_api_format(ApiFormat::OpenAiResponses)
+        .with_base_url(server.base_url());
+    let mut stream = client
+        .stream_message(&sample_request(false), None)
+        .await
+        .expect("responses stream should start");
+
+    assert_eq!(stream.request_id(), Some("req_responses_stream"));
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next_event().await.expect("event should parse") {
+        events.push(event);
+    }
+
+    assert!(matches!(events[0], StreamEvent::MessageStart(_)));
+    assert!(matches!(
+        events[1],
+        StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+            index: 0,
+            content_block: OutputContentBlock::Text { .. }
+        })
+    ));
+    assert!(matches!(
+        events[2],
+        StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+            index: 0,
+            delta: ContentBlockDelta::TextDelta { .. }
+        })
+    ));
+    assert!(matches!(
+        events[3],
+        StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 })
+    ));
+    assert!(matches!(
+        events[4],
+        StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+            index: 1,
+            content_block: OutputContentBlock::ToolUse { .. }
+        })
+    ));
+    assert!(matches!(
+        events[5],
+        StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+            index: 1,
+            delta: ContentBlockDelta::InputJsonDelta { .. }
+        })
+    ));
+    assert!(matches!(
+        events[6],
+        StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 1 })
+    ));
+    assert!(matches!(
+        events[7],
+        StreamEvent::MessageDelta(MessageDeltaEvent { .. })
+    ));
+    assert!(matches!(events[8], StreamEvent::MessageStop(_)));
+
+    match &events[7] {
+        StreamEvent::MessageDelta(MessageDeltaEvent { usage, .. }) => {
+            assert_eq!(usage.input_tokens, 9);
+            assert_eq!(usage.output_tokens, 4);
+        }
+        other => panic!("expected message delta, got {other:?}"),
+    }
+
+    let captured = state.lock().await;
+    let request = captured.first().expect("captured request");
+    assert_eq!(request.path, "/responses");
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["stream"], json!(true));
+    assert!(body.get("messages").is_none());
+    assert!(body.get("input").is_some());
+}
+
+#[tokio::test]
 async fn provider_client_dispatches_xai_requests() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let server = spawn_server(

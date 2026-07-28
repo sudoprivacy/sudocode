@@ -15,7 +15,7 @@ use crate::types::{
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
-use super::registry::preflight_message_request;
+use super::registry::{preflight_message_request, ApiFormat};
 use super::{Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
@@ -99,6 +99,7 @@ pub struct OpenAiCompatClient {
     api_key: String,
     config: OpenAiCompatConfig,
     base_url: String,
+    api_format: ApiFormat,
     retry_policy: RetryPolicy,
 }
 
@@ -118,6 +119,7 @@ impl OpenAiCompatClient {
             api_key: api_key.into(),
             config,
             base_url: read_base_url(config),
+            api_format: ApiFormat::OpenAiCompletions,
             retry_policy: RetryPolicy::DEFAULT,
         }
     }
@@ -130,6 +132,12 @@ impl OpenAiCompatClient {
             ));
         };
         Ok(Self::new(api_key, config))
+    }
+
+    #[must_use]
+    pub fn with_api_format(mut self, api_format: ApiFormat) -> Self {
+        self.api_format = api_format;
+        self
     }
 
     #[must_use]
@@ -174,6 +182,18 @@ impl OpenAiCompatClient {
             ..request.clone()
         };
         preflight_message_request(&request)?;
+        if self.api_format == ApiFormat::OpenAiResponses {
+            let mut stream = self
+                .stream_message(
+                    &MessageRequest {
+                        stream: true,
+                        ..request.clone()
+                    },
+                    trace_id,
+                )
+                .await?;
+            return collect_response_stream(&mut stream, &request).await;
+        }
         let response = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
@@ -247,17 +267,21 @@ impl OpenAiCompatClient {
         let response = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
-        Ok(MessageStream {
-            request_id: request_id_from_headers(response.headers()),
-            response,
-            parser: OpenAiSseParser::with_context(self.config.provider_name, request.model.clone()),
-            pending: VecDeque::new(),
-            done: false,
-            usage_recorded: false,
-            session_tracer: self.session_tracer().cloned(),
-            state: StreamState::new(request.model.clone()),
-            chunks_read: 0,
-            sse_events_read: 0,
+        Ok(match self.api_format {
+            ApiFormat::OpenAiCompletions => MessageStream::chat(
+                request_id_from_headers(response.headers()),
+                response,
+                self.config.provider_name,
+                request.model.clone(),
+                self.session_tracer().cloned(),
+            ),
+            ApiFormat::OpenAiResponses => MessageStream::responses(
+                request_id_from_headers(response.headers()),
+                response,
+                request.model.clone(),
+                self.session_tracer().cloned(),
+            ),
+            _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
         })
     }
 
@@ -267,10 +291,29 @@ impl OpenAiCompatClient {
         request: &MessageRequest,
         trace_id: Option<&str>,
     ) -> Result<reqwest::Response, ApiError> {
-        check_request_body_size(request, self.config())?;
+        match self.api_format {
+            ApiFormat::OpenAiCompletions => check_request_body_size(request, self.config())?,
+            ApiFormat::OpenAiResponses => {
+                let estimated_bytes =
+                    estimate_request_body_size_for_format(request, self.config(), self.api_format);
+                let max_bytes = self.config().max_request_body_bytes;
+                if estimated_bytes > max_bytes {
+                    return Err(ApiError::RequestBodySizeExceeded {
+                        estimated_bytes,
+                        max_bytes,
+                        provider: self.config().provider_name,
+                    });
+                }
+            }
+            _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
+        }
 
-        let url = chat_completions_endpoint(&self.base_url);
-        let body = build_chat_completion_request(request, self.config());
+        let url = endpoint_for_format(&self.base_url, self.api_format);
+        let body = match self.api_format {
+            ApiFormat::OpenAiCompletions => build_chat_completion_request(request, self.config()),
+            ApiFormat::OpenAiResponses => build_responses_request(request),
+            _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
+        };
 
         let headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -331,12 +374,12 @@ impl Provider for OpenAiCompatClient {
 pub struct MessageStream {
     request_id: Option<String>,
     response: reqwest::Response,
-    parser: OpenAiSseParser,
+    parser: MessageStreamParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
     usage_recorded: bool,
     session_tracer: Option<telemetry::SessionTracer>,
-    state: StreamState,
+    state: MessageStreamState,
     /// Number of HTTP chunks successfully read from the stream.
     chunks_read: u64,
     /// Number of SSE events successfully parsed from the stream.
@@ -344,6 +387,47 @@ pub struct MessageStream {
 }
 
 impl MessageStream {
+    fn chat(
+        request_id: Option<String>,
+        response: reqwest::Response,
+        provider: impl Into<String>,
+        model: String,
+        session_tracer: Option<telemetry::SessionTracer>,
+    ) -> Self {
+        Self {
+            request_id,
+            response,
+            parser: MessageStreamParser::Chat(OpenAiSseParser::with_context(provider, model.clone())),
+            pending: VecDeque::new(),
+            done: false,
+            usage_recorded: false,
+            session_tracer,
+            state: MessageStreamState::Chat(ChatStreamState::new(model)),
+            chunks_read: 0,
+            sse_events_read: 0,
+        }
+    }
+
+    fn responses(
+        request_id: Option<String>,
+        response: reqwest::Response,
+        model: String,
+        session_tracer: Option<telemetry::SessionTracer>,
+    ) -> Self {
+        Self {
+            request_id,
+            response,
+            parser: MessageStreamParser::Responses(ResponsesSseParser::new()),
+            pending: VecDeque::new(),
+            done: false,
+            usage_recorded: false,
+            session_tracer,
+            state: MessageStreamState::Responses(ResponsesStreamState::new(model)),
+            chunks_read: 0,
+            sse_events_read: 0,
+        }
+    }
+
     #[must_use]
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()
@@ -367,9 +451,20 @@ impl MessageStream {
             match self.response.chunk().await {
                 Ok(Some(chunk)) => {
                     self.chunks_read += 1;
-                    for parsed in self.parser.push(&chunk)? {
-                        self.sse_events_read += 1;
-                        self.pending.extend(self.state.ingest_chunk(parsed)?);
+                    match (&mut self.parser, &mut self.state) {
+                        (MessageStreamParser::Chat(parser), MessageStreamState::Chat(state)) => {
+                            for parsed in parser.push(&chunk)? {
+                                self.sse_events_read += 1;
+                                self.pending.extend(state.ingest_chunk(parsed)?);
+                            }
+                        }
+                        (MessageStreamParser::Responses(parser), MessageStreamState::Responses(state)) => {
+                            for frame in parser.push(&chunk) {
+                                self.sse_events_read += 1;
+                                self.pending.extend(state.ingest_frame(&frame)?);
+                            }
+                        }
+                        _ => unreachable!("message stream parser/state mismatch"),
                     }
                 }
                 Ok(None) => {
@@ -383,11 +478,11 @@ impl MessageStream {
                                 .request_id
                                 .clone()
                                 .unwrap_or_else(|| "unknown".to_string()),
-                            model: self.state.model.clone(),
+                            model: self.state.model().to_string(),
                             chunks_read: self.chunks_read,
                             sse_events_read: self.sse_events_read,
-                            usage_seen: self.state.usage.is_some(),
-                            stream_finished: self.state.finished,
+                            usage_seen: self.state.usage().is_some(),
+                            stream_finished: self.state.is_finished(),
                             error_message: error.to_string(),
                             error_chain,
                         });
@@ -403,7 +498,7 @@ impl MessageStream {
             return;
         }
         self.usage_recorded = true;
-        let Some(usage) = self.state.usage.as_ref() else {
+        let Some(usage) = self.state.usage() else {
             return;
         };
         let Some(tracer) = &self.session_tracer else {
@@ -420,6 +515,48 @@ impl MessageStream {
             usage.cost_units,
             usage.cost_currency.as_deref(),
         );
+    }
+}
+
+#[derive(Debug)]
+enum MessageStreamParser {
+    Chat(OpenAiSseParser),
+    Responses(ResponsesSseParser),
+}
+
+#[derive(Debug)]
+enum MessageStreamState {
+    Chat(ChatStreamState),
+    Responses(ResponsesStreamState),
+}
+
+impl MessageStreamState {
+    fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
+        match self {
+            Self::Chat(state) => state.finish(),
+            Self::Responses(state) => Ok(state.finish()),
+        }
+    }
+
+    fn usage(&self) -> Option<&Usage> {
+        match self {
+            Self::Chat(state) => state.usage.as_ref(),
+            Self::Responses(state) => state.usage.as_ref(),
+        }
+    }
+
+    fn model(&self) -> &str {
+        match self {
+            Self::Chat(state) => &state.model,
+            Self::Responses(state) => &state.model,
+        }
+    }
+
+    const fn is_finished(&self) -> bool {
+        match self {
+            Self::Chat(state) => state.finished,
+            Self::Responses(state) => state.finished,
+        }
     }
 }
 
@@ -455,7 +592,7 @@ impl OpenAiSseParser {
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
-struct StreamState {
+struct ChatStreamState {
     model: String,
     message_id: Option<String>,
     response_model: Option<String>,
@@ -470,7 +607,7 @@ struct StreamState {
     thinking_finished: bool,
 }
 
-impl StreamState {
+impl ChatStreamState {
     fn new(model: String) -> Self {
         Self {
             model,
@@ -786,6 +923,291 @@ impl ToolCallState {
     }
 }
 
+#[derive(Debug, Default)]
+struct ResponsesSseParser {
+    buffer: Vec<u8>,
+}
+
+impl ResponsesSseParser {
+    fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Vec<ResponsesSseFrame> {
+        self.buffer.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+
+        while let Some(frame) = self.next_frame() {
+            frames.push(frame);
+        }
+
+        frames
+    }
+
+    fn next_frame(&mut self) -> Option<ResponsesSseFrame> {
+        let text = std::str::from_utf8(&self.buffer).ok()?;
+        let (frame_end, sep_len) = if let Some(pos) = text.find("\n\n") {
+            (pos, 2)
+        } else if let Some(pos) = text.find("\r\n\r\n") {
+            (pos, 4)
+        } else {
+            return None;
+        };
+
+        let frame_text = &text[..frame_end];
+        let mut event_type = String::new();
+        let mut data_lines: Vec<String> = Vec::new();
+
+        for line in frame_text.lines() {
+            if let Some(value) = line.strip_prefix("event:") {
+                event_type = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("data:") {
+                data_lines.push(value.trim().to_string());
+            }
+        }
+
+        self.buffer.drain(..frame_end + sep_len);
+
+        let data = data_lines.join("\n");
+        if event_type.is_empty() && data.is_empty() {
+            return None;
+        }
+
+        Some(ResponsesSseFrame { event_type, data })
+    }
+}
+
+#[derive(Debug)]
+struct ResponsesSseFrame {
+    event_type: String,
+    data: String,
+}
+
+#[derive(Debug)]
+struct ResponsesStreamState {
+    model: String,
+    message_started: bool,
+    finished: bool,
+    text_block_started: bool,
+    text_block_index: u32,
+    tool_blocks: BTreeMap<u32, ResponseToolBlockState>,
+    next_block_index: u32,
+    usage: Option<Usage>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResponseToolBlockState {
+    block_index: u32,
+    started: bool,
+    stopped: bool,
+}
+
+impl ResponsesStreamState {
+    fn new(model: String) -> Self {
+        Self {
+            model,
+            message_started: false,
+            finished: false,
+            text_block_started: false,
+            text_block_index: 0,
+            tool_blocks: BTreeMap::new(),
+            next_block_index: 0,
+            usage: None,
+            stop_reason: None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn ingest_frame(&mut self, frame: &ResponsesSseFrame) -> Result<Vec<StreamEvent>, ApiError> {
+        if frame.data.is_empty() || frame.data == "[DONE]" {
+            return Ok(Vec::new());
+        }
+
+        let json: Value = serde_json::from_str(&frame.data)
+            .map_err(|e| ApiError::json_deserialize("OpenAI", &self.model, &frame.data, e))?;
+
+        let mut events = Vec::new();
+
+        match frame.event_type.as_str() {
+            "response.created" => {
+                if !self.message_started {
+                    self.message_started = true;
+                    let id = json_str(&json, "id");
+                    let model = json
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&self.model);
+                    events.push(StreamEvent::MessageStart(MessageStartEvent {
+                        message: MessageResponse {
+                            id: id.to_string(),
+                            kind: "message".to_string(),
+                            role: "assistant".to_string(),
+                            content: Vec::new(),
+                            model: model.to_string(),
+                            stop_reason: None,
+                            stop_sequence: None,
+                            usage: Usage::default(),
+                            request_id: None,
+                        },
+                    }));
+                }
+            }
+            "response.content_part.added" => {
+                self.ensure_text_block(&mut events);
+            }
+            "response.output_text.delta" => {
+                let delta = json_str(&json, "delta");
+                if !delta.is_empty() {
+                    self.ensure_text_block(&mut events);
+                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                        index: self.text_block_index,
+                        delta: ContentBlockDelta::TextDelta {
+                            text: delta.to_string(),
+                        },
+                    }));
+                }
+            }
+            "response.output_text.done" => {
+                if self.text_block_started {
+                    events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                        index: self.text_block_index,
+                    }));
+                }
+            }
+            "response.output_item.added" => {
+                let item = json.get("item").unwrap_or(&Value::Null);
+                if json_str(item, "type") == "function_call" {
+                    let output_index = json_u32(&json, "output_index");
+                    let block_index = self.next_block_index;
+                    self.next_block_index += 1;
+
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = json_str(item, "name").to_string();
+
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: block_index,
+                        content_block: OutputContentBlock::ToolUse {
+                            id: call_id,
+                            name,
+                            input: json!({}),
+                            thought_signature: None,
+                        },
+                    }));
+
+                    self.tool_blocks.insert(
+                        output_index,
+                        ResponseToolBlockState {
+                            block_index,
+                            started: true,
+                            stopped: false,
+                        },
+                    );
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                let output_index = json_u32(&json, "output_index");
+                if let Some(ts) = self.tool_blocks.get(&output_index) {
+                    let delta = json_str(&json, "delta");
+                    if !delta.is_empty() {
+                        events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                            index: ts.block_index,
+                            delta: ContentBlockDelta::InputJsonDelta {
+                                partial_json: delta.to_string(),
+                            },
+                        }));
+                    }
+                }
+            }
+            "response.function_call_arguments.done" | "response.output_item.done" => {
+                let output_index = json_u32(&json, "output_index");
+                if let Some(ts) = self.tool_blocks.get_mut(&output_index) {
+                    if !ts.stopped {
+                        ts.stopped = true;
+                        events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                            index: ts.block_index,
+                        }));
+                    }
+                }
+            }
+            "response.completed" => {
+                let resp = json.get("response").unwrap_or(&json);
+                if let Some(u) = resp.get("usage") {
+                    self.usage = Some(Usage {
+                        input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                            as u32,
+                        output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)
+                            as u32,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        ..Usage::default()
+                    });
+                }
+                self.stop_reason = Some(if self.tool_blocks.is_empty() {
+                    "end_turn".to_string()
+                } else {
+                    "tool_use".to_string()
+                });
+            }
+            _ => {}
+        }
+
+        Ok(events)
+    }
+
+    fn ensure_text_block(&mut self, events: &mut Vec<StreamEvent>) {
+        if !self.text_block_started {
+            self.text_block_started = true;
+            self.text_block_index = self.next_block_index;
+            self.next_block_index += 1;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: self.text_block_index,
+                content_block: OutputContentBlock::Text {
+                    text: String::new(),
+                },
+            }));
+        }
+    }
+
+    fn finish(&mut self) -> Vec<StreamEvent> {
+        if self.finished {
+            return Vec::new();
+        }
+        self.finished = true;
+
+        let mut events = Vec::new();
+        for ts in self.tool_blocks.values_mut() {
+            if ts.started && !ts.stopped {
+                ts.stopped = true;
+                events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                    index: ts.block_index,
+                }));
+            }
+        }
+
+        if self.message_started {
+            events.push(StreamEvent::MessageDelta(MessageDeltaEvent {
+                delta: MessageDelta {
+                    stop_reason: Some(
+                        self.stop_reason
+                            .clone()
+                            .unwrap_or_else(|| "end_turn".to_string()),
+                    ),
+                    stop_sequence: None,
+                },
+                usage: self.usage.clone().unwrap_or_default(),
+            }));
+            events.push(StreamEvent::MessageStop(MessageStopEvent {}));
+        }
+
+        events
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     id: String,
@@ -1007,7 +1429,19 @@ fn strip_routing_prefix(model: &str) -> &str {
 /// This is a pre-flight check to avoid hitting provider-specific size limits.
 pub fn estimate_request_body_size(request: &MessageRequest, config: OpenAiCompatConfig) -> usize {
     let payload = build_chat_completion_request(request, config);
-    // serde_json::to_vec gives us the exact byte size of the serialized JSON
+    serde_json::to_vec(&payload).map_or(0, |v| v.len())
+}
+
+fn estimate_request_body_size_for_format(
+    request: &MessageRequest,
+    config: OpenAiCompatConfig,
+    api_format: ApiFormat,
+) -> usize {
+    let payload = match api_format {
+        ApiFormat::OpenAiCompletions => build_chat_completion_request(request, config),
+        ApiFormat::OpenAiResponses => build_responses_request(request),
+        _ => build_chat_completion_request(request, config),
+    };
     serde_json::to_vec(&payload).map_or(0, |v| v.len())
 }
 
@@ -1116,6 +1550,169 @@ pub fn build_chat_completion_request(
     }
 
     payload
+}
+
+fn build_responses_request(request: &MessageRequest) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+    for msg in &request.messages {
+        translate_responses_input_message(msg, &mut input);
+    }
+
+    let wire_model = strip_routing_prefix(&request.model);
+    let instructions = request.system.as_deref().filter(|s| !s.is_empty());
+
+    let mut payload = json!({
+        "model": wire_model,
+        "input": input,
+        "stream": request.stream,
+        "max_output_tokens": request.max_tokens,
+    });
+
+    if let Some(instructions) = instructions {
+        payload["instructions"] = json!(instructions);
+    }
+    if let Some(tools) = &request.tools {
+        payload["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(responses_tool_definition)
+                .collect::<Vec<_>>(),
+        );
+    }
+    if let Some(tool_choice) = &request.tool_choice {
+        payload["tool_choice"] = responses_tool_choice(tool_choice);
+    }
+    if !is_reasoning_model(&request.model) {
+        if let Some(temperature) = request.temperature {
+            payload["temperature"] = json!(temperature);
+        }
+        if let Some(top_p) = request.top_p {
+            payload["top_p"] = json!(top_p);
+        }
+        if let Some(frequency_penalty) = request.frequency_penalty {
+            payload["frequency_penalty"] = json!(frequency_penalty);
+        }
+        if let Some(presence_penalty) = request.presence_penalty {
+            payload["presence_penalty"] = json!(presence_penalty);
+        }
+    }
+    if let Some(stop) = &request.stop {
+        if !stop.is_empty() {
+            payload["stop"] = json!(stop);
+        }
+    }
+    if let Some(effort) = &request.reasoning_effort {
+        payload["reasoning_effort"] = json!(effort);
+    }
+
+    payload
+}
+
+fn translate_responses_input_message(message: &InputMessage, input: &mut Vec<Value>) {
+    if message.role.as_str() == "assistant" {
+        let mut text_buf = String::new();
+        for block in &message.content {
+            match block {
+                InputContentBlock::Text { text } => text_buf.push_str(text),
+                InputContentBlock::ToolUse {
+                    id,
+                    name,
+                    input: args,
+                    ..
+                } => {
+                    flush_responses_text(&mut text_buf, "assistant", input);
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": id,
+                        "name": name,
+                        "arguments": args.to_string(),
+                    }));
+                }
+                InputContentBlock::ToolResult { .. }
+                | InputContentBlock::Image { .. }
+                | InputContentBlock::Thinking { .. } => {}
+            }
+        }
+        flush_responses_text(&mut text_buf, "assistant", input);
+    } else {
+        let mut user_parts: Vec<Value> = Vec::new();
+        for block in &message.content {
+            match block {
+                InputContentBlock::Text { text } => {
+                    user_parts.push(json!({ "type": "input_text", "text": text }));
+                }
+                InputContentBlock::Image { source } => {
+                    user_parts.push(json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", source.media_type, source.data),
+                    }));
+                }
+                InputContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
+                    if !user_parts.is_empty() {
+                        input.push(json!({
+                            "type": "message",
+                            "role": "user",
+                            "content": user_parts,
+                        }));
+                        user_parts = Vec::new();
+                    }
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": tool_use_id,
+                        "output": flatten_tool_result_content(content),
+                    }));
+                }
+                InputContentBlock::ToolUse { .. } | InputContentBlock::Thinking { .. } => {}
+            }
+        }
+        if !user_parts.is_empty() {
+            if user_parts.len() == 1 && user_parts[0]["type"] == "input_text" {
+                input.push(json!({"role": "user", "content": user_parts[0]["text"]}));
+            } else {
+                input.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": user_parts,
+                }));
+            }
+        }
+    }
+}
+
+fn flush_responses_text(buf: &mut String, role: &str, input: &mut Vec<Value>) {
+    if !buf.is_empty() {
+        input.push(json!({"role": role, "content": buf.as_str()}));
+        buf.clear();
+    }
+}
+
+fn responses_tool_definition(tool: &ToolDefinition) -> Value {
+    let mut parameters = tool.input_schema.clone();
+    normalize_object_schema(&mut parameters);
+    let mut def = json!({
+        "type": "function",
+        "name": tool.name,
+        "parameters": parameters,
+    });
+    if let Some(desc) = &tool.description {
+        def["description"] = json!(desc);
+    }
+    def
+}
+
+fn responses_tool_choice(tool_choice: &ToolChoice) -> Value {
+    match tool_choice {
+        ToolChoice::Auto => Value::String("auto".to_string()),
+        ToolChoice::Any => Value::String("required".to_string()),
+        ToolChoice::Tool { name } => json!({
+            "type": "function",
+            "name": name,
+        }),
+    }
 }
 
 /// Returns true for models that do NOT support the `is_error` field in tool results.
@@ -1479,6 +2076,95 @@ fn parse_tool_arguments(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "raw": arguments }))
 }
 
+fn json_str<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn json_u32(v: &Value, key: &str) -> u32 {
+    v.get(key).and_then(Value::as_u64).unwrap_or(0) as u32
+}
+
+async fn collect_response_stream(
+    stream: &mut MessageStream,
+    request: &MessageRequest,
+) -> Result<MessageResponse, ApiError> {
+    let mut content: Vec<OutputContentBlock> = Vec::new();
+    let mut model = request.model.clone();
+    let mut id = String::new();
+    let mut usage = Usage::default();
+    let mut stop_reason = None;
+
+    while let Some(event) = stream.next_event().await? {
+        match event {
+            StreamEvent::MessageStart(start) => {
+                id = start.message.id;
+                model = start.message.model;
+            }
+            StreamEvent::ContentBlockStart(start) => {
+                content.push(start.content_block);
+            }
+            StreamEvent::ContentBlockDelta(delta) => {
+                apply_delta(&mut content, &delta);
+            }
+            StreamEvent::ContentBlockStop(_) | StreamEvent::MessageStop(_) => {}
+            StreamEvent::MessageDelta(d) => {
+                stop_reason = d.delta.stop_reason;
+                usage = d.usage;
+            }
+        }
+    }
+
+    for block in &mut content {
+        if let OutputContentBlock::ToolUse { input, .. } = block {
+            if let Some(s) = input.as_str() {
+                if let Ok(parsed) = serde_json::from_str(s) {
+                    *input = parsed;
+                }
+            }
+        }
+    }
+
+    Ok(MessageResponse {
+        id,
+        kind: "message".to_string(),
+        role: "assistant".to_string(),
+        content,
+        model,
+        stop_reason,
+        stop_sequence: None,
+        usage,
+        request_id: stream.request_id().map(ToString::to_string),
+    })
+}
+
+fn apply_delta(content: &mut [OutputContentBlock], delta: &ContentBlockDeltaEvent) {
+    let Some(block) = content.get_mut(delta.index as usize) else {
+        return;
+    };
+    match (block, &delta.delta) {
+        (OutputContentBlock::Text { text }, ContentBlockDelta::TextDelta { text: new_text }) => {
+            text.push_str(new_text);
+        }
+        (
+            OutputContentBlock::Thinking { thinking, .. },
+            ContentBlockDelta::ThinkingDelta { thinking: new_thinking },
+        ) => {
+            thinking.push_str(new_thinking);
+        }
+        (
+            OutputContentBlock::ToolUse { input, .. },
+            ContentBlockDelta::InputJsonDelta { partial_json },
+        ) => {
+            if let Some(existing) = input.as_str() {
+                *input = Value::String(format!("{existing}{partial_json}"));
+            } else {
+                *input = Value::String(partial_json.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
 fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {
     let separator = buffer
         .windows(2)
@@ -1581,6 +2267,22 @@ fn chat_completions_endpoint(base_url: &str) -> String {
     }
 }
 
+fn responses_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/responses") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/responses")
+    }
+}
+
+fn endpoint_for_format(base_url: &str, api_format: ApiFormat) -> String {
+    match api_format {
+        ApiFormat::OpenAiResponses => responses_endpoint(base_url),
+        _ => chat_completions_endpoint(base_url),
+    }
+}
+
 async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response, ApiError> {
     let status = response.status();
     if status.is_success() {
@@ -1667,8 +2369,8 @@ mod tests {
     use super::{
         build_chat_completion_request, chat_completions_endpoint, is_reasoning_model,
         model_requires_reasoning_content_in_history, normalize_finish_reason, normalize_response,
-        openai_tool_choice, parse_tool_arguments, OpenAiCompatClient, OpenAiCompatConfig,
-        StreamState,
+        openai_tool_choice, parse_tool_arguments, ChatStreamState, OpenAiCompatClient,
+        OpenAiCompatConfig,
     };
     use crate::error::ApiError;
     use crate::types::{
@@ -1877,7 +2579,7 @@ mod tests {
 
     #[test]
     fn streaming_usage_chunk_maps_quota_to_sudo_point_cost() {
-        let mut state = StreamState::new("sudorouter-model".to_string());
+        let mut state = ChatStreamState::new("sudorouter-model".to_string());
         let _ = state
             .ingest_chunk(super::ChatCompletionChunk {
                 id: "chatcmpl_stream_cost".to_string(),
@@ -1923,7 +2625,7 @@ mod tests {
 
     #[test]
     fn streaming_chunks_with_reasoning_content_emit_thinking_block_events_before_text() {
-        let mut state = StreamState::new("deepseek-v4-pro".to_string());
+        let mut state = ChatStreamState::new("deepseek-v4-pro".to_string());
         let mut events = state
             .ingest_chunk(super::ChatCompletionChunk {
                 id: "chatcmpl_stream_reasoning".to_string(),
@@ -1999,7 +2701,7 @@ mod tests {
 
     #[test]
     fn streaming_contentless_stop_and_usage_chunks_emit_no_message() {
-        let mut state = StreamState::new("gpt-5".to_string());
+        let mut state = ChatStreamState::new("gpt-5".to_string());
         let mut events = state
             .ingest_chunk(super::ChatCompletionChunk {
                 id: "chatcmpl_empty".to_string(),

@@ -22,6 +22,22 @@ fn provider_client_routes_xai_through_from_resolved() {
 }
 
 #[test]
+fn provider_client_routes_generic_openai_responses_through_from_resolved() {
+    let resolved = ResolvedProvider {
+        kind: ProviderKind::OpenAi,
+        api_format: ApiFormat::OpenAiResponses,
+        base_url: "https://api.openai.com/v1".to_string(),
+        credential: Credential::ApiKey("openai-test-key".to_string()),
+        model_id: "gpt-5.5".to_string(),
+    };
+
+    let client = ProviderClient::from_resolved(&resolved, None)
+        .expect("openai responses provider should construct");
+
+    assert_eq!(client.provider_kind(), ProviderKind::OpenAi);
+}
+
+#[test]
 fn provider_client_routes_anthropic_through_from_resolved() {
     let resolved = ResolvedProvider {
         kind: ProviderKind::Anthropic,

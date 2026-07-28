@@ -108,6 +108,8 @@ pub trait ApiClient: Send {
 
 /// Optional observer for runtime events emitted while processing a turn.
 pub trait RuntimeObserver {
+    fn on_thinking_delta(&mut self, _delta: &str) {}
+
     fn on_text_delta(&mut self, _delta: &str) {}
 
     fn on_tool_use(&mut self, _id: &str, _name: &str, _input: &str) {}
@@ -615,10 +617,7 @@ where
                     signature,
                 } => {
                     flush_text_block(&mut text, &mut blocks);
-                    blocks.push(ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    });
+                    push_thinking_block(&mut blocks, thinking, signature);
                 }
                 AssistantEvent::TextDelta(delta) => text.push_str(&delta),
                 AssistantEvent::ToolUse {
@@ -911,6 +910,9 @@ where
                                     // receive incremental updates.
                                     if let Some(obs) = observer.as_mut() {
                                         match &event {
+                                            AssistantEvent::Thinking { thinking, .. } => {
+                                                obs.on_thinking_delta(thinking);
+                                            }
                                             AssistantEvent::TextDelta(delta) => {
                                                 obs.on_text_delta(delta);
                                             }
@@ -1545,10 +1547,7 @@ fn build_assistant_message(
                 signature,
             } => {
                 flush_text_block(&mut text, &mut blocks);
-                blocks.push(ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                });
+                push_thinking_block(&mut blocks, thinking, signature);
             }
             AssistantEvent::TextDelta(delta) => {
                 text.push_str(&delta);
@@ -1724,6 +1723,29 @@ fn flush_text_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
     }
 }
 
+fn push_thinking_block(
+    blocks: &mut Vec<ContentBlock>,
+    thinking: String,
+    signature: Option<String>,
+) {
+    if let Some(ContentBlock::Thinking {
+        thinking: existing,
+        signature: existing_signature,
+    }) = blocks.last_mut()
+    {
+        existing.push_str(&thinking);
+        if existing_signature.is_none() {
+            *existing_signature = signature;
+        }
+        return;
+    }
+
+    blocks.push(ContentBlock::Thinking {
+        thinking,
+        signature,
+    });
+}
+
 fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
     if result.messages().is_empty() {
         fallback.to_string()
@@ -1891,6 +1913,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum ObservedRuntimeEvent {
+        ThinkingDelta(String),
         TextDelta(String),
         ToolUse {
             id: String,
@@ -1911,6 +1934,11 @@ mod tests {
     }
 
     impl RuntimeObserver for RecordingRuntimeObserver {
+        fn on_thinking_delta(&mut self, delta: &str) {
+            self.events
+                .push(ObservedRuntimeEvent::ThinkingDelta(delta.to_string()));
+        }
+
         fn on_text_delta(&mut self, delta: &str) {
             self.events
                 .push(ObservedRuntimeEvent::TextDelta(delta.to_string()));
@@ -1937,6 +1965,25 @@ mod tests {
                 output: output.to_string(),
                 is_error,
             });
+        }
+    }
+
+    struct ThinkingApiClient;
+
+    #[async_trait]
+    impl ApiClient for ThinkingApiClient {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            Ok(events_to_stream(vec![
+                AssistantEvent::Thinking {
+                    thinking: "considering the request".to_string(),
+                    signature: None,
+                },
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ]))
         }
     }
 
@@ -2636,6 +2683,31 @@ mod tests {
                     is_error: false,
                 },
                 ObservedRuntimeEvent::TextDelta("The answer is 4.".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_receives_thinking_delta() {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            ThinkingApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        let mut observer = RecordingRuntimeObserver::default();
+
+        runtime
+            .run_turn("think briefly", None, Some(&mut observer))
+            .await
+            .expect("conversation loop should succeed");
+
+        assert_eq!(
+            observer.events,
+            vec![
+                ObservedRuntimeEvent::ThinkingDelta("considering the request".to_string()),
+                ObservedRuntimeEvent::TextDelta("done".to_string()),
             ]
         );
     }

@@ -129,6 +129,7 @@ impl ProviderClient {
                 };
                 let config = OpenAiCompatConfig::openai();
                 let client = OpenAiCompatClient::new(api_key, config)
+                    .with_api_format(resolved.api_format)
                     .with_base_url(resolved.base_url.clone());
                 match resolved.kind {
                     ProviderKind::Xai => Ok(Self::Xai(client)),

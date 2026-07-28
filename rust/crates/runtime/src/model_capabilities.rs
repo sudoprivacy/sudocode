@@ -140,6 +140,14 @@ pub fn per_model_image_cap(model_id: &str) -> (Option<u32>, Option<u32>) {
     }
 }
 
+/// All known model IDs from the capabilities SSOT.
+/// Used by discovery surfaces (`/model`, tab completion, `get_model_info`).
+#[must_use]
+pub fn all_model_ids() -> Vec<String> {
+    let caps = CAPABILITIES.get_or_init(ModelCapabilitiesFile::default);
+    caps.models.keys().cloned().collect()
+}
+
 /// Context window for a wire model ID, falling back to the SSOT file's
 /// `default` entry when the model is unknown. The single source of truth for
 /// both per-model values and the unknown-model default is this capabilities
@@ -337,6 +345,17 @@ mod tests {
         assert!(
             file.default.context_window > 0,
             "bundled JSON must define a non-zero default context window"
+        );
+    }
+
+    #[test]
+    fn all_model_ids_returns_bundled_models() {
+        // all_model_ids() should return at least the bundled model set.
+        let ids = all_model_ids();
+        assert!(
+            ids.len() >= 30,
+            "expected ≥30 bundled model IDs, got {}",
+            ids.len()
         );
     }
 

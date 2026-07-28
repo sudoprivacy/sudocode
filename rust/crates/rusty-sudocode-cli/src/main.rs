@@ -2620,13 +2620,8 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
     fn get_model_info(&self) -> (String, Vec<String>) {
         let config = load_sudocode_config_for_current_dir();
-        let mut models: Vec<String> = config.models.keys().cloned().collect();
-        // Merge capabilities SSOT models not already covered by config aliases.
-        for id in runtime::model_capabilities::all_model_ids() {
-            if !models.iter().any(|m| m.eq_ignore_ascii_case(&id)) {
-                models.push(id);
-            }
-        }
+        let config_keys: Vec<String> = config.models.keys().cloned().collect();
+        let mut models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
         // Ensure the current model is always present.
         if !models.iter().any(|m| m.eq_ignore_ascii_case(&self.inner.model)) {
             models.insert(0, self.inner.model.clone());
@@ -4003,15 +3998,8 @@ impl LiveCli {
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(model) = model else {
             let sudocode_config = load_sudocode_config_for_current_dir();
-            let mut models: Vec<String> = sudocode_config.models.keys().cloned().collect();
-            // Merge capabilities SSOT models not already covered by config aliases.
-            let seen: std::collections::BTreeSet<String> =
-                models.iter().map(|m| m.to_ascii_lowercase()).collect();
-            for id in runtime::model_capabilities::all_model_ids() {
-                if !seen.contains(&id.to_ascii_lowercase()) {
-                    models.push(id);
-                }
-            }
+            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
+            let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
             let selection = FuzzySelect::new()
                 .with_prompt("Select model")
                 .items(&models)

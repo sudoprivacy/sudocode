@@ -397,7 +397,10 @@ impl MessageStream {
         Self {
             request_id,
             response,
-            parser: MessageStreamParser::Chat(OpenAiSseParser::with_context(provider, model.clone())),
+            parser: MessageStreamParser::Chat(OpenAiSseParser::with_context(
+                provider,
+                model.clone(),
+            )),
             pending: VecDeque::new(),
             done: false,
             usage_recorded: false,
@@ -458,7 +461,10 @@ impl MessageStream {
                                 self.pending.extend(state.ingest_chunk(parsed)?);
                             }
                         }
-                        (MessageStreamParser::Responses(parser), MessageStreamState::Responses(state)) => {
+                        (
+                            MessageStreamParser::Responses(parser),
+                            MessageStreamState::Responses(state),
+                        ) => {
                             for frame in parser.push(&chunk) {
                                 self.sse_events_read += 1;
                                 self.pending.extend(state.ingest_frame(&frame)?);
@@ -2147,7 +2153,9 @@ fn apply_delta(content: &mut [OutputContentBlock], delta: &ContentBlockDeltaEven
         }
         (
             OutputContentBlock::Thinking { thinking, .. },
-            ContentBlockDelta::ThinkingDelta { thinking: new_thinking },
+            ContentBlockDelta::ThinkingDelta {
+                thinking: new_thinking,
+            },
         ) => {
             thinking.push_str(new_thinking);
         }

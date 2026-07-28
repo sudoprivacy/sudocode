@@ -994,6 +994,10 @@ struct ResponsesStreamState {
     model: String,
     message_started: bool,
     finished: bool,
+    thinking_block_started: bool,
+    thinking_block_finished: bool,
+    thinking_block_has_delta: bool,
+    thinking_block_index: u32,
     text_block_started: bool,
     text_block_index: u32,
     tool_blocks: BTreeMap<u32, ResponseToolBlockState>,
@@ -1015,6 +1019,10 @@ impl ResponsesStreamState {
             model,
             message_started: false,
             finished: false,
+            thinking_block_started: false,
+            thinking_block_finished: false,
+            thinking_block_has_delta: false,
+            thinking_block_index: 0,
             text_block_started: false,
             text_block_index: 0,
             tool_blocks: BTreeMap::new(),
@@ -1060,11 +1068,29 @@ impl ResponsesStreamState {
                 }
             }
             "response.content_part.added" => {
+                self.close_thinking_block(&mut events);
                 self.ensure_text_block(&mut events);
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let delta = json_str(&json, "delta");
+                if !delta.is_empty() {
+                    self.ensure_thinking_block(&mut events);
+                    self.thinking_block_has_delta = true;
+                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                        index: self.thinking_block_index,
+                        delta: ContentBlockDelta::ThinkingDelta {
+                            thinking: delta.to_string(),
+                        },
+                    }));
+                }
+            }
+            "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                self.close_thinking_block(&mut events);
             }
             "response.output_text.delta" => {
                 let delta = json_str(&json, "delta");
                 if !delta.is_empty() {
+                    self.close_thinking_block(&mut events);
                     self.ensure_text_block(&mut events);
                     events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
                         index: self.text_block_index,
@@ -1083,7 +1109,10 @@ impl ResponsesStreamState {
             }
             "response.output_item.added" => {
                 let item = json.get("item").unwrap_or(&Value::Null);
-                if json_str(item, "type") == "function_call" {
+                if json_str(item, "type") == "reasoning" {
+                    self.ensure_thinking_block(&mut events);
+                } else if json_str(item, "type") == "function_call" {
+                    self.close_thinking_block(&mut events);
                     let output_index = json_u32(&json, "output_index");
                     let block_index = self.next_block_index;
                     self.next_block_index += 1;
@@ -1129,7 +1158,38 @@ impl ResponsesStreamState {
                     }
                 }
             }
-            "response.function_call_arguments.done" | "response.output_item.done" => {
+            "response.output_item.done" => {
+                let item = json.get("item").unwrap_or(&Value::Null);
+                if json_str(item, "type") == "reasoning" && self.thinking_block_started {
+                    let summary = responses_reasoning_summary_text(item);
+                    if !summary.is_empty() && !self.thinking_block_has_delta {
+                        self.thinking_block_has_delta = true;
+                        events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                            index: self.thinking_block_index,
+                            delta: ContentBlockDelta::ThinkingDelta { thinking: summary },
+                        }));
+                    }
+                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                        index: self.thinking_block_index,
+                        delta: ContentBlockDelta::SignatureDelta {
+                            signature: item.to_string(),
+                        },
+                    }));
+                    self.close_thinking_block(&mut events);
+                    return Ok(events);
+                }
+
+                let output_index = json_u32(&json, "output_index");
+                if let Some(ts) = self.tool_blocks.get_mut(&output_index) {
+                    if !ts.stopped {
+                        ts.stopped = true;
+                        events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                            index: ts.block_index,
+                        }));
+                    }
+                }
+            }
+            "response.function_call_arguments.done" => {
                 let output_index = json_u32(&json, "output_index");
                 if let Some(ts) = self.tool_blocks.get_mut(&output_index) {
                     if !ts.stopped {
@@ -1165,6 +1225,46 @@ impl ResponsesStreamState {
         Ok(events)
     }
 
+    fn ensure_thinking_block(&mut self, events: &mut Vec<StreamEvent>) {
+        if !self.message_started {
+            self.message_started = true;
+            events.push(StreamEvent::MessageStart(MessageStartEvent {
+                message: MessageResponse {
+                    id: "responses-stream".to_string(),
+                    kind: "message".to_string(),
+                    role: "assistant".to_string(),
+                    content: Vec::new(),
+                    model: self.model.clone(),
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: Usage::default(),
+                    request_id: None,
+                },
+            }));
+        }
+        if !self.thinking_block_started {
+            self.thinking_block_started = true;
+            self.thinking_block_index = self.next_block_index;
+            self.next_block_index += 1;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: self.thinking_block_index,
+                content_block: OutputContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            }));
+        }
+    }
+
+    fn close_thinking_block(&mut self, events: &mut Vec<StreamEvent>) {
+        if self.thinking_block_started && !self.thinking_block_finished {
+            self.thinking_block_finished = true;
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index: self.thinking_block_index,
+            }));
+        }
+    }
+
     fn ensure_text_block(&mut self, events: &mut Vec<StreamEvent>) {
         if !self.text_block_started {
             self.text_block_started = true;
@@ -1186,6 +1286,7 @@ impl ResponsesStreamState {
         self.finished = true;
 
         let mut events = Vec::new();
+        self.close_thinking_block(&mut events);
         for ts in self.tool_blocks.values_mut() {
             if ts.started && !ts.stopped {
                 ts.stopped = true;
@@ -1608,7 +1709,8 @@ fn build_responses_request(request: &MessageRequest) -> Value {
         }
     }
     if let Some(effort) = &request.reasoning_effort {
-        payload["reasoning_effort"] = json!(effort);
+        payload["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+        payload["include"] = json!(["reasoning.encrypted_content"]);
     }
 
     payload
@@ -1636,7 +1738,18 @@ fn translate_responses_input_message(message: &InputMessage, input: &mut Vec<Val
                 }
                 InputContentBlock::ToolResult { .. }
                 | InputContentBlock::Image { .. }
-                | InputContentBlock::Thinking { .. } => {}
+                | InputContentBlock::Thinking {
+                    signature: None, ..
+                } => {}
+                InputContentBlock::Thinking {
+                    signature: Some(signature),
+                    ..
+                } => {
+                    flush_responses_text(&mut text_buf, "assistant", input);
+                    if let Some(reasoning) = parse_responses_reasoning_signature(signature) {
+                        input.push(reasoning);
+                    }
+                }
             }
         }
         flush_responses_text(&mut text_buf, "assistant", input);
@@ -1687,6 +1800,30 @@ fn translate_responses_input_message(message: &InputMessage, input: &mut Vec<Val
             }
         }
     }
+}
+
+fn parse_responses_reasoning_signature(signature: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(signature).ok()?;
+    let object = value.as_object()?;
+    let reason_type = object.get("type").and_then(Value::as_str)?;
+    if reason_type != "reasoning" && !reason_type.starts_with("reasoning.") {
+        return None;
+    }
+
+    Some(value)
+}
+
+fn responses_reasoning_summary_text(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
 }
 
 fn flush_responses_text(buf: &mut String, role: &str, input: &mut Vec<Value>) {
@@ -2375,10 +2512,10 @@ impl StringExt for String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_completion_request, chat_completions_endpoint, is_reasoning_model,
-        model_requires_reasoning_content_in_history, normalize_finish_reason, normalize_response,
-        openai_tool_choice, parse_tool_arguments, ChatStreamState, OpenAiCompatClient,
-        OpenAiCompatConfig,
+        build_chat_completion_request, build_responses_request, chat_completions_endpoint,
+        is_reasoning_model, model_requires_reasoning_content_in_history, normalize_finish_reason,
+        normalize_response, openai_tool_choice, parse_tool_arguments, ChatStreamState,
+        OpenAiCompatClient, OpenAiCompatConfig, ResponsesSseFrame, ResponsesStreamState,
     };
     use crate::error::ApiError;
     use crate::types::{
@@ -2708,6 +2845,133 @@ mod tests {
     }
 
     #[test]
+    fn responses_reasoning_summary_delta_emits_thinking_block_before_text() {
+        let mut state = ResponsesStreamState::new("gpt-5.5".to_string());
+        let mut events = state
+            .ingest_frame(&ResponsesSseFrame {
+                event_type: "response.created".to_string(),
+                data: r#"{"id":"resp_1","model":"gpt-5.5"}"#.to_string(),
+            })
+            .expect("response created");
+
+        events.extend(
+            state
+                .ingest_frame(&ResponsesSseFrame {
+                    event_type: "response.reasoning_summary_text.delta".to_string(),
+                    data: r#"{"delta":"considering"}"#.to_string(),
+                })
+                .expect("reasoning summary delta"),
+        );
+        events.extend(
+            state
+                .ingest_frame(&ResponsesSseFrame {
+                    event_type: "response.reasoning_summary_text.done".to_string(),
+                    data: "{}".to_string(),
+                })
+                .expect("reasoning summary done"),
+        );
+        events.extend(
+            state
+                .ingest_frame(&ResponsesSseFrame {
+                    event_type: "response.output_text.delta".to_string(),
+                    data: r#"{"delta":"answer"}"#.to_string(),
+                })
+                .expect("text delta"),
+        );
+
+        assert!(matches!(events[0], StreamEvent::MessageStart(_)));
+        assert!(matches!(
+            events[1],
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Thinking { .. },
+            })
+        ));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingDelta { thinking },
+            }) if thinking == "considering"
+        ));
+        assert!(matches!(
+            events[3],
+            StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 })
+        ));
+        assert!(matches!(
+            events[4],
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 1,
+                content_block: OutputContentBlock::Text { .. },
+            })
+        ));
+        assert!(matches!(
+            &events[5],
+            StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 1,
+                delta: ContentBlockDelta::TextDelta { text },
+            }) if text == "answer"
+        ));
+    }
+
+    #[test]
+    fn responses_reasoning_item_done_emits_signature_for_replay() {
+        let mut state = ResponsesStreamState::new("gpt-5.5".to_string());
+        let mut events = state
+            .ingest_frame(&ResponsesSseFrame {
+                event_type: "response.created".to_string(),
+                data: r#"{"id":"resp_1","model":"gpt-5.5"}"#.to_string(),
+            })
+            .expect("response created");
+
+        events.extend(
+            state
+                .ingest_frame(&ResponsesSseFrame {
+                    event_type: "response.output_item.added".to_string(),
+                    data: r#"{"output_index":0,"item":{"type":"reasoning","id":"rs_123","summary":[]}}"#
+                        .to_string(),
+                })
+                .expect("reasoning item added"),
+        );
+        events.extend(
+            state
+                .ingest_frame(&ResponsesSseFrame {
+                    event_type: "response.output_item.done".to_string(),
+                    data: r#"{"output_index":0,"item":{"type":"reasoning","id":"rs_123","encrypted_content":"enc_123","summary":[{"type":"summary_text","text":"brief thought"}]}}"#
+                        .to_string(),
+                })
+                .expect("reasoning item done"),
+        );
+
+        assert!(matches!(events[0], StreamEvent::MessageStart(_)));
+        assert!(matches!(
+            events[1],
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Thinking { .. },
+            })
+        ));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingDelta { thinking },
+            }) if thinking == "brief thought"
+        ));
+        assert!(matches!(
+            &events[3],
+            StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::SignatureDelta { signature },
+            }) if signature.contains(r#""encrypted_content":"enc_123""#)
+        ));
+        assert!(matches!(
+            events[4],
+            StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 })
+        ));
+    }
+
+    #[test]
     fn streaming_contentless_stop_and_usage_chunks_emit_no_message() {
         let mut state = ChatStreamState::new("gpt-5".to_string());
         let mut events = state
@@ -2797,6 +3061,62 @@ mod tests {
             OpenAiCompatConfig::openai(),
         );
         assert_eq!(payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn responses_reasoning_effort_uses_reasoning_object() {
+        let payload = build_responses_request(&MessageRequest {
+            model: "gpt-5.5".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage::user_text("think hard")],
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            payload["reasoning"],
+            json!({ "effort": "high", "summary": "auto" })
+        );
+        assert_eq!(payload["include"], json!(["reasoning.encrypted_content"]));
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn responses_request_replays_reasoning_signature_before_tool_call() {
+        let signature = json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "encrypted_content": "enc_123",
+            "summary": [{"type": "summary_text", "text": "brief thought"}],
+        })
+        .to_string();
+        let payload = build_responses_request(&MessageRequest {
+            model: "gpt-5.5".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    InputContentBlock::Thinking {
+                        thinking: "brief thought".to_string(),
+                        signature: Some(signature),
+                    },
+                    InputContentBlock::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "noop".to_string(),
+                        input: json!({}),
+                        thought_signature: None,
+                    },
+                ],
+            }],
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        });
+
+        let input = payload["input"].as_array().expect("responses input");
+        assert_eq!(input[0]["type"], json!("reasoning"));
+        assert_eq!(input[0]["encrypted_content"], json!("enc_123"));
+        assert_eq!(input[1]["type"], json!("function_call"));
+        assert_eq!(input[1]["call_id"], json!("call_123"));
     }
 
     #[test]

@@ -2623,7 +2623,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let config_keys: Vec<String> = config.models.keys().cloned().collect();
         let mut models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
         // Ensure the current model is always present.
-        if !models.iter().any(|m| m.eq_ignore_ascii_case(&self.inner.model)) {
+        if !models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&self.inner.model))
+        {
             models.insert(0, self.inner.model.clone());
         }
         (self.inner.model.clone(), models)

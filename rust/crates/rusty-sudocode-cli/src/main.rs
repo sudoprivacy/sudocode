@@ -2624,9 +2624,13 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
     fn get_model_info(&self) -> (String, Vec<String>) {
         let config = load_sudocode_config_for_current_dir();
-        let mut models: Vec<String> = config.models.keys().cloned().collect();
+        let config_keys: Vec<String> = config.models.keys().cloned().collect();
+        let mut models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
         // Ensure the current model is always present.
-        if !models.contains(&self.inner.model) {
+        if !models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&self.inner.model))
+        {
             models.insert(0, self.inner.model.clone());
         }
         (self.inner.model.clone(), models)
@@ -4001,11 +4005,8 @@ impl LiveCli {
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(model) = model else {
             let sudocode_config = load_sudocode_config_for_current_dir();
-            let models: Vec<String> = sudocode_config.models.keys().cloned().collect();
-            if models.is_empty() {
-                println!("No models configured in sudocode.json");
-                return Ok(false);
-            }
+            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
+            let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
             let selection = FuzzySelect::new()
                 .with_prompt("Select model")
                 .items(&models)
@@ -5579,9 +5580,6 @@ fn slash_command_completion_candidates_with_sessions(
         "/export ",
         "/issue ",
         "/model ",
-        "/model opus",
-        "/model sonnet",
-        "/model haiku",
         "/permissions ",
         "/permissions read-only",
         "/permissions workspace-write",
@@ -5618,6 +5616,12 @@ fn slash_command_completion_candidates_with_sessions(
     for alias in sudocode_config.models.keys() {
         completions
             .entry(format!("/model {alias}"))
+            .or_insert_with(String::new);
+    }
+    // Add capabilities SSOT model IDs to /model completions.
+    for id in runtime::model_capabilities::all_model_ids() {
+        completions
+            .entry(format!("/model {id}"))
             .or_insert_with(String::new);
     }
 

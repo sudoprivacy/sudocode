@@ -140,6 +140,36 @@ pub fn per_model_image_cap(model_id: &str) -> (Option<u32>, Option<u32>) {
     }
 }
 
+/// All known model IDs from the capabilities SSOT.
+/// Used by discovery surfaces (`/model`, tab completion, `get_model_info`).
+#[must_use]
+pub fn all_model_ids() -> Vec<String> {
+    let caps = CAPABILITIES.get_or_init(ModelCapabilitiesFile::default);
+    caps.models.keys().cloned().collect()
+}
+
+/// Merge config alias keys with capabilities SSOT model IDs into a single
+/// discovery list: config keys first (preserving order), then capabilities
+/// IDs not already covered (case-insensitive dedup).
+///
+/// This is the DRY helper for all flat-list discovery surfaces
+/// (`get_model_info`, FuzzySelect picker). Call sites that need two-phase
+/// formatting (config aliases with rich display vs. capabilities wire IDs)
+/// should use [`all_model_ids`] directly.
+#[inline]
+#[must_use]
+pub fn merge_discovery_ids(config_keys: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = config_keys.to_vec();
+    let seen: std::collections::BTreeSet<String> =
+        config_keys.iter().map(|k| k.to_ascii_lowercase()).collect();
+    for id in all_model_ids() {
+        if !seen.contains(&id.to_ascii_lowercase()) {
+            merged.push(id);
+        }
+    }
+    merged
+}
+
 /// Context window for a wire model ID, falling back to the SSOT file's
 /// `default` entry when the model is unknown. The single source of truth for
 /// both per-model values and the unknown-model default is this capabilities
@@ -337,6 +367,37 @@ mod tests {
         assert!(
             file.default.context_window > 0,
             "bundled JSON must define a non-zero default context window"
+        );
+    }
+
+    #[test]
+    fn all_model_ids_returns_bundled_models() {
+        let ids = all_model_ids();
+        assert!(
+            ids.len() >= 30,
+            "expected ≥30 bundled model IDs, got {}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn merge_discovery_ids_deduplicates_case_insensitive() {
+        // Config key "claude-opus-4-6" overlaps with capabilities — should not appear twice.
+        let config_keys = vec!["claude-opus-4-6".to_string(), "custom-alias".to_string()];
+        let merged = merge_discovery_ids(&config_keys);
+        // Config keys come first, in order.
+        assert_eq!(&merged[0], "claude-opus-4-6");
+        assert_eq!(&merged[1], "custom-alias");
+        // No duplicates of config keys.
+        let count = merged
+            .iter()
+            .filter(|id| id.eq_ignore_ascii_case("claude-opus-4-6"))
+            .count();
+        assert_eq!(count, 1, "claude-opus-4-6 should appear exactly once");
+        // Capabilities models are appended.
+        assert!(
+            merged.len() > config_keys.len(),
+            "should have more models than just config keys"
         );
     }
 

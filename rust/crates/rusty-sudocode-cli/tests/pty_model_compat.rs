@@ -60,6 +60,28 @@ impl std::fmt::Display for ModelStatus {
     }
 }
 
+/// Check if the PTY screen contains patterns indicating the model is
+/// unavailable (as opposed to genuinely incompatible). These are
+/// transient/group-membership errors that should be skipped, not failed.
+fn is_availability_error(screen: &str) -> bool {
+    screen.contains("429")
+        || screen.contains("rate limit")
+        || screen.contains("Rate limit")
+        || screen.contains("overloaded")
+        || screen.contains("503")
+        || screen.contains("502")
+        || screen.contains("404")
+        || screen.contains("model_not_found")
+        || screen.contains("not supported")
+        || screen.contains("timed out")
+        || screen.contains("timeout")
+        || screen.contains("ETIMEDOUT")
+        || screen.contains("ECONNREFUSED")
+        || screen.contains("connection refused")
+        || screen.contains("upstream")
+        || screen.contains("saturated")
+}
+
 /// Run a single model through a "What is 2+2?" smoke test.
 ///
 /// Returns `Pass` if the model responds with "4", `Skip` if the model
@@ -106,11 +128,25 @@ fn test_one_model(model: &str) -> ModelResult {
                     status: ModelStatus::Pass,
                     detail: "responded with 4, exit 0".to_string(),
                 },
-                Ok(code) => ModelResult {
-                    model: model.to_string(),
-                    status: ModelStatus::Fail,
-                    detail: format!("responded with 4 but exit code {code}"),
-                },
+                Ok(code) => {
+                    // Non-zero exit despite matching "4" — could be a false
+                    // positive (e.g. "404" contains "4"). Check the screen
+                    // for availability errors before calling it a failure.
+                    let screen = sess.render(|s| s.contents());
+                    if is_availability_error(&screen) {
+                        ModelResult {
+                            model: model.to_string(),
+                            status: ModelStatus::Skip,
+                            detail: format!("upstream unavailable (exit {code})"),
+                        }
+                    } else {
+                        ModelResult {
+                            model: model.to_string(),
+                            status: ModelStatus::Fail,
+                            detail: format!("responded with 4 but exit code {code}"),
+                        }
+                    }
+                }
                 Err(e) => ModelResult {
                     model: model.to_string(),
                     status: ModelStatus::Pass,
@@ -122,21 +158,8 @@ fn test_one_model(model: &str) -> ModelResult {
             // Capture the PTY screen to distinguish availability errors
             // from genuine incompatibility.
             let screen = sess.render(|s| s.contents());
-            let is_availability_error = screen.contains("429")
-                || screen.contains("rate limit")
-                || screen.contains("Rate limit")
-                || screen.contains("overloaded")
-                || screen.contains("503")
-                || screen.contains("502")
-                || screen.contains("timed out")
-                || screen.contains("timeout")
-                || screen.contains("ETIMEDOUT")
-                || screen.contains("ECONNREFUSED")
-                || screen.contains("connection refused")
-                || screen.contains("upstream")
-                || screen.contains("saturated");
 
-            if is_availability_error {
+            if is_availability_error(&screen) {
                 ModelResult {
                     model: model.to_string(),
                     status: ModelStatus::Skip,

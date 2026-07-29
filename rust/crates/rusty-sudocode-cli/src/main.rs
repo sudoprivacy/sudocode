@@ -1831,6 +1831,30 @@ struct LiveCliDriver {
 impl repl_async::TurnDriver for LiveCliDriver {
     fn run_turn(&self, prompt: &str) {
         let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
+        // Dispatch slash commands the same way the sync REPL does — parse
+        // before reaching the LLM. `/exit` and `/quit` are already handled
+        // in the coordinator loop; everything else (config set, model, clear,
+        // help, etc.) is dispatched here.
+        let trimmed = prompt.trim();
+        match SlashCommand::parse(trimmed) {
+            Ok(Some(command)) => {
+                match cli.handle_repl_command(command) {
+                    Ok(true) => {
+                        if let Err(e) = cli.persist_session() {
+                            eprintln!("\x1b[31m{e}\x1b[0m");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("\x1b[31m{error}\x1b[0m");
+                return;
+            }
+        }
         if let Err(e) = cli.run_turn(prompt) {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }

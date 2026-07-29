@@ -1,8 +1,8 @@
 //! Async REPL loop that accepts input DURING a running turn — Phase 2 of the
 //! interrupt+queue plan (`notes/plans/conversation-interrupt-queue-sudocode.md`).
 //!
-//! Only activated when `SUDOCODE_INTERRUPT_QUEUE_MODE` is set to a non-off value.
-//! The default REPL (`run_repl`) is unchanged and remains the sync path.
+//! Active by default (`QueueMode::Queue`). Set `SUDOCODE_INTERRUPT_QUEUE_MODE=off`
+//! to fall back to the sync REPL.
 //!
 //! ## Modes
 //!

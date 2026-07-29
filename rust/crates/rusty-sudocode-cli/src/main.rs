@@ -1744,8 +1744,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Async REPL dispatch — takes ownership of the constructed `LiveCli`, wraps it
 /// in `Arc<Mutex<>>` for the coordinator + runner thread, drives the loop, then
-/// unwraps and finalizes the session on exit. Only called when
-/// `SUDOCODE_INTERRUPT_QUEUE_MODE` is set.
+/// unwraps and finalizes the session on exit. Called by default (queue mode)
+/// or when `SUDOCODE_INTERRUPT_QUEUE_MODE` is explicitly set to a non-off value.
 fn run_repl_async_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,

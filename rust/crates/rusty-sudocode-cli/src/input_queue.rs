@@ -23,11 +23,12 @@
 //! The auto-interrupter, if any, always runs alone as a fresh solo turn (§3.2
 //! row 2: "第一条立即打断并单独作为新轮启动") — its follow-ups then batch normally.
 //!
-//! ## Env-gated opt-in
+//! ## Environment override
 //!
 //! Reads `SUDOCODE_INTERRUPT_QUEUE_MODE`:
-//! - unset / `off` — current sync behavior, no queue, no interrupt
-//! - `queue` — queue ON, auto-interrupt OFF
+//! - unset — defaults to `queue` (CC parity)
+//! - `off` — sync behavior, no queue, no interrupt
+//! - `queue` — queue ON, auto-interrupt OFF (default)
 //! - `interrupt` — auto-interrupt ON, queue OFF (interrupt-then-send)
 //! - `both` — both ON (sudowork-parity default)
 //!
@@ -49,16 +50,15 @@ pub enum QueueMode {
 
 impl QueueMode {
     /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive.
-    /// Default is `Off` for now — the async REPL's ESC cancel mechanism
-    /// is not yet wired (the input thread owns stdin, the ESC monitor is
-    /// disabled). Switching the default to `Queue` requires making ESC
-    /// cancel work in async mode first.
+    /// Default is `Queue` — message queue ON, matching Claude Code parity.
+    /// ESC and Ctrl-C cancel are wired in the async REPL via
+    /// `EscCancelHandler` and the `abort_hook` in `LineEditor`.
     #[must_use]
     pub fn from_env() -> Self {
         std::env::var("SUDOCODE_INTERRUPT_QUEUE_MODE")
             .ok()
             .and_then(|v| Self::from_str(&v))
-            .unwrap_or(Self::Off)
+            .unwrap_or(Self::Queue)
     }
 
     fn from_str(s: &str) -> Option<Self> {

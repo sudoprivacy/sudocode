@@ -324,6 +324,11 @@ pub struct LineEditor {
     pending_exit_at: Option<std::time::Instant>,
     /// Shared image map populated by the `ImagePasteHandler`.
     images: ImageMap,
+    /// Optional abort hook called on Ctrl-C with empty buffer (async REPL).
+    /// Cancels the running turn so Ctrl-C works the same as ESC for
+    /// turn cancellation, plus integrates with `cancel::record_ctrlc()`
+    /// for double-press exit.
+    abort_hook: Option<EscAbortHook>,
 }
 
 impl LineEditor {
@@ -373,10 +378,13 @@ impl LineEditor {
 
         // ESC: cancel the running turn (async REPL only). In sync mode the
         // HookAbortMonitor handles ESC on its own raw-mode stdin thread.
-        if let Some(abort_hook) = esc_abort_hook {
+        // Clone the hook so the same callback is available for Ctrl-C too.
+        if let Some(ref abort_hook) = esc_abort_hook {
             editor.bind_sequence(
                 KeyEvent(KeyCode::Esc, Modifiers::NONE),
-                EventHandler::Conditional(Box::new(EscCancelHandler { abort_hook })),
+                EventHandler::Conditional(Box::new(EscCancelHandler {
+                    abort_hook: Arc::clone(abort_hook),
+                })),
             );
         }
 
@@ -407,6 +415,7 @@ impl LineEditor {
             editor,
             pending_exit_at: None,
             images,
+            abort_hook: esc_abort_hook,
         }
     }
 
@@ -458,11 +467,27 @@ impl LineEditor {
                     if has_input {
                         // Had text — clear it and restart the prompt.
                         self.pending_exit_at = None;
+                    } else if let Some(ref hook) = self.abort_hook {
+                        // Async REPL: Ctrl-C cancels the running turn (same
+                        // as ESC) AND checks for double-press exit via the
+                        // shared cancel module.
+                        if cancel::is_double_ctrlc() {
+                            writeln!(stdout, "\x1b[J")?;
+                            stdout.flush()?;
+                            return Ok(ReadOutcome::Exit);
+                        }
+                        cancel::record_ctrlc();
+                        (hook)();
+                        // Show exit hint.
+                        write!(
+                            stdout,
+                            "\x1b[2E\x1b[2K  \x1b[2mPress Ctrl-C again to exit\x1b[0m\x1b[2F"
+                        )?;
                     } else if self
                         .pending_exit_at
                         .is_some_and(|t| t.elapsed() <= cancel::DOUBLE_CTRLC_WINDOW)
                     {
-                        // Second Ctrl-C within 800ms — exit.
+                        // Sync REPL: second Ctrl-C within 800ms — exit.
                         writeln!(stdout, "\x1b[J")?;
                         stdout.flush()?;
                         return Ok(ReadOutcome::Exit);

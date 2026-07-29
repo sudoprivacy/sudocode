@@ -1763,6 +1763,13 @@ fn run_repl_async_dispatch(
     let shared_mode = repl_async::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
+    // ESC abort hook — wired into rustyline's ConditionalEventHandler so ESC
+    // cancels the running turn without a separate raw-mode stdin thread.
+    let esc_abort_hook: input::EscAbortHook = {
+        let sig = abort_signal.clone();
+        Arc::new(move || sig.abort())
+    };
+
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
@@ -1770,7 +1777,13 @@ fn run_repl_async_dispatch(
     });
 
     let session_start = Instant::now();
-    repl_async::run_coordinator_loop(driver, shared_mode, banner, completions)?;
+    repl_async::run_coordinator_loop(
+        driver,
+        shared_mode,
+        banner,
+        completions,
+        Some(esc_abort_hook),
+    )?;
 
     // All threads spawned by the coordinator loop have already been joined
     // inside the loop (Exit branch + TurnDone reap). Unwrapping the Arc here

@@ -76,7 +76,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::input::{LineEditor, ReadOutcome};
+use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
@@ -180,6 +180,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     mode: SharedQueueMode,
     startup_banner: String,
     initial_completions: Vec<(String, String)>,
+    esc_abort_hook: Option<EscAbortHook>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{startup_banner}");
 
@@ -191,14 +192,20 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     // to main via a bounded channel. Exits cleanly on Exit / channel closed.
     // The `↑`-arrow dequeue hook is bound here so the input thread can pop
     // the newest queued input back into the buffer without needing a
-    // channel round-trip to main.
+    // channel round-trip to main. The ESC abort hook cancels the running
+    // turn directly from rustyline's event handler — no raw-mode conflict
+    // because rustyline already owns stdin.
     let input_tx_clone = input_tx.clone();
     let dequeue_hook = make_up_arrow_hook(Arc::clone(&coord));
     thread::Builder::new()
         .name("repl-input".into())
         .spawn(move || {
-            let mut editor =
-                LineEditor::new_with_dequeue_hook("❯ ", initial_completions, Some(dequeue_hook));
+            let mut editor = LineEditor::new_with_dequeue_hook(
+                "❯ ",
+                initial_completions,
+                Some(dequeue_hook),
+                esc_abort_hook,
+            );
             loop {
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {

@@ -20,6 +20,32 @@ use rustyline::{
 /// returns `None` to fall through to history navigation.
 pub type UpArrowDequeueHook = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync + 'static>;
 
+/// Callback invoked on ESC press to cancel the currently-running turn.
+/// The async REPL passes `abort_signal.abort()` here; the sync REPL
+/// leaves it `None` (ESC is handled by `HookAbortMonitor` on a separate
+/// thread in sync mode).
+pub type EscAbortHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
+/// Rustyline handler for ESC: calls the abort hook (cancels the running
+/// turn) and consumes the key. Only bound in async REPL mode — the sync
+/// REPL uses `HookAbortMonitor`'s raw-mode stdin listener instead.
+struct EscCancelHandler {
+    abort_hook: EscAbortHook,
+}
+
+impl ConditionalEventHandler for EscCancelHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        (self.abort_hook)();
+        Some(Cmd::Noop)
+    }
+}
+
 /// Rustyline handler for `↑`: moves cursor to the line above (or to the
 /// beginning of the current line on single-line input), and only navigates
 /// history when the cursor is already at the top-left.  When an async REPL
@@ -303,18 +329,21 @@ pub struct LineEditor {
 impl LineEditor {
     #[must_use]
     pub fn new(prompt: impl Into<String>, completions: Vec<(String, String)>) -> Self {
-        Self::new_with_dequeue_hook(prompt, completions, None)
+        Self::new_with_dequeue_hook(prompt, completions, None, None)
     }
 
-    /// Same as [`new`] but binds `↑` (on an empty buffer) to `dequeue_hook`.
-    /// The async REPL uses this to pop the newest queued input back into the
-    /// editor for editing; sync REPL passes `None` and gets the default
-    /// history-only `↑` behavior.
+    /// Same as [`new`] but binds `↑` (on an empty buffer) to `dequeue_hook`
+    /// and optionally binds ESC to `esc_abort_hook`.
+    ///
+    /// The async REPL uses the dequeue hook to pop the newest queued input
+    /// back into the editor for editing, and the ESC hook to cancel the
+    /// currently-running turn. The sync REPL passes `None` for both.
     #[must_use]
     pub fn new_with_dequeue_hook(
         prompt: impl Into<String>,
         completions: Vec<(String, String)>,
         dequeue_hook: Option<UpArrowDequeueHook>,
+        esc_abort_hook: Option<EscAbortHook>,
     ) -> Self {
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -341,6 +370,15 @@ impl LineEditor {
             KeyEvent(KeyCode::Down, Modifiers::NONE),
             EventHandler::Conditional(Box::new(DownArrowHandler)),
         );
+
+        // ESC: cancel the running turn (async REPL only). In sync mode the
+        // HookAbortMonitor handles ESC on its own raw-mode stdin thread.
+        if let Some(abort_hook) = esc_abort_hook {
+            editor.bind_sequence(
+                KeyEvent(KeyCode::Esc, Modifiers::NONE),
+                EventHandler::Conditional(Box::new(EscCancelHandler { abort_hook })),
+            );
+        }
 
         let images: ImageMap = Arc::new(Mutex::new(HashMap::new()));
 

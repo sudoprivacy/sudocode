@@ -350,10 +350,16 @@ impl LineEditor {
         dequeue_hook: Option<UpArrowDequeueHook>,
         esc_abort_hook: Option<EscAbortHook>,
     ) -> Self {
-        let config = Config::builder()
+        let mut config_builder = Config::builder()
             .completion_type(CompletionType::List)
-            .edit_mode(EditMode::Emacs)
-            .build();
+            .edit_mode(EditMode::Emacs);
+        // When an ESC abort hook is installed (async REPL), set a keyseq
+        // timeout so rustyline recognizes standalone ESC after 50ms instead
+        // of blocking indefinitely for a follow-up key (Emacs Meta prefix).
+        if esc_abort_hook.is_some() {
+            config_builder = config_builder.keyseq_timeout(Some(50));
+        }
+        let config = config_builder.build();
         let mut editor = Editor::<SlashCommandHelper, DefaultHistory>::with_config(config)
             .expect("rustyline editor should initialize");
         editor.set_helper(Some(SlashCommandHelper::new(completions)));

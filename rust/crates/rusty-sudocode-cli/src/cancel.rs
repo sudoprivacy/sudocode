@@ -20,12 +20,16 @@ static LAST_CTRLC_CANCEL_MS: AtomicU64 = AtomicU64::new(0);
 /// Monotonic milliseconds since process start. Used as the time-base for
 /// `LAST_CTRLC_CANCEL_MS` so the timestamp survives across monitor lifetimes
 /// without wall-clock drift concerns.
+///
+/// Returns at least 1 — zero is reserved as the "no previous Ctrl-C"
+/// sentinel in [`LAST_CTRLC_CANCEL_MS`].
 pub fn process_uptime_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
+    let elapsed = START
         .get_or_init(std::time::Instant::now)
         .elapsed()
-        .as_millis() as u64
+        .as_millis() as u64;
+    elapsed.max(1)
 }
 
 /// Record a Ctrl-C cancel. Call this every time a Ctrl-C fires (whether it

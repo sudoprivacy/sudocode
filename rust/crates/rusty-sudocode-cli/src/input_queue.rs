@@ -48,9 +48,11 @@ pub enum QueueMode {
 }
 
 impl QueueMode {
-    /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive; anything
-    /// unrecognized (including unset) → `Off` so the default REPL path stays
-    /// bit-for-bit identical to today's behavior until a user explicitly opts in.
+    /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive.
+    /// Default is `Off` for now — the async REPL's ESC cancel mechanism
+    /// is not yet wired (the input thread owns stdin, the ESC monitor is
+    /// disabled). Switching the default to `Queue` requires making ESC
+    /// cancel work in async mode first.
     #[must_use]
     pub fn from_env() -> Self {
         std::env::var("SUDOCODE_INTERRUPT_QUEUE_MODE")
@@ -66,6 +68,27 @@ impl QueueMode {
             "interrupt" => Some(Self::Interrupt),
             "both" => Some(Self::Both),
             _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Queue => 1,
+            Self::Interrupt => 2,
+            Self::Both => 3,
+        }
+    }
+
+    #[must_use]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Off,
+            1 => Self::Queue,
+            2 => Self::Interrupt,
+            3 => Self::Both,
+            _ => Self::Queue,
         }
     }
 

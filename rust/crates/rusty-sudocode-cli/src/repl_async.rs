@@ -70,6 +70,7 @@
 //! The [`sudocode plan doc`](https://github.com/sudoprivacy/sudocode/blob/main/notes/plans/conversation-interrupt-queue-sudocode.md)
 //! §落地节奏 covers the full sequence; this file is Phase-2 commit 1.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -77,6 +78,21 @@ use std::time::Duration;
 
 use crate::input::{LineEditor, ReadOutcome};
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
+
+/// Shared queue mode that can be toggled at runtime via `/config set`.
+pub type SharedQueueMode = Arc<AtomicU8>;
+
+/// Create a shared queue mode from the initial value.
+#[must_use]
+pub fn shared_queue_mode(mode: QueueMode) -> SharedQueueMode {
+    Arc::new(AtomicU8::new(mode.to_u8()))
+}
+
+/// Read the current queue mode from the shared atomic.
+#[must_use]
+pub fn load_queue_mode(shared: &SharedQueueMode) -> QueueMode {
+    QueueMode::from_u8(shared.load(Ordering::Relaxed))
+}
 
 /// Builds the `↑`-arrow dequeue hook that the input thread's rustyline binds
 /// to `KeyCode::Up` on an empty buffer. Kept as a free function so both the
@@ -161,7 +177,7 @@ fn is_exit_command(text: &str) -> bool {
 /// that might be writing to disk).
 pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     driver: Arc<D>,
-    mode: QueueMode,
+    mode: SharedQueueMode,
     startup_banner: String,
     initial_completions: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -265,7 +281,10 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     ));
                     continue;
                 }
-                let outcome = coord.lock().unwrap().submit_during_turn(text, mode);
+                let outcome = coord
+                    .lock()
+                    .unwrap()
+                    .submit_during_turn(text, load_queue_mode(&mode));
                 match outcome {
                     SubmitOutcome::Queued => {
                         // Silent: sudowork's queue chips render in the sendbox;

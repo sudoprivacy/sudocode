@@ -1266,6 +1266,11 @@ fn run_resume_command(
                 json: Some(json),
             })
         }
+        SlashCommand::ConfigSet { .. } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some("/config set is only available in interactive REPL mode".to_string()),
+            json: None,
+        }),
         SlashCommand::Mcp { action, target } => {
             let cwd = env::current_dir()?;
             let args = match (action.as_deref(), target.as_deref()) {
@@ -1744,22 +1749,18 @@ fn run_repl_async_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Capture startup state that only needs to be read once (banner + initial
-    // completion list). Completion refresh mid-loop is deferred — see the
-    // repl_async module docs §Deferred.
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
-    // In async REPL mode the input thread's rustyline is the sole stdin
-    // consumer — the runner-thread's ESC listener must be disabled or it
-    // wedges the terminal on POSIX (see LiveCli::esc_monitor_enabled docs).
     cli.esc_monitor_enabled = false;
 
-    // Auto-interrupt wiring: install a persistent HookAbortSignal so main can
-    // call `.abort()` mid-turn without ever locking cli. `prepare_turn_runtime`
-    // resets the signal before each turn (see the branch we added there).
     let abort_signal = runtime::HookAbortSignal::new();
     cli.persistent_abort_signal = Some(abort_signal.clone());
+
+    // Shared atomic queue mode — the coordinator reads it each turn,
+    // and `/config set auto-interrupt on|off` writes to it.
+    let shared_mode = repl_async::shared_queue_mode(mode);
+    cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
@@ -1768,7 +1769,7 @@ fn run_repl_async_dispatch(
     });
 
     let session_start = Instant::now();
-    repl_async::run_coordinator_loop(driver, mode, banner, completions)?;
+    repl_async::run_coordinator_loop(driver, shared_mode, banner, completions)?;
 
     // All threads spawned by the coordinator loop have already been joined
     // inside the loop (Exit branch + TurnDone reap). Unwrapping the Arc here
@@ -1863,6 +1864,9 @@ struct LiveCli {
     /// without ever locking the `LiveCli` mutex — the runner thread holds
     /// that lock while `run_turn` streams.
     persistent_abort_signal: Option<runtime::HookAbortSignal>,
+    /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
+    /// writes to this; the coordinator reads it each `submit_during_turn`.
+    shared_queue_mode: Option<repl_async::SharedQueueMode>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -2540,6 +2544,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             }
             SlashCommand::Config { section } => render_config_report(section.as_deref())
                 .map_err(|e| runtime::AcpError::internal(e.to_string()))?,
+            SlashCommand::ConfigSet { .. } => {
+                "/config set is only available in interactive REPL mode".to_string()
+            }
             SlashCommand::Diff => {
                 let output = std::process::Command::new("git")
                     .args(["diff", "--cached", "--no-color"])
@@ -3029,6 +3036,21 @@ struct HookAbortMonitor {
     join_handle: Option<JoinHandle<()>>,
 }
 
+/// CC-parity timeout for double Ctrl-C force exit (800ms).
+const DOUBLE_CTRLC_TIMEOUT_MS: u64 = 800;
+
+/// Shared timestamp (millis since process start) of the last Ctrl-C that
+/// cancelled a turn. Persists across `HookAbortMonitor` lifetimes so a
+/// fast second Ctrl-C on the *next* turn's monitor (or between turns)
+/// triggers process exit. `0` means no pending exit.
+static LAST_CTRLC_CANCEL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Monotonic reference point for [`LAST_CTRLC_CANCEL_MS`].
+fn process_uptime_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
 impl HookAbortMonitor {
     fn spawn(abort_signal: runtime::HookAbortSignal) -> Self {
         Self::spawn_with_waiter(abort_signal, move |stop_rx, abort_signal| {
@@ -3065,15 +3087,49 @@ impl HookAbortMonitor {
                             Err(RecvTimeoutError::Timeout) => continue,
                         }
                     }
-                    if poll_abort_key(Duration::from_millis(50)) {
-                        esc_abort.abort();
-                        return;
+                    match poll_abort_key(Duration::from_millis(50)) {
+                        AbortKey::None => {}
+                        AbortKey::Esc => {
+                            esc_abort.abort();
+                            return;
+                        }
+                        AbortKey::CtrlC => {
+                            let now = process_uptime_ms();
+                            let prev =
+                                LAST_CTRLC_CANCEL_MS.load(std::sync::atomic::Ordering::Relaxed);
+                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
+                                // Double Ctrl-C within 800ms — force exit.
+                                // Restore terminal before exiting.
+                                #[cfg(unix)]
+                                disable_raw_mode_unix();
+                                #[cfg(not(unix))]
+                                let _ = crossterm::terminal::disable_raw_mode();
+                                eprintln!();
+                                std::process::exit(0);
+                            }
+                            LAST_CTRLC_CANCEL_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+                            esc_abort.abort();
+                            return;
+                        }
                     }
                 });
 
                 tokio::select! {
                     result = tokio::signal::ctrl_c() => {
                         if result.is_ok() {
+                            let now = process_uptime_ms();
+                            let prev = LAST_CTRLC_CANCEL_MS
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
+                                #[cfg(unix)]
+                                disable_raw_mode_unix();
+                                #[cfg(not(unix))]
+                                let _ = crossterm::terminal::disable_raw_mode();
+                                eprintln!();
+                                std::process::exit(0);
+                            }
+                            LAST_CTRLC_CANCEL_MS
+                                .store(now, std::sync::atomic::Ordering::Relaxed);
                             abort_signal.abort();
                         }
                     }
@@ -3169,10 +3225,21 @@ fn disable_raw_mode_unix() {
     });
 }
 
+/// Which abort key was detected by `poll_abort_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortKey {
+    /// No abort key pressed within the poll window.
+    None,
+    /// ESC (0x1b) — cancels the current turn but never triggers exit.
+    Esc,
+    /// Ctrl-C (0x03) — cancels the current turn; double-press within
+    /// 800ms exits the process (CC parity).
+    CtrlC,
+}
+
 /// Poll stdin for an abort key (ESC = 0x1b, Ctrl-C = 0x03).
-/// Returns `true` if an abort key was detected within `timeout`.
 #[cfg(unix)]
-fn poll_abort_key(timeout: Duration) -> bool {
+fn poll_abort_key(timeout: Duration) -> AbortKey {
     use nix::poll::{self, PollFd, PollFlags, PollTimeout};
     use std::os::fd::AsFd;
     use std::os::unix::io::AsRawFd;
@@ -3182,36 +3249,39 @@ fn poll_abort_key(timeout: Duration) -> bool {
     let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
     let ready = poll::poll(&mut fds, poll_timeout).unwrap_or(0);
     if ready <= 0 {
-        return false;
+        return AbortKey::None;
     }
     let revents = fds[0].revents().unwrap_or(PollFlags::empty());
     if !revents.contains(PollFlags::POLLIN) {
-        return false;
+        return AbortKey::None;
     }
     let mut buf = [0u8; 1];
     match nix::unistd::read(stdin.as_raw_fd(), &mut buf) {
-        Ok(1) => buf[0] == 0x1b || buf[0] == 0x03,
-        _ => false,
+        Ok(1) if buf[0] == 0x03 => AbortKey::CtrlC,
+        Ok(1) if buf[0] == 0x1b => AbortKey::Esc,
+        _ => AbortKey::None,
     }
 }
 
 /// Poll stdin for an abort key using crossterm's event system (Windows).
 #[cfg(not(unix))]
-fn poll_abort_key(timeout: Duration) -> bool {
+fn poll_abort_key(timeout: Duration) -> AbortKey {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
     if !event::poll(timeout).unwrap_or(false) {
-        return false;
+        return AbortKey::None;
     }
     if let Ok(Event::Key(key)) = event::read() {
         if key.kind != KeyEventKind::Press {
-            return false;
+            return AbortKey::None;
         }
-        let is_esc = key.code == KeyCode::Esc;
-        let is_ctrl_c =
-            key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL);
-        return is_esc || is_ctrl_c;
+        if key.code == KeyCode::Esc {
+            return AbortKey::Esc;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return AbortKey::CtrlC;
+        }
     }
-    false
+    AbortKey::None
 }
 
 /// Measure visible string width by stripping ANSI escape sequences.
@@ -3316,6 +3386,7 @@ impl LiveCli {
             tokio_runtime,
             esc_monitor_enabled: true,
             persistent_abort_signal: None,
+            shared_queue_mode: None,
         };
         cli.persist_session()?;
 
@@ -3787,6 +3858,10 @@ impl LiveCli {
                 Self::print_config(section.as_deref())?;
                 false
             }
+            SlashCommand::ConfigSet { key, value } => {
+                self.handle_config_set(&key, &value)?;
+                false
+            }
             SlashCommand::Mcp { action, target } => {
                 let args = match (action.as_deref(), target.as_deref()) {
                     (None, None) => None,
@@ -4209,6 +4284,82 @@ impl LiveCli {
             path: handle.path,
         };
         Ok(())
+    }
+
+    fn handle_config_set(
+        &mut self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match key {
+            "auto-interrupt" | "autoInterrupt" => {
+                let on = match value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => {
+                        eprintln!("Usage: /config set auto-interrupt on|off");
+                        return Ok(());
+                    }
+                };
+                if let Some(shared) = &self.shared_queue_mode {
+                    use std::sync::atomic::Ordering;
+                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
+                    let new_mode = if on {
+                        if current.queue_enabled() {
+                            input_queue::QueueMode::Both
+                        } else {
+                            input_queue::QueueMode::Interrupt
+                        }
+                    } else if current.queue_enabled() {
+                        input_queue::QueueMode::Queue
+                    } else {
+                        input_queue::QueueMode::Off
+                    };
+                    shared.store(new_mode.to_u8(), Ordering::Relaxed);
+                    println!(
+                        "\x1b[2mauto-interrupt: {}\x1b[0m",
+                        if on { "on" } else { "off" }
+                    );
+                } else {
+                    eprintln!("auto-interrupt is only available in async REPL mode");
+                }
+                Ok(())
+            }
+            "queue" | "messageQueue" => {
+                let on = match value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => {
+                        eprintln!("Usage: /config set queue on|off");
+                        return Ok(());
+                    }
+                };
+                if let Some(shared) = &self.shared_queue_mode {
+                    use std::sync::atomic::Ordering;
+                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
+                    let new_mode = if on {
+                        if current.interrupt_enabled() {
+                            input_queue::QueueMode::Both
+                        } else {
+                            input_queue::QueueMode::Queue
+                        }
+                    } else if current.interrupt_enabled() {
+                        input_queue::QueueMode::Interrupt
+                    } else {
+                        input_queue::QueueMode::Off
+                    };
+                    shared.store(new_mode.to_u8(), Ordering::Relaxed);
+                    println!("\x1b[2mqueue: {}\x1b[0m", if on { "on" } else { "off" });
+                } else {
+                    eprintln!("queue is only available in async REPL mode");
+                }
+                Ok(())
+            }
+            _ => {
+                eprintln!("Unknown config key '{key}'. Available: auto-interrupt, queue");
+                Ok(())
+            }
+        }
     }
 
     fn print_config(section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {

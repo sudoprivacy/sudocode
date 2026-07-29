@@ -1095,6 +1095,11 @@ pub enum SlashCommand {
     Config {
         section: Option<String>,
     },
+    /// `/config set <key> <value>` — runtime toggle for REPL settings.
+    ConfigSet {
+        key: String,
+        value: String,
+    },
     Mcp {
         action: Option<String>,
         target: Option<String>,
@@ -1243,7 +1248,7 @@ impl SlashCommand {
             Self::Compact { .. } => "/compact",
             Self::Cost => "/cost",
             Self::Doctor => "/doctor",
-            Self::Config { .. } => "/config",
+            Self::Config { .. } | Self::ConfigSet { .. } => "/config",
             Self::Memory { .. } => "/memory",
             Self::History { .. } => "/history",
             Self::Diff => "/diff",
@@ -1383,9 +1388,25 @@ pub fn validate_slash_command_input(
         "resume" => SlashCommand::Resume {
             session_path: Some(require_remainder(command, remainder, "<session-path>")?),
         },
-        "config" => SlashCommand::Config {
-            section: parse_config_section(&args)?,
-        },
+        "config" => {
+            if args.first().map(|s| s.to_ascii_lowercase()) == Some("set".into()) {
+                if args.len() < 3 {
+                    return Err(command_error(
+                        "Usage: /config set <key> <value>",
+                        "config",
+                        "/config set <key> <value>",
+                    ));
+                }
+                SlashCommand::ConfigSet {
+                    key: args[1].to_string(),
+                    value: args[2..].join(" "),
+                }
+            } else {
+                SlashCommand::Config {
+                    section: parse_config_section(&args)?,
+                }
+            }
+        }
         "mcp" => parse_mcp_command(&args)?,
         "memory" => {
             validate_no_args(command, &args)?;
@@ -1614,15 +1635,19 @@ fn parse_clear_args(args: &[&str]) -> Result<bool, SlashCommandParseError> {
 }
 
 fn parse_config_section(args: &[&str]) -> Result<Option<String>, SlashCommandParseError> {
-    let section = optional_single_arg("config", args, "[env|hooks|model|plugins]")?;
+    let section = optional_single_arg(
+        "config",
+        args,
+        "[env|hooks|model|plugins|set <key> <value>]",
+    )?;
     if let Some(section) = section {
         if matches!(section.as_str(), "env" | "hooks" | "model" | "plugins") {
             return Ok(Some(section));
         }
         return Err(command_error(
-            &format!("Unsupported /config section '{section}'. Use env, hooks, model, or plugins."),
+            &format!("Unsupported /config section '{section}'. Use env, hooks, model, plugins, or `set <key> <value>`."),
             "config",
-            "/config [env|hooks|model|plugins]",
+            "/config [env|hooks|model|plugins|set <key> <value>]",
         ));
     }
 
@@ -4488,6 +4513,7 @@ pub fn handle_slash_command(
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
         | SlashCommand::Undo
+        | SlashCommand::ConfigSet { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }

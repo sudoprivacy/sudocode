@@ -12,6 +12,7 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod cancel;
 mod cli;
 mod init;
 mod input;
@@ -3036,21 +3037,6 @@ struct HookAbortMonitor {
     join_handle: Option<JoinHandle<()>>,
 }
 
-/// CC-parity timeout for double Ctrl-C force exit (800ms).
-const DOUBLE_CTRLC_TIMEOUT_MS: u64 = 800;
-
-/// Shared timestamp (millis since process start) of the last Ctrl-C that
-/// cancelled a turn. Persists across `HookAbortMonitor` lifetimes so a
-/// fast second Ctrl-C on the *next* turn's monitor (or between turns)
-/// triggers process exit. `0` means no pending exit.
-static LAST_CTRLC_CANCEL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Monotonic reference point for [`LAST_CTRLC_CANCEL_MS`].
-fn process_uptime_ms() -> u64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
 impl HookAbortMonitor {
     fn spawn(abort_signal: runtime::HookAbortSignal) -> Self {
         Self::spawn_with_waiter(abort_signal, move |stop_rx, abort_signal| {
@@ -3094,12 +3080,7 @@ impl HookAbortMonitor {
                             return;
                         }
                         AbortKey::CtrlC => {
-                            let now = process_uptime_ms();
-                            let prev =
-                                LAST_CTRLC_CANCEL_MS.load(std::sync::atomic::Ordering::Relaxed);
-                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
-                                // Double Ctrl-C within 800ms — force exit.
-                                // Restore terminal before exiting.
+                            if cancel::is_double_ctrlc() {
                                 #[cfg(unix)]
                                 disable_raw_mode_unix();
                                 #[cfg(not(unix))]
@@ -3107,7 +3088,7 @@ impl HookAbortMonitor {
                                 eprintln!();
                                 std::process::exit(0);
                             }
-                            LAST_CTRLC_CANCEL_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+                            cancel::record_ctrlc();
                             esc_abort.abort();
                             return;
                         }
@@ -3117,10 +3098,7 @@ impl HookAbortMonitor {
                 tokio::select! {
                     result = tokio::signal::ctrl_c() => {
                         if result.is_ok() {
-                            let now = process_uptime_ms();
-                            let prev = LAST_CTRLC_CANCEL_MS
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
+                            if cancel::is_double_ctrlc() {
                                 #[cfg(unix)]
                                 disable_raw_mode_unix();
                                 #[cfg(not(unix))]
@@ -3128,8 +3106,7 @@ impl HookAbortMonitor {
                                 eprintln!();
                                 std::process::exit(0);
                             }
-                            LAST_CTRLC_CANCEL_MS
-                                .store(now, std::sync::atomic::Ordering::Relaxed);
+                            cancel::record_ctrlc();
                             abort_signal.abort();
                         }
                     }

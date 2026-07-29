@@ -287,14 +287,13 @@ impl Highlighter for SlashCommandHelper {
 impl Validator for SlashCommandHelper {}
 impl Helper for SlashCommandHelper {}
 
-/// CC-parity timeout for double Ctrl-C exit (800ms).
-const DOUBLE_CTRLC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+use crate::cancel;
 
 pub struct LineEditor {
     prompt: String,
     editor: Editor<SlashCommandHelper, DefaultHistory>,
     /// Timestamp of the first Ctrl-C on an empty prompt. `None` when no
-    /// pending exit. A second Ctrl-C within [`DOUBLE_CTRLC_TIMEOUT`] triggers
+    /// pending exit. A second Ctrl-C within [`cancel::DOUBLE_CTRLC_WINDOW`] triggers
     /// exit; after that the pending state resets automatically.
     pending_exit_at: Option<std::time::Instant>,
     /// Shared image map populated by the `ImagePasteHandler`.
@@ -423,7 +422,7 @@ impl LineEditor {
                         self.pending_exit_at = None;
                     } else if self
                         .pending_exit_at
-                        .is_some_and(|t| t.elapsed() <= DOUBLE_CTRLC_TIMEOUT)
+                        .is_some_and(|t| t.elapsed() <= cancel::DOUBLE_CTRLC_WINDOW)
                     {
                         // Second Ctrl-C within 800ms — exit.
                         writeln!(stdout, "\x1b[J")?;

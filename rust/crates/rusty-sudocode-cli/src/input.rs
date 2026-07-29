@@ -287,11 +287,16 @@ impl Highlighter for SlashCommandHelper {
 impl Validator for SlashCommandHelper {}
 impl Helper for SlashCommandHelper {}
 
+/// CC-parity timeout for double Ctrl-C exit (800ms).
+const DOUBLE_CTRLC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+
 pub struct LineEditor {
     prompt: String,
     editor: Editor<SlashCommandHelper, DefaultHistory>,
-    /// Whether the previous read returned a Ctrl-C on an empty prompt.
-    pending_exit: bool,
+    /// Timestamp of the first Ctrl-C on an empty prompt. `None` when no
+    /// pending exit. A second Ctrl-C within [`DOUBLE_CTRLC_TIMEOUT`] triggers
+    /// exit; after that the pending state resets automatically.
+    pending_exit_at: Option<std::time::Instant>,
     /// Shared image map populated by the `ImagePasteHandler`.
     images: ImageMap,
 }
@@ -363,7 +368,7 @@ impl LineEditor {
         Self {
             prompt: prompt.into(),
             editor,
-            pending_exit: false,
+            pending_exit_at: None,
             images,
         }
     }
@@ -402,7 +407,7 @@ impl LineEditor {
         loop {
             match self.editor.readline(&self.prompt) {
                 Ok(line) => {
-                    self.pending_exit = false;
+                    self.pending_exit_at = None;
                     return Ok(ReadOutcome::Submit(line));
                 }
                 Err(ReadlineError::Interrupted) => {
@@ -415,14 +420,17 @@ impl LineEditor {
 
                     if has_input {
                         // Had text — clear it and restart the prompt.
-                        self.pending_exit = false;
-                    } else if self.pending_exit {
-                        // Second Ctrl-C — clear remaining chrome and exit.
+                        self.pending_exit_at = None;
+                    } else if self
+                        .pending_exit_at
+                        .is_some_and(|t| t.elapsed() <= DOUBLE_CTRLC_TIMEOUT)
+                    {
+                        // Second Ctrl-C within 800ms — exit.
                         writeln!(stdout, "\x1b[J")?;
                         stdout.flush()?;
                         return Ok(ReadOutcome::Exit);
                     } else {
-                        self.pending_exit = true;
+                        self.pending_exit_at = Some(std::time::Instant::now());
                         // Show exit hint in the footer area (2 lines below prompt).
                         write!(
                             stdout,

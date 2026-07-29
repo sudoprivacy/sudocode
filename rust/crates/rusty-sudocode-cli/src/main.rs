@@ -3032,6 +3032,16 @@ impl AcpSdkDelegate {
     }
 }
 
+/// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`
+/// (case-insensitive). Returns `None` for unrecognized input.
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 struct HookAbortMonitor {
     stop_tx: Option<Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
@@ -4270,13 +4280,9 @@ impl LiveCli {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match key {
             "auto-interrupt" | "autoInterrupt" => {
-                let on = match value.to_ascii_lowercase().as_str() {
-                    "on" | "true" | "1" => true,
-                    "off" | "false" | "0" => false,
-                    _ => {
-                        eprintln!("Usage: /config set auto-interrupt on|off");
-                        return Ok(());
-                    }
+                let Some(on) = parse_on_off(value) else {
+                    eprintln!("Usage: /config set auto-interrupt on|off");
+                    return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;
@@ -4303,13 +4309,9 @@ impl LiveCli {
                 Ok(())
             }
             "queue" | "messageQueue" => {
-                let on = match value.to_ascii_lowercase().as_str() {
-                    "on" | "true" | "1" => true,
-                    "off" | "false" | "0" => false,
-                    _ => {
-                        eprintln!("Usage: /config set queue on|off");
-                        return Ok(());
-                    }
+                let Some(on) = parse_on_off(value) else {
+                    eprintln!("Usage: /config set queue on|off");
+                    return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;

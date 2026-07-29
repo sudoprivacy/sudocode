@@ -24,7 +24,10 @@ fn double_ctrlc_exits_sync_repl() {
 
     // First Ctrl-C — clears prompt, shows "Press Ctrl-C again to exit".
     sess.send("\x03").expect("send first Ctrl-C");
-    std::thread::sleep(Duration::from_millis(100));
+    sess.expect("Press Ctrl-C again").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see exit hint after first Ctrl-C: {e}\nPTY screen:\n{screen}");
+    });
 
     // Second Ctrl-C within 800ms — should exit.
     sess.send("\x03").expect("send second Ctrl-C");
@@ -52,7 +55,15 @@ fn double_ctrlc_exits_async_repl() {
 
     // First Ctrl-C — cancels (no-op since no turn), records timestamp.
     sess.send("\x03").expect("send first Ctrl-C");
-    std::thread::sleep(Duration::from_millis(100));
+    sess.expect("Press Ctrl-C again").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see exit hint after first Ctrl-C: {e}\nPTY screen:\n{screen}");
+    });
+
+    // Small delay so readline() is fully re-entered before the second
+    // SIGINT arrives — rustyline only catches SIGINT while readline() is
+    // active; between calls the default handler may be in effect.
+    std::thread::sleep(Duration::from_millis(200));
 
     // Second Ctrl-C within 800ms — should exit.
     sess.send("\x03").expect("send second Ctrl-C");

@@ -28,6 +28,11 @@ fn config_set_auto_interrupt_toggles() {
         panic!("should confirm auto-interrupt on: {e}\nPTY screen:\n{screen}");
     });
 
+    // Small delay so the coordinator loop processes TurnDone from the
+    // slash command before the next input arrives (slash commands return
+    // instantly — no LLM call — so the race window is tight).
+    std::thread::sleep(Duration::from_millis(300));
+
     sess.send("/config set auto-interrupt off\r")
         .expect("send config set auto-interrupt off");
     sess.expect("auto-interrupt: off").unwrap_or_else(|e| {
@@ -62,6 +67,10 @@ fn config_set_queue_toggles() {
         let screen = sess.render(|s| s.contents());
         panic!("should confirm queue off: {e}\nPTY screen:\n{screen}");
     });
+
+    // Small delay so the coordinator loop processes TurnDone before the
+    // next slash command arrives.
+    std::thread::sleep(Duration::from_millis(300));
 
     sess.send("/config set queue on\r")
         .expect("send config set queue on");

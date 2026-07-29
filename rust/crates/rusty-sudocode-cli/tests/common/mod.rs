@@ -363,6 +363,12 @@ fn spawn_with_workspace(
         " GIT_COMMITTER_EMAIL={}",
         shell_quote("scode-test@example.com")
     ));
+    // Default to sync REPL for tests — the async REPL doesn't reprint `❯`
+    // after each turn (the prompt is persistent from the input thread), which
+    // breaks tests that `expect("❯")` to detect turn completion. Tests that
+    // want async mode set SUDOCODE_INTERRUPT_QUEUE_MODE explicitly in
+    // `env_vars`, which appears later and overrides this default.
+    cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
     for (k, v) in env_vars {
         cmd.push_str(&format!(" {}={}", k, shell_quote(v)));
     }

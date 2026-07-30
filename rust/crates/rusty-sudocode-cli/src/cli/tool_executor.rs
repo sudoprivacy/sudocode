@@ -93,6 +93,35 @@ impl CliToolExecutor {
         }
     }
 
+    /// Build a progress callback that prints streaming bash output to the
+    /// terminal. Returns `None` when no spinner-pause flag is configured.
+    fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
+        let pause = self.spinner_pause.clone()?;
+        Some(Box::new(move |progress: runtime::BashProgress<'_>| {
+            // Pause spinner and clear its line
+            pause.store(true, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let _ = write!(io::stdout(), "\r\x1b[2K");
+            let _ = io::stdout().flush();
+
+            let trimmed = progress.output.trim_end();
+            if !trimmed.is_empty() {
+                // Show the last 3 lines of the chunk in dim style
+                let tail: Vec<&str> = trimmed.lines().rev().take(3).collect();
+                let display: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n    ");
+                let _ = writeln!(
+                    io::stdout(),
+                    "  \x1b[2m[{} lines, {} bytes]\x1b[0m\n    \x1b[2m{display}\x1b[0m",
+                    progress.total_lines, progress.total_bytes,
+                );
+                let _ = io::stdout().flush();
+            }
+
+            // Resume spinner
+            pause.store(false, Ordering::SeqCst);
+        }))
+    }
+
     fn execute_search_tool(&self, value: serde_json::Value) -> Result<String, ToolError> {
         let input: ToolSearchRequest = serde_json::from_value(value)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
@@ -202,6 +231,15 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
             return self.execute_ask_user_question(value);
         }
+        // For bash tool calls, install a streaming progress callback so
+        // the user sees output as it is produced rather than only after
+        // the child process exits.
+        if tool_name == "bash" && self.emit_output {
+            if let Some(cb) = self.make_bash_progress_callback() {
+                runtime::set_bash_progress_callback(cb);
+            }
+        }
+
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
         } else if self.tool_registry.has_runtime_tool(tool_name) {
@@ -216,6 +254,13 @@ impl ToolExecutor for CliToolExecutor {
                 )
                 .map_err(ToolError::new)
         };
+
+        // Ensure the thread-local is cleaned up regardless of the code
+        // path that was taken (the callback is consumed inside
+        // `execute_bash_with_abort`, but clear defensively).
+        if tool_name == "bash" {
+            runtime::clear_bash_progress_callback();
+        }
         match result {
             Ok(output) => {
                 if self.emit_output {

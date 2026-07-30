@@ -311,11 +311,17 @@ impl CliStreamState {
                     }
                 }
                 ContentBlockDelta::InputJsonDelta { partial_json } => {
+                    if let Some(counter) = &self.spinner_response_bytes {
+                        counter.fetch_add(partial_json.len() as u32, Ordering::Relaxed);
+                    }
                     if let Some((_, _, input, _)) = &mut self.pending_tool {
                         input.push_str(&partial_json);
                     }
                 }
                 ContentBlockDelta::ThinkingDelta { thinking } => {
+                    if let Some(counter) = &self.spinner_response_bytes {
+                        counter.fetch_add(thinking.len() as u32, Ordering::Relaxed);
+                    }
                     if !self.block_has_thinking_summary {
                         self.pause_spinner();
                         render_thinking_block_summary(out, None, false)?;

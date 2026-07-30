@@ -224,8 +224,17 @@ impl Spinner {
             let mut stdout = io::stdout();
             let mut last_bytes_seen: u32 = 0;
             let mut last_bytes_change = Instant::now();
+            let mut was_paused = false;
             while !stop.load(Ordering::SeqCst) {
-                if !pause.load(Ordering::SeqCst) {
+                let is_paused = pause.load(Ordering::SeqCst);
+                // Reset stall timer when resuming from a pause (tool
+                // execution just finished) — matches CC's hasActiveTools
+                // reset behavior.
+                if was_paused && !is_paused {
+                    last_bytes_change = Instant::now();
+                }
+                was_paused = is_paused;
+                if !is_paused {
                     let is_thinking = thinking.load(Ordering::SeqCst);
                     let (frames, label): (&[&str], &str) = if is_thinking {
                         (&Self::FRAMES_THINKING[..], Self::LABEL_THINKING)
@@ -257,8 +266,10 @@ impl Spinner {
                                 budget.to_string()
                             };
                             let _ = write!(line, " ↓ {tokens_display} / {budget_display} ({pct:.0}%)");
-                            // Rate-based ETA
-                            if approx_tokens > 0 && elapsed > 1.0 {
+                            // Rate-based ETA — only shown after 5s elapsed
+                            // and 2000+ tokens to avoid spurious predictions
+                            // from startup latency (matches CC).
+                            if approx_tokens >= 2000 && elapsed > 5.0 {
                                 let rate = f64::from(approx_tokens) / elapsed;
                                 let remaining = f64::from(budget.saturating_sub(approx_tokens));
                                 let eta_secs = remaining / rate;

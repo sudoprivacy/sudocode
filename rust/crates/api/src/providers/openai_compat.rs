@@ -645,11 +645,7 @@ impl ChatStreamState {
         }
 
         for choice in chunk.choices {
-            if let Some(reasoning) = choice
-                .delta
-                .reasoning_content
-                .filter(|value| !value.is_empty())
-            {
+            if let Some(reasoning) = choice.delta.reasoning_content {
                 if !self.thinking_started {
                     self.ensure_message_started(&mut events);
                     self.thinking_started = true;
@@ -661,12 +657,14 @@ impl ChatStreamState {
                         },
                     }));
                 }
-                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 0,
-                    delta: ContentBlockDelta::ThinkingDelta {
-                        thinking: reasoning,
-                    },
-                }));
+                if !reasoning.is_empty() {
+                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                        index: 0,
+                        delta: ContentBlockDelta::ThinkingDelta {
+                            thinking: reasoning,
+                        },
+                    }));
+                }
             }
 
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
@@ -1880,13 +1878,17 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
     if message.role.as_str() == "assistant" {
         let mut text = String::new();
         let mut reasoning = String::new();
+        let mut saw_thinking = false;
         let mut tool_calls = Vec::new();
         for block in &message.content {
             match block {
                 InputContentBlock::Text { text: value } => text.push_str(value),
                 InputContentBlock::Thinking {
                     thinking: value, ..
-                } => reasoning.push_str(value),
+                } => {
+                    saw_thinking = true;
+                    reasoning.push_str(value);
+                }
                 InputContentBlock::ToolUse {
                     id, name, input, ..
                 } => tool_calls.push(json!({
@@ -1900,8 +1902,8 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                 InputContentBlock::ToolResult { .. } | InputContentBlock::Image { .. } => {}
             }
         }
-        let include_reasoning =
-            model_requires_reasoning_content_in_history(model) && !reasoning.is_empty();
+        let include_reasoning = model_requires_reasoning_content_in_history(model)
+            && (saw_thinking || !tool_calls.is_empty());
         if text.is_empty() && tool_calls.is_empty() && !include_reasoning {
             Vec::new()
         } else {
@@ -2608,6 +2610,64 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_request_replays_empty_reasoning_content_for_tool_call_history() {
+        let request = MessageRequest {
+            model: "deepseek-v4-flash".to_string(),
+            max_tokens: 100,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    InputContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                    },
+                    InputContentBlock::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "glob_search".to_string(),
+                        input: json!({"pattern": "**/*skill*"}),
+                        thought_signature: None,
+                    },
+                ],
+            }],
+            stream: false,
+            ..Default::default()
+        };
+
+        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let assistant = &payload["messages"][0];
+
+        assert_eq!(assistant["role"], json!("assistant"));
+        assert_eq!(assistant["reasoning_content"], json!(""));
+        assert_eq!(assistant["tool_calls"][0]["id"], json!("call_123"));
+    }
+
+    #[test]
+    fn deepseek_v4_request_adds_empty_reasoning_content_for_tool_call_history_without_thinking() {
+        let request = MessageRequest {
+            model: "deepseek-v4-flash".to_string(),
+            max_tokens: 100,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![InputContentBlock::ToolUse {
+                    id: "call_123".to_string(),
+                    name: "glob_search".to_string(),
+                    input: json!({"pattern": "**/*skill*"}),
+                    thought_signature: None,
+                }],
+            }],
+            stream: false,
+            ..Default::default()
+        };
+
+        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let assistant = &payload["messages"][0];
+
+        assert_eq!(assistant["role"], json!("assistant"));
+        assert_eq!(assistant["reasoning_content"], json!(""));
+        assert_eq!(assistant["tool_calls"][0]["id"], json!("call_123"));
+    }
+
+    #[test]
     fn non_streaming_response_with_reasoning_content_emits_thinking_block_first() {
         let response = super::ChatCompletionResponse {
             id: "chatcmpl_reasoning".to_string(),
@@ -2841,6 +2901,70 @@ mod tests {
         assert!(matches!(
             events[6],
             StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 1 })
+        ));
+    }
+
+    #[test]
+    fn streaming_chunk_with_empty_reasoning_content_still_emits_thinking_block() {
+        let mut state = ChatStreamState::new("deepseek-v4-flash".to_string());
+        let mut events = state
+            .ingest_chunk(super::ChatCompletionChunk {
+                id: "chatcmpl_stream_empty_reasoning".to_string(),
+                model: Some("deepseek-v4-flash".to_string()),
+                choices: vec![super::ChunkChoice {
+                    delta: super::ChunkDelta {
+                        content: None,
+                        reasoning_content: Some(String::new()),
+                        tool_calls: Vec::new(),
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            })
+            .expect("empty reasoning chunk");
+        events.extend(
+            state
+                .ingest_chunk(super::ChatCompletionChunk {
+                    id: "chatcmpl_stream_empty_reasoning".to_string(),
+                    model: None,
+                    choices: vec![super::ChunkChoice {
+                        delta: super::ChunkDelta {
+                            content: None,
+                            reasoning_content: None,
+                            tool_calls: vec![super::DeltaToolCall {
+                                index: 0,
+                                id: Some("call_123".to_string()),
+                                function: super::DeltaFunction {
+                                    name: Some("glob_search".to_string()),
+                                    arguments: Some("{\"pattern\":\"**/*skill*\"}".to_string()),
+                                },
+                            }],
+                        },
+                        finish_reason: Some("tool_calls".to_string()),
+                    }],
+                    usage: None,
+                })
+                .expect("tool chunk"),
+        );
+
+        assert!(matches!(events[0], StreamEvent::MessageStart(_)));
+        assert!(matches!(
+            events[1],
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Thinking { .. },
+            })
+        ));
+        assert!(matches!(
+            events[2],
+            StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 })
+        ));
+        assert!(matches!(
+            events[3],
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 2,
+                content_block: OutputContentBlock::ToolUse { .. },
+            })
         ));
     }
 

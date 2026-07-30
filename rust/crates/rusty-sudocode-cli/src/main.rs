@@ -12,6 +12,7 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod cancel;
 mod cli;
 mod init;
 mod input;
@@ -1743,8 +1744,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Async REPL dispatch — takes ownership of the constructed `LiveCli`, wraps it
 /// in `Arc<Mutex<>>` for the coordinator + runner thread, drives the loop, then
-/// unwraps and finalizes the session on exit. Only called when
-/// `SUDOCODE_INTERRUPT_QUEUE_MODE` is set.
+/// unwraps and finalizes the session on exit. Called by default (queue mode)
+/// or when `SUDOCODE_INTERRUPT_QUEUE_MODE` is explicitly set to a non-off value.
 fn run_repl_async_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -1762,6 +1763,13 @@ fn run_repl_async_dispatch(
     let shared_mode = repl_async::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
+    // ESC abort hook — wired into rustyline's ConditionalEventHandler so ESC
+    // cancels the running turn without a separate raw-mode stdin thread.
+    let esc_abort_hook: input::EscAbortHook = {
+        let sig = abort_signal.clone();
+        Arc::new(move || sig.abort())
+    };
+
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
@@ -1769,7 +1777,13 @@ fn run_repl_async_dispatch(
     });
 
     let session_start = Instant::now();
-    repl_async::run_coordinator_loop(driver, shared_mode, banner, completions)?;
+    repl_async::run_coordinator_loop(
+        driver,
+        shared_mode,
+        banner,
+        completions,
+        Some(esc_abort_hook),
+    )?;
 
     // All threads spawned by the coordinator loop have already been joined
     // inside the loop (Exit branch + TurnDone reap). Unwrapping the Arc here
@@ -1817,6 +1831,30 @@ struct LiveCliDriver {
 impl repl_async::TurnDriver for LiveCliDriver {
     fn run_turn(&self, prompt: &str) {
         let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
+        // Dispatch slash commands the same way the sync REPL does — parse
+        // before reaching the LLM. `/exit` and `/quit` are already handled
+        // in the coordinator loop; everything else (config set, model, clear,
+        // help, etc.) is dispatched here.
+        let trimmed = prompt.trim();
+        match SlashCommand::parse(trimmed) {
+            Ok(Some(command)) => {
+                match cli.handle_repl_command(command) {
+                    Ok(true) => {
+                        if let Err(e) = cli.persist_session() {
+                            eprintln!("\x1b[31m{e}\x1b[0m");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("\x1b[31m{error}\x1b[0m");
+                return;
+            }
+        }
         if let Err(e) = cli.run_turn(prompt) {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }
@@ -3031,24 +3069,19 @@ impl AcpSdkDelegate {
     }
 }
 
+/// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`
+/// (case-insensitive). Returns `None` for unrecognized input.
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 struct HookAbortMonitor {
     stop_tx: Option<Sender<()>>,
     join_handle: Option<JoinHandle<()>>,
-}
-
-/// CC-parity timeout for double Ctrl-C force exit (800ms).
-const DOUBLE_CTRLC_TIMEOUT_MS: u64 = 800;
-
-/// Shared timestamp (millis since process start) of the last Ctrl-C that
-/// cancelled a turn. Persists across `HookAbortMonitor` lifetimes so a
-/// fast second Ctrl-C on the *next* turn's monitor (or between turns)
-/// triggers process exit. `0` means no pending exit.
-static LAST_CTRLC_CANCEL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Monotonic reference point for [`LAST_CTRLC_CANCEL_MS`].
-fn process_uptime_ms() -> u64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 impl HookAbortMonitor {
@@ -3094,12 +3127,7 @@ impl HookAbortMonitor {
                             return;
                         }
                         AbortKey::CtrlC => {
-                            let now = process_uptime_ms();
-                            let prev =
-                                LAST_CTRLC_CANCEL_MS.load(std::sync::atomic::Ordering::Relaxed);
-                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
-                                // Double Ctrl-C within 800ms — force exit.
-                                // Restore terminal before exiting.
+                            if cancel::is_double_ctrlc() {
                                 #[cfg(unix)]
                                 disable_raw_mode_unix();
                                 #[cfg(not(unix))]
@@ -3107,7 +3135,7 @@ impl HookAbortMonitor {
                                 eprintln!();
                                 std::process::exit(0);
                             }
-                            LAST_CTRLC_CANCEL_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+                            cancel::record_ctrlc();
                             esc_abort.abort();
                             return;
                         }
@@ -3117,10 +3145,7 @@ impl HookAbortMonitor {
                 tokio::select! {
                     result = tokio::signal::ctrl_c() => {
                         if result.is_ok() {
-                            let now = process_uptime_ms();
-                            let prev = LAST_CTRLC_CANCEL_MS
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            if prev > 0 && now.saturating_sub(prev) <= DOUBLE_CTRLC_TIMEOUT_MS {
+                            if cancel::is_double_ctrlc() {
                                 #[cfg(unix)]
                                 disable_raw_mode_unix();
                                 #[cfg(not(unix))]
@@ -3128,8 +3153,7 @@ impl HookAbortMonitor {
                                 eprintln!();
                                 std::process::exit(0);
                             }
-                            LAST_CTRLC_CANCEL_MS
-                                .store(now, std::sync::atomic::Ordering::Relaxed);
+                            cancel::record_ctrlc();
                             abort_signal.abort();
                         }
                     }
@@ -4293,13 +4317,9 @@ impl LiveCli {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match key {
             "auto-interrupt" | "autoInterrupt" => {
-                let on = match value.to_ascii_lowercase().as_str() {
-                    "on" | "true" | "1" => true,
-                    "off" | "false" | "0" => false,
-                    _ => {
-                        eprintln!("Usage: /config set auto-interrupt on|off");
-                        return Ok(());
-                    }
+                let Some(on) = parse_on_off(value) else {
+                    eprintln!("Usage: /config set auto-interrupt on|off");
+                    return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;
@@ -4326,13 +4346,9 @@ impl LiveCli {
                 Ok(())
             }
             "queue" | "messageQueue" => {
-                let on = match value.to_ascii_lowercase().as_str() {
-                    "on" | "true" | "1" => true,
-                    "off" | "false" | "0" => false,
-                    _ => {
-                        eprintln!("Usage: /config set queue on|off");
-                        return Ok(());
-                    }
+                let Some(on) = parse_on_off(value) else {
+                    eprintln!("Usage: /config set queue on|off");
+                    return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;

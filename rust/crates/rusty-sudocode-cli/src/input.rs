@@ -20,6 +20,32 @@ use rustyline::{
 /// returns `None` to fall through to history navigation.
 pub type UpArrowDequeueHook = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync + 'static>;
 
+/// Callback invoked on ESC press to cancel the currently-running turn.
+/// The async REPL passes `abort_signal.abort()` here; the sync REPL
+/// leaves it `None` (ESC is handled by `HookAbortMonitor` on a separate
+/// thread in sync mode).
+pub type EscAbortHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
+/// Rustyline handler for ESC: calls the abort hook (cancels the running
+/// turn) and consumes the key. Only bound in async REPL mode — the sync
+/// REPL uses `HookAbortMonitor`'s raw-mode stdin listener instead.
+struct EscCancelHandler {
+    abort_hook: EscAbortHook,
+}
+
+impl ConditionalEventHandler for EscCancelHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        (self.abort_hook)();
+        Some(Cmd::Noop)
+    }
+}
+
 /// Rustyline handler for `↑`: moves cursor to the line above (or to the
 /// beginning of the current line on single-line input), and only navigates
 /// history when the cursor is already at the top-left.  When an async REPL
@@ -287,40 +313,53 @@ impl Highlighter for SlashCommandHelper {
 impl Validator for SlashCommandHelper {}
 impl Helper for SlashCommandHelper {}
 
-/// CC-parity timeout for double Ctrl-C exit (800ms).
-const DOUBLE_CTRLC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+use crate::cancel;
 
 pub struct LineEditor {
     prompt: String,
     editor: Editor<SlashCommandHelper, DefaultHistory>,
     /// Timestamp of the first Ctrl-C on an empty prompt. `None` when no
-    /// pending exit. A second Ctrl-C within [`DOUBLE_CTRLC_TIMEOUT`] triggers
+    /// pending exit. A second Ctrl-C within [`cancel::DOUBLE_CTRLC_WINDOW`] triggers
     /// exit; after that the pending state resets automatically.
     pending_exit_at: Option<std::time::Instant>,
     /// Shared image map populated by the `ImagePasteHandler`.
     images: ImageMap,
+    /// Optional abort hook called on Ctrl-C with empty buffer (async REPL).
+    /// Cancels the running turn so Ctrl-C works the same as ESC for
+    /// turn cancellation, plus integrates with `cancel::record_ctrlc()`
+    /// for double-press exit.
+    abort_hook: Option<EscAbortHook>,
 }
 
 impl LineEditor {
     #[must_use]
     pub fn new(prompt: impl Into<String>, completions: Vec<(String, String)>) -> Self {
-        Self::new_with_dequeue_hook(prompt, completions, None)
+        Self::new_with_dequeue_hook(prompt, completions, None, None)
     }
 
-    /// Same as [`new`] but binds `↑` (on an empty buffer) to `dequeue_hook`.
-    /// The async REPL uses this to pop the newest queued input back into the
-    /// editor for editing; sync REPL passes `None` and gets the default
-    /// history-only `↑` behavior.
+    /// Same as [`new`] but binds `↑` (on an empty buffer) to `dequeue_hook`
+    /// and optionally binds ESC to `esc_abort_hook`.
+    ///
+    /// The async REPL uses the dequeue hook to pop the newest queued input
+    /// back into the editor for editing, and the ESC hook to cancel the
+    /// currently-running turn. The sync REPL passes `None` for both.
     #[must_use]
     pub fn new_with_dequeue_hook(
         prompt: impl Into<String>,
         completions: Vec<(String, String)>,
         dequeue_hook: Option<UpArrowDequeueHook>,
+        esc_abort_hook: Option<EscAbortHook>,
     ) -> Self {
-        let config = Config::builder()
+        let mut config_builder = Config::builder()
             .completion_type(CompletionType::List)
-            .edit_mode(EditMode::Emacs)
-            .build();
+            .edit_mode(EditMode::Emacs);
+        // When an ESC abort hook is installed (async REPL), set a keyseq
+        // timeout so rustyline recognizes standalone ESC after 50ms instead
+        // of blocking indefinitely for a follow-up key (Emacs Meta prefix).
+        if esc_abort_hook.is_some() {
+            config_builder = config_builder.keyseq_timeout(Some(50));
+        }
+        let config = config_builder.build();
         let mut editor = Editor::<SlashCommandHelper, DefaultHistory>::with_config(config)
             .expect("rustyline editor should initialize");
         editor.set_helper(Some(SlashCommandHelper::new(completions)));
@@ -342,6 +381,18 @@ impl LineEditor {
             KeyEvent(KeyCode::Down, Modifiers::NONE),
             EventHandler::Conditional(Box::new(DownArrowHandler)),
         );
+
+        // ESC: cancel the running turn (async REPL only). In sync mode the
+        // HookAbortMonitor handles ESC on its own raw-mode stdin thread.
+        // Clone the hook so the same callback is available for Ctrl-C too.
+        if let Some(ref abort_hook) = esc_abort_hook {
+            editor.bind_sequence(
+                KeyEvent(KeyCode::Esc, Modifiers::NONE),
+                EventHandler::Conditional(Box::new(EscCancelHandler {
+                    abort_hook: Arc::clone(abort_hook),
+                })),
+            );
+        }
 
         let images: ImageMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -370,6 +421,7 @@ impl LineEditor {
             editor,
             pending_exit_at: None,
             images,
+            abort_hook: esc_abort_hook,
         }
     }
 
@@ -421,11 +473,27 @@ impl LineEditor {
                     if has_input {
                         // Had text — clear it and restart the prompt.
                         self.pending_exit_at = None;
+                    } else if let Some(ref hook) = self.abort_hook {
+                        // Async REPL: Ctrl-C cancels the running turn (same
+                        // as ESC) AND checks for double-press exit via the
+                        // shared cancel module.
+                        if cancel::is_double_ctrlc() {
+                            writeln!(stdout, "\x1b[J")?;
+                            stdout.flush()?;
+                            return Ok(ReadOutcome::Exit);
+                        }
+                        cancel::record_ctrlc();
+                        (hook)();
+                        // Show exit hint.
+                        write!(
+                            stdout,
+                            "\x1b[2E\x1b[2K  \x1b[2mPress Ctrl-C again to exit\x1b[0m\x1b[2F"
+                        )?;
                     } else if self
                         .pending_exit_at
-                        .is_some_and(|t| t.elapsed() <= DOUBLE_CTRLC_TIMEOUT)
+                        .is_some_and(|t| t.elapsed() <= cancel::DOUBLE_CTRLC_WINDOW)
                     {
-                        // Second Ctrl-C within 800ms — exit.
+                        // Sync REPL: second Ctrl-C within 800ms — exit.
                         writeln!(stdout, "\x1b[J")?;
                         stdout.flush()?;
                         return Ok(ReadOutcome::Exit);

@@ -19,10 +19,11 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_connection::McpConnection;
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams, McpGetPromptResult,
-    McpInitializeParams, McpInitializeResult, McpListPromptsParams, McpListPromptsResult,
-    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
-    McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
+    JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams,
+    McpGetPromptResult, McpInitializeParams, McpInitializeResult, McpListPromptsParams,
+    McpListPromptsResult, McpListResourcesParams, McpListResourcesResult, McpListToolsParams,
+    McpListToolsResult, McpProgressNotification, McpReadResourceParams, McpReadResourceResult,
+    McpToolCallParams, McpToolCallResult,
 };
 
 #[derive(Debug)]
@@ -142,29 +143,55 @@ impl McpStdioProcess {
         let method = method.into();
         let request = JsonRpcRequest::new(id.clone(), method.clone(), params);
         self.send_request(&request).await?;
-        let response = self.read_response().await?;
 
-        if response.jsonrpc != "2.0" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "MCP response for {method} used unsupported jsonrpc version `{}`",
-                    response.jsonrpc
-                ),
-            ));
+        loop {
+            let payload = self.read_frame().await?;
+            let raw: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+            // Notifications have no `id` or a null `id`.
+            if raw.get("id").is_none() || raw.get("id") == Some(&serde_json::Value::Null) {
+                if let Ok(notification) =
+                    serde_json::from_value::<JsonRpcNotification>(raw)
+                {
+                    if notification.method == "notifications/progress" {
+                        if let Some(params) = notification.params {
+                            if let Ok(progress) =
+                                serde_json::from_value::<McpProgressNotification>(params)
+                            {
+                                crate::mcp_server_manager::emit_mcp_progress(progress);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let response: JsonRpcResponse<TResult> = serde_json::from_value(raw)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+            if response.jsonrpc != "2.0" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "MCP response for {method} used unsupported jsonrpc version `{}`",
+                        response.jsonrpc
+                    ),
+                ));
+            }
+
+            if response.id != id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "MCP response for {method} used mismatched id: expected {id:?}, got {:?}",
+                        response.id
+                    ),
+                ));
+            }
+
+            return Ok(response);
         }
-
-        if response.id != id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "MCP response for {method} used mismatched id: expected {id:?}, got {:?}",
-                    response.id
-                ),
-            ));
-        }
-
-        Ok(response)
     }
 
     pub async fn initialize(

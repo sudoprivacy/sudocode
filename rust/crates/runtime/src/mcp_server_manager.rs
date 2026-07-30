@@ -8,6 +8,7 @@
 //! in their own modules and are attached through `McpStdioProcess` directly
 //! today (to be generalized via a connection trait in a follow-up).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
@@ -89,6 +90,52 @@ pub struct JsonRpcResponse<T = JsonValue> {
     pub result: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
+}
+
+/// JSON-RPC notification (no `id` field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: Option<JsonValue>,
+}
+
+/// MCP progress notification payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpProgressNotification {
+    #[serde(rename = "progressToken")]
+    pub progress_token: JsonValue,
+    pub progress: f64,
+    pub total: Option<f64>,
+    pub message: Option<String>,
+}
+
+/// Callback for MCP progress notifications.
+pub type McpProgressCallback = Box<dyn Fn(McpProgressNotification) + Send>;
+
+thread_local! {
+    static MCP_PROGRESS_CALLBACK: RefCell<Option<McpProgressCallback>> = const { RefCell::new(None) };
+}
+
+pub fn set_mcp_progress_callback(cb: McpProgressCallback) {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = Some(cb);
+    });
+}
+
+pub fn clear_mcp_progress_callback() {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Call the thread-local progress callback if set.
+pub(crate) fn emit_mcp_progress(notification: McpProgressNotification) {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        if let Some(cb) = cell.borrow().as_ref() {
+            cb(notification);
+        }
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

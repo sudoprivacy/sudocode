@@ -105,6 +105,38 @@ impl CliToolExecutor {
         }
     }
 
+    /// Build a progress callback that prints MCP tool progress notifications
+    /// to the terminal. Returns `None` when no spinner-pause flag is configured.
+    fn make_mcp_progress_callback(&self) -> Option<runtime::McpProgressCallback> {
+        let pause = self.spinner_pause.clone()?;
+        Some(Box::new(move |progress: runtime::McpProgressNotification| {
+            pause.store(true, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let _ = write!(io::stdout(), "\r\x1b[2K");
+            let _ = io::stdout().flush();
+
+            let mut status = String::new();
+            if let Some(total) = progress.total {
+                if total > 0.0 {
+                    let pct = (progress.progress / total * 100.0).min(100.0);
+                    status = format!(" ({pct:.0}%)");
+                }
+            }
+            if let Some(msg) = &progress.message {
+                let _ = writeln!(io::stdout(), "  \x1b[2m\u{27f3} {msg}{status}\x1b[0m");
+            } else {
+                let _ = writeln!(
+                    io::stdout(),
+                    "  \x1b[2m\u{27f3} progress: {:.0}{status}\x1b[0m",
+                    progress.progress
+                );
+            }
+            let _ = io::stdout().flush();
+
+            pause.store(false, Ordering::SeqCst);
+        }))
+    }
+
     /// Build a progress callback that prints streaming bash output to the
     /// terminal. Returns `None` when no spinner-pause flag is configured.
     fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
@@ -265,9 +297,16 @@ impl ToolExecutor for CliToolExecutor {
             }
         }
 
+        let is_mcp_tool = self.tool_registry.has_runtime_tool(tool_name);
+        if is_mcp_tool && self.emit_output {
+            if let Some(cb) = self.make_mcp_progress_callback() {
+                runtime::set_mcp_progress_callback(cb);
+            }
+        }
+
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
-        } else if self.tool_registry.has_runtime_tool(tool_name) {
+        } else if is_mcp_tool {
             self.execute_runtime_tool(tool_name, value)
         } else {
             self.tool_registry
@@ -285,6 +324,9 @@ impl ToolExecutor for CliToolExecutor {
         // `execute_bash_with_abort`, but clear defensively).
         if tool_name == "bash" {
             runtime::clear_bash_progress_callback();
+        }
+        if is_mcp_tool {
+            runtime::clear_mcp_progress_callback();
         }
         match result {
             Ok(output) => {

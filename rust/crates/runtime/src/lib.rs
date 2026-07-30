@@ -147,10 +147,11 @@ pub use mcp_lifecycle_hardened::{
 };
 pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
 pub use mcp_server_manager::{
-    JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure,
-    McpGetPromptParams, McpGetPromptResult, McpInitializeClientInfo, McpInitializeParams,
-    McpInitializeResult, McpInitializeServerInfo, McpListPromptsParams, McpListPromptsResult,
-    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
+    clear_mcp_progress_callback, set_mcp_progress_callback, JsonRpcError, JsonRpcId, JsonRpcRequest,
+    JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure, McpGetPromptParams, McpGetPromptResult,
+    McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
+    McpListPromptsParams, McpListPromptsResult, McpListResourcesParams, McpListResourcesResult,
+    McpListToolsParams, McpListToolsResult, McpProgressCallback, McpProgressNotification,
     McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpReadResourceParams,
     McpReadResourceResult, McpResource, McpResourceContents, McpServerManager,
     McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult,

@@ -3301,6 +3301,13 @@ fn strip_ansi_width(s: &str) -> usize {
 }
 
 impl LiveCli {
+    /// True when the async REPL (queue mode) is active. In this mode the
+    /// input thread owns stdin via rustyline, so interactive widgets
+    /// (FuzzySelect, Select) cannot be used on the runner thread.
+    fn is_async_mode(&self) -> bool {
+        self.persistent_abort_signal.is_some()
+    }
+
     fn new(
         model: String,
         enable_tools: bool,
@@ -3871,7 +3878,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Memory => {
-                Self::edit_memory()?;
+                self.edit_memory()?;
                 false
             }
             SlashCommand::Init => {
@@ -4080,6 +4087,19 @@ impl LiveCli {
             let sudocode_config = load_sudocode_config_for_current_dir();
             let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
             let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+            if self.is_async_mode() {
+                println!("\x1b[1mAvailable models:\x1b[0m");
+                for (i, m) in models.iter().enumerate() {
+                    let marker = if *m == self.config.model {
+                        " ← current"
+                    } else {
+                        ""
+                    };
+                    println!("  \x1b[2m{:>2}.\x1b[0m {m}{marker}", i + 1);
+                }
+                println!("\n\x1b[2mUsage: /model <name>\x1b[0m");
+                return Ok(false);
+            }
             let selection = FuzzySelect::new()
                 .with_prompt("Select model")
                 .items(&models)
@@ -4239,6 +4259,24 @@ impl LiveCli {
                 println!("No sessions found.");
                 return Ok(false);
             }
+            if self.is_async_mode() {
+                println!("\x1b[1mSessions:\x1b[0m");
+                for (i, s) in sessions.iter().enumerate() {
+                    let marker = if s.id == self.session.id {
+                        " ← current"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  \x1b[2m{:>2}.\x1b[0m {} ({} msgs){marker}",
+                        i + 1,
+                        s.id,
+                        s.message_count
+                    );
+                }
+                println!("\n\x1b[2mUsage: /resume <session-id> or /resume latest\x1b[0m");
+                return Ok(false);
+            }
             let labels: Vec<String> = sessions
                 .iter()
                 .map(|s| format!("{} ({} msgs)", s.id, s.message_count))
@@ -4394,16 +4432,22 @@ impl LiveCli {
         Ok(())
     }
 
-    fn edit_memory() -> Result<(), Box<dyn std::error::Error>> {
+    fn edit_memory(&self) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
         let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
         let files = &project_context.instruction_files;
         let target: PathBuf = if files.is_empty() {
-            // No instruction files found — default to AGENTS.md in cwd.
             println!("No instruction files found. Creating AGENTS.md in the current directory.");
             cwd.join("AGENTS.md")
         } else if files.len() == 1 {
             files[0].path.clone()
+        } else if self.is_async_mode() {
+            println!("\x1b[1mInstruction files:\x1b[0m");
+            for (i, f) in files.iter().enumerate() {
+                println!("  \x1b[2m{:>2}.\x1b[0m {}", i + 1, f.path.display());
+            }
+            println!("\n\x1b[2mUsage: /memory <path>\x1b[0m");
+            return Ok(());
         } else {
             let labels: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
             let selection = Select::new()
@@ -4633,11 +4677,12 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match action {
             None | Some("list") => {
-                // On a TTY, present a fuzzy picker that switches on Enter and
-                // is silent on Esc. Non-interactive callers (CI, scripted
-                // pipes, `--output-format json` paths) keep the original
-                // text-table listing.
-                if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                // On a TTY (sync mode), present a fuzzy picker that switches
+                // on Enter and is silent on Esc. In async mode, the input
+                // thread owns stdin so interactive widgets are forbidden —
+                // fall through to the text-table listing.
+                if !self.is_async_mode() && io::stdin().is_terminal() && io::stdout().is_terminal()
+                {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
                         println!("{}", render_session_list(&self.session.id)?);

@@ -1763,14 +1763,56 @@ fn parse_mcp_command(args: &[&str]) -> Result<SlashCommand, SlashCommandParseErr
             "mcp",
             "/mcp remove <name>",
         )),
+        ["reconnect"] => Err(command_error(
+            "Missing server name for /mcp reconnect.",
+            "mcp",
+            "/mcp reconnect <server>",
+        )),
+        ["reconnect", name] => Ok(SlashCommand::Mcp {
+            action: Some("reconnect".to_string()),
+            target: Some((*name).to_string()),
+        }),
+        ["reconnect", ..] => Err(command_error(
+            "Unexpected arguments for /mcp reconnect.",
+            "mcp",
+            "/mcp reconnect <server>",
+        )),
+        ["enable"] => Err(command_error(
+            "Missing server name for /mcp enable.",
+            "mcp",
+            "/mcp enable <server>",
+        )),
+        ["enable", name] => Ok(SlashCommand::Mcp {
+            action: Some("enable".to_string()),
+            target: Some((*name).to_string()),
+        }),
+        ["enable", ..] => Err(command_error(
+            "Unexpected arguments for /mcp enable.",
+            "mcp",
+            "/mcp enable <server>",
+        )),
+        ["disable"] => Err(command_error(
+            "Missing server name for /mcp disable.",
+            "mcp",
+            "/mcp disable <server>",
+        )),
+        ["disable", name] => Ok(SlashCommand::Mcp {
+            action: Some("disable".to_string()),
+            target: Some((*name).to_string()),
+        }),
+        ["disable", ..] => Err(command_error(
+            "Unexpected arguments for /mcp disable.",
+            "mcp",
+            "/mcp disable <server>",
+        )),
         ["help" | "-h" | "--help"] => Ok(SlashCommand::Mcp {
             action: Some("help".to_string()),
             target: None,
         }),
         [action, ..] => Err(command_error(
-            &format!("Unknown /mcp action '{action}'. Use list, show <server>, add-json <name> <json>, remove <name>, or help."),
+            &format!("Unknown /mcp action '{action}'. Use list, show, add-json, remove, reconnect, enable, disable, or help."),
             "mcp",
-            "/mcp [list|show <server>|add-json <name> <json>|remove <name>|help]",
+            "/mcp [list|show|add-json|remove|reconnect|enable|disable|help]",
         )),
     }
 }
@@ -4339,11 +4381,22 @@ fn render_skills_usage_json(unexpected: Option<&str>) -> Value {
 fn render_mcp_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         "MCP".to_string(),
-        "  Usage            /mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"
+        "  Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
             .to_string(),
-        "  Direct CLI       scode mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"
+        "  Direct CLI       scode mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
             .to_string(),
         "  Sources          .nexus/sudocode/settings.json, .nexus/sudocode/settings.local.json"
+            .to_string(),
+        String::new(),
+        "  Subcommands".to_string(),
+        "    list                          List all configured MCP servers".to_string(),
+        "    show <server>                 Show details for a specific server".to_string(),
+        "    add-json <name> <json>        Add a server from JSON config".to_string(),
+        "    remove <name>                 Remove a configured server".to_string(),
+        "    reconnect <server>            Reconnect a running server (shutdown + fresh init)"
+            .to_string(),
+        "    enable <server>               Re-enable a disabled server".to_string(),
+        "    disable <server>              Disable a server (shutdown + prevent respawn)"
             .to_string(),
     ];
     if let Some(args) = unexpected {
@@ -4357,8 +4410,8 @@ fn render_mcp_usage_json(unexpected: Option<&str>) -> Value {
         "kind": "mcp",
         "action": "help",
         "usage": {
-            "slash_command": "/mcp [list|show <server>|add-json <name> <json>|remove <name>|help]",
-            "direct_cli": "scode mcp [list|show <server>|add-json <name> <json>|remove <name>|help]",
+            "slash_command": "/mcp [list|show|add-json|remove|reconnect|enable|disable|help]",
+            "direct_cli": "scode mcp [list|show|add-json|remove|reconnect|enable|disable|help]",
             "sources": [".nexus/sudocode/settings.json", ".nexus/sudocode/settings.local.json"],
         },
         "unexpected": unexpected,
@@ -5208,8 +5261,8 @@ mod tests {
 
         let action_error = parse_error_message("/mcp inspect alpha");
         assert!(action_error
-            .contains("Unknown /mcp action 'inspect'. Use list, show <server>, add-json <name> <json>, remove <name>, or help."));
-        assert!(action_error.contains("  Usage            /mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"));
+            .contains("Unknown /mcp action 'inspect'. Use list, show, add-json, remove, reconnect, enable, disable, or help."));
+        assert!(action_error.contains("  Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
     }
 
     #[test]
@@ -5983,8 +6036,8 @@ mod tests {
         let cwd = temp_dir("mcp-usage");
 
         let help = super::handle_mcp_slash_command(Some("help"), &cwd).expect("mcp help");
-        assert!(help.contains("Usage            /mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"));
-        assert!(help.contains("Direct CLI       scode mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"));
+        assert!(help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
+        assert!(help.contains("Direct CLI       scode mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
 
         let unexpected =
             super::handle_mcp_slash_command(Some("show alpha beta"), &cwd).expect("mcp usage");
@@ -5992,12 +6045,12 @@ mod tests {
 
         let nested_help =
             super::handle_mcp_slash_command(Some("show --help"), &cwd).expect("mcp help");
-        assert!(nested_help.contains("Usage            /mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"));
+        assert!(nested_help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
         assert!(nested_help.contains("Unexpected       show"));
 
         let unknown_help =
             super::handle_mcp_slash_command(Some("inspect --help"), &cwd).expect("mcp usage");
-        assert!(unknown_help.contains("Usage            /mcp [list|show <server>|add-json <name> <json>|remove <name>|help]"));
+        assert!(unknown_help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
         assert!(unknown_help.contains("Unexpected       inspect"));
 
         let _ = fs::remove_dir_all(cwd);
@@ -6436,6 +6489,46 @@ mod tests {
 
         let remove_extra = parse_error_message("/mcp remove alpha beta");
         assert!(remove_extra.contains("Unexpected arguments for /mcp remove."));
+
+        let reconnect_no_args = parse_error_message("/mcp reconnect");
+        assert!(reconnect_no_args.contains("Missing server name for /mcp reconnect."));
+
+        let reconnect_extra = parse_error_message("/mcp reconnect a b");
+        assert!(reconnect_extra.contains("Unexpected arguments for /mcp reconnect."));
+
+        let enable_no_args = parse_error_message("/mcp enable");
+        assert!(enable_no_args.contains("Missing server name for /mcp enable."));
+
+        let enable_extra = parse_error_message("/mcp enable a b");
+        assert!(enable_extra.contains("Unexpected arguments for /mcp enable."));
+
+        let disable_no_args = parse_error_message("/mcp disable");
+        assert!(disable_no_args.contains("Missing server name for /mcp disable."));
+
+        let disable_extra = parse_error_message("/mcp disable a b");
+        assert!(disable_extra.contains("Unexpected arguments for /mcp disable."));
+
+        assert_eq!(
+            SlashCommand::parse("/mcp reconnect my-server"),
+            Ok(Some(SlashCommand::Mcp {
+                action: Some("reconnect".to_string()),
+                target: Some("my-server".to_string()),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/mcp enable my-server"),
+            Ok(Some(SlashCommand::Mcp {
+                action: Some("enable".to_string()),
+                target: Some("my-server".to_string()),
+            }))
+        );
+        assert_eq!(
+            SlashCommand::parse("/mcp disable my-server"),
+            Ok(Some(SlashCommand::Mcp {
+                action: Some("disable".to_string()),
+                target: Some("my-server".to_string()),
+            }))
+        );
     }
 
     #[test]

@@ -151,6 +151,31 @@ impl RuntimeMcpState {
         })
     }
 
+    pub(crate) fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        Self::block_on_isolated(&self.runtime, self.manager.reconnect_server(server_name))
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        Ok(format!(
+            "MCP server reconnected\n  Server           {server_name}"
+        ))
+    }
+
+    pub(crate) fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        Self::block_on_isolated(&self.runtime, self.manager.disable_server(server_name))
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        Ok(format!(
+            "MCP server disabled\n  Server           {server_name}"
+        ))
+    }
+
+    pub(crate) fn enable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        self.manager
+            .enable_server(server_name)
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        Ok(format!(
+            "MCP server enabled\n  Server           {server_name}"
+        ))
+    }
+
     pub(crate) fn call_tool(
         &mut self,
         qualified_tool_name: &str,

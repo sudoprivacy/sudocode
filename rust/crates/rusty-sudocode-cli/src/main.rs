@@ -3866,13 +3866,41 @@ impl LiveCli {
                 false
             }
             SlashCommand::Mcp { action, target } => {
-                let args = match (action.as_deref(), target.as_deref()) {
-                    (None, None) => None,
-                    (Some(action), None) => Some(action.to_string()),
-                    (Some(action), Some(target)) => Some(format!("{action} {target}")),
-                    (None, Some(target)) => Some(target.to_string()),
-                };
-                Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                match action.as_deref() {
+                    Some("reconnect") | Some("enable") | Some("disable") => {
+                        let action_str = action.as_deref().unwrap();
+                        let Some(server_name) = target.as_deref() else {
+                            println!("usage: /mcp {action_str} <server>");
+                            return Ok(false);
+                        };
+                        if let Some(mcp_state) = &self.runtime.mcp_state {
+                            let mut mcp = mcp_state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let result = match action_str {
+                                "reconnect" => mcp.reconnect_server(server_name),
+                                "enable" => mcp.enable_server(server_name),
+                                "disable" => mcp.disable_server(server_name),
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(msg) => println!("{msg}"),
+                                Err(err) => println!("Error: {err}"),
+                            }
+                        } else {
+                            println!("No MCP servers configured");
+                        }
+                    }
+                    _ => {
+                        let args = match (action.as_deref(), target.as_deref()) {
+                            (None, None) => None,
+                            (Some(action), None) => Some(action.to_string()),
+                            (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                            (None, Some(target)) => Some(target.to_string()),
+                        };
+                        Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                    }
+                }
                 false
             }
             SlashCommand::Memory => {

@@ -958,6 +958,51 @@ impl McpServerManager {
         }
     }
 
+    /// Reconnect a server: shutdown existing connection, reset failure state,
+    /// and re-initialize on next request.
+    pub async fn reconnect_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        if let Some(mut process) = server.process.take() {
+            process.shutdown().await;
+        }
+        server.initialized = false;
+        server.spawn_attempts = 0;
+        server.permanent_failure = None;
+        Ok(())
+    }
+
+    /// Disable a server: shutdown and mark as permanently failed so it will not
+    /// be spawned again until explicitly re-enabled.
+    pub async fn disable_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        if let Some(mut process) = server.process.take() {
+            process.shutdown().await;
+        }
+        server.initialized = false;
+        server.permanent_failure = Some("disabled by user".to_string());
+        Ok(())
+    }
+
+    /// Enable a previously disabled server: clear failure state so the next
+    /// request triggers a fresh spawn+initialize cycle.
+    pub fn enable_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        server.spawn_attempts = 0;
+        server.permanent_failure = None;
+        Ok(())
+    }
+
+    /// Check if a server is currently disabled by the user.
+    pub fn is_server_disabled(&self, server_name: &str) -> Result<bool, McpServerManagerError> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| McpServerManagerError::UnknownServer {
+                server_name: server_name.to_string(),
+            })?;
+        Ok(server.permanent_failure.as_deref() == Some("disabled by user"))
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {
@@ -1587,5 +1632,108 @@ async fn spawn_mcp_connection(
                 bootstrap.server_name
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
+
+    fn stub_servers() -> BTreeMap<String, ScopedMcpServerConfig> {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "test-server".to_string(),
+            ScopedMcpServerConfig {
+                scope: ConfigSource::Project,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: "echo".to_string(),
+                    args: vec!["hello".to_string()],
+                    env: BTreeMap::new(),
+                    current_dir: None,
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        );
+        servers
+    }
+
+    #[tokio::test]
+    async fn reconnect_resets_failure_state() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let server = mgr.server_mut("test-server").unwrap();
+        server.permanent_failure = Some("some failure".to_string());
+        server.spawn_attempts = 5;
+
+        mgr.reconnect_server("test-server").await.unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert!(!server.initialized);
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+        assert!(server.process.is_none());
+    }
+
+    #[tokio::test]
+    async fn disable_sets_permanent_failure() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+
+        mgr.disable_server("test-server").await.unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert!(!server.initialized);
+        assert_eq!(
+            server.permanent_failure.as_deref(),
+            Some("disabled by user")
+        );
+        assert!(mgr.is_server_disabled("test-server").unwrap());
+    }
+
+    #[test]
+    fn enable_clears_disabled_state() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let server = mgr.server_mut("test-server").unwrap();
+        server.permanent_failure = Some("disabled by user".to_string());
+        server.spawn_attempts = 3;
+
+        mgr.enable_server("test-server").unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+        assert!(!mgr.is_server_disabled("test-server").unwrap());
+    }
+
+    #[tokio::test]
+    async fn disable_then_enable_then_reconnect_lifecycle() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+
+        mgr.disable_server("test-server").await.unwrap();
+        assert!(mgr.is_server_disabled("test-server").unwrap());
+
+        mgr.enable_server("test-server").unwrap();
+        assert!(!mgr.is_server_disabled("test-server").unwrap());
+
+        mgr.reconnect_server("test-server").await.unwrap();
+        let server = mgr.servers.get("test-server").unwrap();
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnect_unknown_server_returns_error() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let err = mgr.reconnect_server("nonexistent").await.unwrap_err();
+        assert!(
+            err.to_string().contains("unknown MCP server"),
+            "expected UnknownServer error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn is_server_disabled_unknown_server_returns_error() {
+        let mgr = McpServerManager::from_servers(&stub_servers());
+        let err = mgr.is_server_disabled("nonexistent").unwrap_err();
+        assert!(err.to_string().contains("unknown MCP server"));
     }
 }

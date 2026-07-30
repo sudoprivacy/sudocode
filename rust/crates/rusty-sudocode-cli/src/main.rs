@@ -16,6 +16,7 @@ mod cancel;
 mod cli;
 mod init;
 mod input;
+mod input_chrome;
 mod input_queue;
 mod render;
 mod repl_async;
@@ -62,7 +63,7 @@ use cli::export::{
 use cli::format::{
     describe_tool_progress, first_visible_line, format_auth_report, format_auth_switch_report,
     format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
-    format_commit_skipped_report, format_compact_report, format_cost_report, format_input_echo,
+    format_commit_skipped_report, format_compact_report, format_cost_report,
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
@@ -1633,38 +1634,11 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        let term_width = crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or(80);
-        let separator = format!("\x1b[2m{}\x1b[0m", "─".repeat(term_width));
-        let footer = "  \x1b[2m/help · /status · Tab for /commands\x1b[0m";
-        // Print the entire input chrome block: top sep, prompt placeholder,
-        // bottom sep, footer.  Then move the cursor back to the prompt line
-        // so read_line() renders there — the user sees all four elements at once.
-        println!("{separator}");
-        println!();
-        println!("{separator}");
-        print!("{footer}");
-        print!("\x1b[2F\x1b[2K"); // cursor up 2 lines, clear prompt placeholder
-        std::io::Write::flush(&mut std::io::stdout())?;
+        input_chrome::print_before_prompt()?;
         match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
-                // Clear pre-printed bottom sep + footer
-                print!("\x1b[J");
-                // Replace prompt line with a gray-background echo of the user
-                // input.  Multi-line input renders one styled row per line so
-                // the echo matches what the user actually typed (#182 item 3).
+                input_chrome::replace_after_submit(&input)?;
                 let trimmed = input.trim().to_string();
-                let (echo_block, line_count) = format_input_echo(&trimmed, term_width);
-                // Move the cursor up past every row rustyline rendered for the
-                // input and clear each one, then write the echo block in their
-                // place.
-                for _ in 0..line_count {
-                    print!("\x1b[1F\x1b[2K");
-                }
-                print!("{echo_block}");
-                println!();
-                println!("{separator}");
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
                     cli.persist_session()?;
                     break;

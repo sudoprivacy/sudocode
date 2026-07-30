@@ -68,21 +68,20 @@ fn esc_cancels_turn_in_async_repl() {
         Duration::from_secs(15)
     };
     sess.set_default_timeout(cancel_timeout);
-    sess.expect("(?i)(cancelled|interrupted|❯)")
+    sess.expect("(?i)(cancelled|interrupted)")
         .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
             panic!("ESC should cancel the turn: {e}\nPTY screen:\n{screen}");
         });
 
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should return to prompt after cancel: {e}\nPTY screen:\n{screen}");
-    });
-
-    std::thread::sleep(Duration::from_millis(300));
+    // In async REPL mode the ❯ prompt is persistent from the input thread
+    // and doesn't get re-printed after a cancel — "Cancelled" is the
+    // sufficient confirmation. Give the input thread a moment to settle
+    // back into readline before sending /exit.
+    std::thread::sleep(Duration::from_millis(500));
 
     sess.send("/exit\r").expect("send exit");
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");

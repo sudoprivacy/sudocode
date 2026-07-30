@@ -812,12 +812,10 @@ fn push_thinking_event(
     thinking: String,
     signature: Option<String>,
 ) {
-    if !thinking.is_empty() {
-        events.push_back(AssistantEvent::Thinking {
-            thinking,
-            signature,
-        });
-    }
+    events.push_back(AssistantEvent::Thinking {
+        thinking,
+        signature,
+    });
 }
 
 pub(crate) fn response_to_events(
@@ -969,13 +967,20 @@ mod tests {
         );
         push_thinking_event(&mut events, String::new(), None);
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert!(matches!(
             events.pop_front(),
             Some(AssistantEvent::Thinking {
                 thinking,
                 signature: Some(signature),
             }) if thinking == "hidden reasoning" && signature == "sig"
+        ));
+        assert!(matches!(
+            events.pop_front(),
+            Some(AssistantEvent::Thinking {
+                thinking,
+                signature: None,
+            }) if thinking.is_empty()
         ));
     }
 

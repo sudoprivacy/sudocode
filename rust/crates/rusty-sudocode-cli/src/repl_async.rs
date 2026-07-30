@@ -261,12 +261,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 break;
             }
             LoopEvent::Input(InputEvent::Submit(text)) => {
-                // Slash-command intercept: /exit and /quit are user-visible
-                // shutdown commands. They must NOT reach `TurnDriver::run_turn`
-                // (that'd send the literal text to the LLM as a turn — the
-                // regression the pty_repl_async_queue smoke caught). Handled
-                // BEFORE the coordinator matrix so an in-flight turn (if any)
-                // is aborted + joined + telemetry emits cleanly.
                 if is_exit_command(&text) {
                     if runner_handle.is_some() {
                         // Turn still running — abort it first so the join below

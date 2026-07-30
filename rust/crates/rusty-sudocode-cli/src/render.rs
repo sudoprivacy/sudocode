@@ -1,6 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -142,6 +142,7 @@ pub struct Spinner {
     stop: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
     thinking: Arc<AtomicBool>,
+    response_bytes: Arc<AtomicU32>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -152,12 +153,17 @@ impl Spinner {
     const FRAMES_THINKING: [&str; 4] = ["◐", "◓", "◑", "◒"];
     const LABEL_THINKING: &'static str = "🧠 Reasoning...";
 
+    /// Delay before showing the token counter, so short responses don't flash
+    /// a distracting `↓ 0 tokens` line.
+    const SHOW_TOKENS_AFTER_SECS: f64 = 1.0;
+
     #[must_use]
     pub fn new() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             pause: Arc::new(AtomicBool::new(false)),
             thinking: Arc::new(AtomicBool::new(false)),
+            response_bytes: Arc::new(AtomicU32::new(0)),
             handle: None,
         }
     }
@@ -179,14 +185,24 @@ impl Spinner {
         Arc::clone(&self.thinking)
     }
 
+    /// Returns a shared response-bytes counter. The streaming layer
+    /// increments this as text deltas arrive; the spinner thread reads it
+    /// to display a live `↓ N tokens` approximation.
+    #[must_use]
+    pub fn response_bytes_counter(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.response_bytes)
+    }
+
     /// Start the spinner animation in a background thread.
     pub fn start(&mut self, label: &str, model: Option<&str>, theme: &ColorTheme) {
         self.stop.store(false, Ordering::SeqCst);
         self.pause.store(false, Ordering::SeqCst);
         self.thinking.store(false, Ordering::SeqCst);
+        self.response_bytes.store(0, Ordering::SeqCst);
         let stop = Arc::clone(&self.stop);
         let pause = Arc::clone(&self.pause);
         let thinking = Arc::clone(&self.thinking);
+        let response_bytes = Arc::clone(&self.response_bytes);
         let default_label = label.to_string();
         let model = model.map(ToString::to_string);
         let theme = *theme;
@@ -210,6 +226,15 @@ impl Spinner {
                         let _ = write!(line, " [{m}]");
                     }
                     let _ = write!(line, " ({elapsed:.1}s)");
+                    let bytes = response_bytes.load(Ordering::Relaxed);
+                    if bytes > 0 && elapsed >= Self::SHOW_TOKENS_AFTER_SECS {
+                        let approx_tokens = bytes / 4;
+                        let _ = if approx_tokens >= 1000 {
+                            write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
+                        } else {
+                            write!(line, " ↓ {approx_tokens} tokens")
+                        };
+                    }
                     let _ = queue!(
                         stdout,
                         SavePosition,

@@ -3613,10 +3613,14 @@ impl LiveCli {
         );
         let pause_flag = spinner.pause_flag();
         let thinking_flag = spinner.thinking_flag();
+        let response_bytes = spinner.response_bytes_counter();
         runtime
             .api_client_mut()
             .set_spinner_pause(pause_flag.clone());
         runtime.api_client_mut().set_spinner_thinking(thinking_flag);
+        runtime
+            .api_client_mut()
+            .set_spinner_response_bytes(response_bytes);
         runtime.tool_executor_mut().set_spinner_pause(pause_flag);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(

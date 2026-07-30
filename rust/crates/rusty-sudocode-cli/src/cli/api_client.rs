@@ -18,7 +18,7 @@ use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
 use crate::render::{MarkdownStreamState, TerminalRenderer};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::{
@@ -49,6 +49,9 @@ pub(crate) struct AnthropicRuntimeClient {
     /// distinct "Reasoning..." indicator instead of the default "Thinking..."
     /// state.
     pub(crate) spinner_thinking: Option<Arc<AtomicBool>>,
+    /// Shared counter from the Spinner. Incremented by text-delta byte
+    /// length; the spinner thread reads it to display a live token estimate.
+    pub(crate) spinner_response_bytes: Option<Arc<AtomicU32>>,
 }
 
 impl AnthropicRuntimeClient {
@@ -86,6 +89,7 @@ impl AnthropicRuntimeClient {
             reasoning_effort: None,
             spinner_pause: None,
             spinner_thinking: None,
+            spinner_response_bytes: None,
         })
     }
 
@@ -95,6 +99,10 @@ impl AnthropicRuntimeClient {
 
     pub(crate) fn set_spinner_thinking(&mut self, flag: Arc<AtomicBool>) {
         self.spinner_thinking = Some(flag);
+    }
+
+    pub(crate) fn set_spinner_response_bytes(&mut self, counter: Arc<AtomicU32>) {
+        self.spinner_response_bytes = Some(counter);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -204,6 +212,7 @@ struct CliStreamState {
     progress_reporter: Option<InternalPromptProgressReporter>,
     spinner_pause: Option<Arc<AtomicBool>>,
     spinner_thinking: Option<Arc<AtomicBool>>,
+    spinner_response_bytes: Option<Arc<AtomicU32>>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
     markdown_stream: MarkdownStreamState,
@@ -284,6 +293,9 @@ impl CliStreamState {
             ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                 ContentBlockDelta::TextDelta { text } => {
                     if !text.is_empty() {
+                        if let Some(counter) = &self.spinner_response_bytes {
+                            counter.fetch_add(text.len() as u32, Ordering::Relaxed);
+                        }
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_text_phase(&text);
                         }
@@ -427,6 +439,7 @@ impl AnthropicRuntimeClient {
             progress_reporter: self.progress_reporter.clone(),
             spinner_pause: self.spinner_pause.clone(),
             spinner_thinking: self.spinner_thinking.clone(),
+            spinner_response_bytes: self.spinner_response_bytes.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
             markdown_stream: MarkdownStreamState::default(),

@@ -31,7 +31,8 @@ use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
 use crate::mcp_remote::{resolve_headers, MAX_RESPONSE_BYTES};
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
+    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams, McpGetPromptResult,
+    McpInitializeParams, McpInitializeResult, McpListPromptsParams, McpListPromptsResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
     McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
@@ -288,6 +289,22 @@ impl McpConnection for McpHttpConnection {
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>> {
         self.post_and_read("resources/read", id, Some(params)).await
+    }
+
+    async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        self.post_and_read("prompts/list", id, params).await
+    }
+
+    async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        self.post_and_read("prompts/get", id, Some(params)).await
     }
 
     async fn has_exited(&mut self) -> io::Result<bool> {

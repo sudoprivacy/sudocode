@@ -19,7 +19,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_connection::McpConnection;
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
+    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams, McpGetPromptResult,
+    McpInitializeParams, McpInitializeResult, McpListPromptsParams, McpListPromptsResult,
     McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
     McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
@@ -206,6 +207,22 @@ impl McpStdioProcess {
         self.request(id, "resources/read", Some(params)).await
     }
 
+    pub async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        self.request(id, "prompts/list", params).await
+    }
+
+    pub async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        self.request(id, "prompts/get", Some(params)).await
+    }
+
     pub async fn terminate(&mut self) -> io::Result<()> {
         self.child.kill().await
     }
@@ -271,6 +288,22 @@ impl McpConnection for McpStdioProcess {
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>> {
         Self::read_resource(self, id, params).await
+    }
+
+    async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        Self::list_prompts(self, id, params).await
+    }
+
+    async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        Self::get_prompt(self, id, params).await
     }
 
     async fn has_exited(&mut self) -> io::Result<bool> {

@@ -238,6 +238,72 @@ impl RuntimeMcpState {
         }))
         .map_err(|error| ToolError::new(error.to_string()))
     }
+
+    pub(crate) fn list_prompts_for_server(
+        &mut self,
+        server_name: &str,
+    ) -> Result<String, ToolError> {
+        let result =
+            Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
+                .map_err(|error| ToolError::new(error.to_string()))?;
+        serde_json::to_string_pretty(&json!({
+            "server": server_name,
+            "prompts": result.prompts,
+        }))
+        .map_err(|error| ToolError::new(error.to_string()))
+    }
+
+    pub(crate) fn list_prompts_for_all_servers(&mut self) -> Result<String, ToolError> {
+        let mut prompts = Vec::new();
+        let mut failures = Vec::new();
+
+        for server_name in self.server_names() {
+            match Self::block_on_isolated(&self.runtime, self.manager.list_prompts(&server_name)) {
+                Ok(result) => prompts.push(json!({
+                    "server": server_name,
+                    "prompts": result.prompts,
+                })),
+                Err(error) => failures.push(json!({
+                    "server": server_name,
+                    "error": error.to_string(),
+                })),
+            }
+        }
+
+        if prompts.is_empty() && !failures.is_empty() {
+            let message = failures
+                .iter()
+                .filter_map(|failure| failure.get("error").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(ToolError::new(message));
+        }
+
+        serde_json::to_string_pretty(&json!({
+            "prompts": prompts,
+            "failures": failures,
+        }))
+        .map_err(|error| ToolError::new(error.to_string()))
+    }
+
+    pub(crate) fn get_prompt(
+        &mut self,
+        server_name: &str,
+        name: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<String, ToolError> {
+        let result = Self::block_on_isolated(
+            &self.runtime,
+            self.manager.get_prompt(server_name, name, arguments),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
+        serde_json::to_string_pretty(&json!({
+            "server": server_name,
+            "description": result.description,
+            "messages": result.messages,
+        }))
+        .map_err(|error| ToolError::new(error.to_string()))
+    }
 }
 
 pub(crate) fn merged_mcp_servers(
@@ -371,6 +437,39 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                     "uri": { "type": "string" }
                 },
                 "required": ["server", "uri"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        RuntimeToolDefinition {
+            name: "ListMcpPromptsTool".to_string(),
+            description: Some(
+                "List MCP prompts from one configured server or from every connected server."
+                    .to_string(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        RuntimeToolDefinition {
+            name: "GetMcpPromptTool".to_string(),
+            description: Some(
+                "Get a specific MCP prompt from a configured server, optionally with arguments."
+                    .to_string(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" },
+                    "name": { "type": "string" },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["server", "name"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,

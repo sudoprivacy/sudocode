@@ -38,6 +38,18 @@ pub(crate) struct ReadMcpResourceRequest {
     pub(crate) uri: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListMcpPromptsRequest {
+    pub(crate) server: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GetMcpPromptRequest {
+    pub(crate) server: String,
+    pub(crate) name: String,
+    pub(crate) arguments: Option<serde_json::Value>,
+}
+
 pub(crate) struct CliToolExecutor {
     renderer: TerminalRenderer,
     emit_output: bool,
@@ -177,6 +189,19 @@ impl CliToolExecutor {
                 let input: ReadMcpResourceRequest = serde_json::from_value(value)
                     .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
                 mcp_state.read_resource(&input.server, &input.uri)
+            }
+            "ListMcpPromptsTool" => {
+                let input: ListMcpPromptsRequest = serde_json::from_value(value)
+                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+                match input.server {
+                    Some(server_name) => mcp_state.list_prompts_for_server(&server_name),
+                    None => mcp_state.list_prompts_for_all_servers(),
+                }
+            }
+            "GetMcpPromptTool" => {
+                let input: GetMcpPromptRequest = serde_json::from_value(value)
+                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+                mcp_state.get_prompt(&input.server, &input.name, input.arguments)
             }
             _ => mcp_state.call_tool(tool_name, Some(value)),
         }

@@ -234,6 +234,74 @@ pub struct McpReadResourceResult {
     pub contents: Vec<McpResourceContents>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListPromptsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListPromptsResult {
+    pub prompts: Vec<McpPrompt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<McpPromptArgument>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpGetPromptParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpGetPromptResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<McpPromptMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptMessage {
+    pub role: String,
+    pub content: McpPromptContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum McpPromptContent {
+    Text {
+        #[serde(rename = "type")]
+        content_type: String,
+        text: String,
+    },
+    Resource {
+        #[serde(rename = "type")]
+        content_type: String,
+        resource: JsonValue,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedMcpTool {
     pub server_name: String,
@@ -479,7 +547,8 @@ fn lifecycle_phase_for_method(method: &str) -> McpLifecyclePhase {
         "initialize" => McpLifecyclePhase::InitializeHandshake,
         "tools/list" => McpLifecyclePhase::ToolDiscovery,
         "resources/list" => McpLifecyclePhase::ResourceDiscovery,
-        "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
+        "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
+        "prompts/get" | "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
         _ => McpLifecyclePhase::ErrorSurfacing,
     }
 }
@@ -793,6 +862,54 @@ impl McpServerManager {
         }
     }
 
+    pub async fn list_prompts(
+        &mut self,
+        server_name: &str,
+    ) -> Result<McpListPromptsResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self.list_prompts_once(server_name).await {
+                Ok(prompts) => return Ok(prompts),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    pub async fn get_prompt(
+        &mut self,
+        server_name: &str,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<McpGetPromptResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self.get_prompt_once(server_name, name, arguments.clone()).await {
+                Ok(prompt) => return Ok(prompt),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {
@@ -1006,6 +1123,120 @@ impl McpServerManager {
             resources,
             next_cursor: None,
         })
+    }
+
+    async fn list_prompts_once(
+        &mut self,
+        server_name: &str,
+    ) -> Result<McpListPromptsResult, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+
+        let mut prompts = Vec::new();
+        let mut cursor = None;
+        loop {
+            let request_id = self.take_request_id();
+            let response = {
+                let server = self.server_mut(server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: server_name.to_string(),
+                        method: "prompts/list",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                Self::run_process_request(
+                    server_name,
+                    "prompts/list",
+                    MCP_LIST_TOOLS_TIMEOUT_MS,
+                    process.list_prompts(
+                        request_id,
+                        Some(McpListPromptsParams {
+                            cursor: cursor.clone(),
+                        }),
+                    ),
+                )
+                .await?
+            };
+
+            if let Some(error) = response.error {
+                return Err(McpServerManagerError::JsonRpc {
+                    server_name: server_name.to_string(),
+                    method: "prompts/list",
+                    error,
+                });
+            }
+
+            let result = response
+                .result
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "prompts/list",
+                    details: "missing result payload".to_string(),
+                })?;
+
+            prompts.extend(result.prompts);
+
+            match result.next_cursor {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+
+        Ok(McpListPromptsResult {
+            prompts,
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt_once(
+        &mut self,
+        server_name: &str,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<McpGetPromptResult, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+
+        let request_id = self.take_request_id();
+        let response =
+            {
+                let server = self.server_mut(server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: server_name.to_string(),
+                        method: "prompts/get",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                Self::run_process_request(
+                    server_name,
+                    "prompts/get",
+                    MCP_LIST_TOOLS_TIMEOUT_MS,
+                    process.get_prompt(
+                        request_id,
+                        McpGetPromptParams {
+                            name: name.to_string(),
+                            arguments,
+                        },
+                    ),
+                )
+                .await?
+            };
+
+        if let Some(error) = response.error {
+            return Err(McpServerManagerError::JsonRpc {
+                server_name: server_name.to_string(),
+                method: "prompts/get",
+                error,
+            });
+        }
+
+        response
+            .result
+            .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                server_name: server_name.to_string(),
+                method: "prompts/get",
+                details: "missing result payload".to_string(),
+            })
     }
 
     async fn read_resource_once(

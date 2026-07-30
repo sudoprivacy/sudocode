@@ -14,7 +14,8 @@ use std::io;
 use async_trait::async_trait;
 
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcResponse, McpInitializeParams, McpInitializeResult, McpListResourcesParams,
+    JsonRpcId, JsonRpcResponse, McpGetPromptParams, McpGetPromptResult, McpInitializeParams,
+    McpInitializeResult, McpListPromptsParams, McpListPromptsResult, McpListResourcesParams,
     McpListResourcesResult, McpListToolsParams, McpListToolsResult, McpReadResourceParams,
     McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
@@ -56,6 +57,20 @@ pub trait McpConnection: Send + std::fmt::Debug {
         id: JsonRpcId,
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>>;
+
+    /// Send `prompts/list` (optionally paged) and read the response.
+    async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>>;
+
+    /// Send `prompts/get` and read the response.
+    async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>>;
 
     /// Whether the underlying transport has already terminated and must be
     /// re-established before the next request.

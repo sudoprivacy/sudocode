@@ -10,6 +10,10 @@ use std::time::Duration;
 
 /// `/config set auto-interrupt on` then `off` in async REPL.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "async REPL chrome races slash command output on Windows CI"
+)]
 fn config_set_auto_interrupt_toggles() {
     let env = common::TestEnv::new("config-set-interrupt");
 
@@ -50,6 +54,10 @@ fn config_set_auto_interrupt_toggles() {
 
 /// `/config set queue off` then `on` in async REPL.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "async REPL chrome races slash command output on Windows CI"
+)]
 fn config_set_queue_toggles() {
     let env = common::TestEnv::new("config-set-queue");
 

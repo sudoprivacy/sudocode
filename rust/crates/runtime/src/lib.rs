@@ -44,6 +44,7 @@ pub mod mcp_server;
 mod mcp_server_manager;
 mod mcp_sse;
 mod mcp_stdio;
+mod mcp_ws;
 pub mod mcp_tool_bridge;
 pub mod memory;
 pub mod model_capabilities;

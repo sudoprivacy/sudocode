@@ -28,6 +28,7 @@ use crate::mcp_lifecycle_hardened::{
 };
 use crate::mcp_sse::McpSseConnection;
 use crate::mcp_stdio::spawn_mcp_stdio_process;
+use crate::mcp_ws::McpWsConnection;
 
 // Test timeouts must still comfortably cover spawning a fresh Python child and
 // completing the JSON-RPC handshake on a loaded CI runner (macOS is the slowest).
@@ -674,7 +675,7 @@ impl McpServerManager {
             let transport = server_config.transport();
             if matches!(
                 transport,
-                McpTransport::Stdio | McpTransport::Sse | McpTransport::Http
+                McpTransport::Stdio | McpTransport::Sse | McpTransport::Http | McpTransport::Ws
             ) {
                 let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
                 managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
@@ -1572,6 +1573,11 @@ async fn spawn_mcp_connection(
         }
         McpClientTransport::Http(transport) => {
             let connection = McpHttpConnection::connect(transport, &bootstrap.server_name).await?;
+            Ok(Box::new(connection))
+        }
+        McpClientTransport::WebSocket(transport) => {
+            let connection =
+                McpWsConnection::connect(transport, &bootstrap.server_name).await?;
             Ok(Box::new(connection))
         }
         other => Err(io::Error::new(

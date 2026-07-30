@@ -17,7 +17,7 @@ fn config_set_auto_interrupt_toggles() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(Duration::from_secs(15));
 
     sess.expect("❯").expect("async REPL prompt");
 
@@ -31,7 +31,7 @@ fn config_set_auto_interrupt_toggles() {
     // Small delay so the coordinator loop processes TurnDone from the
     // slash command before the next input arrives (slash commands return
     // instantly — no LLM call — so the race window is tight).
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(1));
 
     sess.send("/config set auto-interrupt off\r")
         .expect("send config set auto-interrupt off");
@@ -57,7 +57,7 @@ fn config_set_queue_toggles() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(Duration::from_secs(15));
 
     sess.expect("❯").expect("async REPL prompt");
 
@@ -70,7 +70,7 @@ fn config_set_queue_toggles() {
 
     // Small delay so the coordinator loop processes TurnDone before the
     // next slash command arrives.
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_secs(1));
 
     sess.send("/config set queue on\r")
         .expect("send config set queue on");

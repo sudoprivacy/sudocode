@@ -77,6 +77,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
+use crate::input_chrome;
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
@@ -207,8 +208,10 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 esc_abort_hook,
             );
             loop {
+                let _ = input_chrome::print_before_prompt();
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
+                        let _ = input_chrome::replace_after_submit(&text);
                         if input_tx_clone.send(InputEvent::Submit(text)).is_err() {
                             break;
                         }

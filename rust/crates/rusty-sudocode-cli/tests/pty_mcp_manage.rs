@@ -3,6 +3,13 @@
 //! These test the `scode mcp add-json` and `scode mcp remove` CLI
 //! subcommands, verifying end-to-end config file creation and mutation.
 //!
+//! **Why no `TestEnv`:** These tests exercise the CLI subcommand pathway
+//! (`scode mcp add-json ...`), which is a pure config-file operation —
+//! no model inference, no agent loop. `TestEnv` is designed for
+//! agent-loop tests that need mock/live backend routing. MCP config
+//! management is backend-agnostic, so `HarnessWorkspace` alone provides
+//! the needed isolation.
+//!
 //! ```bash
 //! cargo test --test pty_mcp_manage
 //! ```

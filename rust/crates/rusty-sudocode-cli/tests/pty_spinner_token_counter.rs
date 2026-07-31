@@ -68,23 +68,15 @@ fn live_spinner_shows_token_counter_during_streaming() {
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
     sess.set_default_timeout(Duration::from_secs(60));
 
-    // During streaming, the spinner should show the `↓` token counter
-    // marker at some point. We check the full terminal contents after
-    // the response completes — crossterm's in-place updates leave
-    // traces in the PTY scrollback.
-    sess.expect("\\w+\\s+\\w+")
-        .expect("multi-word response should stream");
+    // The spinner shows `↓` in the raw PTY byte stream while tokens
+    // are being received. We must catch it before the response text
+    // overwrites the spinner line — `expect` watches the live stream.
+    sess.expect("↓")
+        .expect("spinner should show ↓ token counter during streaming");
 
     // Wait for the turn to finish and status line to appear.
     sess.expect("tokens")
         .expect("post-turn status line should show token count");
-
-    // Check terminal contents for the spinner token counter marker.
-    let contents = sess.render(|s| s.contents());
-    assert!(
-        contents.contains('↓'),
-        "spinner should have shown ↓ token counter during streaming.\nTerminal contents:\n{contents}"
-    );
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);

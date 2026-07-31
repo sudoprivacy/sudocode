@@ -868,11 +868,34 @@ where
                 messages: self.session.messages.clone(),
                 trace_id: self.trace_id.clone(),
             };
-            let mut stream = match self.api_client.stream(request).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    self.record_turn_failed(iterations, &error);
-                    return Err(error);
+            // Race the API stream (which includes the retry loop) against
+            // the abort signal so ESC/Ctrl-C cancels even during retries.
+            let mut stream = {
+                let abort = &self.hook_abort_signal;
+                tokio::select! {
+                    biased;
+                    () = abort.cancelled() => {
+                        self.finalize_cancelled_turn(Vec::new());
+                        let turn_usage = sum_assistant_message_usage(&assistant_messages);
+                        let session_usage = self.usage_tracker.cumulative_usage();
+                        return Ok(TurnSummary {
+                            assistant_messages,
+                            tool_results,
+                            prompt_cache_events,
+                            iterations,
+                            turn_usage,
+                            session_usage,
+                            auto_compaction: None,
+                            cancelled: true,
+                        });
+                    }
+                    result = self.api_client.stream(request) => match result {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            self.record_turn_failed(iterations, &error);
+                            return Err(error);
+                        }
+                    }
                 }
             };
 

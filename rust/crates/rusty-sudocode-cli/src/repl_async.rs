@@ -149,6 +149,15 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// self-contained for tests.
     fn on_exit(&self) {}
 
+    /// Try to handle a slash command synchronously on the coordinator thread.
+    /// Returns `true` if the input was a slash command and was handled (caller
+    /// should NOT route it to `run_turn`). Returns `false` if the input is
+    /// not a slash command (caller should route it normally).
+    /// Default returns `false` — test drivers don't handle slash commands.
+    fn try_handle_slash_command(&self, _input: &str) -> bool {
+        false
+    }
+
     /// Auto-interrupt the currently running turn. Called from main when the
     /// coordinator matrix decides `SubmitOutcome::Interrupt` — the runner
     /// thread's `run_turn` will observe the abort and return with a
@@ -274,6 +283,13 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     }
                     driver.on_exit();
                     break;
+                }
+                // Slash commands are dispatched synchronously on the
+                // coordinator thread — no runner thread, no TurnDone
+                // roundtrip. This avoids the timing issues (chrome
+                // overwriting output) that plagued the thread-based path.
+                if driver.try_handle_slash_command(&text) {
+                    continue;
                 }
                 if !turn_active {
                     let next = coord.lock().unwrap().submit_when_idle(text);

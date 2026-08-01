@@ -77,6 +77,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
+use crate::input_chrome;
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
@@ -192,6 +193,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     esc_abort_hook: Option<EscAbortHook>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("{startup_banner}");
+    input_chrome::print_separator();
 
     let coord = Arc::new(Mutex::new(TurnInputCoordinator::new()));
     let (input_tx, input_rx) = sync_channel::<InputEvent>(16);

@@ -1817,11 +1817,13 @@ impl repl_async::TurnDriver for LiveCliDriver {
                     Ok(false) => {}
                     Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
                 }
+                input_chrome::print_separator();
                 true
             }
             Ok(None) => false,
             Err(error) => {
                 eprintln!("\x1b[31m{error}\x1b[0m");
+                input_chrome::print_separator();
                 true
             }
         }
@@ -1832,6 +1834,7 @@ impl repl_async::TurnDriver for LiveCliDriver {
         if let Err(e) = cli.run_turn(prompt) {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }
+        input_chrome::print_separator();
     }
 
     fn on_exit(&self) {

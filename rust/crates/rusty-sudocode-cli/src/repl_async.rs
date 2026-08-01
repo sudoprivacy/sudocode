@@ -218,14 +218,15 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 esc_abort_hook,
             );
             loop {
-                // No input chrome in the async REPL — raw ANSI cursor
-                // manipulation (print_before_prompt / replace_after_submit)
-                // races with the runner thread's stdout, causing garbled
-                // output. The sync REPL can use chrome safely because it's
-                // single-threaded. A proper fix requires a TUI framework
-                // (ratatui) that owns the full terminal layout.
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
+                        // Echo the submitted text as ` › ...` (gray background)
+                        // before notifying the coordinator. This is safe: the
+                        // runner hasn't started yet (send is below), so no
+                        // stdout race. replace_after_submit uses ANSI cursor-up
+                        // to overwrite rustyline's raw prompt with the styled
+                        // echo + a trailing separator.
+                        let _ = input_chrome::echo_submit(&text);
                         if input_tx_clone.send(InputEvent::Submit(text)).is_err() {
                             break;
                         }

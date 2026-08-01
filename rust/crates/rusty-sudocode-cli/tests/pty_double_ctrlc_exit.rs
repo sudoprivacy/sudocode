@@ -29,6 +29,9 @@ fn double_ctrlc_exits_sync_repl() {
         panic!("should see exit hint after first Ctrl-C: {e}\nPTY screen:\n{screen}");
     });
 
+    // Small delay so readline() is re-entered before the second SIGINT.
+    std::thread::sleep(Duration::from_millis(200));
+
     // Second Ctrl-C within 800ms — should exit.
     sess.send("\x03").expect("send second Ctrl-C");
 

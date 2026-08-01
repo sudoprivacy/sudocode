@@ -99,10 +99,12 @@ fn memory_entries_injected_into_system_prompt() {
 
     let text = String::from_utf8(output.stdout).expect("stdout utf8");
 
-    // The memory section header must be present.
+    // The memory section header must be present. The default model is a
+    // frontier model, which now renders the lean `# Memory` block; older/full
+    // models still render `# auto memory`. Either satisfies this check.
     assert!(
-        text.contains("# auto memory"),
-        "system-prompt missing '# Persistent memory' section;\nstdout tail:\n{}",
+        text.contains("# auto memory") || text.contains("# Memory"),
+        "system-prompt missing the memory section;\nstdout tail:\n{}",
         tail(&text, 40)
     );
 
@@ -263,9 +265,11 @@ fn memory_budget_truncates_large_entries() {
 
     let text = String::from_utf8(output.stdout).expect("stdout utf8");
 
-    // The memory section must be present (some entries rendered).
+    // The memory section must be present (some entries rendered). The default
+    // model renders the lean `# Memory` block; full-tier models render
+    // `# auto memory`.
     assert!(
-        text.contains("# auto memory"),
+        text.contains("# auto memory") || text.contains("# Memory"),
         "system-prompt missing memory section under budget pressure;\nstdout tail:\n{}",
         tail(&text, 40)
     );

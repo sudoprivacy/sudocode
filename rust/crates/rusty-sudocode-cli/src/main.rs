@@ -36,11 +36,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
-    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
-    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    base_url_for_mode, model_family_identity_for, prompt_tier_for, resolve_startup_auth_source,
+    AnthropicClient, AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -847,6 +847,7 @@ fn print_system_prompt(
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
+        prompt_tier_for(model),
     )?;
     // Mirror what build_runtime_with_plugin_state does for live sessions:
     // append active SudoCode plugin capabilities so system-prompt output
@@ -5036,6 +5037,7 @@ fn build_system_prompt_for(
         env::consts::OS,
         "unknown",
         model_family_identity_for(model),
+        prompt_tier_for(model),
     )?;
     // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
     // set, prepend the ported CC-fork coordinator role prompt so it

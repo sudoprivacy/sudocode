@@ -143,6 +143,9 @@ pub struct Spinner {
     pause: Arc<AtomicBool>,
     thinking: Arc<AtomicBool>,
     response_bytes: Arc<AtomicU32>,
+    /// User-set token budget (parsed from `+500k` in prompt). `None` when
+    /// no budget was requested — budget/ETA is never shown without one.
+    token_budget: Option<u32>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -167,8 +170,14 @@ impl Spinner {
             pause: Arc::new(AtomicBool::new(false)),
             thinking: Arc::new(AtomicBool::new(false)),
             response_bytes: Arc::new(AtomicU32::new(0)),
+            token_budget: None,
             handle: None,
         }
+    }
+
+    /// Set the user-requested token budget (from `+500k` in prompt).
+    pub fn set_token_budget(&mut self, budget: u32) {
+        self.token_budget = Some(budget);
     }
 
     /// Returns a shared pause flag. Set to `true` before writing content to
@@ -208,6 +217,7 @@ impl Spinner {
         let response_bytes = Arc::clone(&self.response_bytes);
         let default_label = label.to_string();
         let model = model.map(ToString::to_string);
+        let token_budget = self.token_budget;
         let theme = *theme;
         let start_time = Instant::now();
 
@@ -244,15 +254,30 @@ impl Spinner {
                     let bytes = response_bytes.load(Ordering::Relaxed);
                     if bytes > 0 && elapsed >= Self::SHOW_TOKENS_AFTER_SECS {
                         let approx_tokens = bytes / 4;
-                        // CC only shows budget/ETA when user explicitly sets
-                        // a token budget (e.g. "+500k"). max_tokens_for_model
-                        // is NOT a user budget — it's the model's output cap.
-                        // Default: just show `↓ N tokens`.
-                        let _ = if approx_tokens >= 1000 {
-                            write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
+                        if let Some(budget) = token_budget {
+                            // User-set budget (e.g. `+500k` in prompt):
+                            // show Target: X / Y (P%) ~Zm
+                            let pct = (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
+                            let fmt_t = format_compact_tokens(approx_tokens);
+                            let fmt_b = format_compact_tokens(budget);
+                            let _ = write!(line, " ↓ {fmt_t} / {fmt_b} ({pct:.0}%)");
+                            if approx_tokens >= 2000 && elapsed > 5.0 {
+                                let rate = f64::from(approx_tokens) / elapsed;
+                                let remaining = f64::from(budget.saturating_sub(approx_tokens));
+                                let eta_secs = remaining / rate;
+                                let _ = if eta_secs >= 60.0 {
+                                    write!(line, " ~{:.0}m", eta_secs / 60.0)
+                                } else {
+                                    write!(line, " ~{eta_secs:.0}s")
+                                };
+                            }
                         } else {
-                            write!(line, " ↓ {approx_tokens} tokens")
-                        };
+                            let _ = if approx_tokens >= 1000 {
+                                write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
+                            } else {
+                                write!(line, " ↓ {approx_tokens} tokens")
+                            };
+                        }
                     }
                     // Stall detection: if response has started (bytes > 0)
                     // but no new bytes for STALL_THRESHOLD_SECS, use warning color.
@@ -334,6 +359,75 @@ impl Spinner {
         )?;
         out.flush()
     }
+}
+
+#[cfg(test)]
+mod spinner_tests {
+    use super::parse_token_budget;
+
+    #[test]
+    fn parses_shorthand_budget() {
+        assert_eq!(parse_token_budget("+500k do something"), Some(500_000));
+        assert_eq!(parse_token_budget("do something +2m"), Some(2_000_000));
+        assert_eq!(parse_token_budget("+1.5k"), Some(1_500));
+        assert_eq!(parse_token_budget("+1b"), Some(1_000_000_000));
+    }
+
+    #[test]
+    fn returns_none_without_budget() {
+        assert_eq!(parse_token_budget("Write an essay"), None);
+        assert_eq!(parse_token_budget(""), None);
+        assert_eq!(parse_token_budget("500k"), None); // no + prefix
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert_eq!(parse_token_budget("+500K"), Some(500_000));
+        assert_eq!(parse_token_budget("+2M"), Some(2_000_000));
+    }
+}
+
+/// Format a token count compactly: `500`, `1.2k`, `500k`, `1.0M`.
+fn format_compact_tokens(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", f64::from(tokens) / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", f64::from(tokens) / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Parse a token budget from user input. Matches CC's shorthand:
+/// - Start/end anchored: `+500k`, `+2m`, `+1.5k`
+/// - Case insensitive suffixes: k=1000, m=1M, b=1B
+///
+/// Returns `None` if no budget found.
+pub fn parse_token_budget(text: &str) -> Option<u32> {
+    // Scan for `+<number><suffix>` tokens anywhere in the text.
+    for token in text.split_whitespace() {
+        if let Some(result) = parse_budget_token(token.trim_end_matches(|c| ".!?".contains(c))) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+fn parse_budget_token(token: &str) -> Option<u32> {
+    let token = token.strip_prefix('+')?;
+    if token.is_empty() {
+        return None;
+    }
+    let (num_str, suffix) = token.split_at(token.len() - 1);
+    let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        "k" => 1_000.0,
+        "m" => 1_000_000.0,
+        "b" => 1_000_000_000.0,
+        _ => return None,
+    };
+    let value: f64 = num_str.parse().ok()?;
+    let result = (value * multiplier) as u32;
+    (result > 0).then_some(result)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

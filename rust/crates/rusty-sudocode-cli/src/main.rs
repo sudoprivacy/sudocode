@@ -3605,6 +3605,9 @@ impl LiveCli {
         // call in `runtime/src/conversation.rs`.  The CLI no longer
         // duplicates it here.
         let mut spinner = Spinner::new();
+        if let Some(budget) = crate::render::parse_token_budget(input) {
+            spinner.set_token_budget(budget);
+        }
         let mut stdout = io::stdout();
         spinner.start(
             "🦀 Thinking...",

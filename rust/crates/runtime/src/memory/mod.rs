@@ -26,7 +26,7 @@ pub use loader::{
     MEMORY_INDEX_FILE,
 };
 
-use crate::prompt::SystemPromptBuilder;
+use crate::prompt::{PromptTier, SystemPromptBuilder};
 
 /// Cap individual entry body at 2000 chars when rendering.
 pub const ENTRY_BODY_CHAR_CAP: usize = 2_000;
@@ -83,8 +83,23 @@ impl MemoryIndex {
     /// into the instructions so the model knows where to write.
     #[must_use]
     pub fn render_for_prompt(&self, memory_dir: &Path) -> String {
+        self.render_for_prompt_with_tier(memory_dir, PromptTier::Full)
+    }
+
+    /// Tier-aware variant of [`render_for_prompt`]. The Full tier gets the
+    /// verbose `# auto memory` instructions; Mid and Lean collapse to the lean
+    /// `# Memory` block (frontmatter format + type one-liners + condensed
+    /// what-not / access rules, no `<examples>` or step-by-step walkthroughs).
+    /// The loaded index and entries are rendered identically in every tier.
+    #[must_use]
+    pub fn render_for_prompt_with_tier(&self, memory_dir: &Path, tier: PromptTier) -> String {
         let mut out = String::new();
-        out.push_str(&build_auto_memory_instructions(memory_dir));
+        match tier {
+            PromptTier::Full => out.push_str(&build_auto_memory_instructions(memory_dir)),
+            PromptTier::Mid | PromptTier::Lean => {
+                out.push_str(&build_lean_memory_instructions(memory_dir));
+            }
+        }
         out.push_str("\n\n");
 
         if let Some(index) = self.index.as_ref() {
@@ -157,16 +172,20 @@ pub fn append_to_builder(
         owned.as_path()
     };
     loader::ensure_memory_dir_exists(dir);
+    // The memory instructions collapse to the lean `# Memory` block for
+    // non-Full tiers; read the tier off the builder so callers don't have to
+    // thread it through separately.
+    let tier = builder.tier();
     // Always inject the auto-memory instructions (even when empty) so the
     // model knows the memory directory path and how to save/forget entries.
     match MemoryIndex::load(dir) {
-        Ok(idx) => builder.append_section(idx.render_for_prompt(dir)),
+        Ok(idx) => builder.append_section(idx.render_for_prompt_with_tier(dir, tier)),
         _ => {
             let empty = MemoryIndex {
                 directory: dir.to_path_buf(),
                 ..Default::default()
             };
-            builder.append_section(empty.render_for_prompt(dir))
+            builder.append_section(empty.render_for_prompt_with_tier(dir, tier))
         }
     }
 }
@@ -308,6 +327,43 @@ Memory is one of several persistence mechanisms available to you as you assist t
     )
 }
 
+/// Lean `# Memory` instructions for the Mid and Lean tiers — the collapsed
+/// form of [`build_auto_memory_instructions`]. Keeps the memory directory
+/// path, the frontmatter format, one-line summaries of the four memory types,
+/// and condensed what-not-to-save / access rules, but drops every `<examples>`
+/// block and the spelled-out two-step walkthrough (~2 KB vs. ~12.5 KB).
+fn build_lean_memory_instructions(memory_dir: &Path) -> String {
+    format!(
+        "# Memory\n\nYou have a persistent, file-based memory system at `{}`. {}",
+        memory_dir.display(),
+        LEAN_MEMORY_BODY
+    )
+}
+
+const LEAN_MEMORY_BODY: &str = "This directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence). Build it up over time so future conversations understand who the user is, how they want to collaborate, and the context behind the work. If the user asks you to remember something, save it immediately as whichever type fits best; if they ask you to forget something, find and remove the relevant entry.
+
+Types of memory:
+- user — the user's role, goals, responsibilities, and knowledge, so you can tailor how you help them.
+- feedback — guidance on how to approach work, both corrections and confirmed approaches; record the *why* so you can judge edge cases later.
+- project — ongoing work, goals, or incidents not derivable from the code or git history; convert relative dates to absolute (e.g. \"Thursday\" -> \"2026-03-05\").
+- reference — pointers to where information lives in external systems (a Linear project, a Slack channel, a dashboard).
+
+Each memory is its own file, written with this frontmatter:
+
+---
+name: {short-kebab-name}
+description: {one-line, specific — used to judge relevance in future conversations}
+type: {user | feedback | project | reference}
+---
+
+{the memory content; for feedback/project, lead with the rule/fact then **Why:** and **How to apply:** lines}
+
+Then add a one-line pointer in `MEMORY.md` — an index, not a memory: `- [Title](file.md) — one-line hook`, no frontmatter, one line per entry. `MEMORY.md` is always loaded into context, so keep it concise. Organize by topic, not chronologically; update or remove memories that turn out wrong; do not write duplicates — check for an existing entry to update first.
+
+What NOT to save: code patterns, conventions, architecture, or file paths (derive them from the project); git history or who-changed-what (`git log` / `git blame` are authoritative); debugging fixes (the fix is in the code); anything already in AGENTS.md; ephemeral task state. These exclusions hold even when asked to save — if so, save what was *surprising* or *non-obvious* about it instead.
+
+When to access: when memories seem relevant or the user references prior-conversation work; always when the user explicitly asks you to check or recall. If the user says to ignore memory, proceed as if MEMORY.md were empty. Memory reflects what was true when written and can be stale — before recommending a file, function, or flag a memory names, verify it still exists.";
+
 fn render_entry_block(entry: &MemoryEntry) -> String {
     let body = truncate_body(&entry.body, ENTRY_BODY_CHAR_CAP);
     format!(
@@ -331,7 +387,7 @@ fn truncate_body(body: &str, cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::SystemPromptBuilder;
+    use crate::prompt::{PromptTier, SystemPromptBuilder};
     use std::fs;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -391,6 +447,56 @@ mod tests {
         assert!(rendered.contains("type: feedback"));
         assert!(rendered.contains("Always greet warmly."));
         assert!(rendered.len() <= RENDERED_CHAR_CAP);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn lean_tier_collapses_memory_instructions() {
+        let dir = temp_dir("lean-mem");
+        write_entry(&dir, "role", "user", "Senior Rust engineer.");
+        let idx = MemoryIndex::load(&dir).expect("load");
+
+        let full = idx.render_for_prompt_with_tier(&dir, PromptTier::Full);
+        let lean = idx.render_for_prompt_with_tier(&dir, PromptTier::Lean);
+        let mid = idx.render_for_prompt_with_tier(&dir, PromptTier::Mid);
+
+        // Full keeps the verbose `# auto memory` block with worked examples.
+        assert!(full.starts_with("# auto memory"));
+        assert!(full.contains("<examples>"));
+
+        // Lean + Mid collapse to `# Memory`, dropping the examples/walkthrough.
+        assert!(lean.starts_with("# Memory"));
+        assert!(!lean.contains("# auto memory"));
+        assert!(!lean.contains("<examples>"));
+        assert!(!lean.contains("Step 1"));
+        assert!(lean.len() < 3_000, "lean memory block should be < 3KB");
+        // Mid uses the same lean instructions as Lean.
+        assert!(mid.starts_with("# Memory"));
+        assert!(!mid.contains("<examples>"));
+
+        // Loaded entries are still rendered in the lean form.
+        assert!(lean.contains("- name: role"));
+        assert!(lean.contains("Senior Rust engineer."));
+
+        // The memory directory path is still templated in for every tier.
+        assert!(lean.contains(&dir.display().to_string()));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn append_to_builder_uses_lean_memory_for_lean_tier() {
+        let dir = temp_dir("lean-append");
+        let prompt = append_to_builder(
+            SystemPromptBuilder::new()
+                .with_os("linux", "test")
+                .with_tier(PromptTier::Lean),
+            Some(&dir),
+            None,
+        )
+        .render();
+        assert!(prompt.contains("# Memory"));
+        assert!(!prompt.contains("# auto memory"));
+        assert!(!prompt.contains("<examples>"));
         fs::remove_dir_all(dir).ok();
     }
 

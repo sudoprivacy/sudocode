@@ -86,14 +86,10 @@ fn model_switch_in_repl() {
 // 2b. /model report shows capabilities SSOT models
 // ──────────────────────────────────────────────────────────────────────
 
-/// After entering the REPL, `/model sonnet` switches (or confirms)
-/// the model, then `/model sonnet` again triggers the model report
-/// (no-op switch — same model). The report should list not just the
-/// config aliases but also capabilities SSOT models (e.g. deepseek).
-///
-/// This validates the model-discovery SSOT merge:
-/// - Config aliases appear with display name + provider info.
-/// - Capabilities models not in config appear as wire IDs.
+/// `/model` without arguments shows the model report: current model,
+/// available models (config aliases + capabilities SSOT), and session
+/// info. The report should include capabilities-only models like
+/// deepseek that are not in the config aliases.
 #[test]
 fn model_report_shows_capabilities_models() {
     let env = TestEnv::new("model-report-caps");
@@ -101,17 +97,8 @@ fn model_report_shows_capabilities_models() {
 
     sess.expect("❯").expect("should see REPL prompt");
 
-    // First /model sonnet — ensures we are on sonnet (may switch or confirm).
-    sess.send("/model sonnet\r")
-        .expect("send /model sonnet (first)");
-    sess.expect("(?i)(sonnet|model)")
-        .expect("should see model confirmation");
-
-    sess.expect("❯").expect("prompt after first /model");
-
-    // Second /model sonnet — same model, triggers report with full list.
-    sess.send("/model sonnet\r")
-        .expect("send /model sonnet (second, triggers report)");
+    // /model without args shows the report (not a picker).
+    sess.send("/model\r").expect("send /model (no args)");
 
     // Should see the "Available models" section.
     sess.expect("Available models")

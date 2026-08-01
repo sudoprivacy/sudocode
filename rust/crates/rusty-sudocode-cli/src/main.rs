@@ -4087,31 +4087,16 @@ impl LiveCli {
 
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(model) = model else {
-            let sudocode_config = load_sudocode_config_for_current_dir();
-            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
-            let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-            if self.is_async_mode() {
-                println!("\x1b[1mAvailable models:\x1b[0m");
-                for (i, m) in models.iter().enumerate() {
-                    let marker = if *m == self.config.model {
-                        " ← current"
-                    } else {
-                        ""
-                    };
-                    println!("  \x1b[2m{:>2}.\x1b[0m {m}{marker}", i + 1);
-                }
-                println!("\n\x1b[2mUsage: /model <name>\x1b[0m");
-                return Ok(false);
-            }
-            let selection = FuzzySelect::new()
-                .with_prompt("Select model")
-                .items(&models)
-                .default(0)
-                .interact_opt()?;
-            return match selection {
-                Some(idx) => self.set_model(Some(models[idx].clone())),
-                None => Ok(false),
-            };
+            // /model without args: show the model report (current + available).
+            println!(
+                "{}",
+                format_model_report(
+                    &self.config.model,
+                    self.runtime.session().messages.len(),
+                    self.runtime.usage().turns(),
+                )
+            );
+            return Ok(false);
         };
 
         let model = resolve_model_alias_with_config(&model);

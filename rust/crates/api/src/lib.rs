@@ -42,8 +42,8 @@ pub use providers::registry::{
     ResolvedProvider, SudoCodeConfig,
 };
 pub use providers::{
-    detect_provider_kind, model_family_identity_for, model_family_identity_for_kind, AuthMode,
-    ProviderKind,
+    detect_provider_kind, model_family_identity_for, model_family_identity_for_kind,
+    prompt_tier_for, AuthMode, ProviderKind,
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

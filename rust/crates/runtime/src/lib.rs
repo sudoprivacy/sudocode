@@ -177,7 +177,7 @@ pub use policy_engine::{
 };
 pub use prompt::{
     load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with, prepend_bullets,
-    ContextFile, ModelFamilyIdentity, ProjectContext, PromptBuildError, SystemPrompt,
+    ContextFile, ModelFamilyIdentity, ProjectContext, PromptBuildError, PromptTier, SystemPrompt,
     SystemPromptBuilder, FRONTIER_MODEL_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{

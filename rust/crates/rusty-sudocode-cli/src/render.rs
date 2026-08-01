@@ -143,7 +143,6 @@ pub struct Spinner {
     pause: Arc<AtomicBool>,
     thinking: Arc<AtomicBool>,
     response_bytes: Arc<AtomicU32>,
-    max_output_tokens: Option<u32>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -168,14 +167,8 @@ impl Spinner {
             pause: Arc::new(AtomicBool::new(false)),
             thinking: Arc::new(AtomicBool::new(false)),
             response_bytes: Arc::new(AtomicU32::new(0)),
-            max_output_tokens: None,
             handle: None,
         }
-    }
-
-    /// Set the maximum output tokens for budget/ETA display.
-    pub fn set_max_output_tokens(&mut self, max: u32) {
-        self.max_output_tokens = Some(max);
     }
 
     /// Returns a shared pause flag. Set to `true` before writing content to
@@ -215,7 +208,6 @@ impl Spinner {
         let response_bytes = Arc::clone(&self.response_bytes);
         let default_label = label.to_string();
         let model = model.map(ToString::to_string);
-        let max_output_tokens = self.max_output_tokens;
         let theme = *theme;
         let start_time = Instant::now();
 
@@ -252,40 +244,15 @@ impl Spinner {
                     let bytes = response_bytes.load(Ordering::Relaxed);
                     if bytes > 0 && elapsed >= Self::SHOW_TOKENS_AFTER_SECS {
                         let approx_tokens = bytes / 4;
-                        if let Some(budget) = max_output_tokens {
-                            // Budget/ETA: show progress toward max_output_tokens
-                            let pct = (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
-                            let tokens_display = if approx_tokens >= 1000 {
-                                format!("{:.1}k", f64::from(approx_tokens) / 1000.0)
-                            } else {
-                                approx_tokens.to_string()
-                            };
-                            let budget_display = if budget >= 1000 {
-                                format!("{:.0}k", f64::from(budget) / 1000.0)
-                            } else {
-                                budget.to_string()
-                            };
-                            let _ = write!(line, " ↓ {tokens_display} / {budget_display} ({pct:.0}%)");
-                            // Rate-based ETA — only shown after 5s elapsed
-                            // and 2000+ tokens to avoid spurious predictions
-                            // from startup latency (matches CC).
-                            if approx_tokens >= 2000 && elapsed > 5.0 {
-                                let rate = f64::from(approx_tokens) / elapsed;
-                                let remaining = f64::from(budget.saturating_sub(approx_tokens));
-                                let eta_secs = remaining / rate;
-                                let _ = if eta_secs >= 60.0 {
-                                    write!(line, " ~{:.0}m", eta_secs / 60.0)
-                                } else {
-                                    write!(line, " ~{eta_secs:.0}s")
-                                };
-                            }
+                        // CC only shows budget/ETA when user explicitly sets
+                        // a token budget (e.g. "+500k"). max_tokens_for_model
+                        // is NOT a user budget — it's the model's output cap.
+                        // Default: just show `↓ N tokens`.
+                        let _ = if approx_tokens >= 1000 {
+                            write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
                         } else {
-                            let _ = if approx_tokens >= 1000 {
-                                write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
-                            } else {
-                                write!(line, " ↓ {approx_tokens} tokens")
-                            };
-                        }
+                            write!(line, " ↓ {approx_tokens} tokens")
+                        };
                     }
                     // Stall detection: if response has started (bytes > 0)
                     // but no new bytes for STALL_THRESHOLD_SECS, use warning color.

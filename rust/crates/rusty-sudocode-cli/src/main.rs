@@ -3605,7 +3605,6 @@ impl LiveCli {
         // call in `runtime/src/conversation.rs`.  The CLI no longer
         // duplicates it here.
         let mut spinner = Spinner::new();
-        spinner.set_max_output_tokens(cli::api_client::max_tokens_for_model(&self.config.model));
         let mut stdout = io::stdout();
         spinner.start(
             "🦀 Thinking...",
@@ -3888,7 +3887,11 @@ impl LiveCli {
                                 Err(err) => println!("Error: {err}"),
                             }
                         } else {
-                            println!("No MCP servers configured");
+                            println!(
+                                "No MCP servers are running in this session.\n\
+                                 Hint: if you just added a server via `/mcp add-json`, \
+                                 restart scode to load it."
+                            );
                         }
                     }
                     _ => {

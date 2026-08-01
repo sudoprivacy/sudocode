@@ -142,24 +142,31 @@ impl CliToolExecutor {
     fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
         let pause = self.spinner_pause.clone()?;
         Some(Box::new(move |progress: runtime::BashProgress<'_>| {
+            let trimmed = progress.output.trim_end();
+            if trimmed.is_empty() {
+                return;
+            }
             // Pause spinner and clear its line
             pause.store(true, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(10));
             let _ = write!(io::stdout(), "\r\x1b[2K");
             let _ = io::stdout().flush();
 
-            let trimmed = progress.output.trim_end();
-            if !trimmed.is_empty() {
-                // Show the last 3 lines of the chunk in dim style
-                let tail: Vec<&str> = trimmed.lines().rev().take(3).collect();
-                let display: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n    ");
-                let _ = writeln!(
-                    io::stdout(),
-                    "  \x1b[2m[{} lines, {} bytes]\x1b[0m\n    \x1b[2m{display}\x1b[0m",
-                    progress.total_lines, progress.total_bytes,
-                );
-                let _ = io::stdout().flush();
-            }
+            // Show last line of new output + cumulative stats on one line.
+            // CC shows last 5 lines in a block; we keep it to 1 line per
+            // tick so the terminal doesn't scroll excessively.
+            let last_line = trimmed.lines().next_back().unwrap_or("");
+            let bytes_display = if progress.total_bytes >= 1024 {
+                format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
+            } else {
+                format!("{} B", progress.total_bytes)
+            };
+            let _ = writeln!(
+                io::stdout(),
+                "  \x1b[2m⟳ {last_line}  ({} lines, {bytes_display})\x1b[0m",
+                progress.total_lines,
+            );
+            let _ = io::stdout().flush();
 
             // Resume spinner
             pause.store(false, Ordering::SeqCst);

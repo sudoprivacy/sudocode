@@ -137,6 +137,47 @@ pub fn model_family_identity_for(model: &str) -> runtime::ModelFamilyIdentity {
     model_family_identity_for_kind(detect_provider_kind(model))
 }
 
+/// Resolve the system-prompt tier for a model name (see
+/// [`runtime::PromptTier`]). Encodes the model→tier map:
+///
+/// - **Lean** — frontier Anthropic opus (`opus-4-8`, `opus-5`, and the older
+///   opus builds CC remaps onto `opus-4-8`), plus every non-Anthropic model
+///   (GPT / Gemini / xAI / qwen / DeepSeek / local via openai-compat): they
+///   never carried the verbose CC baggage and capable models do better lean.
+/// - **Mid** — `fable-5`: slim harness but keep the communication scaffolding.
+/// - **Full** — all `sonnet-*` / `haiku-*`, `opus-4-5`, older Anthropic, and
+///   any unrecognized model. Full is the safe default.
+#[must_use]
+pub fn prompt_tier_for(model: &str) -> runtime::PromptTier {
+    // Non-Anthropic providers are lean by default — CC never ran them, so
+    // there is no verbose prompt to mirror and the capable ones do better lean.
+    if detect_provider_kind(model) != ProviderKind::Anthropic {
+        return runtime::PromptTier::Lean;
+    }
+    let lowered = model.to_ascii_lowercase();
+    let canonical = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
+    let canonical = canonical.strip_prefix("claude-").unwrap_or(canonical);
+    anthropic_prompt_tier(canonical)
+}
+
+/// Tier for an Anthropic model given its canonical name (lowercased, with any
+/// provider and `claude-` prefixes already stripped).
+fn anthropic_prompt_tier(canonical: &str) -> runtime::PromptTier {
+    if canonical.contains("fable") {
+        return runtime::PromptTier::Mid;
+    }
+    // Frontier opus is lean. `opus-4-5` is NOT frontier (stays Full), so match
+    // the lean opus builds precisely rather than on a bare `opus-4` prefix.
+    if canonical.starts_with("opus-5")
+        || canonical.starts_with("opus-4-8")
+        || canonical.starts_with("opus-4-1")
+        || (canonical.starts_with("opus-4") && !canonical.starts_with("opus-4-5"))
+    {
+        return runtime::PromptTier::Lean;
+    }
+    runtime::PromptTier::Full
+}
+
 /// Env var names used by other provider backends. When Anthropic auth
 /// resolution fails we sniff these so we can hint the user that their
 /// credentials probably belong to a different provider and suggest the
@@ -273,7 +314,7 @@ mod tests {
     use super::{
         anthropic_missing_credentials, anthropic_missing_credentials_hint, detect_provider_kind,
         load_dotenv_file, model_family_identity_for, model_family_identity_for_kind, parse_dotenv,
-        ProviderKind,
+        prompt_tier_for, ProviderKind,
     };
 
     /// Serializes every test in this module that mutates process-wide
@@ -594,6 +635,45 @@ NO_EQUALS_LINE
             model_family_identity_for("grok-3"),
             runtime::ModelFamilyIdentity::Generic
         );
+    }
+
+    #[test]
+    fn prompt_tier_maps_models_to_tiers() {
+        use runtime::PromptTier;
+
+        // Frontier Anthropic opus → Lean (bare and vendor/date-suffixed forms).
+        assert_eq!(prompt_tier_for("opus-4-8"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("claude-opus-4-8"), PromptTier::Lean);
+        assert_eq!(
+            prompt_tier_for("claude-opus-4-8-20260515"),
+            PromptTier::Lean
+        );
+        assert_eq!(prompt_tier_for("opus-5"), PromptTier::Lean);
+        // Older opus that CC remaps onto opus-4-8 → also Lean.
+        assert_eq!(prompt_tier_for("opus-4-1"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("claude-opus-4"), PromptTier::Lean);
+
+        // opus-4-5 is NOT frontier → Full.
+        assert_eq!(prompt_tier_for("claude-opus-4-5"), PromptTier::Full);
+
+        // fable-5 → Mid.
+        assert_eq!(prompt_tier_for("fable-5"), PromptTier::Mid);
+        assert_eq!(prompt_tier_for("claude-fable-5"), PromptTier::Mid);
+
+        // sonnet / haiku → Full.
+        assert_eq!(prompt_tier_for("sonnet-5"), PromptTier::Full);
+        assert_eq!(prompt_tier_for("claude-sonnet-4-5"), PromptTier::Full);
+        assert_eq!(prompt_tier_for("haiku-4-5"), PromptTier::Full);
+
+        // Non-Anthropic providers → Lean by default.
+        assert_eq!(prompt_tier_for("openai/gpt-4.1-mini"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("qwen-plus"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("deepseek-v4-pro"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("grok-3"), PromptTier::Lean);
+        assert_eq!(prompt_tier_for("gemini/gemini-pro"), PromptTier::Lean);
+
+        // Unrecognized model (heuristically Anthropic) → Full, the safe default.
+        assert_eq!(prompt_tier_for("some-unknown-model"), PromptTier::Full);
     }
 
     #[test]

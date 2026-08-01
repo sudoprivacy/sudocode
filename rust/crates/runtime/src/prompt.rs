@@ -63,6 +63,25 @@ impl ModelFamilyIdentity {
     }
 }
 
+/// How much of the static system-prompt scaffolding a given model receives.
+///
+/// Newer/frontier models perform better with a lean prompt, while older or
+/// non-frontier models still benefit from the verbose procedural guidance.
+/// The concrete model→tier mapping lives with the provider resolver (see
+/// `api::prompt_tier_for`); this enum only encodes the three levels the
+/// prompt builder gates on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptTier {
+    /// All verbose sections — the historical default and safe fallback.
+    #[default]
+    Full,
+    /// Slim `# Harness`, memory collapsed, but keep the communication
+    /// scaffolding (tone + output efficiency) that mid-tier models still use.
+    Mid,
+    /// Slim `# Harness` only, everything procedural dropped — frontier models.
+    Lean,
+}
+
 /// Structured system prompt with an explicit static/dynamic split.
 ///
 /// Static sections are stable across requests and suitable for aggressive
@@ -175,6 +194,7 @@ pub struct SystemPromptBuilder {
     os_name: Option<String>,
     os_version: Option<String>,
     model_family: Option<ModelFamilyIdentity>,
+    tier: PromptTier,
     append_sections: Vec<String>,
     project_context: Option<ProjectContext>,
     config: Option<RuntimeConfig>,
@@ -204,6 +224,22 @@ impl SystemPromptBuilder {
     pub fn with_model_family(mut self, model_family: ModelFamilyIdentity) -> Self {
         self.model_family = Some(model_family);
         self
+    }
+
+    /// Select the prompt tier (default [`PromptTier::Full`]). Leaving the
+    /// default produces byte-identical output to callers that never set a tier.
+    #[must_use]
+    pub fn with_tier(mut self, tier: PromptTier) -> Self {
+        self.tier = tier;
+        self
+    }
+
+    /// The prompt tier this builder will render. Used by the memory module to
+    /// select the full vs. lean memory instructions without threading the tier
+    /// through [`append_section`].
+    #[must_use]
+    pub fn tier(&self) -> PromptTier {
+        self.tier
     }
 
     #[must_use]

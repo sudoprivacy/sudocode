@@ -65,6 +65,14 @@ fn async_repl_processes_single_turn_and_exits() {
     sess.expect("4")
         .expect("async REPL should stream the LLM answer through the runner thread");
 
+    // Wait for the prompt to reappear after the turn ends — the
+    // prompt_ready channel gates readline, so ❯ only shows once all
+    // output (including the status line) is flushed.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should see prompt after turn: {e}\nPTY screen:\n{screen}");
+    });
+
     sess.send("/exit\r").expect("send /exit");
 
     // Generous timeout: CI runners (esp. macos-latest) are slower to reap

@@ -1727,7 +1727,10 @@ fn run_repl_async_dispatch(
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
-    cli.esc_monitor_enabled = false;
+    // Re-enable the raw-mode ESC/Ctrl-C listener (HookAbortMonitor).
+    // With prompt_ready gating, rustyline is NOT in readline during turns,
+    // so HookAbortMonitor can safely own stdin for abort key detection.
+    cli.esc_monitor_enabled = true;
 
     let abort_signal = runtime::HookAbortSignal::new();
     cli.persistent_abort_signal = Some(abort_signal.clone());

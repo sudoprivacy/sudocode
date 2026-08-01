@@ -225,7 +225,9 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
             );
             // Wait for the startup banner + separator to finish before
             // showing the first ❯ prompt.
-            let _ = prompt_ready_rx.recv();
+            if prompt_ready_rx.recv().is_err() {
+                return; // coordinator exited
+            }
             loop {
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
@@ -237,10 +239,10 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                             break;
                         }
                         // Wait for the coordinator to signal that all output
-                        // (slash command, turn end) is done before re-entering
-                        // read_line. For LLM turns the coordinator signals
-                        // immediately so the user can type during streaming.
-                        let _ = prompt_ready_rx.recv();
+                        // is done before re-entering read_line.
+                        if prompt_ready_rx.recv().is_err() {
+                            break; // coordinator exited (e.g. /exit)
+                        }
                     }
                     Ok(ReadOutcome::Exit) => {
                         let _ = input_tx_clone.send(InputEvent::Exit);
@@ -317,8 +319,8 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         next.prompt,
                         turn_tx.clone(),
                     ));
-                    // Signal immediately — user can type while LLM streams.
-                    let _ = prompt_ready_tx.send(());
+                    // Don't signal prompt_ready — wait for TurnDone so ❯
+                    // appears AFTER the runner's output + separator.
                     continue;
                 }
                 let outcome = coord
@@ -329,9 +331,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     SubmitOutcome::Queued => {}
                     SubmitOutcome::Interrupt => {
                         driver.abort_current_turn();
-                        eprintln!(
-                            "\x1b[2m(interrupting current turn; interrupter will run as a solo new turn)\x1b[0m"
-                        );
                     }
                     SubmitOutcome::Rejected => {
                         eprintln!(
@@ -339,8 +338,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         );
                     }
                 }
-                // User can keep typing during a running turn.
-                let _ = prompt_ready_tx.send(());
+                // Don't signal prompt_ready — wait for TurnDone.
             }
             LoopEvent::TurnDone => {
                 turn_active = false;
@@ -355,6 +353,9 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         next.prompt,
                         turn_tx.clone(),
                     ));
+                } else {
+                    // All output done, queue drained — show ❯.
+                    let _ = prompt_ready_tx.send(());
                 }
             }
         }

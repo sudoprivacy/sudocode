@@ -214,8 +214,8 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, model_family_identity_for, resolve_provider_from_config, ApiError,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
+    max_tokens_for_model, model_family_identity_for, prompt_tier_for, resolve_provider_from_config,
+    ApiError, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
     OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
@@ -5522,6 +5522,9 @@ fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemP
         std::env::consts::OS,
         "unknown",
         model_family_identity_for(model),
+        // Sub-agents follow the tier of their own model, mirroring how the
+        // parent resolves it.
+        prompt_tier_for(model),
         subagent_type,
     )
     .map_err(|error| error.to_string())?;

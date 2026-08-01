@@ -220,7 +220,6 @@ use api::{
     ToolDefinition, ToolResultContentBlock,
 };
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
-use reqwest::blocking::Client;
 use runtime::{
     agent_mailbox::{self, kinds as mailbox_kinds, MailboxEnvelope},
     check_freshness,
@@ -2922,8 +2921,10 @@ fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
-    // Run on a dedicated OS thread to avoid deadlocking reqwest::blocking inside
-    // a tokio async runtime (e.g. ACP mode).
+    // Run on a dedicated OS thread: execute_web_fetch drives the request with
+    // block_on on the shared HTTP runtime, which panics if called from within
+    // an ambient tokio runtime (e.g. ACP mode). The spawned thread is outside
+    // any such runtime.
     std::thread::spawn(move || to_pretty_json(execute_web_fetch(&input)?))
         .join()
         .unwrap_or_else(|_| Err("web fetch thread panicked".into()))
@@ -2931,8 +2932,10 @@ fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_search(input: WebSearchInput) -> Result<String, String> {
-    // Run on a dedicated OS thread to avoid deadlocking reqwest::blocking inside
-    // a tokio async runtime (e.g. ACP mode).
+    // Run on a dedicated OS thread: execute_web_search drives the request with
+    // block_on on the shared HTTP runtime, which panics if called from within
+    // an ambient tokio runtime (e.g. ACP mode). The spawned thread is outside
+    // any such runtime.
     std::thread::spawn(move || to_pretty_json(execute_web_search(&input)?))
         .join()
         .unwrap_or_else(|_| Err("web search thread panicked".into()))
@@ -3801,22 +3804,25 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let started = Instant::now();
     let client = build_http_client()?;
     let request_url = normalize_fetch_url(&input.url)?;
-    let response = client
-        .get(request_url.clone())
-        .send()
-        .map_err(|error| error.to_string())?;
-
-    let status = response.status();
-    let final_url = response.url().to_string();
-    let code = status.as_u16();
-    let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let body = response.text().map_err(|error| error.to_string())?;
+    let (code, code_text, final_url, content_type, body) = block_on_http(async {
+        let response = client
+            .get(request_url.clone())
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let code = status.as_u16();
+        let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response.text().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>((code, code_text, final_url, content_type, body))
+    })?;
     let bytes = body.len();
     let normalized = normalize_fetched_content(&body, &content_type);
     let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
@@ -3908,13 +3914,57 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     })
 }
 
-fn build_http_client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("sudocode-rust-tools/0.1")
-        .build()
-        .map_err(|error| error.to_string())
+fn build_http_client() -> Result<reqwest::Client, String> {
+    use std::sync::OnceLock;
+
+    // Reuse one async client (and its connection pool) across every call, as
+    // reqwest itself recommends. Cheap Arc clone per call.
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .user_agent("sudocode-rust-tools/0.1")
+            .build()
+            .expect("failed to build the shared HTTP client")
+    });
+    Ok(client.clone())
+}
+
+/// Shared, process-lifetime current-thread Tokio runtime used to drive the
+/// async HTTP client from the synchronous web-search / web-fetch tools.
+///
+/// This replaces `reqwest::blocking`, whose hidden internal runtime keeps a
+/// background thread ("reqwest-internal-sync-runtime") parked inside the mio
+/// IOCP wait (`ZwRemoveIoCompletionEx`). On Windows that thread — or the
+/// per-call IOCP teardown when the blocking client is dropped — races with
+/// process exit and intermittently fastfails with STATUS_STACK_BUFFER_OVERRUN
+/// (0xC0000409): the flaky `tools` test-binary teardown crash.
+///
+/// A current-thread runtime instead polls its IOCP driver inline during
+/// `block_on`, so it never keeps a thread parked in the IOCP wait between
+/// calls. Caching it also means the IOCP is created once and never torn down
+/// mid-run; at process exit the handle is simply abandoned and reclaimed by
+/// the OS, with no mio `CloseHandle` on the teardown path. Concurrent web
+/// calls serialize on this runtime's core, which is acceptable for these
+/// low-frequency network tools.
+fn http_runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build the shared HTTP runtime")
+    })
+}
+
+/// Drive an async HTTP interaction to completion on the shared HTTP runtime.
+/// Called from the dedicated worker threads spawned by `run_web_search` /
+/// `run_web_fetch`, which are outside any ambient Tokio context.
+fn block_on_http<F: std::future::Future>(future: F) -> F::Output {
+    http_runtime().block_on(future)
 }
 
 fn normalize_fetch_url(url: &str) -> Result<String, String> {
@@ -3948,13 +3998,16 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
 fn execute_duckduckgo_search(input: &WebSearchInput) -> Result<Vec<SearchHit>, String> {
     let client = build_http_client()?;
     let search_url = build_search_url(&input.query)?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| error.to_string())?;
-
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
+    let (final_url, html) = block_on_http(async {
+        let response = client
+            .get(search_url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let final_url = response.url().clone();
+        let html = response.text().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>((final_url, html))
+    })?;
     let mut hits = extract_search_hits(&html);
 
     if hits.is_empty() && final_url.host_str().is_some() {
@@ -3983,22 +4036,26 @@ fn execute_tavily_search(
         body["exclude_domains"] = serde_json::json!(blocked);
     }
 
-    let response = client
-        .post(api_url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .json(&body)
-        .send()
-        .map_err(|e| format!("Tavily request failed: {e}"))?;
+    let tavily_resp: TavilySearchResponse = block_on_http(async {
+        let response = client
+            .post(api_url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Tavily request failed: {e}"))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().unwrap_or_default();
-        return Err(format!("Tavily API returned {status}: {text}"));
-    }
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Tavily API returned {status}: {text}"));
+        }
 
-    let tavily_resp: TavilySearchResponse = response
-        .json()
-        .map_err(|e| format!("Failed to parse Tavily response: {e}"))?;
+        response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Tavily response: {e}"))
+    })?;
 
     Ok(tavily_resp
         .results

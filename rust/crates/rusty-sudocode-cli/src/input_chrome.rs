@@ -29,6 +29,14 @@ fn separator(width: usize) -> String {
 
 const FOOTER: &str = "  \x1b[2m/help · /status · Tab for /commands\x1b[0m";
 
+/// Print a plain separator line to stdout. No cursor manipulation — safe
+/// to call from any thread. Used by the async REPL's runner/coordinator
+/// to visually separate output from the next prompt.
+pub fn print_separator() {
+    let w = term_width();
+    println!("{}", separator(w));
+}
+
 /// Print the input chrome block (top sep, prompt placeholder, bottom sep,
 /// footer) then move the cursor back to the prompt line so `read_line()`
 /// renders there.

@@ -29,12 +29,24 @@ fn separator(width: usize) -> String {
 
 const FOOTER: &str = "  \x1b[2m/help · /status · Tab for /commands\x1b[0m";
 
-/// Print a plain separator line to stdout. No cursor manipulation — safe
-/// to call from any thread. Used by the async REPL's runner/coordinator
-/// to visually separate output from the next prompt.
-pub fn print_separator() {
+/// Print a separator line + permission-mode footer below the prompt.
+/// No cursor manipulation — safe to call from any thread.
+pub fn print_separator_with_footer(permission_mode: &str) {
     let w = term_width();
-    println!("{}", separator(w));
+    let sep = separator(w);
+    let icon = match permission_mode {
+        "danger-full-access" => "⏵⏵",
+        "workspace-write" => "⏵",
+        _ => "▷",
+    };
+    let label = match permission_mode {
+        "danger-full-access" => "full access",
+        "workspace-write" => "workspace write",
+        "read-only" => "read only",
+        other => other,
+    };
+    println!("{sep}");
+    println!("  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m");
 }
 
 /// Print the input chrome block (top sep, prompt placeholder, bottom sep,

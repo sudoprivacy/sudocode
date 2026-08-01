@@ -191,6 +191,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     startup_banner: String,
     initial_completions: Vec<(String, String)>,
     esc_abort_hook: Option<EscAbortHook>,
+    permission_mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let coord = Arc::new(Mutex::new(TurnInputCoordinator::new()));
     let (input_tx, input_rx) = sync_channel::<InputEvent>(16);
@@ -201,7 +202,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     let (prompt_ready_tx, prompt_ready_rx) = sync_channel::<()>(1);
 
     println!("{startup_banner}");
-    input_chrome::print_separator();
+    input_chrome::print_separator_with_footer(permission_mode);
     // Signal the input thread: startup output is done, show ❯.
     let _ = prompt_ready_tx.send(());
 

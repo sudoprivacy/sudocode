@@ -77,7 +77,6 @@ use std::thread;
 use std::time::Duration;
 
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
-use crate::input_chrome;
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
@@ -217,10 +216,14 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 esc_abort_hook,
             );
             loop {
-                let _ = input_chrome::print_before_prompt();
+                // No input chrome in the async REPL — raw ANSI cursor
+                // manipulation (print_before_prompt / replace_after_submit)
+                // races with the runner thread's stdout, causing garbled
+                // output. The sync REPL can use chrome safely because it's
+                // single-threaded. A proper fix requires a TUI framework
+                // (ratatui) that owns the full terminal layout.
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
-                        let _ = input_chrome::replace_after_submit(&text);
                         if input_tx_clone.send(InputEvent::Submit(text)).is_err() {
                             break;
                         }

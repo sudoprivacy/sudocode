@@ -71,7 +71,7 @@
 <b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> · <code>sessions/</code> — persistent, Metastore, the addressable identity) vs
 <b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = <code>AgentRegistry</code> SSOT = the session id).
 <br><br>
-<b>Primary key = <code>agent-name</code></b> (one name → many pids across worktrees). The <code>workspace_hash</code> you'll see under <code>sessions/</code> is <i>not</i> a cwd-primary key — it is a <b>per-repo sub-partition</b> so one profile talking to many repos keeps its sessions sorted (§2.4). This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
+<b>Three IDs</b> (nexus Q1, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, spans many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Sessions are a flat byte-SSOT at <span class="path">/sessions/&lt;session-id&gt;</span> (no <code>workspace_hash</code>, no agent nesting); per-repo &amp; per-agent ties are DT_LINKs + an <code>owner</code> field, isolation by policy not path. This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
 <br><br>
 <b>This table's job:</b> put CC's flat <code>~/.claude/projects/&lt;cwd&gt;/</code> model on each row, then read across — (1) does the Nexus end-state <i>cover</i> it? (2) how do sudocode &amp; sudowork store it today, and what's <span class="b dup">dup</span> to merge? CC is the <span class="b ref">reference</span> we map from; Nexus is the target all three converge to.
 <br><br>
@@ -105,9 +105,9 @@
   <td class="mega" rowspan="2">Identity</td>
   <td class="item">Primary key</td>
   <td class="cc">Sanitized <b>cwd</b> → <span class="path">~/.claude/projects/&lt;C--Users-…&gt;/</span> (Win) / <span class="path">-Users-…</span> (POSIX). One implicit agent per project.</td>
-  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span><br><small><b>mirror →</b> the fingerprint <i>is</i> the end-state <code>workspace_hash</code> (per-repo partition); <code>agent-name</code> is new (today implicit = one profile). The <code>session-id</code>↔<code>pid</code> mapping is itself <b>open</b>: §2.3 says <code>session_id = pid</code>, but rev4's 3-layer makes session-id <i>cross-pid</i> (pid ephemeral/per-process) — see Q1.</small></td>
-  <td>conversation-id (SQLite row) + <code>extra.workspace</code> / <code>extra.backend</code>. <span class="b partial">partial</span></td>
-  <td><b>agent-name</b> (image, primary) + <b>pid</b> (runtime). <span class="path">/agents/{name}/</span> · <span class="path">/proc/{pid}/</span>. One name → many pids. <span class="b ok">given</span></td>
+  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span><br><small><b>mirror →</b> (Q1 resolved) sudocode's <code>session-id</code> → the flat <span class="path">/sessions/&lt;session-id&gt;</span>; the cwd/repo tie → a <b>session→repo DT_LINK</b>, <i>not</i> a hash sub-partition (the fingerprint's per-repo role retires); <code>agent-name</code> is new (today implicit = one profile); <code>pid</code> = ephemeral runtime handle. <b>session-id ≠ pid.</b></small></td>
+  <td>conversation-id (SQLite row) + <code>extra.workspace</code> / <code>extra.backend</code>. <span class="b partial">partial</span><br><small>Q1: map conversation-id → <b>session-id</b> (durable), <i>not</i> pid; pid is registered at runtime by MAS keyed by session-id.</small></td>
+  <td><b>Three IDs</b> (nexus Q1): <b>agent-name</b> (durable principal) · <b>session-id</b> (durable UUID, <code>--resume</code> key, spans N pids) · <b>pid</b> (ephemeral, one boot, runtime handle). <b>session-id ≠ pid.</b> <span class="path">/agents/{name}/</span> · <span class="path">/sessions/&lt;sid&gt;</span> · <span class="path">/proc/{pid}/</span>. <span class="b ok">given</span></td>
 </tr>
 <tr>
   <td class="item">Image vs runtime split</td>
@@ -124,7 +124,7 @@
   <td class="cc"><span class="path">~/.claude/projects/&lt;key&gt;/&lt;uuid&gt;.jsonl</span> — JSONL, up to multi-GB, parentUuid DAG.</td>
   <td><span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span>. Typed records in one file: <code>session_meta</code> / <code>compaction</code> / <code>prompt_history</code> / <code>message</code>; rotate 256 KiB × 3. <span class="b ok">done</span></td>
   <td><code>messages</code> table = full UI copy of the conversation (assistant + tool calls/results), joined by <code>acpSessionId</code>. <span class="b dup">dup — primary</span></td>
-  <td>§2.4: <span class="path">/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</span> (per-repo hash partition). rev4 workspace reply: <span class="path">/sessions/{agent-name}/{sid}/</span> (top-level zone, <b>no hash</b>). <code>session-id</code> = pid. <span class="b q">reconcile — Q1</span></td>
+  <td><b>RESOLVED (nexus Q1):</b> flat <span class="path">/sessions/&lt;session-id&gt;</span> — session-id is the <b>sole structural key</b> (no workspace_hash, no agent-name nesting); an <code>owner</code> field drives default policy. Associations all via DT_LINK: agent→sessions <span class="path">/agents/{name}/sessions/&lt;sid&gt;</span> → <span class="path">/sessions/&lt;sid&gt;</span> (enum index, <code>list(prefix)</code>=readdir); session→repo 0..N; pid→session <span class="path">/proc/{pid}/session</span> (reaped). <span class="b ok">given</span></td>
 </tr>
 <tr>
   <td class="item">Cross-agent /<br>cross-session search
@@ -133,7 +133,7 @@
   <td class="cc">Implicit — all sessions flat under the project dir; easy cross-session listing.</td>
   <td><code>SessionStore</code> per workspace-fp; <code>--resume latest</code> / <code>list</code> (computed by scanning + mtime sort). <span class="b partial">partial</span></td>
   <td>Own SQLite index (<code>getUserConversations</code>, <code>ORDER BY updated_at</code>); never enumerates engine files. <span class="b dup">dup</span></td>
-  <td><span class="b q">open?</span> DT_LINK per-agent <span class="path">/agents/{name}/sessions/</span> → shared <span class="path">/agents/sessions/</span>?</td>
+  <td><b>RESOLVED (Q1):</b> all sessions flat under <span class="path">/sessions/</span>; cross-agent access = scan <span class="path">/sessions/</span> or hold a DT_LINK; <b>isolation is policy (owner-default), not path</b>; link-follow re-auths (§13) so a link ≠ a pass. <span class="b ok">given</span></td>
 </tr>
 
 <!-- SUBAGENT -->
@@ -235,7 +235,7 @@
   <td class="cc"><span class="path">&lt;cwd&gt;/bridge-pointer.json</span> — <code>{sessionId,environmentId,source}</code>, mtime TTL 4h, cross-worktree freshest.</td>
   <td><code>--resume &lt;id|latest|last|recent&gt;</code>; "latest" recomputed by scanning + mtime — <b>no stored file pointer</b>. <span class="b partial">partial</span></td>
   <td><code>extra.acpSessionId</code> (acp) / <code>extra.mossSessionId</code> (remote) = the resume pointer. <span class="b dup">dup</span></td>
-  <td><b>AgentRegistry</b> (pid FSM, kernel SSOT) = "which pid is live"; <span class="path">/proc/{pid}/</span> is the live session. <span class="b ok">given</span></td>
+  <td><b>Resume key = session-id</b> (durable UUID); <b>AgentRegistry</b> (pid FSM, kernel SSOT) = "which pid is live" (runtime); MAS registers pid keyed by session-id. <span class="path">/proc/{pid}/</span> = the live boot. <span class="b ok">given</span></td>
 </tr>
 
 <!-- A2A -->
@@ -301,7 +301,7 @@
 </div>
 
 <h2>Open questions (for consensus)</h2>
-<div class="qbox"><span class="qn">Q1</span> <b>Session identity &amp; path — nexus-internal reconcile needed.</b> <u>Axis A (path):</u> two nexus layouts disagree: <code>nexus-integration §2.4</code> = <span class="path">/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</span> (per-repo hash sub-partition under the profile); the <b>rev4 workspace reply</b> = <span class="path">/sessions/{agent-name}/{sid}/</span> (sessions as a top-level zone, <b>no workspace_hash</b>; repos are separate <code>/repos/</code> zones linked by DT_LINK). agent-name is primary either way — but is per-repo separation a hash sub-dir or a DT_LINK to a repo zone? <u>Axis B (identity):</u> is <code>session_id = pid</code> (§2.3), or is <code>session-id</code> <b>cross-pid</b> with <code>pid</code> ephemeral/per-process — possibly the searchable host pid (rev4 3-layer)? A session outlives a pid via <code>--resume</code>, so these can't both hold. <b>nexus to reconcile both axes.</b> <small>(Axis A is the earlier workspace_hash "surprise"; Axis B surfaced from the <code>session-id → pid</code> mirror — both real cross-doc inconsistencies, not bugs to unilaterally "fix".)</small></div>
+<div class="qbox"><span class="qn">Q1</span> <b>Session identity &amp; path — RESOLVED (nexus, 2026-08).</b> <u>Axis B (identity):</u> <b>session-id ≠ pid</b> — three IDs: agent-name (durable principal) · session-id (durable UUID, <code>--resume</code> key, spans N pids) · pid (ephemeral runtime handle). §2.3 had borrowed "session_id" to name the pid handle; fix = <code>start_session_v1</code> takes an optional session_id (resume) and returns {session_id, pid, workspace_path}; addressing fields renamed to pid. <u>Axis A (path):</u> <b>flat <span class="path">/sessions/&lt;session-id&gt;</span></b> is the byte SSOT (no workspace_hash, no agent-name nesting); an <code>owner</code> field drives default policy; all associations are DT_LINKs (agent→sessions, session→repo 0..N, pid→session). Isolation = <b>policy (soft), not path</b> — MetaStore has only get/list, so a DT_LINK dir-index reuses native <code>list(prefix)</code> = O(subset) vs building an attribute index. <small>nexus is landing this into nexus-integration §2.1/§2.3 via PR; the two end-state cells (Session/Transcript + Identity/Primary-key) above are updated to match.</small></div>
 <div class="qbox"><span class="qn">Q2</span> <b>Memory build-out.</b> Which of the 5 missing memory features (extractMemories · session-memory · team-memory · auto-dream · daily-logs) does scode build, and in what order? And where does <b>project-memory</b> live when a workspace DT_LINKs several repos — at the primary mount root (≈ launch path)?</div>
 <div class="qbox"><span class="qn">Q3</span> <b>Cross-agent session search</b> via DT_LINK <code>/agents/{name}/sessions/</code> → shared <code>/agents/sessions/</code> index? <small>(depends on Q1 session-path + Q6; and on the nexus <b>search-plugin</b> — Rust glob/grep port committed, Python search service today)</small></div>
 <div class="qbox"><span class="qn">Q4</span> <b>Oversized tool-output offload</b> (CC's <code>tool-results/</code> + <code>content-replacement</code>) into scode — adopt? Path under <code>/agents/{name}/sessions/&lt;hash&gt;/tool-results/</code>?</div>

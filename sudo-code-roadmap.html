@@ -87,6 +87,9 @@
   }
   th { background: var(--surface); font-weight: 600; color: var(--fg); }
   tbody tr:nth-child(even) td { background: var(--surface-alt); }
+  .table-title { margin: 28px 0 6px; }
+  .table-caption { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 8px 0 30px; }
+  .table-caption code { font-size: 12px; }
   hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
   ul li, ol li { margin: 4px 0; }
   blockquote {
@@ -1115,12 +1118,7 @@ automated in <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/
 Verbatim CC prompt text is kept local (not committed), treated like the private
 CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
 
-<p><strong>Table A — what CC serves each model (SSOT reference, CC&nbsp;2.1.207).</strong>
-The lean/full boundary is <em>model-specific, not generational</em>: sonnet-5
-and haiku-4-5 are new but still get the full 27&nbsp;KB prompt. <strong>scode
-must support all models, not just Anthropic's.</strong> CC only maps its own
-models, so it is a reference for the Anthropic rows only — for non-Anthropic
-models (last row) there is nothing to mirror, and scode picks the tier itself.</p>
+<p class="table-title"><strong>Table A — what CC serves each model</strong> (SSOT reference, CC&nbsp;2.1.207).</p>
 
 <table>
   <thead><tr><th>Model</th><th>CC variant</th><th>System-prompt size</th><th>Memory block</th><th>Distinctive sections</th></tr></thead>
@@ -1134,19 +1132,20 @@ models (last row) there is nothing to mirror, and scode picks the tier itself.</
   </tbody>
 </table>
 
-<p>CC's three variants share the same lean <code># Memory</code> (2,099) across
-Lean+Mid, but sonnet/haiku/older keep the full <code># auto memory</code>
-(12,834). CC's cut for its lean models: delete <code># Doing tasks</code> /
-<code># Executing actions with care</code> / <code># Using your tools</code> /
-<code># Tone and style</code> / <code># Text output</code> entirely, collapse
-<code># auto memory</code> → <code># Memory</code>. Net 27,385 → 5,889 chars
-(−78.5%).</p>
+<p class="table-caption">The lean/full boundary is <em>model-specific, not
+generational</em> — sonnet-5 and haiku-4-5 are new but still get the full
+27&nbsp;KB prompt. scode must support all models, not just Anthropic's: CC maps
+only its own models, so it's a reference for the Anthropic rows only — for
+non-Anthropic models (last row) there's nothing to mirror and scode picks the
+tier itself. CC's three variants share the same lean <code># Memory</code>
+(2,099) across Lean+Mid, but sonnet/haiku/older keep the full
+<code># auto memory</code> (12,834). CC's cut for its lean models: delete
+<code># Doing tasks</code> / <code># Executing actions with care</code> /
+<code># Using your tools</code> / <code># Tone and style</code> /
+<code># Text output</code> entirely, collapse <code># auto memory</code> →
+<code># Memory</code>. Net 27,385 → 5,889 chars (−78.5%).</p>
 
-<p><strong>Table B — scode section-by-section, exhaustive.</strong> Every section
-<code>build()</code> can emit is listed (static + dynamic), with the size of each
-Rust prompt literal and what each CC variant does with it. <code>CC-mid</code> =
-what <code>fable-5</code> gets. Rows marked <em>keep</em> are aligned or
-scode-specific — not bloat.</p>
+<p class="table-title"><strong>Table B — scode section-by-section, exhaustive.</strong></p>
 
 <table>
   <thead><tr><th>scode section (file)</th><th>Now</th><th>CC-full</th><th>CC-mid (fable-5)</th><th>CC-lean (opus-4-8/5)</th><th>Action</th></tr></thead>
@@ -1169,7 +1168,11 @@ scode-specific — not bloat.</p>
   </tbody>
 </table>
 
-<p>✦ <code>fable-5</code>'s Mid variant drops the same five sections as Lean but
+<p class="table-caption">Every section <code>build()</code> can emit is listed
+(static + dynamic), with the size of each Rust prompt literal and what each CC
+variant does with it. <code>CC-mid</code> = what <code>fable-5</code> gets. Rows
+marked <em>keep</em> are aligned or scode-specific — not bloat.<br>
+✦ <code>fable-5</code>'s Mid variant drops the same five sections as Lean but
 <em>adds</em> <code># Communicating with the user</code> (3,734) — comms
 scaffolding the cheaper/faster model benefits from and the top opus models don't
 get. scode's <code># Tone and style</code> + <code># Output efficiency</code>
@@ -1182,16 +1185,7 @@ on CC's ~5,889. Because every sub-agent reuses <code>build()</code> via
 <code>load_system_prompt_for_agent</code>, the saving multiplies across each
 spawn.</p>
 
-<p><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong>
-Tables A/B are about <em>size</em>; this one is about <em>content set
-difference</em>. Most of what lean-CC keeps (reversibility guidance,
-dedicated-tools preference, <code>file:line</code>, memory) scode also has —
-just in verbose form (row group ②). But lean-CC <em>added</em> a few small,
-high-value instructions for newest models that scode lacks entirely (row group
-①, each confirmed absent by grep of <code>prompt.rs</code> + <code>memory/mod.rs</code>).
-Group-① items are tiny <em>additions</em>, not size trade-offs, so they are
-<strong>not tier-gated — adopt for all tiers</strong> (they help full/mid models
-too). Group-② is the size trade-off that <em>is</em> tier-gated.</p>
+<p class="table-title"><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong></p>
 
 <table>
   <thead><tr><th>Direction</th><th>Content</th><th>Other side</th><th>Action</th></tr></thead>
@@ -1210,6 +1204,17 @@ too). Group-② is the size trade-off that <em>is</em> tier-gated.</p>
     <tr><td><code>IMPORTANT: never generate/guess URLs</code> (intro)</td><td>dropped</td><td>Drop for lean models</td></tr>
   </tbody>
 </table>
+
+<p class="table-caption">Tables A/B are about <em>size</em>; this one is about
+<em>content set difference</em>. Most of what lean-CC keeps (reversibility
+guidance, dedicated-tools preference, <code>file:line</code>, memory) scode also
+has — just in verbose form (row group ②). But lean-CC <em>added</em> a few
+small, high-value instructions for newest models that scode lacks entirely (row
+group ①, each confirmed absent by grep of <code>prompt.rs</code> +
+<code>memory/mod.rs</code>). Group-① items are tiny <em>additions</em>, not size
+trade-offs, so they are <strong>not tier-gated — adopt for all tiers</strong>
+(they help full/mid models too). Group-② is the size trade-off that <em>is</em>
+tier-gated.</p>
 
 <p><strong>Approach (all models).</strong> Two rules, because scode runs models
 CC never does:</p>

@@ -1754,12 +1754,20 @@ fn run_repl_async_dispatch(
     });
 
     let session_start = Instant::now();
+    let permission_label = cli_shared
+        .lock()
+        .expect("LiveCli mutex")
+        .config
+        .permission_mode
+        .as_str()
+        .to_string();
     repl_async::run_coordinator_loop(
         driver,
         shared_mode,
         banner,
         completions,
         Some(esc_abort_hook),
+        &permission_label,
     )?;
 
     // All threads spawned by the coordinator loop have already been joined
@@ -1820,13 +1828,14 @@ impl repl_async::TurnDriver for LiveCliDriver {
                     Ok(false) => {}
                     Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
                 }
-                input_chrome::print_separator();
+                input_chrome::print_separator_with_footer(cli.config.permission_mode.as_str());
                 true
             }
             Ok(None) => false,
             Err(error) => {
                 eprintln!("\x1b[31m{error}\x1b[0m");
-                input_chrome::print_separator();
+                let cli = self.cli.lock().expect("LiveCli mutex poisoned");
+                input_chrome::print_separator_with_footer(cli.config.permission_mode.as_str());
                 true
             }
         }
@@ -1837,7 +1846,7 @@ impl repl_async::TurnDriver for LiveCliDriver {
         if let Err(e) = cli.run_turn(prompt) {
             eprintln!("\x1b[31m{e}\x1b[0m");
         }
-        input_chrome::print_separator();
+        input_chrome::print_separator_with_footer(cli.config.permission_mode.as_str());
     }
 
     fn on_exit(&self) {

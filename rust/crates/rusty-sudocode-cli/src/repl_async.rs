@@ -202,7 +202,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     let (prompt_ready_tx, prompt_ready_rx) = sync_channel::<()>(1);
 
     println!("{startup_banner}");
-    input_chrome::print_separator_with_footer(permission_mode);
     // Signal the input thread: startup output is done, show ❯.
     let _ = prompt_ready_tx.send(());
 
@@ -230,6 +229,10 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 return; // coordinator exited
             }
             loop {
+                // Print chrome: ❯ prompt sits between two separators with
+                // a footer below. Safe: prompt_ready guarantees the runner
+                // is not writing to stdout.
+                let _ = input_chrome::print_before_prompt();
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
                         // Echo the submitted text as ` › ...` (gray background)

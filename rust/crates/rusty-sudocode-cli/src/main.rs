@@ -1634,7 +1634,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        input_chrome::print_before_prompt()?;
+        input_chrome::print_before_prompt(cli.config.permission_mode.as_str())?;
         match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
                 input_chrome::replace_after_submit(&input)?;

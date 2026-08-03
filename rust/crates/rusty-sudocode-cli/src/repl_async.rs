@@ -149,6 +149,15 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// self-contained for tests.
     fn on_exit(&self) {}
 
+    /// Try to handle a slash command synchronously on the coordinator thread.
+    /// Returns `true` if the input was a slash command and was handled (caller
+    /// should NOT route it to `run_turn`). Returns `false` if the input is
+    /// not a slash command (caller should route it normally).
+    /// Default returns `false` — test drivers don't handle slash commands.
+    fn try_handle_slash_command(&self, _input: &str) -> bool {
+        false
+    }
+
     /// Auto-interrupt the currently running turn. Called from main when the
     /// coordinator matrix decides `SubmitOutcome::Interrupt` — the runner
     /// thread's `run_turn` will observe the abort and return with a
@@ -182,12 +191,19 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     startup_banner: String,
     initial_completions: Vec<(String, String)>,
     esc_abort_hook: Option<EscAbortHook>,
+    permission_mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{startup_banner}");
-
     let coord = Arc::new(Mutex::new(TurnInputCoordinator::new()));
     let (input_tx, input_rx) = sync_channel::<InputEvent>(16);
     let (turn_tx, turn_rx) = sync_channel::<TurnEvent>(1);
+    // Coordinator → input thread: "output is done, you may prompt."
+    // Sent after slash commands complete and after startup. For LLM turns
+    // the input thread doesn't wait (user can type during streaming).
+    let (prompt_ready_tx, prompt_ready_rx) = sync_channel::<()>(1);
+
+    println!("{startup_banner}");
+    // Signal the input thread: startup output is done, show ❯.
+    let _ = prompt_ready_tx.send(());
 
     // Input thread — owns its rustyline LineEditor. Sends every submitted line
     // to main via a bounded channel. Exits cleanly on Exit / channel closed.
@@ -207,13 +223,29 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 Some(dequeue_hook),
                 esc_abort_hook,
             );
+            // Wait for the startup banner + separator to finish before
+            // showing the first ❯ prompt.
+            if prompt_ready_rx.recv().is_err() {
+                return; // coordinator exited
+            }
             loop {
+                // Print chrome: ❯ prompt sits between two separators with
+                // a footer below. Safe: prompt_ready guarantees the runner
+                // is not writing to stdout.
                 let _ = input_chrome::print_before_prompt();
                 match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
-                        let _ = input_chrome::replace_after_submit(&text);
+                        // Echo the submitted text as ` › ...` (gray background)
+                        // before notifying the coordinator. Safe: the runner
+                        // hasn't started yet (send is below), no stdout race.
+                        let _ = input_chrome::echo_submit(&text);
                         if input_tx_clone.send(InputEvent::Submit(text)).is_err() {
                             break;
+                        }
+                        // Wait for the coordinator to signal that all output
+                        // is done before re-entering read_line.
+                        if prompt_ready_rx.recv().is_err() {
+                            break; // coordinator exited (e.g. /exit)
                         }
                     }
                     Ok(ReadOutcome::Exit) => {
@@ -261,12 +293,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 break;
             }
             LoopEvent::Input(InputEvent::Submit(text)) => {
-                // Slash-command intercept: /exit and /quit are user-visible
-                // shutdown commands. They must NOT reach `TurnDriver::run_turn`
-                // (that'd send the literal text to the LLM as a turn — the
-                // regression the pty_repl_async_queue smoke caught). Handled
-                // BEFORE the coordinator matrix so an in-flight turn (if any)
-                // is aborted + joined + telemetry emits cleanly.
                 if is_exit_command(&text) {
                     if runner_handle.is_some() {
                         // Turn still running — abort it first so the join below
@@ -281,6 +307,14 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     driver.on_exit();
                     break;
                 }
+                // Slash commands are dispatched synchronously on the
+                // coordinator thread — no runner thread, no TurnDone
+                // roundtrip. This avoids the timing issues (chrome
+                // overwriting output) that plagued the thread-based path.
+                if driver.try_handle_slash_command(&text) {
+                    let _ = prompt_ready_tx.send(());
+                    continue;
+                }
                 if !turn_active {
                     let next = coord.lock().unwrap().submit_when_idle(text);
                     turn_active = true;
@@ -289,6 +323,8 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         next.prompt,
                         turn_tx.clone(),
                     ));
+                    // Don't signal prompt_ready — wait for TurnDone so ❯
+                    // appears AFTER the runner's output + separator.
                     continue;
                 }
                 let outcome = coord
@@ -296,21 +332,9 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     .unwrap()
                     .submit_during_turn(text, load_queue_mode(&mode));
                 match outcome {
-                    SubmitOutcome::Queued => {
-                        // Silent: sudowork's queue chips render in the sendbox;
-                        // for the CLI we punt to a status line in a follow-up.
-                    }
+                    SubmitOutcome::Queued => {}
                     SubmitOutcome::Interrupt => {
-                        // Coordinator has already placed the interrupter at the
-                        // queue head with `solo: true`. Now cancel the running
-                        // turn via the driver's abort handle — the runner's
-                        // `run_turn` observes the abort, returns a cancelled
-                        // TurnSummary, sends `TurnEvent::Done`, and the drain
-                        // picks up the interrupter as a fresh solo run.
                         driver.abort_current_turn();
-                        eprintln!(
-                            "\x1b[2m(interrupting current turn; interrupter will run as a solo new turn)\x1b[0m"
-                        );
                     }
                     SubmitOutcome::Rejected => {
                         eprintln!(
@@ -318,6 +342,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         );
                     }
                 }
+                // Don't signal prompt_ready — wait for TurnDone.
             }
             LoopEvent::TurnDone => {
                 turn_active = false;
@@ -332,6 +357,9 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                         next.prompt,
                         turn_tx.clone(),
                     ));
+                } else {
+                    // All output done, queue drained — show ❯.
+                    let _ = prompt_ready_tx.send(());
                 }
             }
         }

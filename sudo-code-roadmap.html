@@ -87,6 +87,9 @@
   }
   th { background: var(--surface); font-weight: 600; color: var(--fg); }
   tbody tr:nth-child(even) td { background: var(--surface-alt); }
+  .table-title { margin: 28px 0 6px; }
+  .table-caption { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 8px 0 30px; }
+  .table-caption code { font-size: 12px; }
   hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
   ul li, ol li { margin: 4px 0; }
   blockquote {
@@ -1115,9 +1118,7 @@ automated in <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/
 Verbatim CC prompt text is kept local (not committed), treated like the private
 CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
 
-<p><strong>Table A — what CC serves each model (SSOT reference, CC&nbsp;2.1.207).</strong>
-The lean/full boundary is <em>model-specific, not generational</em>: sonnet-5
-and haiku-4-5 are new but still get the full 27&nbsp;KB prompt.</p>
+<p class="table-title"><strong>Table A — what CC serves each model</strong> (SSOT reference, CC&nbsp;2.1.207).</p>
 
 <table>
   <thead><tr><th>Model</th><th>CC variant</th><th>System-prompt size</th><th>Memory block</th><th>Distinctive sections</th></tr></thead>
@@ -1127,37 +1128,56 @@ and haiku-4-5 are new but still get the full 27&nbsp;KB prompt.</p>
     <tr><td><code>fable-5</code></td><td data-status="gap-l2"><strong>Mid</strong></td><td>~10.4 KB</td><td><code># Memory</code> (2,099)</td><td><code># Harness</code> (661) + extra <code># Communicating with the user</code> (3,734) — explicit comms scaffolding the top opus models don't get</td></tr>
     <tr><td><code>sonnet-5</code>, <code>sonnet-4-5</code>, <code>sonnet-4</code>, <code>sonnet-3-7</code>, <code>sonnet-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections</td></tr>
     <tr><td><code>opus-4-5</code>, <code>haiku-4-5</code>, <code>haiku-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections — newest haiku still gets the full prompt</td></tr>
+    <tr><td><strong>non-Anthropic</strong> — GPT / qwen / DeepSeek / local (via sudorouter + openai-compat)</td><td data-status="gap-l2"><strong>scode's own</strong></td><td>n/a</td><td>n/a</td><td>CC does not run these, so there is <em>no CC prompt to mirror</em>. scode decides the tier itself — <strong>Lean by default</strong> (they never carried CC's verbose baggage; capable models do better with the lean prompt). This is roughly half the models scode runs in production.</td></tr>
   </tbody>
 </table>
 
-<p>CC's three variants share the same lean <code># Memory</code> (2,099) across
-Lean+Mid, but sonnet/haiku/older keep the full <code># auto memory</code>
-(12,834). CC's cut for its lean models: delete <code># Doing tasks</code> /
-<code># Executing actions with care</code> / <code># Using your tools</code> /
-<code># Tone and style</code> / <code># Text output</code> entirely, collapse
-<code># auto memory</code> → <code># Memory</code>. Net 27,385 → 5,889 chars
-(−78.5%).</p>
+<p class="table-caption">The lean/full boundary is <em>model-specific, not
+generational</em> — sonnet-5 and haiku-4-5 are new but still get the full
+27&nbsp;KB prompt. scode must support all models, not just Anthropic's: CC maps
+only its own models, so it's a reference for the Anthropic rows only — for
+non-Anthropic models (last row) there's nothing to mirror and scode picks the
+tier itself. CC's three variants share the same lean <code># Memory</code>
+(2,099) across Lean+Mid, but sonnet/haiku/older keep the full
+<code># auto memory</code> (12,834). CC's cut for its lean models: delete
+<code># Doing tasks</code> / <code># Executing actions with care</code> /
+<code># Using your tools</code> / <code># Tone and style</code> /
+<code># Text output</code> entirely, collapse <code># auto memory</code> →
+<code># Memory</code>. Net 27,385 → 5,889 chars (−78.5%).</p>
 
-<p><strong>Table B — scode section-by-section bloat vs CC.</strong> Sizes are
-the measured char length of each Rust prompt literal. "Serve Lean" = the action
-for models CC serves lean (opus-4-8 / opus-5); older models keep today's full
-text unchanged.</p>
+<p class="table-title"><strong>Table B — scode section-by-section, exhaustive.</strong></p>
 
 <table>
-  <thead><tr><th>scode section (file)</th><th>Now</th><th>CC-full parity</th><th>CC-lean (opus-4-8/5)</th><th>Action to mirror CC</th></tr></thead>
+  <thead><tr><th>scode section (file)</th><th>Now</th><th>CC-full</th><th>CC-mid (fable-5)</th><th>CC-lean (opus-4-8/5)</th><th>Action</th></tr></thead>
   <tbody>
-    <tr><td><code>get_simple_intro_section</code> — identity + safety (<code>prompt.rs:621</code>)</td><td>910</td><td>preamble</td><td>folded into <code># Harness</code></td><td data-status="covered">Keep — core identity/safety</td></tr>
-    <tr><td><code>get_simple_system_section</code> — <code># System</code> (<code>:637</code>)</td><td>1,239</td><td><code># System</code> 1,619</td><td>reframed → <code># Harness</code> 1,334</td><td data-status="gap-l2">Slim + reframe to <code># Harness</code></td></tr>
-    <tr><td><code>get_simple_doing_tasks_section</code> — <code># Doing tasks</code> (<code>:648</code>)</td><td>2,196</td><td>3,308</td><td>removed</td><td data-status="gap">Drop for lean models</td></tr>
-    <tr><td><code>get_actions_section</code> — <code># Executing actions with care</code> (<code>:664</code>)</td><td>1,575</td><td>3,556</td><td>removed</td><td data-status="gap">Drop (incl. the <code>Examples:</code> block — examples hurt newest models)</td></tr>
-    <tr><td><code>get_using_tools_section</code> — <code># Using your tools</code> + git-commit + PR procedure (<code>:676</code>)</td><td><strong>3,657</strong></td><td>746 (scode is 5× larger than CC-full)</td><td>removed</td><td data-status="gap">Drop procedure; keep one "prefer dedicated tools / batch independent calls" line in Harness; move git/PR steps to a <code>/commit</code> skill / dynamic injection</td></tr>
-    <tr><td><code>get_tone_style_section</code> — <code># Tone and style</code> (<code>:715</code>)</td><td>564</td><td>541</td><td>removed</td><td data-status="gap">Drop; fold <code>file_path:line_number</code> + no-colon-before-tool-calls into Harness</td></tr>
-    <tr><td><code>get_output_efficiency_section</code> — <code># Output efficiency</code> (<code>:724</code>)</td><td>749</td><td>≈ <code># Text output</code> 1,298</td><td>removed</td><td data-status="gap">Drop for lean models</td></tr>
-    <tr><td><code># auto memory</code> (<code>memory/mod.rs:180</code>) — 6 subsections + <code>&lt;examples&gt;</code></td><td><strong>12,525</strong></td><td><code># auto memory</code> 12,834</td><td>collapsed → <code># Memory</code> 2,099</td><td data-status="gap">Collapse to lean <code># Memory</code> for lean models — drop all <code>&lt;examples&gt;</code> + spelled-out 2-step walkthroughs; keep frontmatter format + 4 type one-liners + condensed what-not / access rules</td></tr>
-    <tr><td>coordinator prompt (<code>coordinator_mode.rs:125</code>)</td><td>10,996</td><td>no CC-public equivalent (CC-old style: turn-by-turn <code>## Example</code> + code samples)</td><td>—</td><td data-status="gap-l2">Trim examples for lean models; <strong>fix <code>"You are Claude Code"</code> → <code>"Sudo Code"</code></strong> (naming bug, all models)</td></tr>
-    <tr><td>summarizer (<code>lib.rs:5308</code>) + subagent role hints (<code>:5551</code>)</td><td>~600 / 1 line</td><td>n/a</td><td>already lean</td><td data-status="covered">Keep as-is</td></tr>
+    <tr><td><code>get_simple_intro_section</code> — identity + safety (<code>prompt.rs:621</code>)</td><td>910</td><td>preamble</td><td>→ <code># Harness</code></td><td>→ <code># Harness</code></td><td data-status="covered">Keep — core identity/safety</td></tr>
+    <tr><td><code>get_simple_system_section</code> — <code># System</code> (<code>:637</code>)</td><td>1,239</td><td><code># System</code> 1,619</td><td><code># Harness</code> 661</td><td><code># Harness</code> 1,334</td><td data-status="gap-l2">Slim + reframe to <code># Harness</code></td></tr>
+    <tr><td><code>get_simple_doing_tasks_section</code> — <code># Doing tasks</code> (<code>:648</code>)</td><td>2,196</td><td>3,308</td><td>removed</td><td>removed</td><td data-status="gap">Drop for lean + mid</td></tr>
+    <tr><td><code>get_actions_section</code> — <code># Executing actions with care</code> (<code>:664</code>)</td><td>1,575</td><td>3,556</td><td>removed</td><td>removed</td><td data-status="gap">Drop (incl. the <code>Examples:</code> block — examples hurt newest models)</td></tr>
+    <tr><td><code>get_using_tools_section</code> — <code># Using your tools</code> + git-commit + PR procedure (<code>:676</code>)</td><td><strong>3,657</strong></td><td>746 (scode is 5× larger)</td><td>removed</td><td>removed</td><td data-status="gap">Drop procedure; keep one "prefer dedicated tools / batch independent calls" line in Harness; move git/PR steps to a <code>/commit</code> skill / dynamic injection</td></tr>
+    <tr><td><code>get_tone_style_section</code> — <code># Tone and style</code> (<code>:715</code>)</td><td>564</td><td>541</td><td>≈ <code># Communicating</code> ✦</td><td>removed</td><td data-status="gap">Drop for lean; <strong>mid keeps a comms block</strong> — scode's tone/output already fill that role, so a Mid-tier scode model should retain them</td></tr>
+    <tr><td><code>get_output_efficiency_section</code> — <code># Output efficiency</code> (<code>:724</code>)</td><td>749</td><td>≈ <code># Text output</code> 1,298</td><td>≈ <code># Communicating</code> ✦</td><td>removed</td><td data-status="gap">Drop for lean; keep for mid (see above)</td></tr>
+    <tr><td><code># auto memory</code> (<code>memory/mod.rs:180</code>) — 6 subsections + <code>&lt;examples&gt;</code></td><td><strong>12,525</strong></td><td><code># auto memory</code> 12,834</td><td><code># Memory</code> 2,099</td><td><code># Memory</code> 2,099</td><td data-status="gap">Collapse to lean <code># Memory</code> for lean + mid — drop all <code>&lt;examples&gt;</code> + spelled-out 2-step walkthroughs; keep frontmatter format + 4 type one-liners + condensed what-not / access rules</td></tr>
+    <tr><td><code># Environment context</code> (dynamic, <code>:278</code>)</td><td>dynamic</td><td><code># Environment</code></td><td><code># Environment</code></td><td><code># Environment</code></td><td data-status="covered">Keep — aligned with CC, not bloat</td></tr>
+    <tr><td><code># Project context</code> — AGENTS.md injection (dynamic, <code>:387</code>)</td><td>dynamic</td><td>CC: CLAUDE.md injection</td><td>same</td><td>same</td><td data-status="covered">Keep — scode-specific, same concept as CC, not bloat</td></tr>
+    <tr><td><code># Project instructions</code> (dynamic, <code>:408</code>)</td><td>dynamic</td><td>—</td><td>—</td><td>—</td><td data-status="covered">Keep — runtime-injected, not a static-mirror surface</td></tr>
+    <tr><td><code># Runtime config</code> (dynamic, <code>:603</code>)</td><td>dynamic</td><td>—</td><td>—</td><td>—</td><td data-status="covered">Keep — scode-specific runtime state, not bloat</td></tr>
+    <tr><td>coordinator prompt (<code>coordinator_mode.rs:125</code>)</td><td>10,996</td><td colspan="2">no CC-public equivalent (CC-old style: turn-by-turn <code>## Example</code> + code samples)</td><td>—</td><td data-status="gap-l2">Trim examples for lean/mid; <strong>fix <code>"You are Claude Code"</code> → <code>"Sudo Code"</code></strong> (naming bug, all models)</td></tr>
+    <tr><td>summarizer (<code>lib.rs:5308</code>) + subagent role hints (<code>:5551</code>)</td><td>~600 / 1 line</td><td colspan="3">n/a — already lean</td><td data-status="covered">Keep as-is</td></tr>
+    <tr><td>built-in tool descriptions — <code>mvp_tool_specs()</code> (<code>lib.rs:744</code>), 36 tools</td><td>~3,019 (avg 83/tool)</td><td colspan="3">CC's per-tool descriptions run far larger</td><td data-status="covered">Keep — terse one-liners, <strong>not a bloat surface</strong> (separate from the system prompt; a per-tool API contract loaded only when the tool is available)</td></tr>
   </tbody>
 </table>
+
+<p class="table-caption">Every section <code>build()</code> can emit is listed
+(static + dynamic), with the size of each Rust prompt literal and what each CC
+variant does with it. <code>CC-mid</code> = what <code>fable-5</code> gets. Rows
+marked <em>keep</em> are aligned or scode-specific — not bloat.<br>
+✦ <code>fable-5</code>'s Mid variant drops the same five sections as Lean but
+<em>adds</em> <code># Communicating with the user</code> (3,734) — comms
+scaffolding the cheaper/faster model benefits from and the top opus models don't
+get. scode's <code># Tone and style</code> + <code># Output efficiency</code>
+already occupy that role, so the Mid tier is where they stay rather than being
+cut.</p>
 
 <p><strong>Net for lean models:</strong> main prompt 10,890 → ~2,120 (−80.5%)
 + memory 12,525 → ~2,100 (−83%) ⇒ root prompt ~23,400 → ~4,220 (−82%), landing
@@ -1165,22 +1185,16 @@ on CC's ~5,889. Because every sub-agent reuses <code>build()</code> via
 <code>load_system_prompt_for_agent</code>, the saving multiplies across each
 spawn.</p>
 
-<p><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong>
-Tables A/B are about <em>size</em>; this one is about <em>content set
-difference</em>. Most of what lean-CC keeps (reversibility guidance,
-dedicated-tools preference, <code>file:line</code>, memory) scode also has —
-just in verbose form (row group ②). But lean-CC <em>added</em> a few small,
-high-value instructions for newest models that scode lacks entirely (row group
-①, each confirmed absent by grep of <code>prompt.rs</code> + <code>memory/mod.rs</code>).</p>
+<p class="table-title"><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong></p>
 
 <table>
   <thead><tr><th>Direction</th><th>Content</th><th>Other side</th><th>Action</th></tr></thead>
   <tbody>
-    <tr><td rowspan="5" data-status="gap-l2"><strong>① In lean-CC,<br>NOT in scode</strong><br>(adopt candidates)</td><td>"Report outcomes <strong>faithfully</strong> — if tests fail say so with output; if a step was skipped say that; state done plainly <strong>without hedging</strong>" (<code># Harness</code>)</td><td>absent</td><td>Adopt — honesty / anti-hedge instruction</td></tr>
-    <tr><td>"Write code that <strong>reads like the surrounding code</strong>: match comment density, naming, idiom" (<code># Harness</code>)</td><td>absent (scode only says "comment where non-obvious")</td><td>Adopt — idiom matching</td></tr>
-    <tr><td><code># Context management</code> behavioral guidance: "when you have enough info, <strong>act</strong>; don't re-derive / re-litigate; give a <strong>recommendation, not an exhaustive survey</strong>"</td><td>absent (scode has only a 1-line auto-compress note)</td><td>Adopt — already flagged as "Context window management" Gap in the Memory table</td></tr>
-    <tr><td><code># Session-specific guidance</code>: <code>/&lt;skill-name&gt;</code> → invoke via Skill, only listed skills</td><td>absent</td><td>Adopt if scode surfaces user-invocable skills</td></tr>
-    <tr><td>Dual-use security clause: "C2 frameworks, credential testing, exploit development require clear authorization context: pentesting, CTF, research" (IMPORTANT)</td><td>absent (scode's security line is shorter)</td><td>Adopt — sharper safety scoping</td></tr>
+    <tr><td rowspan="5" data-status="gap-l2"><strong>① In lean-CC,<br>NOT in scode</strong><br>(adopt candidates)</td><td>"Report outcomes <strong>faithfully</strong> — if tests fail say so with output; if a step was skipped say that; state done plainly <strong>without hedging</strong>" (<code># Harness</code>)</td><td>absent</td><td><strong>Adopt (all tiers)</strong> — honesty / anti-hedge instruction</td></tr>
+    <tr><td>"Write code that <strong>reads like the surrounding code</strong>: match comment density, naming, idiom" (<code># Harness</code>)</td><td>absent (scode only says "comment where non-obvious")</td><td><strong>Adopt (all tiers)</strong> — idiom matching</td></tr>
+    <tr><td><code># Context management</code> behavioral guidance: "when you have enough info, <strong>act</strong>; don't re-derive / re-litigate; give a <strong>recommendation, not an exhaustive survey</strong>"</td><td>absent (scode has only a 1-line auto-compress note)</td><td><strong>Adopt (all tiers)</strong> — also closes the "Context window management" Gap in the Memory table</td></tr>
+    <tr><td><code># Session-specific guidance</code>: <code>/&lt;skill-name&gt;</code> → invoke via Skill, only listed skills</td><td>absent</td><td><strong>Adopt (all tiers)</strong> if scode surfaces user-invocable skills</td></tr>
+    <tr><td>Dual-use security clause: "C2 frameworks, credential testing, exploit development require clear authorization context: pentesting, CTF, research" (IMPORTANT)</td><td>absent (scode's security line is shorter)</td><td><strong>Adopt (all tiers)</strong> — sharper safety scoping</td></tr>
     <tr><td rowspan="7" data-status="gap"><strong>② In scode,<br>NOT in lean-CC</strong><br>(cut / compress)</td><td><code># Doing tasks</code> (2,196)</td><td>dropped entirely</td><td>Cut for lean models</td></tr>
     <tr><td><code># Executing actions with care</code> + <code>Examples:</code> list (1,575)</td><td><strong>compressed to one <code># Harness</code> paragraph</strong></td><td>Replace verbose+Examples with the one-liner</td></tr>
     <tr><td><code># Using your tools</code> + git-commit + PR procedure (3,657)</td><td>dropped; kept only "prefer dedicated tools" one-liner</td><td>Cut procedure</td></tr>
@@ -1191,14 +1205,30 @@ high-value instructions for newest models that scode lacks entirely (row group
   </tbody>
 </table>
 
-<p><strong>Approach:</strong> mirror CC's observed per-model mapping (Table&nbsp;A)
-— serve Lean to <code>opus-4-8</code>/<code>opus-5</code>, Mid to
-<code>fable-5</code>, Full to the rest — rather than invent a scode-specific
-boundary. The one hook needed is per-model gating in <code>build()</code>
-(today it is unconditional). Older models keep today's full prompt, so the
-change is zero-risk for them. Intro/identity and Environment context are already
-aligned; the <code>opus-4-1</code>→<code>opus-4-8</code> remap is CC's, not
-something scode needs to replicate.</p>
+<p class="table-caption">Tables A/B are about <em>size</em>; this one is about
+<em>content set difference</em>. Most of what lean-CC keeps (reversibility
+guidance, dedicated-tools preference, <code>file:line</code>, memory) scode also
+has — just in verbose form (row group ②). But lean-CC <em>added</em> a few
+small, high-value instructions for newest models that scode lacks entirely (row
+group ①, each confirmed absent by grep of <code>prompt.rs</code> +
+<code>memory/mod.rs</code>). Group-① items are tiny <em>additions</em>, not size
+trade-offs, so they are <strong>not tier-gated — adopt for all tiers</strong>
+(they help full/mid models too). Group-② is the size trade-off that <em>is</em>
+tier-gated.</p>
+
+<p><strong>Approach (all models).</strong> Two rules, because scode runs models
+CC never does:</p>
+<ul>
+  <li><strong>Anthropic models</strong> — mirror CC's observed mapping (Table&nbsp;A): Lean to <code>opus-4-8</code>/<code>opus-5</code>, Mid to <code>fable-5</code>, Full to the rest. Don't invent a scode-specific boundary where CC gives one.</li>
+  <li><strong>Non-Anthropic models</strong> (GPT / qwen / DeepSeek / local) — no CC reference exists, so scode picks the tier: <strong>Lean by default</strong> (no CC baggage to shed; capable models do better lean).</li>
+  <li><strong>Group-① additions</strong> — adopt on <em>all</em> tiers; they're small, high-value, and not size trade-offs.</li>
+</ul>
+<p>The one hook needed is per-model gating in <code>build()</code> (today
+unconditional): a model→tier resolver + tier-specific section composition.
+Full-tier models keep today's prompt verbatim, so the change is zero-risk for
+them. Intro/identity, Environment/Project/Runtime context, and tool descriptions
+are already aligned or terse; the <code>opus-4-1</code>→<code>opus-4-8</code>
+remap is CC's, not something scode replicates.</p>
 
 <h3>Memory recall — Sonnet side-query relevance ranking (P1)</h3>
 

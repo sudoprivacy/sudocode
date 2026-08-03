@@ -1554,7 +1554,7 @@ pub(crate) fn format_turn_status_line(
     usage: &TokenUsage,
     elapsed: Duration,
 ) -> String {
-    format_turn_status_line_with_branch(model, turn, usage, elapsed, None)
+    format_turn_status_line_with_branch(model, turn, usage, None, None, elapsed, None)
 }
 
 /// Render the dim per-turn status line shown after each interactive turn.
@@ -1568,6 +1568,8 @@ pub(crate) fn format_turn_status_line_with_branch(
     model: &str,
     turn: u32,
     usage: &TokenUsage,
+    cumulative_usage: Option<&TokenUsage>,
+    context_window: Option<u32>,
     elapsed: Duration,
     branch: Option<&str>,
 ) -> String {
@@ -1585,7 +1587,7 @@ pub(crate) fn format_turn_status_line_with_branch(
     };
     let secs = elapsed.as_secs_f64();
 
-    let mut segments: Vec<String> = Vec::with_capacity(6);
+    let mut segments: Vec<String> = Vec::with_capacity(8);
     segments.push(format!("[{model}]"));
     segments.push(format!("turn {turn}"));
     segments.push(format!("{tokens_display} tokens"));
@@ -1593,6 +1595,28 @@ pub(crate) fn format_turn_status_line_with_branch(
         segments.push(cost);
     }
     segments.push(format!("{secs:.1}s"));
+    // Context window usage: cumulative tokens / model context window
+    if let (Some(cumulative), Some(window)) = (cumulative_usage, context_window) {
+        if window > 0 {
+            let cum_total = cumulative.total_tokens();
+            let pct = (f64::from(cum_total) / f64::from(window) * 100.0).min(100.0);
+            let cum_display = if cum_total >= 1_000_000 {
+                format!("{:.1}M", f64::from(cum_total) / 1_000_000.0)
+            } else if cum_total >= 1000 {
+                format!("{:.1}k", f64::from(cum_total) / 1000.0)
+            } else {
+                cum_total.to_string()
+            };
+            let win_display = if window >= 1_000_000 {
+                format!("{:.0}M", f64::from(window) / 1_000_000.0)
+            } else if window >= 1000 {
+                format!("{:.0}k", f64::from(window) / 1000.0)
+            } else {
+                window.to_string()
+            };
+            segments.push(format!("ctx {cum_display}/{win_display} ({pct:.0}%)"));
+        }
+    }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
         segments.push(branch.to_string());
     }
@@ -1944,6 +1968,8 @@ mod tests {
             "claude-opus-4-6",
             3,
             &usage,
+            None,
+            None,
             Duration::from_secs_f64(1.2),
             None,
         );
@@ -1957,13 +1983,13 @@ mod tests {
 
     #[test]
     fn turn_status_line_omits_cost_when_zero() {
-        // With no tokens recorded the estimated cost is 0.0 and the cost
-        // segment is omitted entirely rather than printing "$0.00".
         let usage = TokenUsage::default();
         let rendered = format_turn_status_line_with_branch(
             "claude-opus-4-6",
             1,
             &usage,
+            None,
+            None,
             Duration::from_secs_f64(0.3),
             None,
         );
@@ -1978,6 +2004,8 @@ mod tests {
             "claude-opus-4-6",
             1,
             &usage,
+            None,
+            None,
             Duration::from_millis(800),
             Some("feat/tui-backlog-179"),
         );
@@ -1992,6 +2020,8 @@ mod tests {
             "claude-opus-4-6",
             1,
             &usage,
+            None,
+            None,
             Duration::from_millis(800),
             Some(""),
         );

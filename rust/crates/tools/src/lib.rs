@@ -12698,7 +12698,11 @@ printf 'pwsh:%s' "$1"
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut buffer = [0_u8; 4096];
-                        let size = stream.read(&mut buffer).expect("read request");
+                        let size = match stream.read(&mut buffer) {
+                            Ok(n) => n,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                            Err(e) => panic!("read request: {e}"),
+                        };
                         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                         let request_line = request.lines().next().unwrap_or_default().to_string();
                         let response = handler(&request_line);
@@ -12731,7 +12735,7 @@ printf 'pwsh:%s' "$1"
                 let _ = tx.send(());
             }
             if let Some(handle) = self.handle.take() {
-                handle.join().expect("join test server");
+                let _ = handle.join();
             }
         }
     }

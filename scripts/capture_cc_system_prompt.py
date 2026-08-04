@@ -40,6 +40,7 @@ import threading
 import time
 
 DEFAULT_MODELS = [
+    "claude-opus-4-6",  # current production default (config.rs primary) — must stay captured
     "claude-opus-4-8",
     "claude-opus-5",
     "claude-fable-5",

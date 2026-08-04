@@ -12,6 +12,7 @@
 #
 # Usage:
 #   ./build-rootfs.sh [--scode PATH] [--out DIR] [--size MiB]
+#                     [--base-image IMAGE]
 #
 # Requirements: docker (to stage the Debian userland), mke2fs ≥ 1.43.
 set -euo pipefail
@@ -20,13 +21,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCODE_BIN="${HERE}/../../rust/target/release/scode"
 OUT_DIR="${HERE}/out"
 SIZE_MIB=1024
-BASE_IMAGE="debian:bookworm-slim"
+# trixie's glibc (2.41) covers binaries built on any host glibc ≤ 2.41;
+# bookworm (2.36) rejects binaries built on newer hosts. Override with
+# --base-image if you build scode in the repo Containerfile
+# (rust:bookworm) and want the smaller bookworm userland.
+BASE_IMAGE="debian:trixie-slim"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --scode) SCODE_BIN="$2"; shift 2 ;;
         --out) OUT_DIR="$2"; shift 2 ;;
         --size) SIZE_MIB="$2"; shift 2 ;;
+        --base-image) BASE_IMAGE="$2"; shift 2 ;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -39,6 +45,21 @@ if [ ! -x "$SCODE_BIN" ]; then
 fi
 command -v docker >/dev/null || { echo "error: docker is required to stage the userland" >&2; exit 1; }
 command -v mke2fs >/dev/null || { echo "error: mke2fs (e2fsprogs) is required" >&2; exit 1; }
+
+# --- glibc compatibility preflight ------------------------------------------
+# A scode built on a host with a newer glibc than the guest userland
+# fails at exec time inside the VM ("version `GLIBC_X.YZ' not found").
+# Catch that here, where it is diagnosable, instead of at guest boot.
+echo "preflight: checking ${SCODE_BIN##*/} runs on ${BASE_IMAGE}…"
+if ! docker run --rm -v "$(realpath "$SCODE_BIN"):/preflight/scode:ro" \
+        "$BASE_IMAGE" /preflight/scode --version >/dev/null; then
+    echo "error: scode binary is not runnable on ${BASE_IMAGE} (glibc too old?)" >&2
+    echo "fix: build scode against an older glibc, e.g. in the repo build image:" >&2
+    echo "  docker run --rm -v \"\$(git rev-parse --show-toplevel)\":/workspace \\" >&2
+    echo "      -w /workspace/rust rust:bookworm cargo build --release" >&2
+    echo "or pick a newer guest userland via --base-image." >&2
+    exit 1
+fi
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

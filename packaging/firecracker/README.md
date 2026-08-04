@@ -11,7 +11,7 @@ up where you left off.
 host
 ├── vmlinux            guest kernel   (fetch-kernel.sh, shared)
 ├── rootfs.ext4        READ-ONLY      (build-rootfs.sh, shared by all VMs)
-│     Debian slim + git + ca-certs + scode + /sbin/scode-init
+│     Debian trixie-slim + git + ca-certs + scode + /sbin/scode-init
 └── data-<name>.ext4   READ-WRITE     (build-data-volume.sh, ONE per VM)
       /home            → guest $HOME  → ~/.nexus/sudocode (auth, config, memory)
       /workspace       → repo + .scode/sessions/<hash>/   (session files)
@@ -77,6 +77,12 @@ volume = at most one running VM.
 
 - **`/dev/kvm` required.** Inside another VM you need nested
   virtualization enabled.
+- **glibc compatibility is preflighted.** A scode built on a host with
+  a newer glibc than the guest userland dies at exec inside the VM;
+  `build-rootfs.sh` runs the binary against the base image up front and
+  fails with fix instructions instead. Default userland is trixie
+  (glibc 2.41); binaries from the repo build image (`rust:bookworm`)
+  also run on `--base-image debian:bookworm-slim`.
 - **In-guest sandbox degrades gracefully.** scode's `unshare`-based
   user-namespace sandbox needs `CONFIG_USER_NS` in the guest kernel;
   the Firecracker CI kernels may not enable it. `scode sandbox` will

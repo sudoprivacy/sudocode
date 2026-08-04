@@ -4095,16 +4095,22 @@ impl LiveCli {
 
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(model) = model else {
-            // /model without args: show the model report (current + available).
-            println!(
-                "{}",
-                format_model_report(
-                    &self.config.model,
-                    self.runtime.session().messages.len(),
-                    self.runtime.usage().turns(),
-                )
-            );
-            return Ok(false);
+            let sudocode_config = load_sudocode_config_for_current_dir();
+            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
+            let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+            let default_idx = models
+                .iter()
+                .position(|m| *m == self.config.model)
+                .unwrap_or(0);
+            let selection = FuzzySelect::new()
+                .with_prompt("Select model (type to filter)")
+                .items(&models)
+                .default(default_idx)
+                .interact_opt()?;
+            return match selection {
+                Some(idx) => self.set_model(Some(models[idx].clone())),
+                None => Ok(false),
+            };
         };
 
         let model = resolve_model_alias_with_config(&model);
@@ -4253,24 +4259,6 @@ impl LiveCli {
             let sessions = list_managed_sessions()?;
             if sessions.is_empty() {
                 println!("No sessions found.");
-                return Ok(false);
-            }
-            if self.is_async_mode() {
-                println!("\x1b[1mSessions:\x1b[0m");
-                for (i, s) in sessions.iter().enumerate() {
-                    let marker = if s.id == self.session.id {
-                        " ← current"
-                    } else {
-                        ""
-                    };
-                    println!(
-                        "  \x1b[2m{:>2}.\x1b[0m {} ({} msgs){marker}",
-                        i + 1,
-                        s.id,
-                        s.message_count
-                    );
-                }
-                println!("\n\x1b[2mUsage: /resume <session-id> or /resume latest\x1b[0m");
                 return Ok(false);
             }
             let labels: Vec<String> = sessions
@@ -4437,13 +4425,6 @@ impl LiveCli {
             cwd.join("AGENTS.md")
         } else if files.len() == 1 {
             files[0].path.clone()
-        } else if self.is_async_mode() {
-            println!("\x1b[1mInstruction files:\x1b[0m");
-            for (i, f) in files.iter().enumerate() {
-                println!("  \x1b[2m{:>2}.\x1b[0m {}", i + 1, f.path.display());
-            }
-            println!("\n\x1b[2mUsage: /memory <path>\x1b[0m");
-            return Ok(());
         } else {
             let labels: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
             let selection = Select::new()
@@ -4675,10 +4656,7 @@ impl LiveCli {
             None | Some("list") => {
                 // On a TTY (sync mode), present a fuzzy picker that switches
                 // on Enter and is silent on Esc. In async mode, the input
-                // thread owns stdin so interactive widgets are forbidden —
-                // fall through to the text-table listing.
-                if !self.is_async_mode() && io::stdin().is_terminal() && io::stdout().is_terminal()
-                {
+                if io::stdin().is_terminal() && io::stdout().is_terminal() {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
                         println!("{}", render_session_list(&self.session.id)?);

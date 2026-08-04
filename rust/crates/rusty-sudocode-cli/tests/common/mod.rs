@@ -42,6 +42,11 @@ use pty_expect::{PtySession, Result};
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Default PTY-test timeout for `expect` operations.
+/// Windows CI runners are significantly slower to spawn PTY processes
+/// (cold cache, antivirus scanning, etc.), so use a generous timeout.
+#[cfg(windows)]
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(windows))]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Live-mode timeout — real API calls can take a few seconds.

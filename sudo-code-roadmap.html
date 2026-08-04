@@ -1128,6 +1128,7 @@ CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
     <tr><td><code>opus-4-1</code>, <code>opus-4</code></td><td data-status="covered"><strong>Lean</strong></td><td>~5.9 KB</td><td><code># Memory</code> (2,099)</td><td>Request model is <em>remapped</em> to <code>opus-4-8</code> in the body → lean</td></tr>
     <tr><td><code>fable-5</code></td><td data-status="gap-l2"><strong>Mid</strong></td><td>~10.4 KB</td><td><code># Memory</code> (2,099)</td><td><code># Harness</code> (661) + extra <code># Communicating with the user</code> (3,734) — explicit comms scaffolding the top opus models don't get</td></tr>
     <tr><td><code>sonnet-5</code>, <code>sonnet-4-5</code>, <code>sonnet-4</code>, <code>sonnet-3-7</code>, <code>sonnet-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections</td></tr>
+    <tr><td><code>opus-4-6</code> — <strong>current default</strong> (<code>config.rs</code> primary)</td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>Captured CC&nbsp;2.1.207 → <strong>Full</strong>, byte-identical to opus-4-5. CC reserves Lean for opus-4-8/opus-5 only, so <strong>the default stays Full — no silent cut for default users</strong>. Do <em>not</em> extrapolate "frontier → Lean": 4-6 is newer than 4-5 yet both are Full.</td></tr>
     <tr><td><code>opus-4-5</code>, <code>haiku-4-5</code>, <code>haiku-3-5</code></td><td data-status="gap"><strong>Full</strong></td><td>~27.4 KB</td><td><code># auto memory</code> (12,834)</td><td>All 10 verbose sections — newest haiku still gets the full prompt</td></tr>
     <tr><td><strong>non-Anthropic</strong> — GPT / qwen / DeepSeek / local (via sudorouter + openai-compat)</td><td data-status="gap-l2"><strong>scode's own</strong></td><td>n/a</td><td>n/a</td><td>CC does not run these, so there is <em>no CC prompt to mirror</em>. scode decides the tier itself — <strong>Lean by default</strong> (they never carried CC's verbose baggage; capable models do better with the lean prompt). This is roughly half the models scode runs in production.</td></tr>
   </tbody>
@@ -1135,7 +1136,9 @@ CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
 
 <p class="table-caption">The lean/full boundary is <em>model-specific, not
 generational</em> — sonnet-5 and haiku-4-5 are new but still get the full
-27&nbsp;KB prompt. scode must support all models, not just Anthropic's: CC maps
+27&nbsp;KB prompt. <strong>The production default is <code>opus-4-6</code> →
+Full</strong> (captured); Lean is reserved for opus-4-8/opus-5, so default users
+are unaffected by the trim. scode must support all models, not just Anthropic's: CC maps
 only its own models, so it's a reference for the Anthropic rows only — for
 non-Anthropic models (last row) there's nothing to mirror and scode picks the
 tier itself. CC's three variants share the same lean <code># Memory</code>
@@ -1226,8 +1229,10 @@ CC never does:</p>
 </ul>
 <p>The one hook needed is per-model gating in <code>build()</code> (today
 unconditional): a model→tier resolver + tier-specific section composition.
-Full-tier models keep today's prompt verbatim, so the change is zero-risk for
-them. Intro/identity, Environment/Project/Runtime context, and tool descriptions
+Full-tier models keep today's prompt verbatim — <strong>including the current
+default <code>opus-4-6</code></strong> — so the change is zero-risk for default
+users; only opus-4-8/opus-5 (and non-Anthropic) shift to Lean.
+Intro/identity, Environment/Project/Runtime context, and tool descriptions
 are already aligned or terse; the <code>opus-4-1</code>→<code>opus-4-8</code>
 remap is CC's, not something scode replicates.</p>
 

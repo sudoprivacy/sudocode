@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
-use crossterm::terminal::{Clear, ClearType};
-use crossterm::{execute, queue};
+use crossterm::style::{Color, Stylize};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
@@ -138,125 +136,167 @@ impl Default for ColorTheme {
     }
 }
 
-pub struct Spinner {
-    stop: Arc<AtomicBool>,
-    pause: Arc<AtomicBool>,
-    thinking: Arc<AtomicBool>,
+/// Shared spinner reference for streaming and tool execution layers.
+/// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
+#[derive(Clone)]
+pub struct SpinnerRef {
+    pb: ProgressBar,
     response_bytes: Arc<AtomicU32>,
-    /// User-set token budget (parsed from `+500k` in prompt). `None` when
-    /// no budget was requested — budget/ETA is never shown without one.
-    token_budget: Option<u32>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    is_thinking: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
 }
 
-impl Spinner {
-    const FRAMES_DEFAULT: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    /// Half-circle rotation; visually distinct from braille and recognizable
-    /// as "deliberation".
-    const FRAMES_THINKING: [&str; 4] = ["◐", "◓", "◑", "◒"];
-    const LABEL_THINKING: &'static str = "🧠 Reasoning...";
+impl SpinnerRef {
+    /// Pause the spinner, run the closure, resume the spinner.
+    pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        self.pause();
+        let result = f();
+        self.resume();
+        result
+    }
 
-    /// Delay before showing the token counter, so short responses don't flash
-    /// a distracting `↓ 0 tokens` line.
+    /// Pause the spinner and clear its line. The updater thread stops
+    /// ticking while paused.
+    pub fn pause(&self) {
+        self.is_paused.store(true, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = write!(io::stdout(), "\r\x1b[2K");
+        let _ = io::stdout().flush();
+    }
+
+    /// Resume the spinner after a pause.
+    pub fn resume(&self) {
+        self.is_paused.store(false, Ordering::SeqCst);
+    }
+
+    pub fn set_thinking(&self, on: bool) {
+        self.is_thinking.store(on, Ordering::SeqCst);
+    }
+
+    pub fn add_response_bytes(&self, n: u32) {
+        self.response_bytes.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+/// Owns the spinner lifecycle. Created in `run_turn()`, shared via `SpinnerRef`.
+pub struct SpinnerHandle {
+    pb: ProgressBar,
+    response_bytes: Arc<AtomicU32>,
+    is_thinking: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
+    token_budget: Option<u32>,
+    label: String,
+    model: Option<String>,
+    #[allow(dead_code)]
+    theme: ColorTheme,
+    start_time: Instant,
+    stop: Arc<AtomicBool>,
+    updater: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SpinnerHandle {
+    const FRAMES_DEFAULT: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const FRAMES_THINKING: &[&str] = &["◐", "◓", "◑", "◒"];
+    const LABEL_THINKING: &str = "🧠 Reasoning...";
     const SHOW_TOKENS_AFTER_SECS: f64 = 1.0;
-    /// If no new response bytes arrive for this many seconds, the spinner
-    /// switches to a warning color to signal a potential stall.
     const STALL_THRESHOLD_SECS: f64 = 3.0;
 
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            stop: Arc::new(AtomicBool::new(false)),
-            pause: Arc::new(AtomicBool::new(false)),
-            thinking: Arc::new(AtomicBool::new(false)),
-            response_bytes: Arc::new(AtomicU32::new(0)),
-            token_budget: None,
-            handle: None,
+    pub fn new(
+        label: &str,
+        model: Option<&str>,
+        theme: &ColorTheme,
+        token_budget: Option<u32>,
+    ) -> Self {
+        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+        pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+
+        let response_bytes = Arc::new(AtomicU32::new(0));
+        let is_thinking = Arc::new(AtomicBool::new(false));
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let mut handle = Self {
+            pb,
+            response_bytes,
+            is_thinking,
+            is_paused,
+            token_budget,
+            label: label.to_string(),
+            model: model.map(ToString::to_string),
+            theme: *theme,
+            start_time: Instant::now(),
+            stop,
+            updater: None,
+        };
+        handle.start_updater();
+        handle
+    }
+
+    /// Get a cheap, cloneable reference for the streaming / tool layers.
+    #[must_use]
+    pub fn spinner_ref(&self) -> SpinnerRef {
+        SpinnerRef {
+            pb: self.pb.clone(),
+            response_bytes: Arc::clone(&self.response_bytes),
+            is_thinking: Arc::clone(&self.is_thinking),
+            is_paused: Arc::clone(&self.is_paused),
         }
     }
 
-    /// Set the user-requested token budget (from `+500k` in prompt).
-    pub fn set_token_budget(&mut self, budget: u32) {
-        self.token_budget = Some(budget);
-    }
-
-    /// Returns a shared pause flag. Set to `true` before writing content to
-    /// prevent the spinner from overwriting output lines. Set back to `false`
-    /// after writing to let the spinner resume on the next empty line.
-    #[must_use]
-    pub fn pause_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.pause)
-    }
-
-    /// Returns a shared thinking flag. While set to `true` the spinner
-    /// displays a distinct frame set and "Reasoning..." label, signalling
-    /// that the model is in an extended-thinking phase rather than emitting
-    /// regular content.
-    #[must_use]
-    pub fn thinking_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.thinking)
-    }
-
-    /// Returns a shared response-bytes counter. The streaming layer
-    /// increments this as text deltas arrive; the spinner thread reads it
-    /// to display a live `↓ N tokens` approximation.
-    #[must_use]
-    pub fn response_bytes_counter(&self) -> Arc<AtomicU32> {
-        Arc::clone(&self.response_bytes)
-    }
-
-    /// Start the spinner animation in a background thread.
-    pub fn start(&mut self, label: &str, model: Option<&str>, theme: &ColorTheme) {
-        self.stop.store(false, Ordering::SeqCst);
-        self.pause.store(false, Ordering::SeqCst);
-        self.thinking.store(false, Ordering::SeqCst);
-        self.response_bytes.store(0, Ordering::SeqCst);
+    fn start_updater(&mut self) {
+        let pb = self.pb.clone();
         let stop = Arc::clone(&self.stop);
-        let pause = Arc::clone(&self.pause);
-        let thinking = Arc::clone(&self.thinking);
         let response_bytes = Arc::clone(&self.response_bytes);
-        let default_label = label.to_string();
-        let model = model.map(ToString::to_string);
+        let is_thinking = Arc::clone(&self.is_thinking);
+        let is_paused = Arc::clone(&self.is_paused);
+        let label = self.label.clone();
+        let model = self.model.clone();
+        let start_time = self.start_time;
         let token_budget = self.token_budget;
-        let theme = *theme;
-        let start_time = Instant::now();
 
-        self.handle = Some(std::thread::spawn(move || {
+        self.updater = Some(std::thread::spawn(move || {
             let mut frame_index: usize = 0;
-            let mut stdout = io::stdout();
             let mut last_bytes_seen: u32 = 0;
             let mut last_bytes_change = Instant::now();
             let mut was_paused = false;
+
             while !stop.load(Ordering::SeqCst) {
-                let is_paused = pause.load(Ordering::SeqCst);
+                let paused = is_paused.load(Ordering::SeqCst);
                 // Reset stall timer when resuming from a pause (tool
-                // execution just finished) — matches CC's hasActiveTools
-                // reset behavior.
-                if was_paused && !is_paused {
+                // execution just finished).
+                if was_paused && !paused {
                     last_bytes_change = Instant::now();
                 }
-                was_paused = is_paused;
-                if !is_paused {
-                    let is_thinking = thinking.load(Ordering::SeqCst);
-                    let (frames, label): (&[&str], &str) = if is_thinking {
-                        (&Self::FRAMES_THINKING[..], Self::LABEL_THINKING)
+                was_paused = paused;
+
+                if !paused {
+                    let thinking = is_thinking.load(Ordering::SeqCst);
+                    let frames: &[&str] = if thinking {
+                        SpinnerHandle::FRAMES_THINKING
                     } else {
-                        (&Self::FRAMES_DEFAULT[..], default_label.as_str())
+                        SpinnerHandle::FRAMES_DEFAULT
                     };
+                    let current_label = if thinking {
+                        SpinnerHandle::LABEL_THINKING
+                    } else {
+                        &label
+                    };
+
                     let frame = frames[frame_index % frames.len()];
                     frame_index += 1;
                     let elapsed = start_time.elapsed().as_secs_f64();
-                    let mut line = format!("{frame} {label}");
+
+                    let mut line = format!("{frame} {current_label}");
                     if let Some(ref m) = model {
                         let _ = write!(line, " [{m}]");
                     }
                     let _ = write!(line, " ({elapsed:.1}s)");
+
                     let bytes = response_bytes.load(Ordering::Relaxed);
-                    if bytes > 0 && elapsed >= Self::SHOW_TOKENS_AFTER_SECS {
+                    if bytes > 0 && elapsed >= SpinnerHandle::SHOW_TOKENS_AFTER_SECS {
                         let approx_tokens = bytes / 4;
                         if let Some(budget) = token_budget {
-                            // User-set budget (e.g. `+500k` in prompt):
-                            // show Target: X / Y (P%) ~Zm
                             let pct =
                                 (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
                             let fmt_t = format_compact_tokens(approx_tokens);
@@ -280,85 +320,52 @@ impl Spinner {
                             };
                         }
                     }
-                    // Stall detection: if response has started (bytes > 0)
-                    // but no new bytes for STALL_THRESHOLD_SECS, use warning color.
+
+                    // Stall detection
                     if bytes != last_bytes_seen {
                         last_bytes_seen = bytes;
                         last_bytes_change = Instant::now();
                     }
                     let is_stalled = bytes > 0
-                        && !is_thinking
-                        && last_bytes_change.elapsed().as_secs_f64() >= Self::STALL_THRESHOLD_SECS;
-                    let color = if is_stalled {
-                        Color::DarkYellow
-                    } else {
-                        theme.spinner_active
-                    };
-                    let _ = queue!(
-                        stdout,
-                        SavePosition,
-                        MoveToColumn(0),
-                        Clear(ClearType::CurrentLine),
-                        SetForegroundColor(color),
-                        Print(line),
-                        ResetColor,
-                        RestorePosition
-                    );
-                    let _ = stdout.flush();
+                        && !thinking
+                        && last_bytes_change.elapsed().as_secs_f64()
+                            >= SpinnerHandle::STALL_THRESHOLD_SECS;
+
+                    // yellow(33) for stall, blue(34) for active
+                    let color_code = if is_stalled { "33" } else { "34" };
+                    let colored = format!("\x1b[{color_code}m{line}\x1b[0m");
+                    pb.set_message(colored);
+                    pb.tick();
                 }
+
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
         }));
     }
 
-    fn stop_thread(&mut self) {
+    fn stop_updater(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.updater.take() {
             let _ = handle.join();
         }
     }
 
     /// Stop the spinner and clear its line without printing a final message.
-    pub fn clear(&mut self, out: &mut impl Write) -> io::Result<()> {
-        self.stop_thread();
-        execute!(out, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        out.flush()
+    pub fn clear(&mut self) {
+        self.stop_updater();
+        self.pb.finish_and_clear();
     }
 
-    pub fn finish(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.stop_thread();
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_done),
-            Print(format!("✔ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
+    pub fn finish(&mut self, label: &str) {
+        self.stop_updater();
+        self.pb.finish_and_clear();
+        println!("\x1b[32m✔ {label}\x1b[0m");
     }
 
-    pub fn fail(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.stop_thread();
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_failed),
-            Print(format!("✘ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
+    pub fn fail(&mut self, label: &str) {
+        self.stop_updater();
+        self.pb.finish_and_clear();
+        println!("\x1b[31m✘ {label}\x1b[0m");
     }
 }
 
@@ -1409,30 +1416,5 @@ mod tests {
             out.contains("\u{1b}[38;2;"),
             "missing truecolor escape in: {out:?}"
         );
-    }
-
-    #[test]
-    fn spinner_thinking_flag_round_trips() {
-        let spinner = Spinner::new();
-        let flag = spinner.thinking_flag();
-        assert!(
-            !flag.load(Ordering::SeqCst),
-            "default thinking flag should be off"
-        );
-        flag.store(true, Ordering::SeqCst);
-        // The handle returned by `thinking_flag()` is shared, so consumers
-        // toggle the same atomic the spinner thread reads from.
-        assert!(spinner.thinking_flag().load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn spinner_thinking_and_pause_flags_are_independent() {
-        let spinner = Spinner::new();
-        let pause = spinner.pause_flag();
-        let thinking = spinner.thinking_flag();
-        pause.store(true, Ordering::SeqCst);
-        assert!(!thinking.load(Ordering::SeqCst));
-        thinking.store(true, Ordering::SeqCst);
-        assert!(pause.load(Ordering::SeqCst));
     }
 }

@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
@@ -10,7 +9,7 @@ use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
 use super::format::format_tool_result;
-use crate::render::TerminalRenderer;
+use crate::render::{SpinnerRef, TerminalRenderer};
 use crate::{AllowedToolSet, RuntimeMcpState};
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +55,7 @@ pub(crate) struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    spinner_pause: Option<Arc<AtomicBool>>,
+    spinner: Option<SpinnerRef>,
     question_prompter: Option<Box<dyn QuestionPrompter>>,
     abort_signal: Option<runtime::HookAbortSignal>,
 }
@@ -74,14 +73,14 @@ impl CliToolExecutor {
             allowed_tools,
             tool_registry,
             mcp_state,
-            spinner_pause: None,
+            spinner: None,
             question_prompter: None,
             abort_signal: None,
         }
     }
 
-    pub(crate) fn set_spinner_pause(&mut self, flag: Arc<AtomicBool>) {
-        self.spinner_pause = Some(flag);
+    pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
+        self.spinner = Some(ref_);
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -90,88 +89,71 @@ impl CliToolExecutor {
 
     /// Pause the spinner and clear its line before writing content.
     fn pause_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(true, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
+        if let Some(s) = &self.spinner {
+            s.pause();
         }
     }
 
     /// Resume the spinner after content has been written.
     fn resume_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(false, Ordering::SeqCst);
+        if let Some(s) = &self.spinner {
+            s.resume();
         }
     }
 
     /// Build a progress callback that prints MCP tool progress notifications
-    /// to the terminal. Returns `None` when no spinner-pause flag is configured.
+    /// to the terminal. Returns `None` when no spinner ref is configured.
     fn make_mcp_progress_callback(&self) -> Option<runtime::McpProgressCallback> {
-        let pause = self.spinner_pause.clone()?;
+        let spinner = self.spinner.clone()?;
         Some(Box::new(
             move |progress: runtime::McpProgressNotification| {
-                pause.store(true, Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                let _ = write!(io::stdout(), "\r\x1b[2K");
-                let _ = io::stdout().flush();
-
-                let mut status = String::new();
-                if let Some(total) = progress.total {
-                    if total > 0.0 {
-                        let pct = (progress.progress / total * 100.0).min(100.0);
-                        status = format!(" ({pct:.0}%)");
+                spinner.suspend(|| {
+                    let mut status = String::new();
+                    if let Some(total) = progress.total {
+                        if total > 0.0 {
+                            let pct = (progress.progress / total * 100.0).min(100.0);
+                            status = format!(" ({pct:.0}%)");
+                        }
                     }
-                }
-                if let Some(msg) = &progress.message {
-                    let _ = writeln!(io::stdout(), "  \x1b[2m\u{27f3} {msg}{status}\x1b[0m");
-                } else {
-                    let _ = writeln!(
-                        io::stdout(),
-                        "  \x1b[2m\u{27f3} progress: {:.0}{status}\x1b[0m",
-                        progress.progress
-                    );
-                }
-                let _ = io::stdout().flush();
-
-                pause.store(false, Ordering::SeqCst);
+                    if let Some(msg) = &progress.message {
+                        let _ = writeln!(io::stdout(), "  \x1b[2m\u{27f3} {msg}{status}\x1b[0m");
+                    } else {
+                        let _ = writeln!(
+                            io::stdout(),
+                            "  \x1b[2m\u{27f3} progress: {:.0}{status}\x1b[0m",
+                            progress.progress
+                        );
+                    }
+                    let _ = io::stdout().flush();
+                });
             },
         ))
     }
 
     /// Build a progress callback that prints streaming bash output to the
-    /// terminal. Returns `None` when no spinner-pause flag is configured.
+    /// terminal. Returns `None` when no spinner ref is configured.
     fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
-        let pause = self.spinner_pause.clone()?;
+        let spinner = self.spinner.clone()?;
         Some(Box::new(move |progress: runtime::BashProgress<'_>| {
             let trimmed = progress.output.trim_end();
             if trimmed.is_empty() {
                 return;
             }
-            // Pause spinner and clear its line
-            pause.store(true, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
-
-            // Show last line of new output + cumulative stats on one line.
-            // CC shows last 5 lines in a block; we keep it to 1 line per
-            // tick so the terminal doesn't scroll excessively.
-            let last_line = trimmed.lines().next_back().unwrap_or("");
-            let bytes_display = if progress.total_bytes >= 1024 {
-                format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
-            } else {
-                format!("{} B", progress.total_bytes)
-            };
-            let _ = writeln!(
-                io::stdout(),
-                "  \x1b[2m⟳ {last_line}  ({} lines, {bytes_display})\x1b[0m",
-                progress.total_lines,
-            );
-            let _ = io::stdout().flush();
-
-            // Resume spinner
-            pause.store(false, Ordering::SeqCst);
+            spinner.suspend(|| {
+                // Show last line of new output + cumulative stats on one line.
+                let last_line = trimmed.lines().next_back().unwrap_or("");
+                let bytes_display = if progress.total_bytes >= 1024 {
+                    format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
+                } else {
+                    format!("{} B", progress.total_bytes)
+                };
+                let _ = writeln!(
+                    io::stdout(),
+                    "  \x1b[2m⟳ {last_line}  ({} lines, {bytes_display})\x1b[0m",
+                    progress.total_lines,
+                );
+                let _ = io::stdout().flush();
+            });
         }))
     }
 

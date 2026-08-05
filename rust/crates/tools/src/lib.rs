@@ -12689,8 +12689,12 @@ printf 'pwsh:%s' "$1"
                 .expect("set nonblocking listener");
             let addr = listener.local_addr().expect("local addr");
             let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
 
-            let handle = thread::spawn(move || loop {
+            let handle = thread::spawn(move || {
+                // Signal that the accept loop is about to start.
+                let _ = ready_tx.send(());
+                loop {
                 if rx.try_recv().is_ok() {
                     break;
                 }
@@ -12715,7 +12719,12 @@ printf 'pwsh:%s' "$1"
                     }
                     Err(error) => panic!("server accept failed: {error}"),
                 }
-            });
+            }});
+
+            // Wait for the server thread to enter the accept loop before
+            // returning. Without this, the client can connect before the
+            // thread is scheduled, causing "connection refused" on macOS CI.
+            ready_rx.recv().expect("server readiness signal");
 
             Self {
                 addr,

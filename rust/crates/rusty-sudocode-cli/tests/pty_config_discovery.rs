@@ -87,8 +87,6 @@ fn model_switch_in_repl() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// In the REPL, `/model` without arguments opens the interactive picker.
-/// The model report behavior is used by ACP mode, where there is no local
-/// TTY picker to drive.
 #[test]
 fn model_without_args_opens_picker() {
     let env = TestEnv::new("model-picker");
@@ -96,7 +94,6 @@ fn model_without_args_opens_picker() {
 
     sess.expect("❯").expect("should see REPL prompt");
 
-    // /model without args opens the interactive picker in the REPL.
     sess.send("/model\r").expect("send /model (no args)");
 
     sess.expect("Select model")

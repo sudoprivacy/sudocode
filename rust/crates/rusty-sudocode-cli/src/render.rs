@@ -314,11 +314,7 @@ impl SpinnerHandle {
                             }
                         } else {
                             let _ = if approx_tokens >= 1000 {
-                                write!(
-                                    line,
-                                    " ↓ {:.1}k tokens",
-                                    f64::from(approx_tokens) / 1000.0
-                                )
+                                write!(line, " ↓ {:.1}k tokens", f64::from(approx_tokens) / 1000.0)
                             } else {
                                 write!(line, " ↓ {approx_tokens} tokens")
                             };
@@ -1421,5 +1417,4 @@ mod tests {
             "missing truecolor escape in: {out:?}"
         );
     }
-
 }

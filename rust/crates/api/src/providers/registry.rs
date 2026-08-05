@@ -391,7 +391,8 @@ fn try_proxy_passthrough(
 
 /// Resolve the wire API format.
 ///
-/// - Proxy providers: must have an `api` field (`"openai-completions"` or `"openai-responses"`).
+/// - Explicit `api`: `"openai-completions"`, `"openai-responses"`, or
+///   `"anthropic-messages"`.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,

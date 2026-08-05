@@ -403,6 +403,7 @@ fn resolve_api_format(
         return match api {
             "openai-completions" => Ok(ApiFormat::OpenAiCompletions),
             "openai-responses" => Ok(ApiFormat::OpenAiResponses),
+            "anthropic-messages" => Ok(ApiFormat::AnthropicMessages),
             other => Err(ApiError::Configuration(format!(
                 "unknown api format '{other}' for provider '{provider_name}' under mode '{auth_mode}'"
             ))),
@@ -877,6 +878,11 @@ mod tests {
         assert_eq!(
             resolve_api_format("proxy", "any", Some("openai-responses")).unwrap(),
             ApiFormat::OpenAiResponses
+        );
+        assert_eq!(
+            resolve_api_format("api-key", "deepseek-anthropic", Some("anthropic-messages"))
+                .unwrap(),
+            ApiFormat::AnthropicMessages
         );
         assert_eq!(
             resolve_api_format("proxy", "any", None).unwrap(),

@@ -83,33 +83,30 @@ fn model_switch_in_repl() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// 2b. /model report shows capabilities SSOT models
+// 2b. /model opens the interactive model picker
 // ──────────────────────────────────────────────────────────────────────
 
-/// `/model` without arguments shows the model report: current model,
-/// available models (config aliases + capabilities SSOT), and session
-/// info. The report should include capabilities-only models like
-/// deepseek that are not in the config aliases.
+/// In the REPL, `/model` without arguments opens the interactive picker.
+/// The model report behavior is used by ACP mode, where there is no local
+/// TTY picker to drive.
 #[test]
-fn model_report_shows_capabilities_models() {
-    let env = TestEnv::new("model-report-caps");
+fn model_without_args_opens_picker() {
+    let env = TestEnv::new("model-picker");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
 
     sess.expect("❯").expect("should see REPL prompt");
 
-    // /model without args shows the report (not a picker).
+    // /model without args opens the interactive picker in the REPL.
     sess.send("/model\r").expect("send /model (no args)");
 
-    // Should see the "Available models" section.
-    sess.expect("Available models")
-        .expect("should see Available models header");
+    sess.expect("Select model")
+        .expect("should see interactive model picker");
 
-    // Should include capabilities-only models (not in config aliases).
-    sess.expect("deepseek-v4")
-        .expect("should see deepseek capabilities model");
+    // Cancel the picker and return to the prompt.
+    sess.send("\x1b").expect("cancel picker");
 
     // Clean exit.
-    sess.expect("❯").expect("prompt after report");
+    sess.expect("❯").expect("prompt after picker");
     sess.send("/exit\r").expect("exit");
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().expect("should exit");

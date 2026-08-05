@@ -391,7 +391,8 @@ fn try_proxy_passthrough(
 
 /// Resolve the wire API format.
 ///
-/// - Proxy providers: must have an `api` field (`"openai-completions"` or `"openai-responses"`).
+/// - Explicit `api`: `"openai-completions"`, `"openai-responses"`, or
+///   `"anthropic-messages"`.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,
@@ -403,6 +404,7 @@ fn resolve_api_format(
         return match api {
             "openai-completions" => Ok(ApiFormat::OpenAiCompletions),
             "openai-responses" => Ok(ApiFormat::OpenAiResponses),
+            "anthropic-messages" => Ok(ApiFormat::AnthropicMessages),
             other => Err(ApiError::Configuration(format!(
                 "unknown api format '{other}' for provider '{provider_name}' under mode '{auth_mode}'"
             ))),
@@ -877,6 +879,11 @@ mod tests {
         assert_eq!(
             resolve_api_format("proxy", "any", Some("openai-responses")).unwrap(),
             ApiFormat::OpenAiResponses
+        );
+        assert_eq!(
+            resolve_api_format("api-key", "deepseek-anthropic", Some("anthropic-messages"))
+                .unwrap(),
+            ApiFormat::AnthropicMessages
         );
         assert_eq!(
             resolve_api_format("proxy", "any", None).unwrap(),

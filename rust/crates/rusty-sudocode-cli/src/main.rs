@@ -3675,9 +3675,7 @@ impl LiveCli {
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
                     let context_window =
-                        runtime::model_capabilities::context_window_or_default(
-                            &self.config.model,
-                        );
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -3901,9 +3899,7 @@ impl LiveCli {
                             return Ok(false);
                         };
                         if let Some(mcp_state) = &self.runtime.mcp_state {
-                            let mut mcp = mcp_state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut mcp = mcp_state.lock().unwrap_or_else(|e| e.into_inner());
                             let result = match action_str {
                                 "reconnect" => mcp.reconnect_server(server_name),
                                 "enable" => mcp.enable_server(server_name),

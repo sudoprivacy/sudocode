@@ -268,9 +268,8 @@ impl RuntimeMcpState {
         &mut self,
         server_name: &str,
     ) -> Result<String, ToolError> {
-        let result =
-            Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
-                .map_err(|error| ToolError::new(error.to_string()))?;
+        let result = Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
+            .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "prompts": result.prompts,

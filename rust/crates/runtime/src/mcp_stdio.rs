@@ -151,9 +151,7 @@ impl McpStdioProcess {
 
             // Notifications have no `id` or a null `id`.
             if raw.get("id").is_none() || raw.get("id") == Some(&serde_json::Value::Null) {
-                if let Ok(notification) =
-                    serde_json::from_value::<JsonRpcNotification>(raw)
-                {
+                if let Ok(notification) = serde_json::from_value::<JsonRpcNotification>(raw) {
                     if notification.method == "notifications/progress" {
                         if let Some(params) = notification.params {
                             if let Ok(progress) =

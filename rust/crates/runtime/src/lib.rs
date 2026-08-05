@@ -44,8 +44,8 @@ pub mod mcp_server;
 mod mcp_server_manager;
 mod mcp_sse;
 mod mcp_stdio;
-mod mcp_ws;
 pub mod mcp_tool_bridge;
+mod mcp_ws;
 pub mod memory;
 pub mod model_capabilities;
 mod oauth;
@@ -148,15 +148,15 @@ pub use mcp_lifecycle_hardened::{
 };
 pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
 pub use mcp_server_manager::{
-    clear_mcp_progress_callback, set_mcp_progress_callback, JsonRpcError, JsonRpcId, JsonRpcRequest,
-    JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure, McpGetPromptParams, McpGetPromptResult,
-    McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
-    McpListPromptsParams, McpListPromptsResult, McpListResourcesParams, McpListResourcesResult,
-    McpListToolsParams, McpListToolsResult, McpProgressCallback, McpProgressNotification,
-    McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpReadResourceParams,
-    McpReadResourceResult, McpResource, McpResourceContents, McpServerManager,
-    McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult,
-    McpToolDiscoveryReport, UnsupportedMcpServer,
+    clear_mcp_progress_callback, set_mcp_progress_callback, JsonRpcError, JsonRpcId,
+    JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure, McpGetPromptParams,
+    McpGetPromptResult, McpInitializeClientInfo, McpInitializeParams, McpInitializeResult,
+    McpInitializeServerInfo, McpListPromptsParams, McpListPromptsResult, McpListResourcesParams,
+    McpListResourcesResult, McpListToolsParams, McpListToolsResult, McpProgressCallback,
+    McpProgressNotification, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage,
+    McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents,
+    McpServerManager, McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams,
+    McpToolCallResult, McpToolDiscoveryReport, UnsupportedMcpServer,
 };
 pub use mcp_stdio::{spawn_mcp_stdio_process, McpStdioProcess};
 pub use oauth::{

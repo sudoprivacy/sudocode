@@ -942,7 +942,10 @@ impl McpServerManager {
         let mut attempts = 0;
 
         loop {
-            match self.get_prompt_once(server_name, name, arguments.clone()).await {
+            match self
+                .get_prompt_once(server_name, name, arguments.clone())
+                .await
+            {
                 Ok(prompt) => return Ok(prompt),
                 Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
                     self.reset_server(server_name).await?;
@@ -960,7 +963,10 @@ impl McpServerManager {
 
     /// Reconnect a server: shutdown existing connection, reset failure state,
     /// and re-initialize on next request.
-    pub async fn reconnect_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+    pub async fn reconnect_server(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), McpServerManagerError> {
         let server = self.server_mut(server_name)?;
         if let Some(mut process) = server.process.take() {
             process.shutdown().await;
@@ -994,12 +1000,12 @@ impl McpServerManager {
 
     /// Check if a server is currently disabled by the user.
     pub fn is_server_disabled(&self, server_name: &str) -> Result<bool, McpServerManagerError> {
-        let server = self
-            .servers
-            .get(server_name)
-            .ok_or_else(|| McpServerManagerError::UnknownServer {
-                server_name: server_name.to_string(),
-            })?;
+        let server =
+            self.servers
+                .get(server_name)
+                .ok_or_else(|| McpServerManagerError::UnknownServer {
+                    server_name: server_name.to_string(),
+                })?;
         Ok(server.permanent_failure.as_deref() == Some("disabled by user"))
     }
 
@@ -1621,8 +1627,7 @@ async fn spawn_mcp_connection(
             Ok(Box::new(connection))
         }
         McpClientTransport::WebSocket(transport) => {
-            let connection =
-                McpWsConnection::connect(transport, &bootstrap.server_name).await?;
+            let connection = McpWsConnection::connect(transport, &bootstrap.server_name).await?;
             Ok(Box::new(connection))
         }
         other => Err(io::Error::new(
@@ -1638,7 +1643,9 @@ async fn spawn_mcp_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
+    use crate::config::{
+        ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig,
+    };
 
     fn stub_servers() -> BTreeMap<String, ScopedMcpServerConfig> {
         let mut servers = BTreeMap::new();

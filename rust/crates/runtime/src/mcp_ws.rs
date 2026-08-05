@@ -36,9 +36,7 @@ use crate::mcp_server_manager::{
 /// Type alias for the writer half of the WebSocket stream. The reader half
 /// lives in a background task that forwards text frames to an mpsc channel.
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
@@ -73,11 +71,12 @@ impl McpWsConnection {
     ) -> io::Result<Self> {
         let headers = resolve_headers(transport, server_name).await;
 
-        let mut request = transport
-            .url
-            .as_str()
-            .into_client_request()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid MCP WebSocket url `{}`: {e}", transport.url)))?;
+        let mut request = transport.url.as_str().into_client_request().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid MCP WebSocket url `{}`: {e}", transport.url),
+            )
+        })?;
 
         // Inject resolved headers into the upgrade request.
         let req_headers = request.headers_mut();
@@ -118,7 +117,12 @@ impl McpWsConnection {
                         break;
                     }
                     // Ping/Pong are handled automatically by tungstenite.
-                    Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_)) => {
+                    Ok(
+                        Message::Ping(_)
+                        | Message::Pong(_)
+                        | Message::Binary(_)
+                        | Message::Frame(_),
+                    ) => {
                         continue;
                     }
                     Err(_) => {
@@ -158,14 +162,12 @@ impl McpWsConnection {
 
         {
             let mut sink = self.sink.lock().await;
-            sink.send(Message::Text(json.into()))
-                .await
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        format!("MCP WebSocket send failed: {e}"),
-                    )
-                })?;
+            sink.send(Message::Text(json.into())).await.map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("MCP WebSocket send failed: {e}"),
+                )
+            })?;
         }
 
         let mut events = self.events.lock().await;
@@ -314,7 +316,10 @@ mod tests {
                 let responses = responses.clone();
                 move |ws: WebSocketUpgrade| {
                     let responses = responses.clone();
-                    async move { ws.on_upgrade(move |socket| handle_ws(socket, responses)).into_response() }
+                    async move {
+                        ws.on_upgrade(move |socket| handle_ws(socket, responses))
+                            .into_response()
+                    }
                 }
             }),
         );
@@ -354,12 +359,7 @@ mod tests {
         let list = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}}"#;
         let call = r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"echo:hi"}],"isError":false}}"#;
 
-        let addr = spawn_mock_ws(vec![
-            init.to_string(),
-            list.to_string(),
-            call.to_string(),
-        ])
-        .await;
+        let addr = spawn_mock_ws(vec![init.to_string(), list.to_string(), call.to_string()]).await;
 
         let mut connection = McpWsConnection::connect(&transport(addr), "mock-ws")
             .await
@@ -465,11 +465,7 @@ mod tests {
             )
             .await
             .expect("call tool with interleaved notifications");
-        assert!(!result
-            .result
-            .expect("call result")
-            .is_error
-            .unwrap_or(true));
+        assert!(!result.result.expect("call result").is_error.unwrap_or(true));
     }
 
     #[tokio::test]
@@ -483,7 +479,10 @@ mod tests {
         assert!(!connection.has_exited().await.expect("has_exited"));
 
         connection.shutdown().await;
-        assert!(connection.has_exited().await.expect("has_exited after shutdown"));
+        assert!(connection
+            .has_exited()
+            .await
+            .expect("has_exited after shutdown"));
     }
 
     #[tokio::test]

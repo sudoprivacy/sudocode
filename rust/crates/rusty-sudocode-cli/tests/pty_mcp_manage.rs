@@ -46,16 +46,24 @@ fn mcp_add_json_then_list() {
     // Add a server
     let mut sess = spawn_mcp_in_workspace(
         &workspace,
-        &["mcp", "add-json", "test-server", r#"{"command":"echo","args":["hello"]}"#],
+        &[
+            "mcp",
+            "add-json",
+            "test-server",
+            r#"{"command":"echo","args":["hello"]}"#,
+        ],
     );
     sess.expect("Added").expect("should report server added");
-    sess.expect("test-server")
-        .expect("should show server name");
+    sess.expect("test-server").expect("should show server name");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 
     // Verify settings file was created
-    let settings_path = workspace.root.join(".nexus").join("sudocode").join("settings.json");
+    let settings_path = workspace
+        .root
+        .join(".nexus")
+        .join("sudocode")
+        .join("settings.json");
     assert!(settings_path.exists(), "settings.json should be created");
     let content = std::fs::read_to_string(&settings_path).expect("read settings");
     assert!(content.contains("test-server"));
@@ -90,7 +98,11 @@ fn mcp_remove_after_add() {
     assert_eq!(exit, 0);
 
     // Verify it's gone from the settings file
-    let settings_path = workspace.root.join(".nexus").join("sudocode").join("settings.json");
+    let settings_path = workspace
+        .root
+        .join(".nexus")
+        .join("sudocode")
+        .join("settings.json");
     let content = std::fs::read_to_string(&settings_path).expect("read settings");
     assert!(
         !content.contains("to-remove"),
@@ -103,10 +115,8 @@ fn mcp_remove_after_add() {
 fn mcp_add_json_invalid_json_errors() {
     let workspace = HarnessWorkspace::new("mcp-add-invalid");
 
-    let mut sess = spawn_mcp_in_workspace(
-        &workspace,
-        &["mcp", "add-json", "bad-server", "not-json"],
-    );
+    let mut sess =
+        spawn_mcp_in_workspace(&workspace, &["mcp", "add-json", "bad-server", "not-json"]);
     sess.expect("invalid JSON|error|Error")
         .expect("should show error for invalid JSON");
     let exit = sess.expect_eof().expect("exit");

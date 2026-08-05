@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "test-srv": {
+      "args": [
+        "hello"
+      ],
+      "command": "echo"
+    }
+  }
+}

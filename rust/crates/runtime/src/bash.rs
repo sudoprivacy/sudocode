@@ -790,23 +790,20 @@ mod tests {
 
         let calls: Arc<Mutex<Vec<(String, usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_clone = calls.clone();
-        let on_progress: Option<BashProgressCallback> =
-            Some(Box::new(move |progress| {
-                calls_clone.lock().unwrap().push((
-                    progress.output.to_string(),
-                    progress.total_lines,
-                    progress.total_bytes,
-                ));
-            }));
+        let on_progress: Option<BashProgressCallback> = Some(Box::new(move |progress| {
+            calls_clone.lock().unwrap().push((
+                progress.output.to_string(),
+                progress.total_lines,
+                progress.total_bytes,
+            ));
+        }));
 
         // Use a command that produces multiple lines with a small delay
         // so the 1-second progress interval fires at least once, plus
         // the final flush.
         let output = execute_bash_with_progress(
             BashCommandInput {
-                command: String::from(
-                    "for i in 1 2 3; do echo \"line $i\"; sleep 0.5; done",
-                ),
+                command: String::from("for i in 1 2 3; do echo \"line $i\"; sleep 0.5; done"),
                 timeout: Some(10_000),
                 description: None,
                 run_in_background: Some(false),

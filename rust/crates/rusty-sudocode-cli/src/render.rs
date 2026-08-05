@@ -257,7 +257,8 @@ impl Spinner {
                         if let Some(budget) = token_budget {
                             // User-set budget (e.g. `+500k` in prompt):
                             // show Target: X / Y (P%) ~Zm
-                            let pct = (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
+                            let pct =
+                                (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
                             let fmt_t = format_compact_tokens(approx_tokens);
                             let fmt_b = format_compact_tokens(budget);
                             let _ = write!(line, " ↓ {fmt_t} / {fmt_b} ({pct:.0}%)");

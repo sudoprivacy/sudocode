@@ -2875,8 +2875,7 @@ fn add_mcp_server(cwd: &Path, name: &str, config_json: &str) -> Result<String, S
     let is_update = servers.contains_key(name);
     servers.insert(name.to_string(), config_value);
 
-    fs::create_dir_all(&settings_dir)
-        .map_err(|e| format!("failed to create directory: {e}"))?;
+    fs::create_dir_all(&settings_dir).map_err(|e| format!("failed to create directory: {e}"))?;
     let formatted =
         serde_json::to_string_pretty(&settings).map_err(|e| format!("failed to serialize: {e}"))?;
     fs::write(&settings_path, formatted)
@@ -3018,8 +3017,7 @@ fn render_mcp_report_for(
             let json_str = parts.next().ok_or_else(|| {
                 runtime::ConfigError::Parse("usage: /mcp add-json <name> <json>".to_string())
             })?;
-            add_mcp_server(cwd, name.trim(), json_str.trim())
-                .map_err(runtime::ConfigError::Parse)
+            add_mcp_server(cwd, name.trim(), json_str.trim()).map_err(runtime::ConfigError::Parse)
         }
         Some(args) if args.split_whitespace().next() == Some("remove") => {
             let mut parts = args.split_whitespace();
@@ -3027,8 +3025,7 @@ fn render_mcp_report_for(
             let name = parts.next().ok_or_else(|| {
                 runtime::ConfigError::Parse("usage: /mcp remove <name>".to_string())
             })?;
-            remove_mcp_server(cwd, name)
-                .map_err(runtime::ConfigError::Parse)
+            remove_mcp_server(cwd, name).map_err(runtime::ConfigError::Parse)
         }
         Some(args) => Ok(render_mcp_usage(Some(args))),
     }
@@ -3151,8 +3148,7 @@ fn render_mcp_report_json_for(
             let name = parts.next().ok_or_else(|| {
                 runtime::ConfigError::Parse("usage: /mcp remove <name>".to_string())
             })?;
-            let result = remove_mcp_server(cwd, name)
-                .map_err(runtime::ConfigError::Parse)?;
+            let result = remove_mcp_server(cwd, name).map_err(runtime::ConfigError::Parse)?;
             Ok(json!({
                 "kind": "mcp",
                 "action": "remove",
@@ -5262,7 +5258,9 @@ mod tests {
         let action_error = parse_error_message("/mcp inspect alpha");
         assert!(action_error
             .contains("Unknown /mcp action 'inspect'. Use list, show, add-json, remove, reconnect, enable, disable, or help."));
-        assert!(action_error.contains("  Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
+        assert!(action_error.contains(
+            "  Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
+        ));
     }
 
     #[test]
@@ -6036,8 +6034,12 @@ mod tests {
         let cwd = temp_dir("mcp-usage");
 
         let help = super::handle_mcp_slash_command(Some("help"), &cwd).expect("mcp help");
-        assert!(help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
-        assert!(help.contains("Direct CLI       scode mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
+        assert!(help.contains(
+            "Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
+        ));
+        assert!(help.contains(
+            "Direct CLI       scode mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
+        ));
 
         let unexpected =
             super::handle_mcp_slash_command(Some("show alpha beta"), &cwd).expect("mcp usage");
@@ -6045,12 +6047,16 @@ mod tests {
 
         let nested_help =
             super::handle_mcp_slash_command(Some("show --help"), &cwd).expect("mcp help");
-        assert!(nested_help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
+        assert!(nested_help.contains(
+            "Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
+        ));
         assert!(nested_help.contains("Unexpected       show"));
 
         let unknown_help =
             super::handle_mcp_slash_command(Some("inspect --help"), &cwd).expect("mcp usage");
-        assert!(unknown_help.contains("Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"));
+        assert!(unknown_help.contains(
+            "Usage            /mcp [list|show|add-json|remove|reconnect|enable|disable|help]"
+        ));
         assert!(unknown_help.contains("Unexpected       inspect"));
 
         let _ = fs::remove_dir_all(cwd);
@@ -6403,11 +6409,8 @@ mod tests {
         let workspace = temp_dir("mcp-remove-missing");
         let settings_dir = workspace.join(".nexus").join("sudocode");
         fs::create_dir_all(&settings_dir).expect("create settings dir");
-        fs::write(
-            settings_dir.join("settings.json"),
-            r#"{"mcpServers": {}}"#,
-        )
-        .expect("write settings");
+        fs::write(settings_dir.join("settings.json"), r#"{"mcpServers": {}}"#)
+            .expect("write settings");
 
         let result = super::handle_mcp_slash_command(Some("remove ghost"), &workspace);
         assert!(result.is_err());
@@ -6460,11 +6463,8 @@ mod tests {
         )
         .expect("write settings");
 
-        super::handle_mcp_slash_command(
-            Some(r#"add-json new {"command": "new-cmd"}"#),
-            &workspace,
-        )
-        .expect("add-json should succeed");
+        super::handle_mcp_slash_command(Some(r#"add-json new {"command": "new-cmd"}"#), &workspace)
+            .expect("add-json should succeed");
 
         let content =
             fs::read_to_string(settings_dir.join("settings.json")).expect("read settings");

@@ -1,9 +1,11 @@
+use std::cell::RefCell;
 use std::env;
 use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
 
@@ -21,6 +23,41 @@ use crate::ConfigLoader;
 /// timeout; this default prevents unbounded foreground commands from pinning a
 /// turn indefinitely when the model omits that field.
 pub const DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS: u64 = 120_000;
+
+/// Progress report emitted during streaming bash execution.
+pub struct BashProgress<'a> {
+    /// Latest output chunk (may contain multiple lines).
+    pub output: &'a str,
+    /// Cumulative line count so far.
+    pub total_lines: usize,
+    /// Cumulative byte count so far.
+    pub total_bytes: usize,
+}
+
+/// Callback invoked periodically during bash command execution.
+pub type BashProgressCallback = Box<dyn Fn(BashProgress<'_>) + Send>;
+
+thread_local! {
+    static BASH_PROGRESS_CALLBACK: RefCell<Option<BashProgressCallback>> = const { RefCell::new(None) };
+}
+
+/// Store a progress callback in thread-local storage.
+///
+/// The next call to [`execute_bash_with_abort`] on this thread will
+/// consume (take) the callback and use it for streaming output.
+pub fn set_bash_progress_callback(cb: BashProgressCallback) {
+    BASH_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = Some(cb);
+    });
+}
+
+/// Remove any progress callback from thread-local storage without
+/// invoking it. Safe to call even when no callback is set.
+pub fn clear_bash_progress_callback() {
+    BASH_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
 
 /// Input schema for the built-in bash execution tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,9 +117,27 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
 }
 
 /// Executes a shell command and cooperates with turn cancellation.
+///
+/// If a progress callback was previously stored via
+/// [`set_bash_progress_callback`], it will be consumed and used for
+/// streaming output during this invocation.
 pub fn execute_bash_with_abort(
     input: BashCommandInput,
     abort_signal: Option<&HookAbortSignal>,
+) -> io::Result<BashCommandOutput> {
+    let on_progress = BASH_PROGRESS_CALLBACK.with(|cell| cell.borrow_mut().take());
+    execute_bash_with_progress(input, abort_signal, on_progress)
+}
+
+/// Executes a shell command with an optional streaming progress callback.
+///
+/// When `on_progress` is `Some`, stdout is read line-by-line and the
+/// callback is invoked roughly every second with the latest output chunk.
+/// When `None`, the original non-streaming code path is used.
+pub fn execute_bash_with_progress(
+    input: BashCommandInput,
+    abort_signal: Option<&HookAbortSignal>,
+    on_progress: Option<BashProgressCallback>,
 ) -> io::Result<BashCommandOutput> {
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
@@ -114,26 +169,63 @@ pub fn execute_bash_with_abort(
         });
     }
 
-    // If we are already inside a tokio runtime (e.g. when run_turn is
-    // driven by an outer block_on), use the current handle instead of
-    // creating a nested runtime which would panic.
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| {
-            handle.block_on(execute_bash_async(
+    // Pick async implementation: streaming when a progress callback is
+    // provided, the original `command.output()` path otherwise.
+    let run_async = |handle_or_runtime: AsyncRunner| -> io::Result<BashCommandOutput> {
+        if on_progress.is_some() {
+            handle_or_runtime.block_on(execute_bash_streaming(
                 input,
                 sandbox_status,
                 cwd,
                 abort_signal.cloned(),
+                on_progress,
             ))
-        })
+        } else {
+            handle_or_runtime.block_on_dyn(Box::pin(execute_bash_async(
+                input,
+                sandbox_status,
+                cwd,
+                abort_signal.cloned(),
+            )))
+        }
+    };
+
+    // If we are already inside a tokio runtime (e.g. when run_turn is
+    // driven by an outer block_on), use the current handle instead of
+    // creating a nested runtime which would panic.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        run_async(AsyncRunner::Handle(handle))
     } else {
         let runtime = Builder::new_current_thread().enable_all().build()?;
-        runtime.block_on(execute_bash_async(
-            input,
-            sandbox_status,
-            cwd,
-            abort_signal.cloned(),
-        ))
+        run_async(AsyncRunner::Runtime(runtime))
+    }
+}
+
+/// Helper to abstract over `tokio::runtime::Handle` vs owned `Runtime`.
+enum AsyncRunner {
+    Handle(tokio::runtime::Handle),
+    Runtime(tokio::runtime::Runtime),
+}
+
+impl AsyncRunner {
+    fn block_on<F: std::future::Future<Output = io::Result<BashCommandOutput>>>(
+        self,
+        future: F,
+    ) -> io::Result<BashCommandOutput> {
+        match self {
+            Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+            Self::Runtime(runtime) => runtime.block_on(future),
+        }
+    }
+
+    fn block_on_dyn(
+        self,
+        future: std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<BashCommandOutput>>>>,
+    ) -> io::Result<BashCommandOutput> {
+        match self {
+            Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+            Self::Runtime(runtime) => runtime.block_on(future),
+        }
     }
 }
 
@@ -251,6 +343,167 @@ async fn execute_bash_async(
     let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = output.status.code().and_then(|code| {
+        if code == 0 {
+            None
+        } else {
+            Some(format!("exit_code:{code}"))
+        }
+    });
+
+    Ok(BashCommandOutput {
+        stdout,
+        stderr,
+        raw_output_path: None,
+        interrupted: false,
+        is_image: None,
+        background_task_id: None,
+        backgrounded_by_user: None,
+        assistant_auto_backgrounded: None,
+        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
+        return_code_interpretation,
+        no_output_expected,
+        structured_content: None,
+        persisted_output_path: None,
+        persisted_output_size: None,
+        sandbox_status: Some(sandbox_status),
+    })
+}
+
+/// Streaming variant of [`execute_bash_async`].
+///
+/// Pipes stdout and stderr from the child process and reads them
+/// line-by-line. When `on_progress` is `Some`, the callback is invoked
+/// roughly every second with the latest stdout chunk. All output is
+/// collected for the final [`BashCommandOutput`].
+async fn execute_bash_streaming(
+    input: BashCommandInput,
+    sandbox_status: SandboxStatus,
+    cwd: std::path::PathBuf,
+    abort_signal: Option<HookAbortSignal>,
+    on_progress: Option<BashProgressCallback>,
+) -> io::Result<BashCommandOutput> {
+    detect_and_emit_ship_prepared(&input.command);
+
+    let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.kill_on_drop(true);
+
+    let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
+    let mut child = command.spawn()?;
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+
+    let mut stdout_reader = tokio::io::BufReader::new(stdout);
+    let mut stderr_reader = tokio::io::BufReader::new(stderr);
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    let mut total_lines: usize = 0;
+    let mut total_bytes: usize = 0;
+    let mut progress_chunk = String::new();
+    let mut last_progress = tokio::time::Instant::now();
+
+    const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+    let timeout_deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let abort_wait = async {
+        if let Some(signal) = &abort_signal {
+            signal.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::pin!(abort_wait);
+
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdout_line = String::new();
+    let mut stderr_line = String::new();
+
+    loop {
+        if stdout_done && stderr_done {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+            () = &mut abort_wait => {
+                let _ = child.kill().await;
+                return Ok(interrupted_bash_output(
+                    "Command interrupted by user",
+                    "interrupted",
+                    input.dangerously_disable_sandbox,
+                    sandbox_status,
+                ));
+            }
+            _ = tokio::time::sleep_until(timeout_deadline) => {
+                let _ = child.kill().await;
+                return Ok(interrupted_bash_output(
+                    &format!("Command exceeded timeout of {timeout_ms} ms"),
+                    "timeout",
+                    input.dangerously_disable_sandbox,
+                    sandbox_status,
+                ));
+            }
+            result = stdout_reader.read_line(&mut stdout_line), if !stdout_done => {
+                match result {
+                    Ok(0) => stdout_done = true,
+                    Ok(n) => {
+                        total_bytes += n;
+                        total_lines += 1;
+                        stdout_buf.push_str(&stdout_line);
+                        progress_chunk.push_str(&stdout_line);
+                        stdout_line.clear();
+
+                        if let Some(ref cb) = on_progress {
+                            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                                cb(BashProgress {
+                                    output: &progress_chunk,
+                                    total_lines,
+                                    total_bytes,
+                                });
+                                progress_chunk.clear();
+                                last_progress = tokio::time::Instant::now();
+                            }
+                        }
+                    }
+                    Err(_) => stdout_done = true,
+                }
+            }
+            result = stderr_reader.read_line(&mut stderr_line), if !stderr_done => {
+                match result {
+                    Ok(0) => stderr_done = true,
+                    Ok(n) => {
+                        total_bytes += n;
+                        stderr_buf.push_str(&stderr_line);
+                        stderr_line.clear();
+                    }
+                    Err(_) => stderr_done = true,
+                }
+            }
+        }
+    }
+
+    // Flush any remaining progress chunk
+    if let Some(ref cb) = on_progress {
+        if !progress_chunk.is_empty() {
+            cb(BashProgress {
+                output: &progress_chunk,
+                total_lines,
+                total_bytes,
+            });
+        }
+    }
+
+    // Wait for the child to fully exit
+    let status = child.wait().await?;
+
+    let stdout = truncate_output(&stdout_buf);
+    let stderr = truncate_output(&stderr_buf);
+    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
+    let return_code_interpretation = status.code().and_then(|code| {
         if code == 0 {
             None
         } else {
@@ -437,7 +690,10 @@ pub fn execute_bash_with_tracking(
 // require sh.
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{execute_bash, execute_bash_with_abort, BashCommandInput};
+    use super::{
+        execute_bash, execute_bash_with_abort, execute_bash_with_progress, BashCommandInput,
+        BashProgressCallback,
+    };
     use crate::hooks::HookAbortSignal;
     use crate::sandbox::FilesystemIsolationMode;
 
@@ -526,6 +782,80 @@ mod tests {
             !output.interrupted,
             "Command hung and was cut off by the timeout!"
         );
+    }
+
+    #[test]
+    fn streaming_progress_callback_invoked() {
+        use std::sync::{Arc, Mutex};
+
+        let calls: Arc<Mutex<Vec<(String, usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = calls.clone();
+        let on_progress: Option<BashProgressCallback> = Some(Box::new(move |progress| {
+            calls_clone.lock().unwrap().push((
+                progress.output.to_string(),
+                progress.total_lines,
+                progress.total_bytes,
+            ));
+        }));
+
+        // Use a command that produces multiple lines with a small delay
+        // so the 1-second progress interval fires at least once, plus
+        // the final flush.
+        let output = execute_bash_with_progress(
+            BashCommandInput {
+                command: String::from("for i in 1 2 3; do echo \"line $i\"; sleep 0.5; done"),
+                timeout: Some(10_000),
+                description: None,
+                run_in_background: Some(false),
+                dangerously_disable_sandbox: Some(true),
+                namespace_restrictions: None,
+                isolate_network: None,
+                filesystem_mode: None,
+                allowed_mounts: None,
+            },
+            None,
+            on_progress,
+        )
+        .expect("streaming bash command should execute");
+
+        assert!(!output.interrupted);
+        assert!(output.stdout.contains("line 1"));
+        assert!(output.stdout.contains("line 2"));
+        assert!(output.stdout.contains("line 3"));
+
+        let recorded = calls.lock().unwrap();
+        // The callback must have been invoked at least once (the final
+        // flush fires even if the interval never elapsed).
+        assert!(
+            !recorded.is_empty(),
+            "progress callback should have been invoked at least once"
+        );
+        // The last call should report all 3 lines
+        let last = recorded.last().unwrap();
+        assert_eq!(last.1, 3, "total_lines should be 3 after all output");
+    }
+
+    #[test]
+    fn streaming_without_callback_still_works() {
+        let output = execute_bash_with_progress(
+            BashCommandInput {
+                command: String::from("printf 'streaming-none'"),
+                timeout: Some(2_000),
+                description: None,
+                run_in_background: Some(false),
+                dangerously_disable_sandbox: Some(true),
+                namespace_restrictions: None,
+                isolate_network: None,
+                filesystem_mode: None,
+                allowed_mounts: None,
+            },
+            None,
+            None,
+        )
+        .expect("bash with no callback should still work");
+
+        assert_eq!(output.stdout, "streaming-none");
+        assert!(!output.interrupted);
     }
 }
 

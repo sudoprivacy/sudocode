@@ -31,9 +31,11 @@ use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_connection::McpConnection;
 use crate::mcp_remote::{resolve_headers, MAX_RESPONSE_BYTES};
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
-    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
-    McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
+    JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams,
+    McpGetPromptResult, McpInitializeParams, McpInitializeResult, McpListPromptsParams,
+    McpListPromptsResult, McpListResourcesParams, McpListResourcesResult, McpListToolsParams,
+    McpListToolsResult, McpProgressNotification, McpReadResourceParams, McpReadResourceResult,
+    McpToolCallParams, McpToolCallResult,
 };
 use crate::{IncrementalSseParser, SseEvent};
 
@@ -233,7 +235,22 @@ impl McpSseConnection {
             })?;
             let response: JsonRpcResponse<TResult> = match serde_json::from_str(&event.data) {
                 Ok(response) => response,
-                Err(_) => continue,
+                Err(_) => {
+                    if let Ok(notification) =
+                        serde_json::from_str::<JsonRpcNotification>(&event.data)
+                    {
+                        if notification.method == "notifications/progress" {
+                            if let Some(params) = notification.params {
+                                if let Ok(progress) =
+                                    serde_json::from_value::<McpProgressNotification>(params)
+                                {
+                                    crate::mcp_server_manager::emit_mcp_progress(progress);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
             };
             if response.id == id {
                 return Ok(response);
@@ -282,6 +299,22 @@ impl McpConnection for McpSseConnection {
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>> {
         self.post_and_read("resources/read", id, Some(params)).await
+    }
+
+    async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        self.post_and_read("prompts/list", id, params).await
+    }
+
+    async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        self.post_and_read("prompts/get", id, Some(params)).await
     }
 
     async fn has_exited(&mut self) -> io::Result<bool> {

@@ -394,6 +394,21 @@ impl ConfigLoader {
             loaded_entries.push(entry);
         }
 
+        // Discover project-scoped `.mcp.json` at the workspace root.
+        // This mirrors CC's convention: teams check in `.mcp.json` so
+        // collaborators auto-discover shared MCP servers on clone.
+        // Project-scope MCP servers do NOT override user/settings entries
+        // with the same name (user config wins).
+        let project_mcp_path = self.cwd.join(".mcp.json");
+        if project_mcp_path.is_file() {
+            if let Ok(project_mcp) = load_plugin_mcp_servers(&project_mcp_path) {
+                for (name, mut config) in project_mcp {
+                    config.scope = ConfigSource::Project;
+                    mcp_servers.entry(name).or_insert(config);
+                }
+            }
+        }
+
         for warning in &all_warnings {
             eprintln!("warning: {warning}");
         }
@@ -2962,6 +2977,82 @@ mod tests {
             err_msg.contains("missing sudocode.json"),
             "error should mention missing file: {err_msg}"
         );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn discovers_mcp_servers_from_project_root_mcp_json() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::create_dir_all(&home).expect("home dir");
+
+        // Place a .mcp.json at the project root
+        fs::write(
+            cwd.join(".mcp.json"),
+            r#"{ "mcpServers": { "team-server": { "command": "team-mcp" } } }"#,
+        )
+        .expect("write .mcp.json");
+
+        let config = ConfigLoader::new(&cwd, &home).load().expect("config");
+        let servers = config.mcp().servers();
+        assert!(
+            servers.contains_key("team-server"),
+            ".mcp.json server should be discovered"
+        );
+        let server = &servers["team-server"];
+        assert_eq!(server.scope, ConfigSource::Project);
+        match &server.config {
+            McpServerConfig::Stdio(stdio) => {
+                assert!(
+                    stdio.command.contains("team-mcp"),
+                    "command should be resolved"
+                );
+            }
+            other => panic!("expected stdio config, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn settings_json_mcp_servers_override_mcp_json() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::create_dir_all(&home).expect("home dir");
+
+        // .mcp.json at project root
+        fs::write(
+            cwd.join(".mcp.json"),
+            r#"{ "mcpServers": { "shared": { "command": "from-mcp-json" } } }"#,
+        )
+        .expect("write .mcp.json");
+
+        // settings.json with same server name (higher priority)
+        let settings_dir = cwd.join(".nexus").join("sudocode");
+        fs::create_dir_all(&settings_dir).expect("settings dir");
+        fs::write(
+            settings_dir.join("settings.json"),
+            r#"{ "mcpServers": { "shared": { "command": "from-settings" } } }"#,
+        )
+        .expect("write settings.json");
+
+        let config = ConfigLoader::new(&cwd, &home).load().expect("config");
+        let servers = config.mcp().servers();
+        let server = &servers["shared"];
+        match &server.config {
+            McpServerConfig::Stdio(stdio) => {
+                assert_eq!(
+                    stdio.command, "from-settings",
+                    "settings.json should win over .mcp.json on name collision"
+                );
+            }
+            other => panic!("expected stdio config, got {other:?}"),
+        }
 
         fs::remove_dir_all(root).expect("cleanup");
     }

@@ -3621,6 +3621,9 @@ impl LiveCli {
         // call in `runtime/src/conversation.rs`.  The CLI no longer
         // duplicates it here.
         let mut spinner = Spinner::new();
+        if let Some(budget) = crate::render::parse_token_budget(input) {
+            spinner.set_token_budget(budget);
+        }
         let mut stdout = io::stdout();
         spinner.start(
             "🦀 Thinking...",
@@ -3629,10 +3632,14 @@ impl LiveCli {
         );
         let pause_flag = spinner.pause_flag();
         let thinking_flag = spinner.thinking_flag();
+        let response_bytes = spinner.response_bytes_counter();
         runtime
             .api_client_mut()
             .set_spinner_pause(pause_flag.clone());
         runtime.api_client_mut().set_spinner_thinking(thinking_flag);
+        runtime
+            .api_client_mut()
+            .set_spinner_response_bytes(response_bytes);
         runtime.tool_executor_mut().set_spinner_pause(pause_flag);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -3663,7 +3670,10 @@ impl LiveCli {
                         println!("{timeline}");
                     }
                     let usage = self.runtime.usage().current_turn_usage();
+                    let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
+                    let context_window =
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -3673,6 +3683,8 @@ impl LiveCli {
                             &self.config.model,
                             turns,
                             &usage,
+                            Some(&cumulative),
+                            Some(context_window),
                             elapsed,
                             branch.as_deref(),
                         )
@@ -3877,13 +3889,43 @@ impl LiveCli {
                 false
             }
             SlashCommand::Mcp { action, target } => {
-                let args = match (action.as_deref(), target.as_deref()) {
-                    (None, None) => None,
-                    (Some(action), None) => Some(action.to_string()),
-                    (Some(action), Some(target)) => Some(format!("{action} {target}")),
-                    (None, Some(target)) => Some(target.to_string()),
-                };
-                Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                match action.as_deref() {
+                    Some("reconnect") | Some("enable") | Some("disable") => {
+                        let action_str = action.as_deref().unwrap();
+                        let Some(server_name) = target.as_deref() else {
+                            println!("usage: /mcp {action_str} <server>");
+                            return Ok(false);
+                        };
+                        if let Some(mcp_state) = &self.runtime.mcp_state {
+                            let mut mcp = mcp_state.lock().unwrap_or_else(|e| e.into_inner());
+                            let result = match action_str {
+                                "reconnect" => mcp.reconnect_server(server_name),
+                                "enable" => mcp.enable_server(server_name),
+                                "disable" => mcp.disable_server(server_name),
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(msg) => println!("{msg}"),
+                                Err(err) => println!("Error: {err}"),
+                            }
+                        } else {
+                            println!(
+                                "No MCP servers are running in this session.\n\
+                                 Hint: if you just added a server via `/mcp add-json`, \
+                                 restart scode to load it."
+                            );
+                        }
+                    }
+                    _ => {
+                        let args = match (action.as_deref(), target.as_deref()) {
+                            (None, None) => None,
+                            (Some(action), None) => Some(action.to_string()),
+                            (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                            (None, Some(target)) => Some(target.to_string()),
+                        };
+                        Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                    }
+                }
                 false
             }
             SlashCommand::Memory => {

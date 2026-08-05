@@ -17,8 +17,7 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{MarkdownStreamState, TerminalRenderer};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer};
 use std::sync::Arc;
 
 use crate::{
@@ -42,16 +41,9 @@ pub(crate) struct AnthropicRuntimeClient {
     pub(crate) tool_registry: GlobalToolRegistry,
     pub(crate) progress_reporter: Option<InternalPromptProgressReporter>,
     pub(crate) reasoning_effort: Option<String>,
-    /// Shared flag from the Spinner. Set to `true` before writing output to
-    /// pause the spinner animation, `false` after to let it resume.
-    pub(crate) spinner_pause: Option<Arc<AtomicBool>>,
-    /// Shared flag from the Spinner. While `true`, the spinner displays a
-    /// distinct "Reasoning..." indicator instead of the default "Thinking..."
-    /// state.
-    pub(crate) spinner_thinking: Option<Arc<AtomicBool>>,
-    /// Shared counter from the Spinner. Incremented by text-delta byte
-    /// length; the spinner thread reads it to display a live token estimate.
-    pub(crate) spinner_response_bytes: Option<Arc<AtomicU32>>,
+    /// Shared spinner reference for pausing, thinking indicator, and
+    /// response-byte counting.
+    pub(crate) spinner: Option<SpinnerRef>,
 }
 
 impl AnthropicRuntimeClient {
@@ -87,40 +79,25 @@ impl AnthropicRuntimeClient {
             tool_registry,
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
-            spinner_pause: None,
-            spinner_thinking: None,
-            spinner_response_bytes: None,
+            spinner: None,
         })
     }
 
-    pub(crate) fn set_spinner_pause(&mut self, flag: Arc<AtomicBool>) {
-        self.spinner_pause = Some(flag);
-    }
-
-    pub(crate) fn set_spinner_thinking(&mut self, flag: Arc<AtomicBool>) {
-        self.spinner_thinking = Some(flag);
-    }
-
-    pub(crate) fn set_spinner_response_bytes(&mut self, counter: Arc<AtomicU32>) {
-        self.spinner_response_bytes = Some(counter);
+    pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
+        self.spinner = Some(ref_);
     }
 
     /// Pause the spinner and clear its line before writing content.
     fn pause_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(true, Ordering::SeqCst);
-            // Brief sleep to let the spinner thread finish its current tick.
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            // Clear the spinner text from the current line.
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
+        if let Some(s) = &self.spinner {
+            s.pause();
         }
     }
 
     /// Resume the spinner after content has been written.
     fn resume_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(false, Ordering::SeqCst);
+        if let Some(s) = &self.spinner {
+            s.resume();
         }
     }
 
@@ -210,9 +187,7 @@ struct CliStreamState {
     session_id: String,
     emit_output: bool,
     progress_reporter: Option<InternalPromptProgressReporter>,
-    spinner_pause: Option<Arc<AtomicBool>>,
-    spinner_thinking: Option<Arc<AtomicBool>>,
-    spinner_response_bytes: Option<Arc<AtomicU32>>,
+    spinner: Option<SpinnerRef>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
     markdown_stream: MarkdownStreamState,
@@ -232,23 +207,20 @@ struct CliStreamState {
 
 impl CliStreamState {
     fn pause_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(true, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
+        if let Some(s) = &self.spinner {
+            s.pause();
         }
     }
 
     fn resume_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(false, Ordering::SeqCst);
+        if let Some(s) = &self.spinner {
+            s.resume();
         }
     }
 
     fn set_thinking_indicator(&self, on: bool) {
-        if let Some(flag) = &self.spinner_thinking {
-            flag.store(on, Ordering::SeqCst);
+        if let Some(s) = &self.spinner {
+            s.set_thinking(on);
         }
     }
 
@@ -293,8 +265,8 @@ impl CliStreamState {
             ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                 ContentBlockDelta::TextDelta { text } => {
                     if !text.is_empty() {
-                        if let Some(counter) = &self.spinner_response_bytes {
-                            counter.fetch_add(text.len() as u32, Ordering::Relaxed);
+                        if let Some(s) = &self.spinner {
+                            s.add_response_bytes(text.len() as u32);
                         }
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_text_phase(&text);
@@ -311,16 +283,16 @@ impl CliStreamState {
                     }
                 }
                 ContentBlockDelta::InputJsonDelta { partial_json } => {
-                    if let Some(counter) = &self.spinner_response_bytes {
-                        counter.fetch_add(partial_json.len() as u32, Ordering::Relaxed);
+                    if let Some(s) = &self.spinner {
+                        s.add_response_bytes(partial_json.len() as u32);
                     }
                     if let Some((_, _, input, _)) = &mut self.pending_tool {
                         input.push_str(&partial_json);
                     }
                 }
                 ContentBlockDelta::ThinkingDelta { thinking } => {
-                    if let Some(counter) = &self.spinner_response_bytes {
-                        counter.fetch_add(thinking.len() as u32, Ordering::Relaxed);
+                    if let Some(s) = &self.spinner {
+                        s.add_response_bytes(thinking.len() as u32);
                     }
                     if !self.block_has_thinking_summary {
                         self.pause_spinner();
@@ -443,9 +415,7 @@ impl AnthropicRuntimeClient {
             session_id: self.session_id.clone(),
             emit_output: self.emit_output,
             progress_reporter: self.progress_reporter.clone(),
-            spinner_pause: self.spinner_pause.clone(),
-            spinner_thinking: self.spinner_thinking.clone(),
-            spinner_response_bytes: self.spinner_response_bytes.clone(),
+            spinner: self.spinner.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
             markdown_stream: MarkdownStreamState::default(),

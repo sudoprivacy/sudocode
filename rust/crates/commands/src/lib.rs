@@ -1386,7 +1386,7 @@ pub fn validate_slash_command_input(
             SlashCommand::Cost
         }
         "resume" => SlashCommand::Resume {
-            session_path: Some(require_remainder(command, remainder, "<session-path>")?),
+            session_path: remainder.map(|s| s.to_string()),
         },
         "config" => {
             if args.first().map(|s| s.to_ascii_lowercase()) == Some("set".into()) {

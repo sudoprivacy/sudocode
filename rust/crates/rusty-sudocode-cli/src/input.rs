@@ -460,6 +460,7 @@ impl LineEditor {
             match self.editor.readline(&self.prompt) {
                 Ok(line) => {
                     self.pending_exit_at = None;
+                    self.push_history(&line);
                     return Ok(ReadOutcome::Submit(line));
                 }
                 Err(ReadlineError::Interrupted) => {

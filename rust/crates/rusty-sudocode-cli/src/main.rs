@@ -1673,14 +1673,12 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     &trimmed,
                     Some(cli.runtime.plugin_load_outcome()),
                 ) {
-                    editor.push_history(input);
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn(&prompt) {
                         eprintln!("\x1b[31m{e}\x1b[0m");
                     }
                     continue;
                 }
-                editor.push_history(input);
                 cli.record_prompt_history(&trimmed);
                 if let Err(e) = cli.run_turn(&trimmed) {
                     eprintln!("\x1b[31m{e}\x1b[0m");

@@ -2206,7 +2206,7 @@ impl AcpCliAgent {
 
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let auth_mode = resolve_auth_mode(&resolved, self.auth_mode, &sudocode_config)
+        let auth_mode = resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
         let system_prompt = build_system_prompt_for(&cwd, &resolved)
             .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
@@ -5822,10 +5822,28 @@ fn resolve_auth_mode(
     explicit: Option<AuthMode>,
     config: &api::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
     if let Some(mode) = explicit {
         return Ok(mode);
     }
+    resolve_configured_auth_mode(model, config)
+}
+
+fn resolve_model_switch_auth_mode(
+    model: &str,
+    explicit: Option<AuthMode>,
+    config: &api::SudoCodeConfig,
+) -> Result<AuthMode, String> {
+    match resolve_configured_auth_mode(model, config) {
+        Ok(mode) => Ok(mode),
+        Err(error) => explicit.map_or(Err(error), Ok),
+    }
+}
+
+fn resolve_configured_auth_mode(
+    model: &str,
+    config: &api::SudoCodeConfig,
+) -> Result<AuthMode, String> {
+    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
     let entry = api::resolve_model(config, model).ok_or_else(|| {
         format!(
             "model '{model}' not found in config. Run /model to configure it, \
@@ -5841,4 +5859,106 @@ fn resolve_auth_mode(
         "no auth mode available for model '{model}'. Run /model to configure it, \
          or pass --auth=<subscription|proxy|api-key> explicitly."
     ))
+}
+
+#[cfg(test)]
+mod auth_mode_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn connection(base_url: &str) -> api::ProviderConnectionConfig {
+        api::ProviderConnectionConfig {
+            base_url: base_url.to_string(),
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            token: None,
+            token_env: None,
+            auth_file: None,
+        }
+    }
+
+    fn model_entry(
+        alias: &str,
+        mode: &str,
+        provider: &str,
+        wire_model: &str,
+        api_format: &str,
+    ) -> api::ModelConfigEntry {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            mode.to_string(),
+            api::ModelProviderMapping {
+                provider: provider.to_string(),
+                model: wire_model.to_string(),
+                api: Some(api_format.to_string()),
+            },
+        );
+
+        api::ModelConfigEntry {
+            alias: alias.to_string(),
+            name: alias.to_string(),
+            input: vec!["text".to_string()],
+            providers,
+        }
+    }
+
+    fn mixed_auth_config() -> api::SudoCodeConfig {
+        let mut auth_modes = BTreeMap::new();
+        auth_modes.insert(
+            "proxy".to_string(),
+            BTreeMap::from([(
+                "sudorouter".to_string(),
+                connection("https://hk.sudorouter.ai/v1"),
+            )]),
+        );
+        auth_modes.insert(
+            "api-key".to_string(),
+            BTreeMap::from([(
+                "deepseek-anthropic".to_string(),
+                connection("https://api.deepseek.com/anthropic"),
+            )]),
+        );
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "minimax-m2.5".to_string(),
+            model_entry(
+                "MiniMax-M2.5",
+                "proxy",
+                "sudorouter",
+                "MiniMax-M2.5",
+                "openai-completions",
+            ),
+        );
+        models.insert(
+            "deepseek-anthropic/deepseek-v4-flash".to_string(),
+            model_entry(
+                "deepseek-anthropic/deepseek-v4-flash",
+                "api-key",
+                "deepseek-anthropic",
+                "deepseek-v4-flash",
+                "anthropic-messages",
+            ),
+        );
+
+        api::SudoCodeConfig {
+            auth_modes,
+            models,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn configured_api_key_model_wins_over_stale_proxy_auth_mode() {
+        let config = mixed_auth_config();
+
+        let mode = resolve_model_switch_auth_mode(
+            "deepseek-anthropic/deepseek-v4-flash",
+            Some(AuthMode::Proxy),
+            &config,
+        )
+        .expect("configured api-key model should resolve");
+
+        assert_eq!(mode, AuthMode::ApiKey);
+    }
 }

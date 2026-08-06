@@ -194,8 +194,12 @@ impl CliOutput {
     }
 }
 
-/// Format the sticky footer bar text.
+/// Format the sticky footer bar text with a separator line above.
 fn format_footer_bar(permission_mode: &str) -> String {
+    let width = crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80);
+    let separator = format!("\x1b[2m{}\x1b[0m", "─".repeat(width));
     let icon = match permission_mode {
         "danger-full-access" => "⏵⏵",
         "workspace-write" => "⏵",
@@ -207,7 +211,9 @@ fn format_footer_bar(permission_mode: &str) -> String {
         "read-only" => "read only",
         other => other,
     };
-    format!("\x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m")
+    format!(
+        "{separator}\n  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m"
+    )
 }
 
 /// Shared spinner reference for streaming and tool execution layers.
@@ -418,7 +424,6 @@ impl SpinnerHandle {
                     let color_code = if is_stalled { "33" } else { "34" };
                     let colored = format!("\x1b[{color_code}m{line}\x1b[0m");
                     pb.set_message(colored);
-                    pb.tick();
                 }
 
                 std::thread::sleep(std::time::Duration::from_millis(80));

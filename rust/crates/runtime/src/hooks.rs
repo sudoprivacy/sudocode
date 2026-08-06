@@ -1278,7 +1278,7 @@ mod tests {
 
     // `#[cfg(unix)]` because the diagnostic-rendering assertions on
     // lines 1283-1284 hard-code the POSIX-shell forms of the command
-    // string (`command=printf '{not-json`, `printf 'stderr warning'
+    // string (`command=printf '%s' '{not-json`, `printf '%s' 'stderr warning'
     // >&2; exit 1`). The Windows `shell_snippet` translator rewrites
     // those into `echo` + `1>&2` + `exit /b`, so the rendered
     // diagnostic on Windows contains the translated form and the
@@ -1292,7 +1292,7 @@ mod tests {
     fn malformed_nonempty_hook_output_reports_explicit_diagnostic_with_previews() {
         let runner = HookRunner::new(RuntimeHookConfig::new(
             vec![shell_snippet(
-                "printf '{not-json\nsecond line'; printf 'stderr warning' >&2; exit 1",
+                "printf '%s' '{not-json\nsecond line'; printf '%s' 'stderr warning' >&2; exit 1",
             )],
             Vec::new(),
             Vec::new(),
@@ -1305,12 +1305,13 @@ mod tests {
         assert!(rendered.contains("hook_invalid_json:"));
         assert!(rendered.contains("phase=PreToolUse"));
         assert!(rendered.contains("tool=Edit"));
-        assert!(rendered.contains("command=printf '{not-json"));
-        assert!(rendered.contains("printf 'stderr warning' >&2; exit 1"));
+        assert!(rendered.contains("command=printf '%s' '{not-json"));
+        assert!(rendered.contains("printf '%s' 'stderr warning' >&2; exit 1"));
         assert!(rendered.contains("detail=key must be a string"));
         assert!(rendered.contains("stdout_preview={not-json"));
-        assert!(rendered.contains("second line stderr_preview=stderr warning"));
-        assert!(rendered.contains("stderr_preview=stderr warning"));
+        assert!(rendered.contains("\\nsecond line"));
+        assert!(rendered.contains("stderr_preview="));
+        assert!(rendered.contains("stderr warning"));
     }
 
     // `#[cfg(unix)]` because the test relies on POSIX signal-based

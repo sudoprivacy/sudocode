@@ -109,7 +109,7 @@ use init::initialize_repo;
 use plugins::{
     render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
 };
-use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+use render::{MarkdownStreamState, SpinnerHandle, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -251,7 +251,7 @@ type RuntimePluginStateBuildOutput = (
 /// through crossterm. On Windows the console has virtual-terminal processing
 /// disabled by default, so those escapes render as literal garbage (e.g.
 /// `[2m`, `[38;5;245m`, `[0m`). crossterm only flips the VT flag on its first
-/// command execution — which, via `Spinner::start()`, happens deep inside
+/// command execution — which, via `SpinnerHandle::new()`, happens deep inside
 /// `run_turn`, long after the banner and other early output have already been
 /// written with raw escapes. Calling this at the very top of `main` triggers
 /// crossterm's `enable_vt_processing()` up front so all subsequent raw escapes
@@ -3620,20 +3620,16 @@ impl LiveCli {
         // so ACP / MCP / print-mode paths inherit it — see the drain
         // call in `runtime/src/conversation.rs`.  The CLI no longer
         // duplicates it here.
-        let mut spinner = Spinner::new();
-        let mut stdout = io::stdout();
-        spinner.start(
+        let token_budget = crate::render::parse_token_budget(input);
+        let mut spinner = SpinnerHandle::new(
             "🦀 Thinking...",
             Some(self.config.model.as_str()),
             TerminalRenderer::new().color_theme(),
+            token_budget,
         );
-        let pause_flag = spinner.pause_flag();
-        let thinking_flag = spinner.thinking_flag();
-        runtime
-            .api_client_mut()
-            .set_spinner_pause(pause_flag.clone());
-        runtime.api_client_mut().set_spinner_thinking(thinking_flag);
-        runtime.tool_executor_mut().set_spinner_pause(pause_flag);
+        let spinner_ref = spinner.spinner_ref();
+        runtime.api_client_mut().set_spinner(spinner_ref.clone());
+        runtime.tool_executor_mut().set_spinner(spinner_ref);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
             input,
@@ -3645,13 +3641,9 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    spinner.fail(
-                        "⏹ Cancelled",
-                        TerminalRenderer::new().color_theme(),
-                        &mut stdout,
-                    )?;
+                    spinner.fail("⏹ Cancelled");
                 } else {
-                    spinner.clear(&mut stdout)?;
+                    spinner.clear();
                     if let Some(event) = summary.auto_compaction {
                         println!(
                             "{}",
@@ -3663,7 +3655,10 @@ impl LiveCli {
                         println!("{timeline}");
                     }
                     let usage = self.runtime.usage().current_turn_usage();
+                    let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
+                    let context_window =
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -3673,6 +3668,8 @@ impl LiveCli {
                             &self.config.model,
                             turns,
                             &usage,
+                            Some(&cumulative),
+                            Some(context_window),
                             elapsed,
                             branch.as_deref(),
                         )
@@ -3684,11 +3681,7 @@ impl LiveCli {
             Err(error) => {
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
-                spinner.fail(
-                    "❌ Request failed",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
+                spinner.fail("❌ Request failed");
                 Err(Box::new(error))
             }
         }
@@ -3877,13 +3870,43 @@ impl LiveCli {
                 false
             }
             SlashCommand::Mcp { action, target } => {
-                let args = match (action.as_deref(), target.as_deref()) {
-                    (None, None) => None,
-                    (Some(action), None) => Some(action.to_string()),
-                    (Some(action), Some(target)) => Some(format!("{action} {target}")),
-                    (None, Some(target)) => Some(target.to_string()),
-                };
-                Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                match action.as_deref() {
+                    Some("reconnect") | Some("enable") | Some("disable") => {
+                        let action_str = action.as_deref().unwrap();
+                        let Some(server_name) = target.as_deref() else {
+                            println!("usage: /mcp {action_str} <server>");
+                            return Ok(false);
+                        };
+                        if let Some(mcp_state) = &self.runtime.mcp_state {
+                            let mut mcp = mcp_state.lock().unwrap_or_else(|e| e.into_inner());
+                            let result = match action_str {
+                                "reconnect" => mcp.reconnect_server(server_name),
+                                "enable" => mcp.enable_server(server_name),
+                                "disable" => mcp.disable_server(server_name),
+                                _ => unreachable!(),
+                            };
+                            match result {
+                                Ok(msg) => println!("{msg}"),
+                                Err(err) => println!("Error: {err}"),
+                            }
+                        } else {
+                            println!(
+                                "No MCP servers are running in this session.\n\
+                                 Hint: if you just added a server via `/mcp add-json`, \
+                                 restart scode to load it."
+                            );
+                        }
+                    }
+                    _ => {
+                        let args = match (action.as_deref(), target.as_deref()) {
+                            (None, None) => None,
+                            (Some(action), None) => Some(action.to_string()),
+                            (Some(action), Some(target)) => Some(format!("{action} {target}")),
+                            (None, Some(target)) => Some(target.to_string()),
+                        };
+                        Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                    }
+                }
                 false
             }
             SlashCommand::Memory => {

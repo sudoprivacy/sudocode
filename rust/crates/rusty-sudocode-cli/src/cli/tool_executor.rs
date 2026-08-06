@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
@@ -10,7 +9,7 @@ use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
 use super::format::format_tool_result;
-use crate::render::TerminalRenderer;
+use crate::render::{SpinnerRef, TerminalRenderer};
 use crate::{AllowedToolSet, RuntimeMcpState};
 
 #[derive(Debug, Deserialize)]
@@ -38,13 +37,25 @@ pub(crate) struct ReadMcpResourceRequest {
     pub(crate) uri: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListMcpPromptsRequest {
+    pub(crate) server: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GetMcpPromptRequest {
+    pub(crate) server: String,
+    pub(crate) name: String,
+    pub(crate) arguments: Option<serde_json::Value>,
+}
+
 pub(crate) struct CliToolExecutor {
     renderer: TerminalRenderer,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    spinner_pause: Option<Arc<AtomicBool>>,
+    spinner: Option<SpinnerRef>,
     question_prompter: Option<Box<dyn QuestionPrompter>>,
     abort_signal: Option<runtime::HookAbortSignal>,
 }
@@ -62,14 +73,14 @@ impl CliToolExecutor {
             allowed_tools,
             tool_registry,
             mcp_state,
-            spinner_pause: None,
+            spinner: None,
             question_prompter: None,
             abort_signal: None,
         }
     }
 
-    pub(crate) fn set_spinner_pause(&mut self, flag: Arc<AtomicBool>) {
-        self.spinner_pause = Some(flag);
+    pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
+        self.spinner = Some(ref_);
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -78,19 +89,72 @@ impl CliToolExecutor {
 
     /// Pause the spinner and clear its line before writing content.
     fn pause_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(true, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
+        if let Some(s) = &self.spinner {
+            s.pause();
         }
     }
 
     /// Resume the spinner after content has been written.
     fn resume_spinner(&self) {
-        if let Some(flag) = &self.spinner_pause {
-            flag.store(false, Ordering::SeqCst);
+        if let Some(s) = &self.spinner {
+            s.resume();
         }
+    }
+
+    /// Build a progress callback that prints MCP tool progress notifications
+    /// to the terminal. Returns `None` when no spinner ref is configured.
+    fn make_mcp_progress_callback(&self) -> Option<runtime::McpProgressCallback> {
+        let spinner = self.spinner.clone()?;
+        Some(Box::new(
+            move |progress: runtime::McpProgressNotification| {
+                spinner.suspend(|| {
+                    let mut status = String::new();
+                    if let Some(total) = progress.total {
+                        if total > 0.0 {
+                            let pct = (progress.progress / total * 100.0).min(100.0);
+                            status = format!(" ({pct:.0}%)");
+                        }
+                    }
+                    if let Some(msg) = &progress.message {
+                        let _ = writeln!(io::stdout(), "  \x1b[2m\u{27f3} {msg}{status}\x1b[0m");
+                    } else {
+                        let _ = writeln!(
+                            io::stdout(),
+                            "  \x1b[2m\u{27f3} progress: {:.0}{status}\x1b[0m",
+                            progress.progress
+                        );
+                    }
+                    let _ = io::stdout().flush();
+                });
+            },
+        ))
+    }
+
+    /// Build a progress callback that prints streaming bash output to the
+    /// terminal. Returns `None` when no spinner ref is configured.
+    fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
+        let spinner = self.spinner.clone()?;
+        Some(Box::new(move |progress: runtime::BashProgress<'_>| {
+            let trimmed = progress.output.trim_end();
+            if trimmed.is_empty() {
+                return;
+            }
+            spinner.suspend(|| {
+                // Show last line of new output + cumulative stats on one line.
+                let last_line = trimmed.lines().next_back().unwrap_or("");
+                let bytes_display = if progress.total_bytes >= 1024 {
+                    format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
+                } else {
+                    format!("{} B", progress.total_bytes)
+                };
+                let _ = writeln!(
+                    io::stdout(),
+                    "  \x1b[2m⟳ {last_line}  ({} lines, {bytes_display})\x1b[0m",
+                    progress.total_lines,
+                );
+                let _ = io::stdout().flush();
+            });
+        }))
     }
 
     fn execute_search_tool(&self, value: serde_json::Value) -> Result<String, ToolError> {
@@ -149,6 +213,19 @@ impl CliToolExecutor {
                     .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
                 mcp_state.read_resource(&input.server, &input.uri)
             }
+            "ListMcpPromptsTool" => {
+                let input: ListMcpPromptsRequest = serde_json::from_value(value)
+                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+                match input.server {
+                    Some(server_name) => mcp_state.list_prompts_for_server(&server_name),
+                    None => mcp_state.list_prompts_for_all_servers(),
+                }
+            }
+            "GetMcpPromptTool" => {
+                let input: GetMcpPromptRequest = serde_json::from_value(value)
+                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+                mcp_state.get_prompt(&input.server, &input.name, input.arguments)
+            }
             _ => mcp_state.call_tool(tool_name, Some(value)),
         }
     }
@@ -202,9 +279,25 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
             return self.execute_ask_user_question(value);
         }
+        // For bash tool calls, install a streaming progress callback so
+        // the user sees output as it is produced rather than only after
+        // the child process exits.
+        if tool_name == "bash" && self.emit_output {
+            if let Some(cb) = self.make_bash_progress_callback() {
+                runtime::set_bash_progress_callback(cb);
+            }
+        }
+
+        let is_mcp_tool = self.tool_registry.has_runtime_tool(tool_name);
+        if is_mcp_tool && self.emit_output {
+            if let Some(cb) = self.make_mcp_progress_callback() {
+                runtime::set_mcp_progress_callback(cb);
+            }
+        }
+
         let result = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
-        } else if self.tool_registry.has_runtime_tool(tool_name) {
+        } else if is_mcp_tool {
             self.execute_runtime_tool(tool_name, value)
         } else {
             self.tool_registry
@@ -216,6 +309,16 @@ impl ToolExecutor for CliToolExecutor {
                 )
                 .map_err(ToolError::new)
         };
+
+        // Ensure the thread-local is cleaned up regardless of the code
+        // path that was taken (the callback is consumed inside
+        // `execute_bash_with_abort`, but clear defensively).
+        if tool_name == "bash" {
+            runtime::clear_bash_progress_callback();
+        }
+        if is_mcp_tool {
+            runtime::clear_mcp_progress_callback();
+        }
         match result {
             Ok(output) => {
                 if self.emit_output {

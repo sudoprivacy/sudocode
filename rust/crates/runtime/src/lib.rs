@@ -45,6 +45,7 @@ mod mcp_server_manager;
 mod mcp_sse;
 mod mcp_stdio;
 pub mod mcp_tool_bridge;
+mod mcp_ws;
 pub mod memory;
 pub mod model_capabilities;
 mod oauth;
@@ -77,8 +78,10 @@ pub mod worker_boot;
 
 pub use acp_sdk_server::AcpError;
 pub use bash::{
-    execute_bash, execute_bash_with_abort, execute_bash_with_tracking, BashCommandInput,
-    BashCommandOutput, BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
+    execute_bash_with_progress, execute_bash_with_tracking, set_bash_progress_callback,
+    BashCommandInput, BashCommandOutput, BashProgress, BashProgressCallback,
+    BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
@@ -145,9 +148,12 @@ pub use mcp_lifecycle_hardened::{
 };
 pub use mcp_server::{McpServer, McpServerSpec, ToolCallHandler, MCP_SERVER_PROTOCOL_VERSION};
 pub use mcp_server_manager::{
-    JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure,
-    McpInitializeClientInfo, McpInitializeParams, McpInitializeResult, McpInitializeServerInfo,
-    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
+    clear_mcp_progress_callback, set_mcp_progress_callback, JsonRpcError, JsonRpcId,
+    JsonRpcRequest, JsonRpcResponse, ManagedMcpTool, McpDiscoveryFailure, McpGetPromptParams,
+    McpGetPromptResult, McpInitializeClientInfo, McpInitializeParams, McpInitializeResult,
+    McpInitializeServerInfo, McpListPromptsParams, McpListPromptsResult, McpListResourcesParams,
+    McpListResourcesResult, McpListToolsParams, McpListToolsResult, McpProgressCallback,
+    McpProgressNotification, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage,
     McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents,
     McpServerManager, McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams,
     McpToolCallResult, McpToolDiscoveryReport, UnsupportedMcpServer,

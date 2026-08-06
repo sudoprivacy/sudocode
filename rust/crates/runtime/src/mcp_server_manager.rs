@@ -8,6 +8,7 @@
 //! in their own modules and are attached through `McpStdioProcess` directly
 //! today (to be generalized via a connection trait in a follow-up).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
@@ -27,6 +28,7 @@ use crate::mcp_lifecycle_hardened::{
 };
 use crate::mcp_sse::McpSseConnection;
 use crate::mcp_stdio::spawn_mcp_stdio_process;
+use crate::mcp_ws::McpWsConnection;
 
 // Test timeouts must still comfortably cover spawning a fresh Python child and
 // completing the JSON-RPC handshake on a loaded CI runner (macOS is the slowest).
@@ -89,6 +91,52 @@ pub struct JsonRpcResponse<T = JsonValue> {
     pub result: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
+}
+
+/// JSON-RPC notification (no `id` field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: Option<JsonValue>,
+}
+
+/// MCP progress notification payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpProgressNotification {
+    #[serde(rename = "progressToken")]
+    pub progress_token: JsonValue,
+    pub progress: f64,
+    pub total: Option<f64>,
+    pub message: Option<String>,
+}
+
+/// Callback for MCP progress notifications.
+pub type McpProgressCallback = Box<dyn Fn(McpProgressNotification) + Send>;
+
+thread_local! {
+    static MCP_PROGRESS_CALLBACK: RefCell<Option<McpProgressCallback>> = const { RefCell::new(None) };
+}
+
+pub fn set_mcp_progress_callback(cb: McpProgressCallback) {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = Some(cb);
+    });
+}
+
+pub fn clear_mcp_progress_callback() {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Call the thread-local progress callback if set.
+pub(crate) fn emit_mcp_progress(notification: McpProgressNotification) {
+    MCP_PROGRESS_CALLBACK.with(|cell| {
+        if let Some(cb) = cell.borrow().as_ref() {
+            cb(notification);
+        }
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,6 +280,74 @@ pub struct McpResourceContents {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpReadResourceResult {
     pub contents: Vec<McpResourceContents>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListPromptsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListPromptsResult {
+    pub prompts: Vec<McpPrompt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<McpPromptArgument>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpGetPromptParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpGetPromptResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<McpPromptMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptMessage {
+    pub role: String,
+    pub content: McpPromptContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum McpPromptContent {
+    Text {
+        #[serde(rename = "type")]
+        content_type: String,
+        text: String,
+    },
+    Resource {
+        #[serde(rename = "type")]
+        content_type: String,
+        resource: JsonValue,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -479,7 +595,8 @@ fn lifecycle_phase_for_method(method: &str) -> McpLifecyclePhase {
         "initialize" => McpLifecyclePhase::InitializeHandshake,
         "tools/list" => McpLifecyclePhase::ToolDiscovery,
         "resources/list" => McpLifecyclePhase::ResourceDiscovery,
-        "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
+        "prompts/list" => McpLifecyclePhase::ResourceDiscovery,
+        "prompts/get" | "resources/read" | "tools/call" => McpLifecyclePhase::Invocation,
         _ => McpLifecyclePhase::ErrorSurfacing,
     }
 }
@@ -558,7 +675,7 @@ impl McpServerManager {
             let transport = server_config.transport();
             if matches!(
                 transport,
-                McpTransport::Stdio | McpTransport::Sse | McpTransport::Http
+                McpTransport::Stdio | McpTransport::Sse | McpTransport::Http | McpTransport::Ws
             ) {
                 let bootstrap = McpClientBootstrap::from_scoped_config(server_name, server_config);
                 managed_servers.insert(server_name.clone(), ManagedMcpServer::new(bootstrap));
@@ -793,6 +910,105 @@ impl McpServerManager {
         }
     }
 
+    pub async fn list_prompts(
+        &mut self,
+        server_name: &str,
+    ) -> Result<McpListPromptsResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self.list_prompts_once(server_name).await {
+                Ok(prompts) => return Ok(prompts),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    pub async fn get_prompt(
+        &mut self,
+        server_name: &str,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<McpGetPromptResult, McpServerManagerError> {
+        let mut attempts = 0;
+
+        loop {
+            match self
+                .get_prompt_once(server_name, name, arguments.clone())
+                .await
+            {
+                Ok(prompt) => return Ok(prompt),
+                Err(error) if attempts == 0 && Self::is_retryable_error(&error) => {
+                    self.reset_server(server_name).await?;
+                    attempts += 1;
+                }
+                Err(error) => {
+                    if Self::should_reset_server(&error) {
+                        self.reset_server(server_name).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Reconnect a server: shutdown existing connection, reset failure state,
+    /// and re-initialize on next request.
+    pub async fn reconnect_server(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        if let Some(mut process) = server.process.take() {
+            process.shutdown().await;
+        }
+        server.initialized = false;
+        server.spawn_attempts = 0;
+        server.permanent_failure = None;
+        Ok(())
+    }
+
+    /// Disable a server: shutdown and mark as permanently failed so it will not
+    /// be spawned again until explicitly re-enabled.
+    pub async fn disable_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        if let Some(mut process) = server.process.take() {
+            process.shutdown().await;
+        }
+        server.initialized = false;
+        server.permanent_failure = Some("disabled by user".to_string());
+        Ok(())
+    }
+
+    /// Enable a previously disabled server: clear failure state so the next
+    /// request triggers a fresh spawn+initialize cycle.
+    pub fn enable_server(&mut self, server_name: &str) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        server.spawn_attempts = 0;
+        server.permanent_failure = None;
+        Ok(())
+    }
+
+    /// Check if a server is currently disabled by the user.
+    pub fn is_server_disabled(&self, server_name: &str) -> Result<bool, McpServerManagerError> {
+        let server =
+            self.servers
+                .get(server_name)
+                .ok_or_else(|| McpServerManagerError::UnknownServer {
+                    server_name: server_name.to_string(),
+                })?;
+        Ok(server.permanent_failure.as_deref() == Some("disabled by user"))
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {
@@ -1006,6 +1222,120 @@ impl McpServerManager {
             resources,
             next_cursor: None,
         })
+    }
+
+    async fn list_prompts_once(
+        &mut self,
+        server_name: &str,
+    ) -> Result<McpListPromptsResult, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+
+        let mut prompts = Vec::new();
+        let mut cursor = None;
+        loop {
+            let request_id = self.take_request_id();
+            let response = {
+                let server = self.server_mut(server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: server_name.to_string(),
+                        method: "prompts/list",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                Self::run_process_request(
+                    server_name,
+                    "prompts/list",
+                    MCP_LIST_TOOLS_TIMEOUT_MS,
+                    process.list_prompts(
+                        request_id,
+                        Some(McpListPromptsParams {
+                            cursor: cursor.clone(),
+                        }),
+                    ),
+                )
+                .await?
+            };
+
+            if let Some(error) = response.error {
+                return Err(McpServerManagerError::JsonRpc {
+                    server_name: server_name.to_string(),
+                    method: "prompts/list",
+                    error,
+                });
+            }
+
+            let result = response
+                .result
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "prompts/list",
+                    details: "missing result payload".to_string(),
+                })?;
+
+            prompts.extend(result.prompts);
+
+            match result.next_cursor {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+        }
+
+        Ok(McpListPromptsResult {
+            prompts,
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt_once(
+        &mut self,
+        server_name: &str,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<McpGetPromptResult, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+
+        let request_id = self.take_request_id();
+        let response =
+            {
+                let server = self.server_mut(server_name)?;
+                let process = server.process.as_mut().ok_or_else(|| {
+                    McpServerManagerError::InvalidResponse {
+                        server_name: server_name.to_string(),
+                        method: "prompts/get",
+                        details: "server process missing after initialization".to_string(),
+                    }
+                })?;
+                Self::run_process_request(
+                    server_name,
+                    "prompts/get",
+                    MCP_LIST_TOOLS_TIMEOUT_MS,
+                    process.get_prompt(
+                        request_id,
+                        McpGetPromptParams {
+                            name: name.to_string(),
+                            arguments,
+                        },
+                    ),
+                )
+                .await?
+            };
+
+        if let Some(error) = response.error {
+            return Err(McpServerManagerError::JsonRpc {
+                server_name: server_name.to_string(),
+                method: "prompts/get",
+                error,
+            });
+        }
+
+        response
+            .result
+            .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                server_name: server_name.to_string(),
+                method: "prompts/get",
+                details: "missing result payload".to_string(),
+            })
     }
 
     async fn read_resource_once(
@@ -1296,6 +1626,10 @@ async fn spawn_mcp_connection(
             let connection = McpHttpConnection::connect(transport, &bootstrap.server_name).await?;
             Ok(Box::new(connection))
         }
+        McpClientTransport::WebSocket(transport) => {
+            let connection = McpWsConnection::connect(transport, &bootstrap.server_name).await?;
+            Ok(Box::new(connection))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -1303,5 +1637,110 @@ async fn spawn_mcp_connection(
                 bootstrap.server_name
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig,
+    };
+
+    fn stub_servers() -> BTreeMap<String, ScopedMcpServerConfig> {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "test-server".to_string(),
+            ScopedMcpServerConfig {
+                scope: ConfigSource::Project,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: "echo".to_string(),
+                    args: vec!["hello".to_string()],
+                    env: BTreeMap::new(),
+                    current_dir: None,
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        );
+        servers
+    }
+
+    #[tokio::test]
+    async fn reconnect_resets_failure_state() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let server = mgr.server_mut("test-server").unwrap();
+        server.permanent_failure = Some("some failure".to_string());
+        server.spawn_attempts = 5;
+
+        mgr.reconnect_server("test-server").await.unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert!(!server.initialized);
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+        assert!(server.process.is_none());
+    }
+
+    #[tokio::test]
+    async fn disable_sets_permanent_failure() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+
+        mgr.disable_server("test-server").await.unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert!(!server.initialized);
+        assert_eq!(
+            server.permanent_failure.as_deref(),
+            Some("disabled by user")
+        );
+        assert!(mgr.is_server_disabled("test-server").unwrap());
+    }
+
+    #[test]
+    fn enable_clears_disabled_state() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let server = mgr.server_mut("test-server").unwrap();
+        server.permanent_failure = Some("disabled by user".to_string());
+        server.spawn_attempts = 3;
+
+        mgr.enable_server("test-server").unwrap();
+
+        let server = mgr.servers.get("test-server").unwrap();
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+        assert!(!mgr.is_server_disabled("test-server").unwrap());
+    }
+
+    #[tokio::test]
+    async fn disable_then_enable_then_reconnect_lifecycle() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+
+        mgr.disable_server("test-server").await.unwrap();
+        assert!(mgr.is_server_disabled("test-server").unwrap());
+
+        mgr.enable_server("test-server").unwrap();
+        assert!(!mgr.is_server_disabled("test-server").unwrap());
+
+        mgr.reconnect_server("test-server").await.unwrap();
+        let server = mgr.servers.get("test-server").unwrap();
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnect_unknown_server_returns_error() {
+        let mut mgr = McpServerManager::from_servers(&stub_servers());
+        let err = mgr.reconnect_server("nonexistent").await.unwrap_err();
+        assert!(
+            err.to_string().contains("unknown MCP server"),
+            "expected UnknownServer error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn is_server_disabled_unknown_server_returns_error() {
+        let mgr = McpServerManager::from_servers(&stub_servers());
+        let err = mgr.is_server_disabled("nonexistent").unwrap_err();
+        assert!(err.to_string().contains("unknown MCP server"));
     }
 }

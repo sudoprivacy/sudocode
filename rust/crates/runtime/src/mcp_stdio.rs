@@ -19,9 +19,11 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_connection::McpConnection;
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams, McpInitializeResult,
-    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
-    McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
+    JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams,
+    McpGetPromptResult, McpInitializeParams, McpInitializeResult, McpListPromptsParams,
+    McpListPromptsResult, McpListResourcesParams, McpListResourcesResult, McpListToolsParams,
+    McpListToolsResult, McpProgressNotification, McpReadResourceParams, McpReadResourceResult,
+    McpToolCallParams, McpToolCallResult,
 };
 
 #[derive(Debug)]
@@ -141,29 +143,53 @@ impl McpStdioProcess {
         let method = method.into();
         let request = JsonRpcRequest::new(id.clone(), method.clone(), params);
         self.send_request(&request).await?;
-        let response = self.read_response().await?;
 
-        if response.jsonrpc != "2.0" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "MCP response for {method} used unsupported jsonrpc version `{}`",
-                    response.jsonrpc
-                ),
-            ));
+        loop {
+            let payload = self.read_frame().await?;
+            let raw: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+            // Notifications have no `id` or a null `id`.
+            if raw.get("id").is_none() || raw.get("id") == Some(&serde_json::Value::Null) {
+                if let Ok(notification) = serde_json::from_value::<JsonRpcNotification>(raw) {
+                    if notification.method == "notifications/progress" {
+                        if let Some(params) = notification.params {
+                            if let Ok(progress) =
+                                serde_json::from_value::<McpProgressNotification>(params)
+                            {
+                                crate::mcp_server_manager::emit_mcp_progress(progress);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let response: JsonRpcResponse<TResult> = serde_json::from_value(raw)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+            if response.jsonrpc != "2.0" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "MCP response for {method} used unsupported jsonrpc version `{}`",
+                        response.jsonrpc
+                    ),
+                ));
+            }
+
+            if response.id != id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "MCP response for {method} used mismatched id: expected {id:?}, got {:?}",
+                        response.id
+                    ),
+                ));
+            }
+
+            return Ok(response);
         }
-
-        if response.id != id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "MCP response for {method} used mismatched id: expected {id:?}, got {:?}",
-                    response.id
-                ),
-            ));
-        }
-
-        Ok(response)
     }
 
     pub async fn initialize(
@@ -204,6 +230,22 @@ impl McpStdioProcess {
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>> {
         self.request(id, "resources/read", Some(params)).await
+    }
+
+    pub async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        self.request(id, "prompts/list", params).await
+    }
+
+    pub async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        self.request(id, "prompts/get", Some(params)).await
     }
 
     pub async fn terminate(&mut self) -> io::Result<()> {
@@ -271,6 +313,22 @@ impl McpConnection for McpStdioProcess {
         params: McpReadResourceParams,
     ) -> io::Result<JsonRpcResponse<McpReadResourceResult>> {
         Self::read_resource(self, id, params).await
+    }
+
+    async fn list_prompts(
+        &mut self,
+        id: JsonRpcId,
+        params: Option<McpListPromptsParams>,
+    ) -> io::Result<JsonRpcResponse<McpListPromptsResult>> {
+        Self::list_prompts(self, id, params).await
+    }
+
+    async fn get_prompt(
+        &mut self,
+        id: JsonRpcId,
+        params: McpGetPromptParams,
+    ) -> io::Result<JsonRpcResponse<McpGetPromptResult>> {
+        Self::get_prompt(self, id, params).await
     }
 
     async fn has_exited(&mut self) -> io::Result<bool> {
@@ -1740,11 +1798,10 @@ mod tests {
         let manager = McpServerManager::from_servers(&servers);
         let unsupported = manager.unsupported_servers();
 
-        // Http is now a supported transport (Streamable HTTP); only SDK and WS
-        // remain unsupported by McpServerManager.
-        assert_eq!(unsupported.len(), 2);
+        // Http and WebSocket are now supported transports; only SDK
+        // remains unsupported by McpServerManager.
+        assert_eq!(unsupported.len(), 1);
         assert_eq!(unsupported[0].server_name, "sdk");
-        assert_eq!(unsupported[1].server_name, "ws");
         assert_eq!(
             unsupported_server_failed_server(&unsupported[0]).phase,
             McpLifecyclePhase::ServerRegistration

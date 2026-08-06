@@ -266,5 +266,6 @@ jobs:
             echo "Uploading $filename"
             coscmd upload "$file" "sudocode/release/latest/$filename"
           done
+          coscmd upload install.sh "sudocode/release/latest/install.sh"
           coscmd upload dist/SHA256SUMS.txt "sudocode/release/latest/SHA256SUMS.txt"
           echo "Done: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/"

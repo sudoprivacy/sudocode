@@ -183,14 +183,13 @@ impl ConditionalEventHandler for ImagePasteHandler {
         images.insert(registered.hash.clone(), (b64, mime));
         drop(images);
 
-        // Write the indicator on the pre-allocated line above the prompt
-        // chrome.  Layout: indicator is 2 lines above the cursor (prompt).
-        let mut stdout = std::io::stdout();
-        // Save cursor, move up 2 to indicator line, clear & write, restore.
-        write!(stdout, "\x1b7\x1b[2A\x1b[2K").ok();
+        // Print a simple indicator on the current line. When running
+        // inside mp.suspend() (REPL mode), bars are hidden and this is
+        // safe. The indicator appears above the prompt on the next
+        // redraw.
         let hash_prefix = &registered.hash[..12];
-        write!(stdout, "  \x1b[1m[Image #{hash_prefix}]\x1b[0m").ok();
-        write!(stdout, "\x1b8").ok();
+        let mut stdout = std::io::stdout();
+        write!(stdout, "\r\x1b[2K  \x1b[1m[Image #{hash_prefix}]\x1b[0m\n").ok();
         stdout.flush().ok();
 
         Some(Cmd::Noop)

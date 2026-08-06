@@ -16,7 +16,6 @@ mod cancel;
 mod cli;
 mod init;
 mod input;
-mod input_chrome;
 mod input_queue;
 mod render;
 mod repl_async;
@@ -109,7 +108,7 @@ use init::initialize_repo;
 use plugins::{
     render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
 };
-use render::{MarkdownStreamState, SpinnerHandle, TerminalRenderer};
+use render::{CliOutput, MarkdownStreamState, SpinnerHandle, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -1595,7 +1594,9 @@ fn run_repl(
 fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
-    println!("{}", cli.startup_banner());
+    let output = CliOutput::new(cli.config.permission_mode.as_str());
+    cli.output = Some(output.clone());
+    output.println(cli.startup_banner());
 
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
@@ -1608,7 +1609,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         let renderer = render::TerminalRenderer::new();
         let rendered = render_messages(messages, term_width, &renderer);
         if !rendered.is_empty() {
-            println!("{rendered}");
+            output.println(rendered);
         }
         // Seed rustyline history so ↑ recalls previous prompts.
         for msg in messages {
@@ -1634,12 +1635,21 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        input_chrome::print_before_prompt(cli.config.permission_mode.as_str())?;
-        match editor.read_line()? {
+        let read_result = output.suspend(|| editor.read_line());
+        match read_result? {
             input::ReadOutcome::Submit(input) => {
-                input_chrome::replace_after_submit(&input)?;
+                // Echo the submitted input above the sticky bars.
+                let trimmed_text = input.trim();
+                if !trimmed_text.is_empty() {
+                    let w = crossterm::terminal::size()
+                        .map(|(cols, _)| cols as usize)
+                        .unwrap_or(80);
+                    let (echo, _) = cli::format::format_input_echo(trimmed_text, w);
+                    output.println(echo);
+                }
                 let trimmed = input.trim().to_string();
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
+                    output.finish();
                     cli.persist_session()?;
                     break;
                 }
@@ -1685,6 +1695,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             input::ReadOutcome::Exit => {
+                output.finish();
                 cli.persist_session()?;
                 break;
             }
@@ -1745,6 +1756,10 @@ fn run_repl_async_dispatch(
         Arc::new(move || sig.abort())
     };
 
+    // Create CliOutput for the async REPL and store on cli.
+    let output = CliOutput::new(cli.config.permission_mode.as_str());
+    cli.output = Some(output.clone());
+
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
@@ -1752,20 +1767,13 @@ fn run_repl_async_dispatch(
     });
 
     let session_start = Instant::now();
-    let permission_label = cli_shared
-        .lock()
-        .expect("LiveCli mutex")
-        .config
-        .permission_mode
-        .as_str()
-        .to_string();
     repl_async::run_coordinator_loop(
         driver,
         shared_mode,
+        output,
         banner,
         completions,
         Some(esc_abort_hook),
-        &permission_label,
     )?;
 
     // All threads spawned by the coordinator loop have already been joined
@@ -1888,6 +1896,9 @@ struct LiveCli {
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
+    /// MultiProgress-based output manager. `Some` in REPL mode; `None` for
+    /// one-shot subcommands. All REPL stdout goes through this.
+    output: Option<CliOutput>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3317,6 +3328,26 @@ impl LiveCli {
         self.persistent_abort_signal.is_some()
     }
 
+    /// Print a line through `CliOutput` (MultiProgress-safe) when available,
+    /// falling back to raw `println!` for one-shot / non-REPL paths.
+    fn out_println(&self, msg: impl AsRef<str>) {
+        if let Some(ref output) = self.output {
+            output.println(msg);
+        } else {
+            println!("{}", msg.as_ref());
+        }
+    }
+
+    /// Suspend MultiProgress bars, run `f`, then redraw. Falls back to
+    /// just calling `f` directly when no CliOutput is set.
+    fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        if let Some(ref output) = self.output {
+            output.suspend(f)
+        } else {
+            f()
+        }
+    }
+
     fn new(
         model: String,
         enable_tools: bool,
@@ -3401,6 +3432,7 @@ impl LiveCli {
             esc_monitor_enabled: true,
             persistent_abort_signal: None,
             shared_queue_mode: None,
+            output: None,
         };
         cli.persist_session()?;
 
@@ -3626,9 +3658,14 @@ impl LiveCli {
             Some(self.config.model.as_str()),
             TerminalRenderer::new().color_theme(),
             token_budget,
+            self.output.as_ref(),
         );
         let spinner_ref = spinner.spinner_ref();
         runtime.api_client_mut().set_spinner(spinner_ref.clone());
+        if let Some(ref output) = self.output {
+            runtime.api_client_mut().set_cli_output(output.clone());
+            runtime.tool_executor_mut().set_cli_output(output.clone());
+        }
         runtime.tool_executor_mut().set_spinner(spinner_ref);
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -3645,14 +3682,13 @@ impl LiveCli {
                 } else {
                     spinner.clear();
                     if let Some(event) = summary.auto_compaction {
-                        println!(
-                            "{}",
-                            format_auto_compaction_notice(event.removed_message_count)
-                        );
+                        self.out_println(format_auto_compaction_notice(
+                            event.removed_message_count,
+                        ));
                     }
                     let elapsed = turn_start.elapsed();
                     if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
-                        println!("{timeline}");
+                        self.out_println(timeline);
                     }
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
@@ -3662,18 +3698,15 @@ impl LiveCli {
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    println!(
-                        "{}",
-                        format_turn_status_line_with_branch(
-                            &self.config.model,
-                            turns,
-                            &usage,
-                            Some(&cumulative),
-                            Some(context_window),
-                            elapsed,
-                            branch.as_deref(),
-                        )
-                    );
+                    self.out_println(format_turn_status_line_with_branch(
+                        &self.config.model,
+                        turns,
+                        &usage,
+                        Some(&cumulative),
+                        Some(context_window),
+                        elapsed,
+                        branch.as_deref(),
+                    ));
                 }
                 self.persist_session()?;
                 Ok(())
@@ -3714,7 +3747,7 @@ impl LiveCli {
         self.replace_runtime(runtime)?;
         self.persist_session()?;
         let final_text = final_assistant_text(&summary);
-        println!("{final_text}");
+        self.out_println(final_text);
         Ok(())
     }
 
@@ -3730,8 +3763,7 @@ impl LiveCli {
         let summary = result?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
-        println!(
-            "{}",
+        self.out_println(
             json!({
                 "message": final_assistant_text(&summary),
                 "compact": true,
@@ -3743,6 +3775,7 @@ impl LiveCli {
                     "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
                 },
             })
+            .to_string(),
         );
         Ok(())
     }
@@ -3759,8 +3792,7 @@ impl LiveCli {
         let summary = result?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
-        println!(
-            "{}",
+        self.out_println(
             json!({
                 "message": final_assistant_text(&summary),
                 "model": self.config.model,
@@ -3785,6 +3817,7 @@ impl LiveCli {
                     ).total_cost_usd()
                 )
             })
+            .to_string(),
         );
         Ok(())
     }
@@ -3796,7 +3829,7 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         Ok(match command {
             SlashCommand::Help => {
-                println!("{}", render_repl_help());
+                self.out_println(render_repl_help());
                 false
             }
             SlashCommand::Status => {
@@ -3824,7 +3857,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Teleport { target } => {
-                Self::run_teleport(target.as_deref())?;
+                self.run_teleport(target.as_deref())?;
                 false
             }
             SlashCommand::DebugToolCall => {
@@ -3832,7 +3865,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Sandbox => {
-                Self::print_sandbox_status();
+                self.print_sandbox_status();
                 false
             }
             SlashCommand::Compact => {
@@ -3850,19 +3883,16 @@ impl LiveCli {
             SlashCommand::Resume { session_path } => {
                 let resumed = self.load_session(session_path)?;
                 if resumed {
-                    println!(
-                        "{}",
-                        format_resume_report(
-                            &self.session.path.display().to_string(),
-                            self.runtime.session().messages.len(),
-                            self.runtime.usage().turns(),
-                        )
-                    );
+                    self.out_println(format_resume_report(
+                        &self.session.path.display().to_string(),
+                        self.runtime.session().messages.len(),
+                        self.runtime.usage().turns(),
+                    ));
                 }
                 resumed
             }
             SlashCommand::Config { section } => {
-                Self::print_config(section.as_deref())?;
+                self.out_suspend(|| Self::print_config(section.as_deref()))?;
                 false
             }
             SlashCommand::ConfigSet { key, value } => {
@@ -3874,7 +3904,7 @@ impl LiveCli {
                     Some("reconnect") | Some("enable") | Some("disable") => {
                         let action_str = action.as_deref().unwrap();
                         let Some(server_name) = target.as_deref() else {
-                            println!("usage: /mcp {action_str} <server>");
+                            self.out_println(format!("usage: /mcp {action_str} <server>"));
                             return Ok(false);
                         };
                         if let Some(mcp_state) = &self.runtime.mcp_state {
@@ -3886,14 +3916,14 @@ impl LiveCli {
                                 _ => unreachable!(),
                             };
                             match result {
-                                Ok(msg) => println!("{msg}"),
-                                Err(err) => println!("Error: {err}"),
+                                Ok(msg) => self.out_println(msg),
+                                Err(err) => self.out_println(format!("Error: {err}")),
                             }
                         } else {
-                            println!(
+                            self.out_println(
                                 "No MCP servers are running in this session.\n\
                                  Hint: if you just added a server via `/mcp add-json`, \
-                                 restart scode to load it."
+                                 restart scode to load it.",
                             );
                         }
                     }
@@ -3904,7 +3934,9 @@ impl LiveCli {
                             (Some(action), Some(target)) => Some(format!("{action} {target}")),
                             (None, Some(target)) => Some(target.to_string()),
                         };
-                        Self::print_mcp(args.as_deref(), CliOutputFormat::Text)?;
+                        self.out_suspend(|| {
+                            Self::print_mcp(args.as_deref(), CliOutputFormat::Text)
+                        })?;
                     }
                 }
                 false
@@ -3914,11 +3946,11 @@ impl LiveCli {
                 false
             }
             SlashCommand::Init => {
-                run_init(CliOutputFormat::Text)?;
+                self.out_suspend(|| run_init(CliOutputFormat::Text))?;
                 false
             }
             SlashCommand::Diff => {
-                Self::print_diff()?;
+                self.out_suspend(|| Self::print_diff())?;
                 false
             }
             SlashCommand::Undo => {
@@ -3926,7 +3958,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Version => {
-                Self::print_version(CliOutputFormat::Text);
+                self.out_suspend(|| Self::print_version(CliOutputFormat::Text));
                 false
             }
             SlashCommand::Export { path } => {
@@ -3940,13 +3972,13 @@ impl LiveCli {
                 self.handle_plugins_command(action.as_deref(), target.as_deref())?
             }
             SlashCommand::Agents { args } => {
-                Self::print_agents(args.as_deref(), CliOutputFormat::Text)?;
+                self.out_suspend(|| Self::print_agents(args.as_deref(), CliOutputFormat::Text))?;
                 false
             }
             SlashCommand::Cron { args } => {
                 match cli::cron::run_slash(args.as_deref()) {
-                    Ok(text) => println!("{text}"),
-                    Err(e) => println!("cron error: {e}"),
+                    Ok(text) => self.out_println(text),
+                    Err(e) => self.out_println(format!("cron error: {e}")),
                 }
                 false
             }
@@ -3961,13 +3993,15 @@ impl LiveCli {
                 {
                     SkillSlashDispatch::Invoke(prompt) => self.run_turn(&prompt)?,
                     SkillSlashDispatch::Local => {
-                        self.print_skills_with_plugins(args.as_deref(), CliOutputFormat::Text)?;
+                        self.out_suspend(|| {
+                            self.print_skills_with_plugins(args.as_deref(), CliOutputFormat::Text)
+                        })?;
                     }
                 }
                 false
             }
             SlashCommand::Doctor => {
-                println!("{}", render_doctor_report()?.render());
+                self.out_println(render_doctor_report()?.render());
                 false
             }
             SlashCommand::History { count } => {
@@ -3976,7 +4010,7 @@ impl LiveCli {
             }
             SlashCommand::Stats => {
                 let usage = UsageTracker::from_session(self.runtime.session()).cumulative_usage();
-                println!("{}", format_cost_report(usage));
+                self.out_println(format_cost_report(usage));
                 false
             }
             SlashCommand::Login
@@ -4049,7 +4083,7 @@ impl LiveCli {
             &status_context(Some(&self.session.path)).expect("status context should load"),
             None, // #148: REPL /status doesn't carry flag provenance
         );
-        print_with_pager(&report);
+        self.out_suspend(|| print_with_pager(&report));
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
@@ -4099,19 +4133,19 @@ impl LiveCli {
                 })
                 .collect()
         };
-        println!("{}", render_prompt_history_report(&entries, limit));
+        self.out_println(render_prompt_history_report(&entries, limit));
     }
 
-    fn print_sandbox_status() {
+    fn print_sandbox_status(&self) {
         let cwd = env::current_dir().expect("current dir");
         let loader = ConfigLoader::default_for(&cwd);
         let runtime_config = loader
             .load()
             .unwrap_or_else(|_| runtime::RuntimeConfig::empty());
-        println!(
-            "{}",
-            format_sandbox_report(&resolve_sandbox_status(runtime_config.sandbox(), &cwd))
-        );
+        self.out_println(format_sandbox_report(&resolve_sandbox_status(
+            runtime_config.sandbox(),
+            &cwd,
+        )));
     }
 
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
@@ -4123,11 +4157,13 @@ impl LiveCli {
                 .iter()
                 .position(|m| *m == self.config.model)
                 .unwrap_or(0);
-            let selection = FuzzySelect::new()
-                .with_prompt("Select model (type to filter)")
-                .items(&models)
-                .default(default_idx)
-                .interact_opt()?;
+            let selection = self.out_suspend(|| {
+                FuzzySelect::new()
+                    .with_prompt("Select model (type to filter)")
+                    .items(&models)
+                    .default(default_idx)
+                    .interact_opt()
+            })?;
             return match selection {
                 Some(idx) => self.set_model(Some(models[idx].clone())),
                 None => Ok(false),
@@ -4137,14 +4173,11 @@ impl LiveCli {
         let model = resolve_model_alias_with_config(&model);
 
         if model == self.config.model {
-            println!(
-                "{}",
-                format_model_report(
-                    &self.config.model,
-                    self.runtime.session().messages.len(),
-                    self.runtime.usage().turns(),
-                )
-            );
+            self.out_println(format_model_report(
+                &self.config.model,
+                self.runtime.session().messages.len(),
+                self.runtime.usage().turns(),
+            ));
             return Ok(false);
         }
 
@@ -4166,10 +4199,7 @@ impl LiveCli {
         )?;
         self.replace_runtime(runtime)?;
         self.config.model.clone_from(&model);
-        println!(
-            "{}",
-            format_model_switch_report(&previous, &model, message_count)
-        );
+        self.out_println(format_model_switch_report(&previous, &model, message_count));
         Ok(true)
     }
 
@@ -4178,10 +4208,9 @@ impl LiveCli {
         mode: Option<String>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(mode) = mode else {
-            println!(
-                "{}",
-                format_permissions_report(self.config.permission_mode.as_str())
-            );
+            self.out_println(format_permissions_report(
+                self.config.permission_mode.as_str(),
+            ));
             return Ok(false);
         };
 
@@ -4192,7 +4221,7 @@ impl LiveCli {
         })?;
 
         if normalized == self.config.permission_mode.as_str() {
-            println!("{}", format_permissions_report(normalized));
+            self.out_println(format_permissions_report(normalized));
             return Ok(false);
         }
 
@@ -4202,10 +4231,11 @@ impl LiveCli {
         self.config.permission_mode = permission_mode_from_label(normalized);
         let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
-        println!(
-            "{}",
-            format_permissions_switch_report(&previous, normalized)
-        );
+        // Update the footer bar to reflect the new permission mode.
+        if let Some(ref output) = self.output {
+            output.set_footer(normalized);
+        }
+        self.out_println(format_permissions_switch_report(&previous, normalized));
         Ok(true)
     }
 
@@ -4213,14 +4243,14 @@ impl LiveCli {
         let current_str = self.config.auth_mode.as_str().to_string();
 
         let Some(mode) = mode else {
-            println!("{}", format_auth_report(&current_str));
+            self.out_println(format_auth_report(&current_str));
             return Ok(false);
         };
 
         let parsed = AuthMode::parse(&mode)?;
 
         if parsed.as_str() == current_str {
-            println!("{}", format_auth_report(&current_str));
+            self.out_println(format_auth_report(&current_str));
             return Ok(false);
         }
 
@@ -4230,14 +4260,14 @@ impl LiveCli {
         self.config.auth_mode = parsed;
         let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
-        println!("{}", format_auth_switch_report(&previous, parsed.as_str()));
+        self.out_println(format_auth_switch_report(&previous, parsed.as_str()));
         Ok(true)
     }
 
     fn clear_session(&mut self, confirm: bool) -> Result<bool, Box<dyn std::error::Error>> {
         if !confirm {
-            println!(
-                "clear: confirmation required; run /clear --confirm to start a fresh session."
+            self.out_println(
+                "clear: confirmation required; run /clear --confirm to start a fresh session.",
             );
             return Ok(false);
         }
@@ -4252,7 +4282,7 @@ impl LiveCli {
         )?;
         self.session = next_handle;
         self.replace_runtime(runtime)?;
-        println!(
+        self.out_println(format!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
             previous_session.id,
             previous_session.id,
@@ -4260,13 +4290,13 @@ impl LiveCli {
             self.config.permission_mode.as_str(),
             self.session.id,
             self.session.path.display(),
-        );
+        ));
         Ok(true)
     }
 
     fn print_cost(&self) {
         let cumulative = self.runtime.usage().cumulative_usage();
-        println!("{}", format_cost_report(cumulative));
+        self.out_println(format_cost_report(cumulative));
     }
 
     /// Load a session by reference (id, path, or "latest"), replacing the
@@ -4279,18 +4309,20 @@ impl LiveCli {
         let Some(session_ref) = session_path else {
             let sessions = list_managed_sessions()?;
             if sessions.is_empty() {
-                println!("No sessions found.");
+                self.out_println("No sessions found.");
                 return Ok(false);
             }
             let labels: Vec<String> = sessions
                 .iter()
                 .map(|s| format!("{} ({} msgs)", s.id, s.message_count))
                 .collect();
-            let selection = Select::new()
-                .with_prompt("Select session to resume")
-                .items(&labels)
-                .default(0)
-                .interact_opt()?;
+            let selection = self.out_suspend(|| {
+                Select::new()
+                    .with_prompt("Select session to resume")
+                    .items(&labels)
+                    .default(0)
+                    .interact_opt()
+            })?;
             return match selection {
                 Some(idx) => self.load_session(Some(sessions[idx].id.clone())),
                 None => Ok(false),
@@ -4353,10 +4385,10 @@ impl LiveCli {
                         input_queue::QueueMode::Off
                     };
                     shared.store(new_mode.to_u8(), Ordering::Relaxed);
-                    println!(
+                    self.out_println(format!(
                         "\x1b[2mauto-interrupt: {}\x1b[0m",
                         if on { "on" } else { "off" }
-                    );
+                    ));
                 } else {
                     eprintln!("auto-interrupt is only available in async REPL mode");
                 }
@@ -4382,7 +4414,10 @@ impl LiveCli {
                         input_queue::QueueMode::Off
                     };
                     shared.store(new_mode.to_u8(), Ordering::Relaxed);
-                    println!("\x1b[2mqueue: {}\x1b[0m", if on { "on" } else { "off" });
+                    self.out_println(format!(
+                        "\x1b[2mqueue: {}\x1b[0m",
+                        if on { "on" } else { "off" }
+                    ));
                 } else {
                     eprintln!("queue is only available in async REPL mode");
                 }
@@ -4405,7 +4440,7 @@ impl LiveCli {
         Ok(())
     }
 
-    fn open_in_editor(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn open_in_editor(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -4423,18 +4458,18 @@ impl LiveCli {
         if !status.success() {
             return Err(format!("Editor '{}' exited with {}", editor, status).into());
         }
-        println!("Opened memory file at {}", path.display());
+        let mut msg = format!("Opened memory file at {}", path.display());
         if source == "default" {
-            println!(
-                "> To use a different editor, set the $EDITOR or $VISUAL environment variable."
+            msg.push_str(
+                "\n> To use a different editor, set the $EDITOR or $VISUAL environment variable.",
             );
         } else {
-            println!(
-                "> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
+            msg.push_str(&format!(
+                "\n> Using {}=\"{}\". To change editor, set $EDITOR or $VISUAL environment variable.",
                 source, editor
-            );
+            ));
         }
-        Ok(())
+        Ok(msg)
     }
 
     fn edit_memory(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -4442,23 +4477,29 @@ impl LiveCli {
         let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
         let files = &project_context.instruction_files;
         let target: PathBuf = if files.is_empty() {
-            println!("No instruction files found. Creating AGENTS.md in the current directory.");
+            self.out_println(
+                "No instruction files found. Creating AGENTS.md in the current directory.",
+            );
             cwd.join("AGENTS.md")
         } else if files.len() == 1 {
             files[0].path.clone()
         } else {
             let labels: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
-            let selection = Select::new()
-                .with_prompt("Select memory file to edit")
-                .items(&labels)
-                .default(0)
-                .interact_opt()?;
+            let selection = self.out_suspend(|| {
+                Select::new()
+                    .with_prompt("Select memory file to edit")
+                    .items(&labels)
+                    .default(0)
+                    .interact_opt()
+            })?;
             match selection {
                 Some(idx) => files[idx].path.clone(),
                 None => return Ok(()),
             }
         };
-        Self::open_in_editor(&target)
+        let msg = self.out_suspend(|| Self::open_in_editor(&target))?;
+        self.out_println(msg);
+        Ok(())
     }
 
     fn print_agents(
@@ -4633,14 +4674,14 @@ impl LiveCli {
         let messages = &self.runtime.session().messages;
         match crate::cli::undo::find_last_undoable_edit(messages, &self.undone_tool_use_ids) {
             None => {
-                println!(
+                self.out_println(
                     "Nothing to undo in this session. /undo only restores edit_file and write_file results recorded in the live session."
                 );
             }
             Some(edit) => match crate::cli::undo::apply_undo(&edit) {
                 Ok(message) => {
                     self.undone_tool_use_ids.insert(edit.tool_use_id.clone());
-                    println!("{message}");
+                    self.out_println(message);
                 }
                 Err(error) => {
                     eprintln!("undo failed for {}: {error}", edit.file_path);
@@ -4659,11 +4700,11 @@ impl LiveCli {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let export_path = resolve_export_path(requested_path, self.runtime.session())?;
         fs::write(&export_path, render_export_text(self.runtime.session()))?;
-        println!(
+        self.out_println(format!(
             "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}",
             export_path.display(),
             self.runtime.session().messages.len(),
-        );
+        ));
         Ok(())
     }
 
@@ -4680,7 +4721,7 @@ impl LiveCli {
                 if io::stdin().is_terminal() && io::stdout().is_terminal() {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
-                        println!("{}", render_session_list(&self.session.id)?);
+                        self.out_println(render_session_list(&self.session.id)?);
                         return Ok(false);
                     }
                     let default_idx = sessions
@@ -4691,27 +4732,29 @@ impl LiveCli {
                         .iter()
                         .map(|session| format_session_picker_entry(session, &self.session.id))
                         .collect();
-                    let selection = FuzzySelect::new()
-                        .with_prompt("Select a session (type to filter, Esc to cancel)")
-                        .items(&items)
-                        .default(default_idx)
-                        .interact_opt()?;
+                    let selection = self.out_suspend(|| {
+                        FuzzySelect::new()
+                            .with_prompt("Select a session (type to filter, Esc to cancel)")
+                            .items(&items)
+                            .default(default_idx)
+                            .interact_opt()
+                    })?;
                     let Some(idx) = selection else {
                         return Ok(false);
                     };
                     let target = sessions[idx].id.clone();
                     if target == self.session.id {
-                        println!("Session unchanged (already active: {target}).");
+                        self.out_println(format!("Session unchanged (already active: {target})."));
                         return Ok(false);
                     }
                     return self.handle_session_command(Some("switch"), Some(&target));
                 }
-                println!("{}", render_session_list(&self.session.id)?);
+                self.out_println(render_session_list(&self.session.id)?);
                 Ok(false)
             }
             Some("switch") => {
                 let Some(target) = target else {
-                    println!("Usage: /session switch <session-id>");
+                    self.out_println("Usage: /session switch <session-id>");
                     return Ok(false);
                 };
                 let (handle, session) = load_session_reference(target)?;
@@ -4727,12 +4770,12 @@ impl LiveCli {
                     id: session_id,
                     path: handle.path,
                 };
-                println!(
+                self.out_println(format!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
                     self.session.id,
                     self.session.path.display(),
                     message_count,
-                );
+                ));
                 Ok(true)
             }
             Some("fork") => {
@@ -4750,66 +4793,66 @@ impl LiveCli {
                     self.build_replacement_runtime(forked, handle.id.clone(), self.config.clone())?;
                 self.replace_runtime(runtime)?;
                 self.session = handle;
-                println!(
+                self.out_println(format!(
                     "Session forked\n  Parent session   {}\n  Active session   {}\n  Branch           {}\n  File             {}\n  Messages         {}",
                     parent_session_id,
                     self.session.id,
                     branch_name.as_deref().unwrap_or("(unnamed)"),
                     self.session.path.display(),
                     message_count,
-                );
+                ));
                 Ok(true)
             }
             Some("delete") => {
                 let Some(target) = target else {
-                    println!("Usage: /session delete <session-id> [--force]");
+                    self.out_println("Usage: /session delete <session-id> [--force]");
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
                 if handle.id == self.session.id {
-                    println!(
+                    self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
-                    );
+                    ));
                     return Ok(false);
                 }
-                if !confirm_session_deletion(&handle.id) {
-                    println!("delete: cancelled.");
+                if !self.out_suspend(|| confirm_session_deletion(&handle.id)) {
+                    self.out_println("delete: cancelled.");
                     return Ok(false);
                 }
                 delete_managed_session(&handle.path)?;
-                println!(
+                self.out_println(format!(
                     "Session deleted\n  Deleted session  {}\n  File             {}",
                     handle.id,
                     handle.path.display(),
-                );
+                ));
                 Ok(false)
             }
             Some("delete-force") => {
                 let Some(target) = target else {
-                    println!("Usage: /session delete <session-id> [--force]");
+                    self.out_println("Usage: /session delete <session-id> [--force]");
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
                 if handle.id == self.session.id {
-                    println!(
+                    self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
-                    );
+                    ));
                     return Ok(false);
                 }
                 delete_managed_session(&handle.path)?;
-                println!(
+                self.out_println(format!(
                     "Session deleted\n  Deleted session  {}\n  File             {}",
                     handle.id,
                     handle.path.display(),
-                );
+                ));
                 Ok(false)
             }
             Some(other) => {
-                println!(
+                self.out_println(format!(
                     "Unknown /session action '{other}'. Use /session list, /session switch <session-id>, /session fork [branch-name], or /session delete <session-id> [--force]."
-                );
+                ));
                 Ok(false)
             }
         }
@@ -4825,7 +4868,7 @@ impl LiveCli {
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
         let result = handle_plugins_slash_command(action, target, &mut manager, &cwd)?;
-        println!("{}", result.message);
+        self.out_println(&result.message);
         if result.reload_runtime {
             self.reload_runtime_features()?;
         }
@@ -4853,7 +4896,7 @@ impl LiveCli {
         )?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
-        println!("{}", format_compact_report(removed, kept, skipped));
+        self.out_println(format_compact_report(removed, kept, skipped));
         Ok(())
     }
 
@@ -4896,28 +4939,28 @@ impl LiveCli {
     }
 
     fn run_bughunter(&self, scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", format_bughunter_report(scope));
+        self.out_println(format_bughunter_report(scope));
         Ok(())
     }
 
     fn run_ultraplan(&self, task: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", format_ultraplan_report(task));
+        self.out_println(format_ultraplan_report(task));
         Ok(())
     }
 
-    fn run_teleport(target: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_teleport(&self, target: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
-            println!("Usage: /teleport <symbol-or-path>");
+            self.out_println("Usage: /teleport <symbol-or-path>");
             return Ok(());
         };
 
-        println!("{}", render_teleport_report(target)?);
+        self.out_println(render_teleport_report(target)?);
         Ok(())
     }
 
     fn run_debug_tool_call(&self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         validate_no_args("/debug-tool-call", args)?;
-        println!("{}", render_last_tool_debug_report(self.runtime.session())?);
+        self.out_println(render_last_tool_debug_report(self.runtime.session())?);
         Ok(())
     }
 
@@ -4927,26 +4970,23 @@ impl LiveCli {
         let summary = parse_git_workspace_summary(Some(&status));
         let branch = parse_git_status_branch(Some(&status));
         if summary.is_clean() {
-            println!("{}", format_commit_skipped_report());
+            self.out_println(format_commit_skipped_report());
             return Ok(());
         }
 
-        println!(
-            "{}",
-            format_commit_preflight_report(branch.as_deref(), summary)
-        );
+        self.out_println(format_commit_preflight_report(branch.as_deref(), summary));
         Ok(())
     }
 
     fn run_pr(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let branch =
             resolve_git_branch_for(&env::current_dir()?).unwrap_or_else(|| "unknown".to_string());
-        println!("{}", format_pr_report(&branch, context));
+        self.out_println(format_pr_report(&branch, context));
         Ok(())
     }
 
     fn run_issue(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        println!("{}", format_issue_report(context));
+        self.out_println(format_issue_report(context));
         Ok(())
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::style::{Color, Stylize};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
@@ -136,6 +136,80 @@ impl Default for ColorTheme {
     }
 }
 
+/// Unified terminal output manager backed by `indicatif::MultiProgress`.
+///
+/// All text output in the REPL goes through `CliOutput::println()` (inserted
+/// above sticky bars). The footer bar shows the current permission mode and
+/// help hints. Spinners register themselves via `mp.add()` so all bars are
+/// managed consistently — no raw cursor manipulation needed.
+///
+/// Clone is cheap — both `MultiProgress` and `ProgressBar` are `Arc`-wrapped.
+#[derive(Clone)]
+pub struct CliOutput {
+    mp: MultiProgress,
+    footer: ProgressBar,
+}
+
+impl CliOutput {
+    /// Create a new `CliOutput` with a sticky footer bar showing the
+    /// permission mode.
+    #[must_use]
+    pub fn new(permission_mode: &str) -> Self {
+        let mp = MultiProgress::new();
+        let footer = mp.add(ProgressBar::new_spinner());
+        footer.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        let footer_text = format_footer_bar(permission_mode);
+        footer.set_message(footer_text);
+        // Prevent the footer from being auto-finished; it stays visible.
+        footer.enable_steady_tick(std::time::Duration::from_secs(3600));
+        Self { mp, footer }
+    }
+
+    /// Print a line above the sticky bars. Thread-safe.
+    pub fn println(&self, msg: impl AsRef<str>) {
+        let _ = self.mp.println(msg);
+    }
+
+    /// Temporarily clear all bars, run `f`, then redraw. Use for raw I/O
+    /// that must own the terminal (rustyline, dialoguer, streaming writes).
+    pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        self.mp.suspend(f)
+    }
+
+    /// Update the footer bar text (e.g. after `/permissions` changes the mode).
+    pub fn set_footer(&self, permission_mode: &str) {
+        self.footer.set_message(format_footer_bar(permission_mode));
+    }
+
+    /// Access the underlying `MultiProgress` so spinners can register via
+    /// `mp.add(pb)`.
+    #[must_use]
+    pub fn multi(&self) -> &MultiProgress {
+        &self.mp
+    }
+
+    /// Finish and clear the footer bar. Called on exit.
+    pub fn finish(&self) {
+        self.footer.finish_and_clear();
+    }
+}
+
+/// Format the sticky footer bar text.
+fn format_footer_bar(permission_mode: &str) -> String {
+    let icon = match permission_mode {
+        "danger-full-access" => "⏵⏵",
+        "workspace-write" => "⏵",
+        _ => "▷",
+    };
+    let label = match permission_mode {
+        "danger-full-access" => "full access",
+        "workspace-write" => "workspace write",
+        "read-only" => "read only",
+        other => other,
+    };
+    format!("\x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m")
+}
+
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
 #[derive(Clone)]
@@ -155,13 +229,12 @@ impl SpinnerRef {
         result
     }
 
-    /// Pause the spinner and clear its line. The updater thread stops
-    /// ticking while paused.
+    /// Pause the spinner. The updater thread stops ticking while paused.
+    /// When registered with MultiProgress, bar clearing is handled
+    /// automatically; the manual `\r\x1b[2K` is no longer needed.
     pub fn pause(&self) {
         self.is_paused.store(true, Ordering::SeqCst);
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let _ = write!(io::stdout(), "\r\x1b[2K");
-        let _ = io::stdout().flush();
     }
 
     /// Resume the spinner after a pause.
@@ -192,6 +265,7 @@ pub struct SpinnerHandle {
     start_time: Instant,
     stop: Arc<AtomicBool>,
     updater: Option<std::thread::JoinHandle<()>>,
+    output: Option<CliOutput>,
 }
 
 impl SpinnerHandle {
@@ -207,9 +281,17 @@ impl SpinnerHandle {
         model: Option<&str>,
         theme: &ColorTheme,
         token_budget: Option<u32>,
+        output: Option<&CliOutput>,
     ) -> Self {
-        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
-        pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
+        let pb = if let Some(output) = output {
+            let bar = ProgressBar::new_spinner();
+            bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
+            output.mp.insert_before(&output.footer, bar)
+        } else {
+            let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+            bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
+            bar
+        };
 
         let response_bytes = Arc::new(AtomicU32::new(0));
         let is_thinking = Arc::new(AtomicBool::new(false));
@@ -221,6 +303,7 @@ impl SpinnerHandle {
             response_bytes,
             is_thinking,
             is_paused,
+            output: output.cloned(),
             token_budget,
             label: label.to_string(),
             model: model.map(ToString::to_string),
@@ -359,13 +442,23 @@ impl SpinnerHandle {
     pub fn finish(&mut self, label: &str) {
         self.stop_updater();
         self.pb.finish_and_clear();
-        println!("\x1b[32m✔ {label}\x1b[0m");
+        let msg = format!("\x1b[32m✔ {label}\x1b[0m");
+        if let Some(ref output) = self.output {
+            output.println(&msg);
+        } else {
+            println!("{msg}");
+        }
     }
 
     pub fn fail(&mut self, label: &str) {
         self.stop_updater();
         self.pb.finish_and_clear();
-        println!("\x1b[31m✘ {label}\x1b[0m");
+        let msg = format!("\x1b[31m✘ {label}\x1b[0m");
+        if let Some(ref output) = self.output {
+            output.println(&msg);
+        } else {
+            println!("{msg}");
+        }
     }
 }
 

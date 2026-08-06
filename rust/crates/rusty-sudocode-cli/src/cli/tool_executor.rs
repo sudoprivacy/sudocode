@@ -1,8 +1,9 @@
-use std::io::{self, Write};
+use std::cell::RefCell;
+use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
-    PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
+    ContentBlock, PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
     QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor,
 };
 use serde::Deserialize;
@@ -11,6 +12,38 @@ use tools::GlobalToolRegistry;
 use super::format::format_tool_result;
 use crate::render::{SpinnerRef, TerminalRenderer};
 use crate::{AllowedToolSet, RuntimeMcpState};
+
+// ---------------------------------------------------------------------------
+// Thread-local side-channel for "clear context & execute plan" flow.
+//
+// When the user chooses option 1 ("Clear context & execute") in the
+// ExitPlanMode confirmation dialog, the tool executor stores the plan text
+// here. After `runtime.run_turn()` returns, `LiveCli::run_turn()` checks
+// this value and, if set, clears the session and re-runs with the plan as
+// the new prompt.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static PENDING_PLAN_EXECUTION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Store a plan for the `run_turn` caller to pick up after the turn.
+fn set_pending_plan_execution(plan: String) {
+    PENDING_PLAN_EXECUTION.with(|cell| {
+        *cell.borrow_mut() = Some(plan);
+    });
+}
+
+/// Take the pending plan (if any), clearing the thread-local.
+pub(crate) fn take_pending_plan_execution() -> Option<String> {
+    PENDING_PLAN_EXECUTION.with(|cell| cell.borrow_mut().take())
+}
+
+/// Clear the pending plan without returning it.
+pub(crate) fn clear_pending_plan_execution() {
+    PENDING_PLAN_EXECUTION.with(|cell| {
+        cell.borrow_mut().take();
+    });
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolSearchRequest {
@@ -52,6 +85,7 @@ pub(crate) struct GetMcpPromptRequest {
 pub(crate) struct CliToolExecutor {
     renderer: TerminalRenderer,
     emit_output: bool,
+    is_repl: bool,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -70,6 +104,7 @@ impl CliToolExecutor {
         Self {
             renderer: TerminalRenderer::new(),
             emit_output,
+            is_repl: false,
             allowed_tools,
             tool_registry,
             mcp_state,
@@ -81,6 +116,10 @@ impl CliToolExecutor {
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
+    }
+
+    pub(crate) fn set_repl_mode(&mut self, is_repl: bool) {
+        self.is_repl = is_repl;
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -275,6 +314,12 @@ impl ToolExecutor for CliToolExecutor {
         let value = parse_tool_call_input(input)?;
         if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
             return self.execute_ask_user_question(value);
+        }
+        // In REPL mode, intercept ExitPlanMode to show a confirmation
+        // dialog. In one-shot mode, skip the dialog and let ExitPlanMode
+        // execute normally — there is no interactive user to ask.
+        if tool_name == "ExitPlanMode" && self.emit_output && self.is_repl {
+            return self.handle_exit_plan_mode(&value, ctx);
         }
         // For bash tool calls, install a streaming progress callback so
         // the user sees output as it is produced rather than only after
@@ -500,6 +545,146 @@ impl CliToolExecutor {
             })).collect::<Vec<_>>(),
         }))
         .map_err(|error| ToolError::new(error.to_string()))
+    }
+
+    /// Intercept `ExitPlanMode` to present a confirmation dialog before
+    /// transitioning out of plan mode. The user chooses between:
+    ///   1. Clear context & execute the plan as a fresh prompt
+    ///   2. Keep context & exit plan mode (current behavior)
+    ///   3. Stay in plan mode and refine the plan
+    fn handle_exit_plan_mode(
+        &self,
+        value: &serde_json::Value,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<String, ToolError> {
+        // Extract the plan text from the assistant message that emitted this
+        // tool call. This is the model's plan output.
+        let plan_text = ctx
+            .parent_assistant_message
+            .as_ref()
+            .map(|msg| {
+                msg.blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        let plan_display = if plan_text.is_empty() {
+            "(no plan text available)".to_string()
+        } else {
+            plan_text.clone()
+        };
+
+        // Non-interactive: default to option 2 (keep context & execute).
+        if !io::stdin().is_terminal() {
+            return self
+                .tool_registry
+                .execute_with_abort_and_context(
+                    "ExitPlanMode",
+                    value,
+                    self.abort_signal.as_ref(),
+                    Some(ctx),
+                )
+                .map_err(ToolError::new);
+        }
+
+        // Show plan summary and prompt the user.
+        let print_line = |line: &str| {
+            let _ = writeln!(io::stdout(), "{line}");
+        };
+
+        self.pause_spinner();
+
+        print_line("");
+        print_line("\x1b[1m\u{1f4cb} Plan ready for review:\x1b[0m");
+        print_line("");
+
+        let lines: Vec<&str> = plan_display.lines().collect();
+        let display_limit = 20;
+        for line in lines.iter().take(display_limit) {
+            print_line(&format!("  \x1b[2m{line}\x1b[0m"));
+        }
+        if lines.len() > display_limit {
+            print_line(&format!(
+                "  \x1b[2m... ({} more lines)\x1b[0m",
+                lines.len() - display_limit
+            ));
+        }
+
+        print_line("");
+        print_line("\x1b[1mChoose an action:\x1b[0m");
+        print_line("  \x1b[36m[1]\x1b[0m Clear context & execute plan");
+        print_line("  \x1b[36m[2]\x1b[0m Keep context & execute");
+        print_line("  \x1b[36m[3]\x1b[0m Keep planning (provide feedback)");
+        print_line("");
+
+        // Read the choice from the user.
+        print!("\x1b[1mYour choice (1/2/3): \x1b[0m");
+        io::stdout()
+            .flush()
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        let mut choice = String::new();
+        io::stdin()
+            .read_line(&mut choice)
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        let choice = choice.trim();
+
+        match choice {
+            "1" => {
+                // Execute ExitPlanMode to restore the previous permission mode.
+                let result = self
+                    .tool_registry
+                    .execute_with_abort_and_context(
+                        "ExitPlanMode",
+                        &value,
+                        self.abort_signal.as_ref(),
+                        Some(ctx),
+                    )
+                    .map_err(ToolError::new)?;
+
+                // Store the plan text for run_turn to pick up.
+                let plan_for_execution = if plan_text.is_empty() {
+                    // Fallback: use the full plan display.
+                    plan_display
+                } else {
+                    plan_text
+                };
+                set_pending_plan_execution(plan_for_execution);
+
+                print_line("\x1b[32m\u{2714} Plan confirmed. Will clear context and execute...\x1b[0m");
+                self.resume_spinner();
+                Ok(result)
+            }
+            "2" => {
+                // Normal ExitPlanMode execution — keep context.
+                let result = self
+                    .tool_registry
+                    .execute_with_abort_and_context(
+                        "ExitPlanMode",
+                        &value,
+                        self.abort_signal.as_ref(),
+                        Some(ctx),
+                    )
+                    .map_err(ToolError::new)?;
+
+                print_line("\x1b[32m\u{2714} Exiting plan mode, keeping context.\x1b[0m");
+                self.resume_spinner();
+                Ok(result)
+            }
+            _ => {
+                // Choice 3 or any other input: stay in plan mode.
+                print_line("\x1b[33m\u{21a9} Staying in plan mode. Provide feedback to refine the plan.\x1b[0m");
+                self.resume_spinner();
+                Err(ToolError::new(
+                    "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",
+                ))
+            }
+        }
     }
 }
 

@@ -5856,23 +5856,42 @@ fn resolve_model_switch_auth_mode(
     explicit: Option<AuthMode>,
     config: &api::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    match resolve_configured_auth_mode(model, config) {
-        Ok(mode) => Ok(mode),
-        Err(error) => explicit.map_or(Err(error), Ok),
+    let Some(entry) = api::resolve_model(config, model) else {
+        return explicit.ok_or_else(|| {
+            format!(
+                "model '{model}' not found in config. Run /model to configure it, \
+                 or pass --auth=<subscription|proxy|api-key> explicitly."
+            )
+        });
+    };
+
+    if let Some(mode) = explicit {
+        if entry.providers.contains_key(mode.as_str()) {
+            return Ok(mode);
+        }
     }
+
+    resolve_configured_auth_mode_for_entry(model, entry)
 }
 
 fn resolve_configured_auth_mode(
     model: &str,
     config: &api::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
     let entry = api::resolve_model(config, model).ok_or_else(|| {
         format!(
             "model '{model}' not found in config. Run /model to configure it, \
              or pass --auth=<subscription|proxy|api-key> explicitly."
         )
     })?;
+    resolve_configured_auth_mode_for_entry(model, entry)
+}
+
+fn resolve_configured_auth_mode_for_entry(
+    model: &str,
+    entry: &api::ModelConfigEntry,
+) -> Result<AuthMode, String> {
+    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
     for mode_str in PRIORITY {
         if entry.providers.contains_key(*mode_str) {
             return AuthMode::parse(mode_str);
@@ -5983,5 +6002,33 @@ mod auth_mode_tests {
         .expect("configured api-key model should resolve");
 
         assert_eq!(mode, AuthMode::ApiKey);
+    }
+
+    #[test]
+    fn model_switch_keeps_explicit_mode_when_target_supports_it() {
+        let config = mixed_auth_config();
+
+        let mode = resolve_model_switch_auth_mode(
+            "deepseek-anthropic/deepseek-v4-flash",
+            Some(AuthMode::ApiKey),
+            &config,
+        )
+        .expect("deepseek should support api-key auth");
+
+        assert_eq!(mode, AuthMode::ApiKey);
+    }
+
+    #[test]
+    fn model_switch_falls_back_to_explicit_mode_for_unknown_proxy_model() {
+        let config = mixed_auth_config();
+
+        let mode = resolve_model_switch_auth_mode(
+            "unconfigured-proxy-model",
+            Some(AuthMode::Proxy),
+            &config,
+        )
+        .expect("explicit proxy auth should allow passthrough models");
+
+        assert_eq!(mode, AuthMode::Proxy);
     }
 }

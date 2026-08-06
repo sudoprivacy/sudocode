@@ -10,7 +10,7 @@
 #                       Use this to point at a mirror (e.g. Tencent COS) for
 #                       faster downloads in China. The checksum file is always
 #                       fetched from GitHub Releases for security.
-#                       Example: https://sudowork-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
+#                       Example: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
 #   NO_COLOR            Disable ANSI color output when set.
 #
 # Flags:
@@ -89,8 +89,8 @@ ${C_BOLD}EXAMPLES${C_RESET}
     sh install.sh --prefix /usr/local
     sh install.sh --no-sudo
     # China mirror (faster in mainland China):
-    SCODE_MIRROR=https://sudowork-download-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest \\
-      curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
+    curl -fsSL https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/install.sh | \\
+      SCODE_MIRROR=https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest sh
 EOF
 }
 

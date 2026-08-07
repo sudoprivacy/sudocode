@@ -17,7 +17,7 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{CliOutput, MarkdownStreamState, SpinnerRef, TerminalRenderer};
+use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer};
 use std::sync::Arc;
 
 use crate::{
@@ -44,8 +44,6 @@ pub(crate) struct AnthropicRuntimeClient {
     /// Shared spinner reference for pausing, thinking indicator, and
     /// response-byte counting.
     pub(crate) spinner: Option<SpinnerRef>,
-    /// MultiProgress output manager for REPL mode.
-    pub(crate) cli_output: Option<CliOutput>,
 }
 
 impl AnthropicRuntimeClient {
@@ -82,16 +80,11 @@ impl AnthropicRuntimeClient {
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
             spinner: None,
-            cli_output: None,
         })
     }
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
-    }
-
-    pub(crate) fn set_cli_output(&mut self, output: CliOutput) {
-        self.cli_output = Some(output);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -195,7 +188,6 @@ struct CliStreamState {
     emit_output: bool,
     progress_reporter: Option<InternalPromptProgressReporter>,
     spinner: Option<SpinnerRef>,
-    cli_output: Option<CliOutput>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
     markdown_stream: MarkdownStreamState,
@@ -214,7 +206,7 @@ struct CliStreamState {
 }
 
 impl CliStreamState {
-    /// Suspend MultiProgress (or fall back to spinner pause) before raw I/O.
+    /// Pause the spinner before raw I/O.
     fn pause_output(&self) {
         if let Some(s) = &self.spinner {
             s.pause();
@@ -426,7 +418,6 @@ impl AnthropicRuntimeClient {
             emit_output: self.emit_output,
             progress_reporter: self.progress_reporter.clone(),
             spinner: self.spinner.clone(),
-            cli_output: self.cli_output.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
             markdown_stream: MarkdownStreamState::default(),

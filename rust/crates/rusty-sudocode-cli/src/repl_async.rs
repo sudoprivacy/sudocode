@@ -70,6 +70,7 @@
 //! The [`sudocode plan doc`](https://github.com/sudoprivacy/sudocode/blob/main/notes/plans/conversation-interrupt-queue-sudocode.md)
 //! §落地节奏 covers the full sequence; this file is Phase-2 commit 1.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -77,8 +78,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
+use crate::input_chrome;
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
-use crate::render::CliOutput;
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
 pub type SharedQueueMode = Arc<AtomicU8>;
@@ -188,10 +189,10 @@ fn is_exit_command(text: &str) -> bool {
 pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     driver: Arc<D>,
     mode: SharedQueueMode,
-    output: CliOutput,
     startup_banner: String,
     initial_completions: Vec<(String, String)>,
     esc_abort_hook: Option<EscAbortHook>,
+    permission_mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let coord = Arc::new(Mutex::new(TurnInputCoordinator::new()));
     let (input_tx, input_rx) = sync_channel::<InputEvent>(16);
@@ -201,7 +202,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     // the input thread doesn't wait (user can type during streaming).
     let (prompt_ready_tx, prompt_ready_rx) = sync_channel::<()>(1);
 
-    output.println(startup_banner);
+    println!("{startup_banner}");
     // Signal the input thread: startup output is done, show ❯.
     let _ = prompt_ready_tx.send(());
 
@@ -214,7 +215,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
     // because rustyline already owns stdin.
     let input_tx_clone = input_tx.clone();
     let dequeue_hook = make_up_arrow_hook(Arc::clone(&coord));
-    let input_output = output.clone();
+    let perm_mode = permission_mode.to_string();
     thread::Builder::new()
         .name("repl-input".into())
         .spawn(move || {
@@ -228,18 +229,14 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                 return;
             }
             loop {
-                let read_result = input_output.suspend(|| editor.read_line());
-                match read_result {
+                input_chrome::print_before_prompt(&perm_mode);
+                match editor.read_line() {
                     Ok(ReadOutcome::Submit(text)) => {
-                        // Echo the submitted input above the sticky bars.
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            let w = crossterm::terminal::size()
-                                .map(|(cols, _)| cols as usize)
-                                .unwrap_or(80);
-                            let (echo, _) = crate::cli::format::format_input_echo(trimmed, w);
-                            input_output.println(echo);
-                        }
+                        // Clear the pre-printed bottom sep + footer.
+                        // After readline, cursor is at the start of the
+                        // bottom sep line. \x1b[J clears to end of screen.
+                        print!("\x1b[J");
+                        let _ = std::io::stdout().flush();
                         if input_tx_clone.send(InputEvent::Submit(text)).is_err() {
                             break;
                         }
@@ -290,7 +287,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     // flushed cleanly.
                     let _ = h.join();
                 }
-                output.finish();
                 driver.on_exit();
                 break;
             }
@@ -306,7 +302,6 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     if let Some(h) = runner_handle.take() {
                         let _ = h.join();
                     }
-                    output.finish();
                     driver.on_exit();
                     break;
                 }

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
 use super::format::format_tool_result;
-use crate::render::{CliOutput, SpinnerRef, TerminalRenderer};
+use crate::render::{SpinnerRef, TerminalRenderer};
 use crate::{AllowedToolSet, RuntimeMcpState};
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +56,6 @@ pub(crate) struct CliToolExecutor {
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     spinner: Option<SpinnerRef>,
-    cli_output: Option<CliOutput>,
     question_prompter: Option<Box<dyn QuestionPrompter>>,
     abort_signal: Option<runtime::HookAbortSignal>,
 }
@@ -75,7 +74,6 @@ impl CliToolExecutor {
             tool_registry,
             mcp_state,
             spinner: None,
-            cli_output: None,
             question_prompter: None,
             abort_signal: None,
         }
@@ -83,10 +81,6 @@ impl CliToolExecutor {
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
-    }
-
-    pub(crate) fn set_cli_output(&mut self, output: CliOutput) {
-        self.cli_output = Some(output);
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -111,7 +105,6 @@ impl CliToolExecutor {
     /// to the terminal. Returns `None` when no spinner ref is configured.
     fn make_mcp_progress_callback(&self) -> Option<runtime::McpProgressCallback> {
         let spinner = self.spinner.clone()?;
-        let cli_output = self.cli_output.clone();
         Some(Box::new(
             move |progress: runtime::McpProgressNotification| {
                 let mut status = String::new();
@@ -129,16 +122,10 @@ impl CliToolExecutor {
                         progress.progress
                     )
                 };
-                if let Some(ref output) = cli_output {
-                    spinner.pause();
-                    output.println(&line);
-                    spinner.resume();
-                } else {
-                    spinner.suspend(|| {
-                        let _ = writeln!(io::stdout(), "{line}");
-                        let _ = io::stdout().flush();
-                    });
-                }
+                spinner.suspend(|| {
+                    let _ = writeln!(io::stdout(), "{line}");
+                    let _ = io::stdout().flush();
+                });
             },
         ))
     }
@@ -147,13 +134,11 @@ impl CliToolExecutor {
     /// terminal. Returns `None` when no spinner ref is configured.
     fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
         let spinner = self.spinner.clone()?;
-        let cli_output = self.cli_output.clone();
         Some(Box::new(move |progress: runtime::BashProgress<'_>| {
             let trimmed = progress.output.trim_end();
             if trimmed.is_empty() {
                 return;
             }
-            // Show last line of new output + cumulative stats on one line.
             let last_line = trimmed.lines().next_back().unwrap_or("");
             let bytes_display = if progress.total_bytes >= 1024 {
                 format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
@@ -164,16 +149,10 @@ impl CliToolExecutor {
                 "  \x1b[2m⟳ {last_line}  ({} lines, {bytes_display})\x1b[0m",
                 progress.total_lines,
             );
-            if let Some(ref output) = cli_output {
-                spinner.pause();
-                output.println(&line);
-                spinner.resume();
-            } else {
-                spinner.suspend(|| {
-                    let _ = writeln!(io::stdout(), "{line}");
-                    let _ = io::stdout().flush();
-                });
-            }
+            spinner.suspend(|| {
+                let _ = writeln!(io::stdout(), "{line}");
+                let _ = io::stdout().flush();
+            });
         }))
     }
 
@@ -348,13 +327,9 @@ impl ToolExecutor for CliToolExecutor {
                         .as_ref()
                         .is_some_and(runtime::HookAbortSignal::is_aborted);
                     let formatted = format_tool_result(tool_name, &output, interrupted);
-                    if let Some(ref cli_output) = self.cli_output {
-                        cli_output.println(&formatted);
-                    } else {
-                        writeln!(io::stdout(), "{formatted}")
-                            .and_then(|()| io::stdout().flush())
-                            .map_err(|error| ToolError::new(error.to_string()))?;
-                    }
+                    writeln!(io::stdout(), "{formatted}")
+                        .and_then(|()| io::stdout().flush())
+                        .map_err(|error| ToolError::new(error.to_string()))?;
                     self.resume_spinner();
                 }
                 Ok(output)
@@ -363,13 +338,9 @@ impl ToolExecutor for CliToolExecutor {
                 if self.emit_output {
                     self.pause_spinner();
                     let formatted = format_tool_result(tool_name, &error.to_string(), true);
-                    if let Some(ref cli_output) = self.cli_output {
-                        cli_output.println(&formatted);
-                    } else {
-                        writeln!(io::stdout(), "{formatted}")
-                            .and_then(|()| io::stdout().flush())
-                            .map_err(|error| ToolError::new(error.to_string()))?;
-                    }
+                    writeln!(io::stdout(), "{formatted}")
+                        .and_then(|()| io::stdout().flush())
+                        .map_err(|error| ToolError::new(error.to_string()))?;
                     self.resume_spinner();
                 }
                 Err(error)

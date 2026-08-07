@@ -420,9 +420,20 @@ pub struct ReplHandle {
 }
 
 impl ReplHandle {
-    /// Wait for the iocraft render loop thread to exit.
+    /// Wait for the iocraft render loop thread to exit, with a timeout.
+    /// If the thread doesn't exit within 500ms (e.g. Windows PTY
+    /// interaction), abandon it — the process exit will clean up.
     pub fn join(mut self) {
+        // Drop the output sender so the render loop sees Disconnected.
+        drop(self.output);
         if let Some(h) = self.ui_thread.take() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while !h.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return; // Abandon — process exit will clean up.
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             let _ = h.join();
         }
     }

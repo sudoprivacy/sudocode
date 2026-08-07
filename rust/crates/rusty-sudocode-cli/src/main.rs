@@ -1009,7 +1009,7 @@ fn run_resume(
         // Enter the REPL loop (it renders banner + any existing messages).
         let mode = input_queue::QueueMode::from_env();
         if !matches!(mode, input_queue::QueueMode::Off) {
-            if let Err(e) = run_repl_async_dispatch(cli, mode) {
+            if let Err(e) = run_repl_iocraft_dispatch(cli, mode) {
                 eprintln!("\x1b[31m{e}\x1b[0m");
             }
         } else if let Err(e) = run_repl_loop(cli) {
@@ -1585,7 +1585,7 @@ fn run_repl(
     // path below stays byte-identical to today's sync behavior.
     let mode = input_queue::QueueMode::from_env();
     if !matches!(mode, input_queue::QueueMode::Off) {
-        return run_repl_async_dispatch(cli, mode);
+        return run_repl_iocraft_dispatch(cli, mode);
     }
 
     run_repl_loop(cli)
@@ -1860,6 +1860,229 @@ impl repl_async::TurnDriver for LiveCliDriver {
         // holds it while streaming, and would deadlock if we tried.
         self.abort_signal.abort();
     }
+}
+
+/// iocraft-based REPL dispatch. Spawns the iocraft render loop on a
+/// dedicated thread and runs the coordinator loop on the current thread.
+/// The coordinator reads `InputEvent`s from the iocraft UI and dispatches
+/// turns on runner threads, identical to the rustyline-based coordinator
+/// but with iocraft owning stdin+stdout.
+fn run_repl_iocraft_dispatch(
+    mut cli: LiveCli,
+    mode: input_queue::QueueMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let banner = cli.startup_banner();
+    let permission_label = cli.config.permission_mode.as_str().to_string();
+
+    // iocraft owns stdin (raw mode), so:
+    // 1. ESC-key abort monitor must NOT compete for stdin.
+    // 2. Ignore SIGINT — iocraft delivers Ctrl-C as a key event in raw
+    //    mode. Without this, a Ctrl-C arriving before raw mode is entered
+    //    (timing race) kills the process.
+    cli.esc_monitor_enabled = false;
+
+    let abort_signal = runtime::HookAbortSignal::new();
+    cli.persistent_abort_signal = Some(abort_signal.clone());
+
+    let shared_mode = repl_async::shared_queue_mode(mode);
+    cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
+
+    // Spawn the iocraft REPL UI on a dedicated thread.
+    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
+
+    let cli_shared = Arc::new(Mutex::new(cli));
+    let session_start = Instant::now();
+
+    // Coordinator loop on the current thread. Reads InputEvents from the
+    // iocraft UI and dispatches turns via the same TurnInputCoordinator +
+    // runner-thread pattern as the rustyline-based coordinator.
+    let coord = Arc::new(Mutex::new(input_queue::TurnInputCoordinator::new()));
+    let (turn_tx, turn_rx) = mpsc::sync_channel::<()>(1);
+    let mut turn_active = false;
+    let mut runner_handle: Option<thread::JoinHandle<()>> = None;
+
+    loop {
+        // When idle, block on input; when a turn is running, poll both
+        // channels with a 100ms timeout.
+        let event = if !turn_active {
+            match repl.input_rx.recv() {
+                Ok(evt) => Some(evt),
+                Err(_) => break,
+            }
+        } else {
+            match repl.input_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(evt) => Some(evt),
+                Err(RecvTimeoutError::Timeout) => {
+                    // Check if a turn finished.
+                    if turn_rx.try_recv().is_ok() {
+                        turn_active = false;
+                        if let Some(h) = runner_handle.take() {
+                            let _ = h.join();
+                        }
+                        let next = coord.lock().unwrap().drain_next();
+                        if let Some(next) = next {
+                            turn_active = true;
+                            runner_handle = Some(spawn_iocraft_turn(
+                                Arc::clone(&cli_shared),
+                                &abort_signal,
+                                next.prompt,
+                                repl.output.clone(),
+                                repl.spinner.clone(),
+                                turn_tx.clone(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
+        let Some(event) = event else { continue };
+
+        match event {
+            repl_ui::InputEvent::Exit => {
+                if let Some(h) = runner_handle.take() {
+                    abort_signal.abort();
+                    let _ = h.join();
+                }
+                let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                if let Err(e) = cli_lock.persist_session() {
+                    repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                }
+                break;
+            }
+            repl_ui::InputEvent::Abort => {
+                if runner_handle.is_some() {
+                    abort_signal.abort();
+                }
+            }
+            repl_ui::InputEvent::Submit(text) => {
+                if text.trim() == "/exit" || text.trim() == "/quit" {
+                    if runner_handle.is_some() {
+                        abort_signal.abort();
+                    }
+                    if let Some(h) = runner_handle.take() {
+                        let _ = h.join();
+                    }
+                    let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                    if let Err(e) = cli_lock.persist_session() {
+                        repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                    }
+                    break;
+                }
+
+                // Try slash command dispatch.
+                let trimmed = text.trim();
+                let is_slash = match SlashCommand::parse(trimmed) {
+                    Ok(Some(command)) => {
+                        let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                        match cli_lock.handle_repl_command(command) {
+                            Ok(true) => {
+                                if let Err(e) = cli_lock.persist_session() {
+                                    repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(e) => repl.output.println(&format!("\x1b[31m{e}\x1b[0m")),
+                        }
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(error) => {
+                        repl.output.println(&format!("\x1b[31m{error}\x1b[0m"));
+                        true
+                    }
+                };
+                if is_slash {
+                    continue;
+                }
+
+                // Route to turn.
+                if !turn_active {
+                    let next = coord.lock().unwrap().submit_when_idle(text);
+                    turn_active = true;
+                    runner_handle = Some(spawn_iocraft_turn(
+                        Arc::clone(&cli_shared),
+                        &abort_signal,
+                        next.prompt,
+                        repl.output.clone(),
+                        repl.spinner.clone(),
+                        turn_tx.clone(),
+                    ));
+                } else {
+                    let outcome = coord
+                        .lock()
+                        .unwrap()
+                        .submit_during_turn(text, repl_async::load_queue_mode(&shared_mode));
+                    match outcome {
+                        input_queue::SubmitOutcome::Queued => {}
+                        input_queue::SubmitOutcome::Interrupt => {
+                            abort_signal.abort();
+                        }
+                        input_queue::SubmitOutcome::Rejected => {
+                            repl.output.println(
+                                "\x1b[2m(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead)\x1b[0m",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Unwrap the Arc and finalize telemetry.
+    let cli = Arc::try_unwrap(cli_shared)
+        .map_err(|_| "LiveCli still shared after iocraft coordinator loop exit")?
+        .into_inner()
+        .map_err(|e| format!("LiveCli mutex poisoned: {e}"))?;
+
+    let duration_ms = session_start.elapsed().as_millis() as u64;
+    let usage = cli.runtime.usage().cumulative_usage();
+    let total_turns = cli.runtime.usage().turns();
+    if let Some(tracer) = cli.session_tracer() {
+        tracer.record_usage(
+            "session_summary".to_string(),
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+        tracer.record_session_ended(
+            total_turns,
+            usage.input_tokens as u64,
+            usage.output_tokens as u64,
+            duration_ms,
+        );
+    }
+
+    Ok(())
+}
+
+/// Spawn a runner thread for the iocraft REPL path. The runner locks
+/// `LiveCli`, calls `run_turn`, and sends the result via the output
+/// channel. The spinner state is wired so the streaming/tool layers
+/// can update it atomically.
+fn spawn_iocraft_turn(
+    cli_shared: Arc<Mutex<LiveCli>>,
+    abort_signal: &runtime::HookAbortSignal,
+    prompt: String,
+    output: repl_ui::OutputSender,
+    spinner: repl_ui::SpinnerState,
+    done_tx: mpsc::SyncSender<()>,
+) -> thread::JoinHandle<()> {
+    let abort = abort_signal.clone();
+    thread::Builder::new()
+        .name("repl-runner".into())
+        .spawn(move || {
+            abort.reset();
+            let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
+            if let Err(e) = cli.run_turn_iocraft(&prompt, &output, &spinner) {
+                output.println(&format!("\x1b[31m{e}\x1b[0m"));
+            }
+            let _ = done_tx.send(());
+        })
+        .expect("spawn repl-runner thread")
 }
 
 struct LiveCli {
@@ -3720,6 +3943,83 @@ impl LiveCli {
                 } else if let Some(ref mut s) = spinner {
                     s.fail("❌ Request failed");
                 }
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    /// Run a turn using the iocraft REPL path. Output is routed through
+    /// `OutputSender` and the spinner is managed via the shared
+    /// `SpinnerState` atomics instead of indicatif.
+    fn run_turn_iocraft(
+        &mut self,
+        input: &str,
+        output: &repl_ui::OutputSender,
+        spinner_state: &repl_ui::SpinnerState,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let turn_start = Instant::now();
+        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
+        let token_budget = crate::render::parse_token_budget(input);
+
+        // Activate the shared spinner state for the iocraft render loop.
+        spinner_state.start_turn(
+            "\u{1f980} Thinking...",
+            Some(self.config.model.as_str()),
+            token_budget,
+        );
+
+        // Wire the spinner state into the SpinnerRef API so the streaming
+        // and tool layers can update bytes + thinking flags atomically.
+        let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
+        runtime.api_client_mut().set_spinner(spinner_ref.clone());
+        runtime.tool_executor_mut().set_spinner(spinner_ref);
+
+        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
+        let result = self.tokio_runtime.block_on(runtime.run_turn(
+            input,
+            Some(&mut permission_prompter),
+            None,
+        ));
+        hook_abort_monitor.stop();
+        spinner_state.stop_turn();
+
+        match result {
+            Ok(summary) => {
+                self.replace_runtime(runtime)?;
+                if summary.cancelled {
+                    output.println("\x1b[31m\u{23f9} Cancelled\x1b[0m");
+                } else {
+                    if let Some(event) = summary.auto_compaction {
+                        output.println(&format_auto_compaction_notice(event.removed_message_count));
+                    }
+                    let elapsed = turn_start.elapsed();
+                    if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
+                        output.println(&timeline);
+                    }
+                    let usage = self.runtime.usage().current_turn_usage();
+                    let cumulative = self.runtime.usage().cumulative_usage();
+                    let turns = self.runtime.usage().turns();
+                    let context_window =
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
+                    let branch = env::current_dir()
+                        .ok()
+                        .and_then(|cwd| resolve_git_branch_for(&cwd));
+                    output.println(&format_turn_status_line_with_branch(
+                        &self.config.model,
+                        turns,
+                        &usage,
+                        Some(&cumulative),
+                        Some(context_window),
+                        elapsed,
+                        branch.as_deref(),
+                    ));
+                }
+                self.persist_session()?;
+                Ok(())
+            }
+            Err(error) => {
+                runtime.shutdown_mcp()?;
+                runtime.shutdown_plugins()?;
                 Err(Box::new(error))
             }
         }

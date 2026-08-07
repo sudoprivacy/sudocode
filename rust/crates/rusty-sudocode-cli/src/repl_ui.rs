@@ -424,18 +424,14 @@ impl ReplHandle {
     /// If the thread doesn't exit within 500ms (e.g. Windows PTY
     /// interaction), abandon it — the process exit will clean up.
     pub fn join(self) {
-        // Drop the output sender so the render loop sees Disconnected.
-        let ui_thread = self.ui_thread;
+        // Drop channels so the render loop sees Disconnected and exits.
         drop(self.output);
         drop(self.input_rx);
-        if let Some(h) = ui_thread {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        if let Some(h) = self.ui_thread {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
             while !h.is_finished() {
                 if std::time::Instant::now() >= deadline {
-                    // iocraft render_loop didn't exit in time (Windows PTY).
-                    // Force process exit — all persistent state has been
-                    // flushed by the coordinator before calling join().
-                    std::process::exit(0);
+                    return; // Abandon — process exit will clean up.
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

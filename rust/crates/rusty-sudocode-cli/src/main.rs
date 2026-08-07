@@ -1907,7 +1907,13 @@ fn run_repl_iocraft_dispatch(
         let event = if !turn_active {
             match repl.input_rx.recv() {
                 Ok(evt) => Some(evt),
-                Err(_) => break,
+                Err(_) => {
+                    if let Some(h) = runner_handle.take() {
+                        abort_signal.abort();
+                        let _ = h.join();
+                    }
+                    break;
+                }
             }
         } else {
             match repl.input_rx.recv_timeout(Duration::from_millis(100)) {
@@ -1934,7 +1940,14 @@ fn run_repl_iocraft_dispatch(
                     }
                     continue;
                 }
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    // Render loop exited — clean up runner if active.
+                    if let Some(h) = runner_handle.take() {
+                        abort_signal.abort();
+                        let _ = h.join();
+                    }
+                    break;
+                }
             }
         };
 
@@ -2031,14 +2044,23 @@ fn run_repl_iocraft_dispatch(
         }
     }
 
-    // Wait for the iocraft render loop thread to exit cleanly.
-    repl.join();
+    // The iocraft render loop thread may not exit cleanly on all
+    // platforms (Windows PTY). Drop the channels to signal it, then
+    // proceed — process exit will clean up the thread.
+    // Persist session before dropping the repl — the UI thread may still
+    // be alive and we need the mutex accessible.
+    {
+        let cli_lock = cli_shared.lock().expect("LiveCli mutex");
+        let _ = cli_lock.persist_session();
+    }
+    drop(repl);
 
-    // Unwrap the Arc and finalize telemetry.
-    let cli = Arc::try_unwrap(cli_shared)
-        .map_err(|_| "LiveCli still shared after iocraft coordinator loop exit")?
-        .into_inner()
-        .map_err(|e| format!("LiveCli mutex poisoned: {e}"))?;
+    // Unwrap the Arc and finalize telemetry. If the runner thread
+    // still holds a clone, force-exit — session is already persisted.
+    let cli = match Arc::try_unwrap(cli_shared) {
+        Ok(m) => m.into_inner().unwrap_or_else(|e| e.into_inner()),
+        Err(_) => std::process::exit(0),
+    };
 
     let duration_ms = session_start.elapsed().as_millis() as u64;
     let usage = cli.runtime.usage().cumulative_usage();
@@ -2059,7 +2081,10 @@ fn run_repl_iocraft_dispatch(
         );
     }
 
-    Ok(())
+    // The iocraft render loop thread may still be alive (it blocks on
+    // terminal events). Force process exit — all persistent state has
+    // already been flushed above.
+    std::process::exit(0);
 }
 
 /// Spawn a runner thread for the iocraft REPL path. The runner locks

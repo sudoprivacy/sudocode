@@ -161,102 +161,15 @@ fn format_compact_tokens(tokens: u32) -> String {
     }
 }
 
-// ── Chrome rendering ───────────────────────────────────────────────────
-
-/// Number of chrome lines: spinner, top sep, prompt placeholder, bottom
-/// sep, footer.
-const CHROME_LINES: usize = 5;
-
-fn term_width() -> usize {
-    crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
-}
-
-fn format_separator() -> String {
-    let w = term_width();
-    format!("\x1b[2m{}\x1b[0m", "─".repeat(w))
-}
-
-fn format_footer(permission_mode: &str) -> String {
-    let icon = match permission_mode {
-        "danger-full-access" => "⏵⏵",
-        "workspace-write" => "⏵",
-        _ => "▷",
-    };
-    let label = match permission_mode {
-        "danger-full-access" => "full access",
-        "workspace-write" => "workspace write",
-        "read-only" => "read only",
-        other => other,
-    };
-    format!("  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m")
-}
-
-/// Draw the initial chrome block (5 lines) at the current cursor position.
-fn draw_chrome_initial(spinner_text: &str, permission_mode: &str) {
-    let sep = format_separator();
-    let footer = format_footer(permission_mode);
-    let mut stdout = io::stdout();
-    let _ = writeln!(stdout, "{spinner_text}");
-    let _ = writeln!(stdout, "{sep}");
-    let _ = writeln!(stdout); // prompt placeholder
-    let _ = writeln!(stdout, "{sep}");
-    let _ = write!(stdout, "{footer}");
-    let _ = stdout.flush();
-}
-
-/// Redraw the chrome in place. The cursor must be at the start of the
-/// spinner line (first of CHROME_LINES). Clears each line before writing.
-fn redraw_chrome(spinner_text: &str, permission_mode: &str) {
-    let sep = format_separator();
-    let footer = format_footer(permission_mode);
-    let mut stdout = io::stdout();
-    // Line 1: spinner
-    let _ = write!(stdout, "\x1b[2K{spinner_text}\n");
-    // Line 2: top sep
-    let _ = write!(stdout, "\x1b[2K{sep}\n");
-    // Line 3: prompt placeholder (empty)
-    let _ = write!(stdout, "\x1b[2K\n");
-    // Line 4: bottom sep
-    let _ = write!(stdout, "\x1b[2K{sep}\n");
-    // Line 5: footer (no trailing newline — cursor stays at end)
-    let _ = write!(stdout, "\x1b[2K{footer}");
-    // Move cursor back up to start of spinner line for next redraw.
-    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
-    let _ = stdout.flush();
-}
-
-/// Clear the chrome region. Cursor must be at the spinner line start.
-fn clear_chrome() {
-    let mut stdout = io::stdout();
-    for _ in 0..CHROME_LINES {
-        let _ = write!(stdout, "\x1b[2K\n");
-    }
-    // Move back up to where spinner was.
-    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES);
-    let _ = stdout.flush();
-}
-
 // ── Render thread ──────────────────────────────────────────────────────
 
-/// The render loop running on the `repl-render` thread.
-/// Polls the output channel and redraws the chrome at 80ms intervals.
-fn render_loop(
-    output_rx: Receiver<OutputMsg>,
-    spinner: SpinnerState,
-    permission_mode: &str,
-    stop: Arc<AtomicBool>,
-) {
-    let mut stdout = io::stdout();
+/// The render loop: drains the output channel and prints to stdout.
+/// The spinner is a single-line overwrite (`\r\x1b[2K` + text) — same
+/// approach as indicatif's `ProgressBar`, keeping stdout writes minimal
+/// to avoid filling the PTY buffer during long streaming responses.
+fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<AtomicBool>) {
     let mut frame_index: usize = 0;
-    let mut chrome_visible = false;
-
-    // Draw initial chrome.
-    let initial_spinner = spinner.render_frame(frame_index);
-    draw_chrome_initial(&initial_spinner, permission_mode);
-    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
-    let _ = stdout.flush();
-    chrome_visible = true;
-    frame_index += 1;
+    let mut spinner_visible = false;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -268,60 +181,63 @@ fn render_loop(
         loop {
             match output_rx.try_recv() {
                 Ok(msg) => {
-                    if !had_output && chrome_visible {
-                        clear_chrome();
-                        chrome_visible = false;
-                        had_output = true;
+                    if !had_output && spinner_visible {
+                        // Clear the spinner line before printing output.
+                        let _ = write!(io::stdout(), "\r\x1b[2K");
+                        spinner_visible = false;
                     }
                     match msg {
                         OutputMsg::Print(text) => {
-                            let _ = write!(stdout, "{text}");
+                            let _ = write!(io::stdout(), "{text}");
                         }
                         OutputMsg::Println(text) => {
-                            let _ = writeln!(stdout, "{text}");
+                            let _ = writeln!(io::stdout(), "{text}");
                         }
                     }
                     had_output = true;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    if had_output {
-                        let _ = stdout.flush();
+                    if spinner_visible {
+                        let _ = write!(io::stdout(), "\r\x1b[2K");
                     }
-                    if chrome_visible {
-                        clear_chrome();
-                    }
+                    let _ = io::stdout().flush();
                     return;
                 }
             }
         }
 
-        // Check stop again after draining — avoids one extra 80ms sleep.
         if stop.load(Ordering::SeqCst) {
-            if had_output {
-                let _ = stdout.flush();
-            }
             break;
         }
 
         if had_output {
-            let _ = stdout.flush();
-            let spinner_text = spinner.render_frame(frame_index);
-            draw_chrome_initial(&spinner_text, permission_mode);
-            let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
-            let _ = stdout.flush();
-            chrome_visible = true;
-        } else {
-            let spinner_text = spinner.render_frame(frame_index);
-            redraw_chrome(&spinner_text, permission_mode);
+            let _ = io::stdout().flush();
+        }
+
+        // Update spinner — single line overwrite. When paused
+        // (e.g. during permission prompts or tool output), clear the
+        // spinner line and don't redraw so external code can write to
+        // stdout without interference.
+        let spinner_text = spinner.render_frame(frame_index);
+        if !spinner_text.is_empty() {
+            let _ = write!(io::stdout(), "\r\x1b[2K{spinner_text}");
+            let _ = io::stdout().flush();
+            spinner_visible = true;
+        } else if spinner_visible {
+            // Spinner just became paused — clear its line.
+            let _ = write!(io::stdout(), "\r\x1b[2K");
+            let _ = io::stdout().flush();
+            spinner_visible = false;
         }
 
         frame_index = frame_index.wrapping_add(1);
         std::thread::sleep(Duration::from_millis(80));
     }
 
-    if chrome_visible {
-        clear_chrome();
+    if spinner_visible {
+        let _ = write!(io::stdout(), "\r\x1b[2K");
+        let _ = io::stdout().flush();
     }
 }
 
@@ -339,24 +255,18 @@ pub struct TurnRenderer {
 impl TurnRenderer {
     /// Start a new render thread for a turn.
     #[must_use]
-    pub fn new(
-        label: &str,
-        model: Option<&str>,
-        token_budget: Option<u32>,
-        permission_mode: &str,
-    ) -> Self {
+    pub fn new(label: &str, model: Option<&str>, token_budget: Option<u32>) -> Self {
         let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(256);
         let stop = Arc::new(AtomicBool::new(false));
 
         let spinner = SpinnerState::new(label, model, token_budget);
         let spinner_clone = spinner.clone();
-        let perm = permission_mode.to_string();
         let stop_clone = Arc::clone(&stop);
 
         let join_handle = std::thread::Builder::new()
             .name("repl-render".into())
             .spawn(move || {
-                render_loop(output_rx, spinner_clone, &perm, stop_clone);
+                render_loop(output_rx, spinner_clone, stop_clone);
             })
             .expect("spawn repl-render thread");
 

@@ -3624,14 +3624,14 @@ impl LiveCli {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
-        // Use TurnRenderer for unified chrome during REPL turns when
-        // SUDOCODE_IOCRAFT=1. Falls back to standalone indicatif spinner
-        // otherwise. Live-mode PTY tests revealed that the render thread's
-        // stdout writes can block when the PTY buffer fills (long-running
-        // LLM responses), preventing clean process exit. The env gate
-        // remains until non-blocking stdout is implemented.
-        let use_turn_renderer =
-            io::stdout().is_terminal() && env::var("SUDOCODE_IOCRAFT").is_ok_and(|v| v == "1");
+        // Use TurnRenderer for unified output routing during REPL turns.
+        // Non-interactive (piped) mode uses the standalone indicatif spinner.
+        // TurnRenderer routes all output through a channel to the render
+        // thread, keeping spinner updates coordinated. Opt-in for now
+        // (SUDOCODE_TURN_RENDERER=1) until all PTY tests are adapted.
+        let use_turn_renderer = io::stdout().is_terminal()
+            && env::var("SUDOCODE_TURN_RENDERER")
+                .is_ok_and(|v| !matches!(v.as_str(), "0" | "off" | "false"));
         let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
         let mut spinner: Option<SpinnerHandle> = None;
 
@@ -3640,7 +3640,6 @@ impl LiveCli {
                 "🦀 Thinking...",
                 Some(self.config.model.as_str()),
                 token_budget,
-                self.config.permission_mode.as_str(),
             );
             let spinner_state = renderer.spinner().clone();
             // Wire the spinner state into the existing SpinnerRef API

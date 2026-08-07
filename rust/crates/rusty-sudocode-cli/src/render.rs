@@ -144,6 +144,9 @@ pub struct SpinnerRef {
     response_bytes: Arc<AtomicU32>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    /// When true, a TurnRenderer manages the spinner display — pause/resume
+    /// only set the atomic flag without writing to stdout.
+    managed: bool,
 }
 
 impl SpinnerRef {
@@ -160,6 +163,7 @@ impl SpinnerRef {
             response_bytes: Arc::clone(response_bytes),
             is_thinking: Arc::clone(is_thinking),
             is_paused: Arc::clone(is_paused),
+            managed: true,
         }
     }
 
@@ -172,9 +176,15 @@ impl SpinnerRef {
     }
 
     /// Pause the spinner and clear its line. The updater thread stops
-    /// ticking while paused.
+    /// ticking while paused. When managed by a TurnRenderer, only the
+    /// atomic flag is set — the render thread handles clearing.
     pub fn pause(&self) {
         self.is_paused.store(true, Ordering::SeqCst);
+        if self.managed {
+            // TurnRenderer sees is_paused and clears the spinner line
+            // on its next tick (≤80ms). No direct stdout write needed.
+            return;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
         let _ = write!(io::stdout(), "\r\x1b[2K");
         let _ = io::stdout().flush();
@@ -257,6 +267,7 @@ impl SpinnerHandle {
             response_bytes: Arc::clone(&self.response_bytes),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
+            managed: false,
         }
     }
 

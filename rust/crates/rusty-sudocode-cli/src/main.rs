@@ -3626,12 +3626,7 @@ impl LiveCli {
         let token_budget = crate::render::parse_token_budget(input);
         // Use TurnRenderer for unified output routing during REPL turns.
         // Non-interactive (piped) mode uses the standalone indicatif spinner.
-        // TurnRenderer routes all output through a channel to the render
-        // thread, keeping spinner updates coordinated. Opt-in for now
-        // (SUDOCODE_TURN_RENDERER=1) until all PTY tests are adapted.
-        let use_turn_renderer = io::stdout().is_terminal()
-            && env::var("SUDOCODE_TURN_RENDERER")
-                .is_ok_and(|v| !matches!(v.as_str(), "0" | "off" | "false"));
+        let use_turn_renderer = io::stdout().is_terminal();
         let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
         let mut spinner: Option<SpinnerHandle> = None;
 
@@ -3651,10 +3646,6 @@ impl LiveCli {
             );
             runtime.api_client_mut().set_spinner(spinner_ref.clone());
             runtime.tool_executor_mut().set_spinner(spinner_ref);
-            if let Some(output) = renderer.output() {
-                runtime.api_client_mut().set_turn_output(output.clone());
-                runtime.tool_executor_mut().set_turn_output(output);
-            }
             turn_renderer = Some(renderer);
         } else {
             let s = SpinnerHandle::new(

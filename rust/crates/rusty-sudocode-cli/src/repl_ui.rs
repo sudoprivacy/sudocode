@@ -161,13 +161,67 @@ fn format_compact_tokens(tokens: u32) -> String {
     }
 }
 
+// ── Non-blocking stdout ────────────────────────────────────────────────
+
+/// Set stdout to non-blocking mode on Unix. Returns `true` on success.
+/// When non-blocking, `write()` returns `WouldBlock` instead of blocking
+/// when the PTY buffer is full — the render thread drops the data and
+/// retries on the next tick rather than stalling.
+#[cfg(unix)]
+fn set_stdout_nonblocking(nonblock: bool) -> bool {
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use std::os::unix::io::AsRawFd;
+    let fd = io::stdout().as_raw_fd();
+    let Ok(flags) = fcntl(fd, FcntlArg::F_GETFL) else {
+        return false;
+    };
+    let Some(mut oflags) = OFlag::from_bits(flags) else {
+        return false;
+    };
+    oflags.set(OFlag::O_NONBLOCK, nonblock);
+    fcntl(fd, FcntlArg::F_SETFL(oflags)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn set_stdout_nonblocking(_nonblock: bool) -> bool {
+    false
+}
+
+/// Write spinner/cosmetic data to stdout, silently dropping if the fd
+/// is non-blocking and the buffer is full (`WouldBlock`). Used only for
+/// spinner frame updates — user-visible text uses `write_blocking`.
+fn write_nonblocking(data: &[u8]) {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_all(data) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Err(_) => {}
+    }
+    let _ = stdout.flush();
+}
+
+/// Write user-visible text to stdout. Temporarily switches back to
+/// blocking mode so no content is lost.
+fn write_blocking(data: &[u8]) {
+    set_stdout_nonblocking(false);
+    let mut stdout = io::stdout().lock();
+    let _ = stdout.write_all(data);
+    let _ = stdout.flush();
+    set_stdout_nonblocking(true);
+}
+
 // ── Render thread ──────────────────────────────────────────────────────
 
 /// The render loop: drains the output channel and prints to stdout.
 /// The spinner is a single-line overwrite (`\r\x1b[2K` + text) — same
 /// approach as indicatif's `ProgressBar`, keeping stdout writes minimal
 /// to avoid filling the PTY buffer during long streaming responses.
+///
+/// stdout is set to non-blocking mode on entry and restored on exit so
+/// writes never block the thread (preventing process hang on PTY buffer
+/// pressure).
 fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<AtomicBool>) {
+    let was_nonblocking = set_stdout_nonblocking(true);
     let mut frame_index: usize = 0;
     let mut spinner_visible = false;
 
@@ -182,16 +236,17 @@ fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<
             match output_rx.try_recv() {
                 Ok(msg) => {
                     if !had_output && spinner_visible {
-                        // Clear the spinner line before printing output.
-                        let _ = write!(io::stdout(), "\r\x1b[2K");
+                        write_nonblocking(b"\r\x1b[2K");
                         spinner_visible = false;
                     }
                     match msg {
                         OutputMsg::Print(text) => {
-                            let _ = write!(io::stdout(), "{text}");
+                            write_blocking(text.as_bytes());
                         }
                         OutputMsg::Println(text) => {
-                            let _ = writeln!(io::stdout(), "{text}");
+                            let mut buf = text.into_bytes();
+                            buf.push(b'\n');
+                            write_blocking(&buf);
                         }
                     }
                     had_output = true;
@@ -199,9 +254,11 @@ fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if spinner_visible {
-                        let _ = write!(io::stdout(), "\r\x1b[2K");
+                        write_nonblocking(b"\r\x1b[2K");
                     }
-                    let _ = io::stdout().flush();
+                    if was_nonblocking {
+                        set_stdout_nonblocking(false);
+                    }
                     return;
                 }
             }
@@ -211,23 +268,16 @@ fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<
             break;
         }
 
-        if had_output {
-            let _ = io::stdout().flush();
-        }
-
         // Update spinner — single line overwrite. When paused
         // (e.g. during permission prompts or tool output), clear the
         // spinner line and don't redraw so external code can write to
         // stdout without interference.
         let spinner_text = spinner.render_frame(frame_index);
         if !spinner_text.is_empty() {
-            let _ = write!(io::stdout(), "\r\x1b[2K{spinner_text}");
-            let _ = io::stdout().flush();
+            write_nonblocking(format!("\r\x1b[2K{spinner_text}").as_bytes());
             spinner_visible = true;
         } else if spinner_visible {
-            // Spinner just became paused — clear its line.
-            let _ = write!(io::stdout(), "\r\x1b[2K");
-            let _ = io::stdout().flush();
+            write_nonblocking(b"\r\x1b[2K");
             spinner_visible = false;
         }
 
@@ -236,8 +286,10 @@ fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<
     }
 
     if spinner_visible {
-        let _ = write!(io::stdout(), "\r\x1b[2K");
-        let _ = io::stdout().flush();
+        write_nonblocking(b"\r\x1b[2K");
+    }
+    if was_nonblocking {
+        set_stdout_nonblocking(false);
     }
 }
 

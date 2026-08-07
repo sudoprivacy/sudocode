@@ -2031,6 +2031,9 @@ fn run_repl_iocraft_dispatch(
         }
     }
 
+    // Wait for the iocraft render loop thread to exit cleanly.
+    repl.join();
+
     // Unwrap the Arc and finalize telemetry.
     let cli = Arc::try_unwrap(cli_shared)
         .map_err(|_| "LiveCli still shared after iocraft coordinator loop exit")?

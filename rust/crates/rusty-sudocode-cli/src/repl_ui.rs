@@ -416,6 +416,16 @@ pub struct ReplHandle {
     pub output: OutputSender,
     pub input_rx: Receiver<InputEvent>,
     pub spinner: SpinnerState,
+    ui_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ReplHandle {
+    /// Wait for the iocraft render loop thread to exit.
+    pub fn join(mut self) {
+        if let Some(h) = self.ui_thread.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 /// Context passed to `ReplApp` via `ContextProvider`.
@@ -594,7 +604,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
     };
 
     let banner = startup_banner.to_string();
-    std::thread::Builder::new()
+    let join_handle = std::thread::Builder::new()
         .name("repl-ui".into())
         .spawn(move || {
             // Print banner before entering the render loop so the user sees
@@ -613,10 +623,14 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
             .expect("iocraft render_loop failed");
         })
         .expect("spawn repl-ui thread");
+    // Small delay to let the render loop enter raw mode before the
+    // coordinator starts sending events.
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     ReplHandle {
         output: OutputSender { tx: output_tx },
         input_rx,
         spinner,
+        ui_thread: Some(join_handle),
     }
 }

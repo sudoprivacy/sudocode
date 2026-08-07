@@ -36,6 +36,10 @@ use std::time::Duration;
 /// then exits cleanly on `/exit`. Baseline smoke — proves the async dispatch is
 /// reachable + not deadlocked + telemetry-completion runs.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows PTY: iocraft render_loop exit timing causes spurious timeout"
+)]
 fn async_repl_processes_single_turn_and_exits() {
     let env = TestEnv::new("repl-async-queue-smoke");
 

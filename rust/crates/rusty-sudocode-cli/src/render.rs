@@ -167,6 +167,12 @@ impl SpinnerRef {
         }
     }
 
+    /// Create a `SpinnerRef` from a `SpinnerState`. Convenience wrapper
+    /// around `from_state` for the iocraft REPL path.
+    pub fn from_spinner_state(state: &crate::repl_ui::SpinnerState) -> Self {
+        Self::from_state(&state.response_bytes, &state.is_thinking, &state.is_paused)
+    }
+
     /// Pause the spinner, run the closure, resume the spinner.
     pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
         self.pause();

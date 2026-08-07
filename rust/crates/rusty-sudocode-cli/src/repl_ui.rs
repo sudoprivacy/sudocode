@@ -1,38 +1,38 @@
 //! iocraft-based terminal UI for the REPL.
 //!
-//! During a turn, `TurnRenderer` starts an iocraft render loop on a
-//! dedicated thread. The render loop manages:
-//! - **SpinnerLine**: animated spinner with model/timing/token info
-//! - **Chrome**: separator lines + permission mode footer
+//! During a turn, `TurnRenderer` manages a dedicated render thread that:
+//! - Drains `TurnOutput` messages (text from the runner thread) and prints
+//!   them above a fixed-position bottom chrome region.
+//! - Redraws the bottom chrome (spinner + separators + permission footer)
+//!   at 80ms intervals using cursor manipulation.
 //!
-//! All terminal output during a turn flows through `TurnOutput` (a
-//! channel-backed `Write` impl) → iocraft `UseOutput::println()`, which
-//! inserts text above the fixed chrome region. This eliminates the
-//! cursor-management conflicts between raw ANSI writes and managed UI.
+//! The chrome is positioned using cursor-save/restore and line-clear
+//! sequences. Scrollback text is written ABOVE the chrome: the render
+//! thread moves the cursor up, inserts lines, then restores the chrome.
+//!
+//! This approach avoids iocraft's `render_loop()` (which enters raw mode
+//! and blocks on stdin events). Instead, it uses iocraft's `element!().print()`
+//! for one-shot rendering of the chrome layout at construction time, and
+//! manages cursor state manually on the timer loop.
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{self, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use iocraft::prelude::*;
-
 // ── TurnOutput ─────────────────────────────────────────────────────────
 
-/// Messages from the runner thread to the iocraft render loop.
+/// Messages from the runner thread to the render thread.
 enum OutputMsg {
-    /// Write text without trailing newline.
     Print(String),
-    /// Write text with trailing newline.
     Println(String),
 }
 
-/// Channel-backed output handle for routing terminal output through
-/// iocraft's `UseOutput` during a turn. Clone is cheap (SyncSender is
-/// Arc-wrapped internally). Implements `Write` so it can be used as a
-/// drop-in replacement for `io::stdout()`.
+/// Channel-backed output handle for routing terminal output through the
+/// render thread during a turn. Clone is cheap. Implements `Write` so it
+/// can be used as a drop-in replacement for `io::stdout()`.
 #[derive(Clone)]
 pub struct TurnOutput {
     tx: SyncSender<OutputMsg>,
@@ -62,9 +62,9 @@ impl Write for TurnOutput {
 
 // ── SpinnerState ───────────────────────────────────────────────────────
 
-/// Shared state for the spinner, read by the iocraft component and
-/// written by the runner thread. All fields are atomic for lock-free
-/// cross-thread access.
+/// Shared state for the spinner, read by the render thread and written
+/// by the runner thread. All fields are atomic for lock-free cross-thread
+/// access.
 #[derive(Clone)]
 pub struct SpinnerState {
     pub response_bytes: Arc<AtomicU32>,
@@ -90,10 +90,9 @@ impl SpinnerState {
         }
     }
 
-    /// Render the current spinner frame as a styled string.
+    /// Render the current spinner frame as a colored ANSI string.
     fn render_frame(&self, frame_index: usize) -> String {
-        let paused = self.is_paused.load(Ordering::SeqCst);
-        if paused {
+        if self.is_paused.load(Ordering::SeqCst) {
             return String::new();
         }
 
@@ -145,7 +144,10 @@ impl SpinnerState {
             }
         }
 
-        line
+        // Stall detection: yellow when no new bytes for 3+ seconds.
+        let is_stalled = bytes > 0 && !thinking && elapsed > 3.0;
+        let color_code = if is_stalled { "33" } else { "34" };
+        format!("\x1b[{color_code}m{line}\x1b[0m")
     }
 }
 
@@ -159,126 +161,170 @@ fn format_compact_tokens(tokens: u32) -> String {
     }
 }
 
-// ── Render context ─────────────────────────────────────────────────────
+// ── Chrome rendering ───────────────────────────────────────────────────
 
-/// Context provided to the iocraft component tree via `ContextProvider`.
-struct RenderContext {
-    output_rx: Arc<std::sync::Mutex<mpsc::Receiver<OutputMsg>>>,
-    spinner: SpinnerState,
-    permission_mode: String,
+/// Number of chrome lines: spinner, top sep, prompt placeholder, bottom
+/// sep, footer.
+const CHROME_LINES: usize = 5;
+
+fn term_width() -> usize {
+    crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
 }
 
-// ── iocraft components ─────────────────────────────────────────────────
+fn format_separator() -> String {
+    let w = term_width();
+    format!("\x1b[2m{}\x1b[0m", "─".repeat(w))
+}
 
-#[component]
-fn TurnChrome(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let ctx = hooks.use_context::<RenderContext>();
-    let spinner = ctx.spinner.clone();
-    let permission_mode = ctx.permission_mode.clone();
-    let output_rx_mutex = &ctx.output_rx;
-
-    let (stdout, _stderr) = hooks.use_output();
-    let mut system = hooks.use_context_mut::<SystemContext>();
-    let mut frame_index = hooks.use_state(|| 0usize);
-    let mut spinner_text = hooks.use_state(String::new);
-    let mut should_exit = hooks.use_state(|| false);
-
-    // Drain the output channel and print above the chrome.
-    // Also update spinner frame.
-    {
-        let spinner_clone = spinner.clone();
-        let output_rx = Arc::clone(output_rx_mutex);
-        hooks.use_future(async move {
-            loop {
-                // Drain all pending output messages.
-                if let Ok(rx) = output_rx.lock() {
-                    loop {
-                        match rx.try_recv() {
-                            Ok(OutputMsg::Print(text)) => stdout.print(&text),
-                            Ok(OutputMsg::Println(text)) => stdout.println(&text),
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => {
-                                should_exit.set(true);
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Update spinner.
-                let idx = frame_index.get();
-                let text = spinner_clone.render_frame(idx);
-                spinner_text.set(text);
-                frame_index.set(idx.wrapping_add(1));
-
-                // 80ms tick — matches the original spinner update interval.
-                smol::Timer::after(Duration::from_millis(80)).await;
-            }
-        });
-    }
-
-    if *should_exit.read() {
-        system.exit();
-    }
-
-    let w = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-    let sep = format!("\x1b[2m{}\x1b[0m", "─".repeat(w));
-
-    let icon = match permission_mode.as_str() {
+fn format_footer(permission_mode: &str) -> String {
+    let icon = match permission_mode {
         "danger-full-access" => "⏵⏵",
         "workspace-write" => "⏵",
         _ => "▷",
     };
-    let label = match permission_mode.as_str() {
+    let label = match permission_mode {
         "danger-full-access" => "full access",
         "workspace-write" => "workspace write",
         "read-only" => "read only",
         other => other,
     };
-    let footer = format!(
-        "  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m"
-    );
+    format!("  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m")
+}
 
-    let spinner_content = spinner_text.read().clone();
-    let spinner_color = if spinner_content.is_empty() {
-        ""
-    } else {
-        "\x1b[34m"
-    };
-    let colored_spinner = if spinner_content.is_empty() {
-        String::new()
-    } else {
-        format!("{spinner_color}{spinner_content}\x1b[0m")
-    };
+/// Draw the initial chrome block (5 lines) at the current cursor position.
+fn draw_chrome_initial(spinner_text: &str, permission_mode: &str) {
+    let sep = format_separator();
+    let footer = format_footer(permission_mode);
+    let mut stdout = io::stdout();
+    let _ = writeln!(stdout, "{spinner_text}");
+    let _ = writeln!(stdout, "{sep}");
+    let _ = writeln!(stdout); // prompt placeholder
+    let _ = writeln!(stdout, "{sep}");
+    let _ = write!(stdout, "{footer}");
+    let _ = stdout.flush();
+}
 
-    element! {
-        View(flex_direction: FlexDirection::Column) {
-            #(if !colored_spinner.is_empty() {
-                Some(element! { Text(content: colored_spinner) })
-            } else {
-                None
-            })
-            Text(content: sep.clone())
-            Text(content: "")
-            Text(content: sep)
-            Text(content: footer)
-        }
+/// Redraw the chrome in place. The cursor must be at the start of the
+/// spinner line (first of CHROME_LINES). Clears each line before writing.
+fn redraw_chrome(spinner_text: &str, permission_mode: &str) {
+    let sep = format_separator();
+    let footer = format_footer(permission_mode);
+    let mut stdout = io::stdout();
+    // Line 1: spinner
+    let _ = write!(stdout, "\x1b[2K{spinner_text}\n");
+    // Line 2: top sep
+    let _ = write!(stdout, "\x1b[2K{sep}\n");
+    // Line 3: prompt placeholder (empty)
+    let _ = write!(stdout, "\x1b[2K\n");
+    // Line 4: bottom sep
+    let _ = write!(stdout, "\x1b[2K{sep}\n");
+    // Line 5: footer (no trailing newline — cursor stays at end)
+    let _ = write!(stdout, "\x1b[2K{footer}");
+    // Move cursor back up to start of spinner line for next redraw.
+    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
+    let _ = stdout.flush();
+}
+
+/// Clear the chrome region. Cursor must be at the spinner line start.
+fn clear_chrome() {
+    let mut stdout = io::stdout();
+    for _ in 0..CHROME_LINES {
+        let _ = write!(stdout, "\x1b[2K\n");
     }
+    // Move back up to where spinner was.
+    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES);
+    let _ = stdout.flush();
+}
+
+// ── Render thread ──────────────────────────────────────────────────────
+
+/// The render loop running on the `repl-render` thread.
+/// Polls the output channel and redraws the chrome at 80ms intervals.
+fn render_loop(
+    output_rx: Receiver<OutputMsg>,
+    spinner: SpinnerState,
+    permission_mode: &str,
+    stop: Arc<AtomicBool>,
+) {
+    let mut stdout = io::stdout();
+    let mut frame_index: usize = 0;
+
+    // Draw initial chrome.
+    let initial_spinner = spinner.render_frame(frame_index);
+    draw_chrome_initial(&initial_spinner, permission_mode);
+    // Position cursor at the start of the spinner line.
+    let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
+    let _ = stdout.flush();
+    frame_index += 1;
+
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Drain pending output messages.
+        let mut had_output = false;
+        loop {
+            match output_rx.try_recv() {
+                Ok(msg) => {
+                    if !had_output {
+                        // Clear chrome before printing output above it.
+                        clear_chrome();
+                        had_output = true;
+                    }
+                    match msg {
+                        OutputMsg::Print(text) => {
+                            let _ = write!(stdout, "{text}");
+                        }
+                        OutputMsg::Println(text) => {
+                            let _ = writeln!(stdout, "{text}");
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if had_output {
+                        let _ = stdout.flush();
+                    }
+                    return; // Channel closed — turn is ending.
+                }
+            }
+        }
+
+        if had_output {
+            let _ = stdout.flush();
+            // Redraw chrome below the new output.
+            let spinner_text = spinner.render_frame(frame_index);
+            draw_chrome_initial(&spinner_text, permission_mode);
+            let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
+            let _ = stdout.flush();
+        } else {
+            // No output — just update the spinner in place.
+            let spinner_text = spinner.render_frame(frame_index);
+            redraw_chrome(&spinner_text, permission_mode);
+        }
+
+        frame_index = frame_index.wrapping_add(1);
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    // Clear chrome on exit.
+    clear_chrome();
 }
 
 // ── TurnRenderer ───────────────────────────────────────────────────────
 
-/// Manages an iocraft render loop on a dedicated thread during a turn.
-/// Created at the start of `run_turn()`, stopped at the end.
+/// Manages a render thread during a turn. Created at the start of
+/// `run_turn()`, stopped at the end.
 pub struct TurnRenderer {
     output: Option<TurnOutput>,
     spinner: SpinnerState,
-    stop_tx: Option<SyncSender<()>>,
+    stop: Arc<AtomicBool>,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TurnRenderer {
-    /// Start a new render loop for a turn.
+    /// Start a new render thread for a turn.
     #[must_use]
     pub fn new(
         label: &str,
@@ -287,47 +333,29 @@ impl TurnRenderer {
         permission_mode: &str,
     ) -> Self {
         let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(256);
-        let (stop_tx, stop_rx) = mpsc::sync_channel::<()>(1);
+        let stop = Arc::new(AtomicBool::new(false));
 
         let spinner = SpinnerState::new(label, model, token_budget);
         let spinner_clone = spinner.clone();
         let perm = permission_mode.to_string();
+        let stop_clone = Arc::clone(&stop);
 
         let join_handle = std::thread::Builder::new()
             .name("repl-render".into())
             .spawn(move || {
-                let ctx = RenderContext {
-                    output_rx: Arc::new(std::sync::Mutex::new(output_rx)),
-                    spinner: spinner_clone,
-                    permission_mode: perm,
-                };
-
-                // Drive the render loop with smol's executor which
-                // includes the async-io reactor for Timer support.
-                smol::block_on(async {
-                    let _ = element! {
-                        ContextProvider(value: Context::owned(ctx)) {
-                            TurnChrome
-                        }
-                    }
-                    .render_loop()
-                    .await;
-                });
-
-                // Consume the stop signal if it arrived (non-blocking).
-                let _ = stop_rx.try_recv();
+                render_loop(output_rx, spinner_clone, &perm, stop_clone);
             })
             .expect("spawn repl-render thread");
 
         Self {
             output: Some(TurnOutput { tx: output_tx }),
             spinner,
-            stop_tx: Some(stop_tx),
+            stop,
             join_handle: Some(join_handle),
         }
     }
 
-    /// Get a cloneable output handle for sending text to the render loop.
+    /// Get a cloneable output handle for sending text to the render thread.
     pub fn output(&self) -> Option<TurnOutput> {
         self.output.clone()
     }
@@ -339,23 +367,21 @@ impl TurnRenderer {
     }
 
     fn stop_render(&mut self) {
-        // Drop the output sender so the render loop sees Disconnected.
+        self.stop.store(true, Ordering::SeqCst);
+        // Drop the output sender so the render thread sees Disconnected.
         self.output.take();
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
         if let Some(h) = self.join_handle.take() {
             let _ = h.join();
         }
     }
 
-    /// Signal the render loop to stop and print a success message.
+    /// Signal the render thread to stop and print a success message.
     pub fn finish(&mut self, label: &str) {
         self.stop_render();
         println!("\x1b[32m✔ {label}\x1b[0m");
     }
 
-    /// Signal the render loop to stop and print a failure message.
+    /// Signal the render thread to stop and print a failure message.
     pub fn fail(&mut self, label: &str) {
         self.stop_render();
         println!("\x1b[31m✘ {label}\x1b[0m");

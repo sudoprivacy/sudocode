@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 api = { path = "../api" }
 arboard = { version = "3", features = ["image-data"] }
-smol = "2"
 async-trait = "0.1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
@@ -21,7 +20,6 @@ compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = "0.8"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

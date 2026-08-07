@@ -18,6 +18,7 @@ use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
 use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer};
+use crate::repl_ui::TurnOutput;
 use std::sync::Arc;
 
 use crate::{
@@ -44,6 +45,8 @@ pub(crate) struct AnthropicRuntimeClient {
     /// Shared spinner reference for pausing, thinking indicator, and
     /// response-byte counting.
     pub(crate) spinner: Option<SpinnerRef>,
+    /// Channel-backed output for routing text through iocraft (REPL mode).
+    pub(crate) turn_output: Option<TurnOutput>,
 }
 
 impl AnthropicRuntimeClient {
@@ -80,11 +83,16 @@ impl AnthropicRuntimeClient {
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
             spinner: None,
+            turn_output: None,
         })
     }
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
+    }
+
+    pub(crate) fn set_turn_output(&mut self, output: TurnOutput) {
+        self.turn_output = Some(output);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -188,6 +196,7 @@ struct CliStreamState {
     emit_output: bool,
     progress_reporter: Option<InternalPromptProgressReporter>,
     spinner: Option<SpinnerRef>,
+    turn_output: Option<TurnOutput>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
     markdown_stream: MarkdownStreamState,
@@ -206,8 +215,12 @@ struct CliStreamState {
 }
 
 impl CliStreamState {
-    /// Pause the spinner before raw I/O.
+    /// Pause the spinner before raw I/O. Skipped when TurnOutput is
+    /// active (iocraft handles cursor coordination).
     fn pause_output(&self) {
+        if self.turn_output.is_some() {
+            return;
+        }
         if let Some(s) = &self.spinner {
             s.pause();
         }
@@ -215,6 +228,9 @@ impl CliStreamState {
 
     /// Resume after raw I/O.
     fn resume_output(&self) {
+        if self.turn_output.is_some() {
+            return;
+        }
         if let Some(s) = &self.spinner {
             s.resume();
         }
@@ -234,8 +250,13 @@ impl CliStreamState {
     fn process_provider_event(&mut self, event: ApiStreamEvent) -> Result<(), RuntimeError> {
         let mut stdout = io::stdout();
         let mut sink = io::sink();
+        let mut turn_out_clone = self.turn_output.clone();
         let out: &mut dyn Write = if self.emit_output {
-            &mut stdout
+            if let Some(ref mut turn_out) = turn_out_clone {
+                turn_out
+            } else {
+                &mut stdout
+            }
         } else {
             &mut sink
         };
@@ -418,6 +439,7 @@ impl AnthropicRuntimeClient {
             emit_output: self.emit_output,
             progress_reporter: self.progress_reporter.clone(),
             spinner: self.spinner.clone(),
+            turn_output: self.turn_output.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
             markdown_stream: MarkdownStreamState::default(),

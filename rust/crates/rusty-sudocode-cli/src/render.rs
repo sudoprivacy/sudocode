@@ -147,6 +147,22 @@ pub struct SpinnerRef {
 }
 
 impl SpinnerRef {
+    /// Create a `SpinnerRef` from shared atomics (used by iocraft
+    /// `TurnRenderer` which manages its own spinner rendering).
+    /// The `ProgressBar` is a hidden dummy — only the atomics matter.
+    pub fn from_state(
+        response_bytes: &Arc<AtomicU32>,
+        is_thinking: &Arc<AtomicBool>,
+        is_paused: &Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            pb: ProgressBar::hidden(),
+            response_bytes: Arc::clone(response_bytes),
+            is_thinking: Arc::clone(is_thinking),
+            is_paused: Arc::clone(is_paused),
+        }
+    }
+
     /// Pause the spinner, run the closure, resume the spinner.
     pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
         self.pause();

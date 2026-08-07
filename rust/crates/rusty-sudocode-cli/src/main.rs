@@ -3623,21 +3623,49 @@ impl LiveCli {
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
-        // Coordinator-mode `<task-notification>` push is now
-        // handled inside `ConversationRuntime::run_turn_with_blocks`
-        // so ACP / MCP / print-mode paths inherit it — see the drain
-        // call in `runtime/src/conversation.rs`.  The CLI no longer
-        // duplicates it here.
         let token_budget = crate::render::parse_token_budget(input);
-        let mut spinner = SpinnerHandle::new(
-            "🦀 Thinking...",
-            Some(self.config.model.as_str()),
-            TerminalRenderer::new().color_theme(),
-            token_budget,
-        );
-        let spinner_ref = spinner.spinner_ref();
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
+        // Use iocraft TurnRenderer when explicitly enabled and in REPL mode.
+        // Default path uses the standalone indicatif spinner.
+        let use_iocraft =
+            io::stdout().is_terminal() && env::var("SUDOCODE_IOCRAFT").is_ok_and(|v| v == "1");
+        let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
+        let mut spinner: Option<SpinnerHandle> = None;
+
+        if use_iocraft {
+            let renderer = repl_ui::TurnRenderer::new(
+                "🦀 Thinking...",
+                Some(self.config.model.as_str()),
+                token_budget,
+                self.config.permission_mode.as_str(),
+            );
+            let spinner_state = renderer.spinner().clone();
+            // Wire the spinner state into the existing SpinnerRef API
+            // so streaming/tool layers can update bytes + thinking.
+            let spinner_ref = render::SpinnerRef::from_state(
+                &spinner_state.response_bytes,
+                &spinner_state.is_thinking,
+                &spinner_state.is_paused,
+            );
+            runtime.api_client_mut().set_spinner(spinner_ref.clone());
+            runtime.tool_executor_mut().set_spinner(spinner_ref);
+            if let Some(output) = renderer.output() {
+                runtime.api_client_mut().set_turn_output(output.clone());
+                runtime.tool_executor_mut().set_turn_output(output);
+            }
+            turn_renderer = Some(renderer);
+        } else {
+            let s = SpinnerHandle::new(
+                "🦀 Thinking...",
+                Some(self.config.model.as_str()),
+                TerminalRenderer::new().color_theme(),
+                token_budget,
+            );
+            let spinner_ref = s.spinner_ref();
+            runtime.api_client_mut().set_spinner(spinner_ref.clone());
+            runtime.tool_executor_mut().set_spinner(spinner_ref);
+            spinner = Some(s);
+        }
+
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
             input,
@@ -3649,9 +3677,17 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    spinner.fail("⏹ Cancelled");
+                    if let Some(mut r) = turn_renderer {
+                        r.fail("⏹ Cancelled");
+                    } else if let Some(ref mut s) = spinner {
+                        s.fail("⏹ Cancelled");
+                    }
                 } else {
-                    spinner.clear();
+                    if let Some(mut r) = turn_renderer {
+                        r.clear();
+                    } else if let Some(ref mut s) = spinner {
+                        s.clear();
+                    }
                     if let Some(event) = summary.auto_compaction {
                         self.out_println(format_auto_compaction_notice(
                             event.removed_message_count,
@@ -3685,7 +3721,11 @@ impl LiveCli {
             Err(error) => {
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
-                spinner.fail("❌ Request failed");
+                if let Some(mut r) = turn_renderer {
+                    r.fail("❌ Request failed");
+                } else if let Some(ref mut s) = spinner {
+                    s.fail("❌ Request failed");
+                }
                 Err(Box::new(error))
             }
         }

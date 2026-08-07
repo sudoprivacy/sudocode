@@ -212,7 +212,7 @@ fn TurnChrome(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 frame_index.set(idx.wrapping_add(1));
 
                 // 80ms tick — matches the original spinner update interval.
-                tokio::time::sleep(Duration::from_millis(80)).await;
+                smol::Timer::after(Duration::from_millis(80)).await;
             }
         });
     }
@@ -302,14 +302,9 @@ impl TurnRenderer {
                     permission_mode: perm,
                 };
 
-                // Build a minimal tokio runtime for the timer inside
-                // the component's use_future.
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .expect("tokio current-thread runtime for render loop");
-
-                rt.block_on(async {
+                // Drive the render loop with smol's executor which
+                // includes the async-io reactor for Timer support.
+                smol::block_on(async {
                     let _ = element! {
                         ContextProvider(value: Context::owned(ctx)) {
                             TurnChrome

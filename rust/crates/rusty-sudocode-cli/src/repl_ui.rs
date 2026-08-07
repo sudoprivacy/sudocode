@@ -248,13 +248,14 @@ fn render_loop(
 ) {
     let mut stdout = io::stdout();
     let mut frame_index: usize = 0;
+    let mut chrome_visible = false;
 
     // Draw initial chrome.
     let initial_spinner = spinner.render_frame(frame_index);
     draw_chrome_initial(&initial_spinner, permission_mode);
-    // Position cursor at the start of the spinner line.
     let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
     let _ = stdout.flush();
+    chrome_visible = true;
     frame_index += 1;
 
     loop {
@@ -267,9 +268,9 @@ fn render_loop(
         loop {
             match output_rx.try_recv() {
                 Ok(msg) => {
-                    if !had_output {
-                        // Clear chrome before printing output above it.
+                    if !had_output && chrome_visible {
                         clear_chrome();
+                        chrome_visible = false;
                         had_output = true;
                     }
                     match msg {
@@ -280,26 +281,37 @@ fn render_loop(
                             let _ = writeln!(stdout, "{text}");
                         }
                     }
+                    had_output = true;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if had_output {
                         let _ = stdout.flush();
                     }
-                    return; // Channel closed — turn is ending.
+                    if chrome_visible {
+                        clear_chrome();
+                    }
+                    return;
                 }
             }
         }
 
+        // Check stop again after draining — avoids one extra 80ms sleep.
+        if stop.load(Ordering::SeqCst) {
+            if had_output {
+                let _ = stdout.flush();
+            }
+            break;
+        }
+
         if had_output {
             let _ = stdout.flush();
-            // Redraw chrome below the new output.
             let spinner_text = spinner.render_frame(frame_index);
             draw_chrome_initial(&spinner_text, permission_mode);
             let _ = write!(stdout, "\x1b[{}F", CHROME_LINES - 1);
             let _ = stdout.flush();
+            chrome_visible = true;
         } else {
-            // No output — just update the spinner in place.
             let spinner_text = spinner.render_frame(frame_index);
             redraw_chrome(&spinner_text, permission_mode);
         }
@@ -308,8 +320,9 @@ fn render_loop(
         std::thread::sleep(Duration::from_millis(80));
     }
 
-    // Clear chrome on exit.
-    clear_chrome();
+    if chrome_visible {
+        clear_chrome();
+    }
 }
 
 // ── TurnRenderer ───────────────────────────────────────────────────────
@@ -371,7 +384,21 @@ impl TurnRenderer {
         // Drop the output sender so the render thread sees Disconnected.
         self.output.take();
         if let Some(h) = self.join_handle.take() {
-            let _ = h.join();
+            // The render thread checks `stop` each 80ms tick and should
+            // exit promptly. Use a timeout to avoid blocking forever if
+            // the thread is stuck on a stdout write (PTY buffer full).
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while !h.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    // Render thread stuck — abandon it (it will be cleaned
+                    // up when the process exits).
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
     }
 

@@ -3624,14 +3624,18 @@ impl LiveCli {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
-        // Use iocraft TurnRenderer when explicitly enabled and in REPL mode.
-        // Default path uses the standalone indicatif spinner.
-        let use_iocraft =
+        // Use TurnRenderer for unified chrome during REPL turns when
+        // SUDOCODE_IOCRAFT=1. Falls back to standalone indicatif spinner
+        // otherwise. Live-mode PTY tests revealed that the render thread's
+        // stdout writes can block when the PTY buffer fills (long-running
+        // LLM responses), preventing clean process exit. The env gate
+        // remains until non-blocking stdout is implemented.
+        let use_turn_renderer =
             io::stdout().is_terminal() && env::var("SUDOCODE_IOCRAFT").is_ok_and(|v| v == "1");
         let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
         let mut spinner: Option<SpinnerHandle> = None;
 
-        if use_iocraft {
+        if use_turn_renderer {
             let renderer = repl_ui::TurnRenderer::new(
                 "🦀 Thinking...",
                 Some(self.config.model.as_str()),

@@ -1,8 +1,7 @@
-//! PTY tests for the iocraft-based TurnRenderer chrome.
+//! PTY tests for the TurnRenderer chrome.
 //!
 //! These tests verify that the turn-scoped chrome (spinner + separators +
-//! footer) renders correctly and cleans up when the turn ends. They run
-//! with `SUDOCODE_IOCRAFT=1` to activate the iocraft render path.
+//! footer) renders correctly and cleans up when the turn ends.
 //!
 //! ```bash
 //! cargo test --test pty_iocraft_chrome                          # mock (CI)

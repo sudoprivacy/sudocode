@@ -16,9 +16,11 @@ mod cancel;
 mod cli;
 mod init;
 mod input;
+mod input_chrome;
 mod input_queue;
 mod render;
 mod repl_async;
+mod repl_ui;
 mod vlm_describe;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -108,7 +110,7 @@ use init::initialize_repo;
 use plugins::{
     render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
 };
-use render::{CliOutput, MarkdownStreamState, SpinnerHandle, TerminalRenderer};
+use render::{MarkdownStreamState, SpinnerHandle, TerminalRenderer};
 use runtime::{
     check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -1594,9 +1596,7 @@ fn run_repl(
 fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
-    let output = CliOutput::new(cli.config.permission_mode.as_str());
-    cli.output = Some(output.clone());
-    output.println(cli.startup_banner());
+    println!("{}", cli.startup_banner());
 
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
@@ -1609,7 +1609,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         let renderer = render::TerminalRenderer::new();
         let rendered = render_messages(messages, term_width, &renderer);
         if !rendered.is_empty() {
-            output.println(rendered);
+            println!("{rendered}");
         }
         // Seed rustyline history so ↑ recalls previous prompts.
         for msg in messages {
@@ -1635,21 +1635,16 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        let read_result = output.suspend(|| editor.read_line());
-        match read_result? {
+        input_chrome::print_before_prompt(cli.config.permission_mode.as_str());
+        match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
-                // Echo the submitted input above the sticky bars.
-                let trimmed_text = input.trim();
-                if !trimmed_text.is_empty() {
-                    let w = crossterm::terminal::size()
-                        .map(|(cols, _)| cols as usize)
-                        .unwrap_or(80);
-                    let (echo, _) = cli::format::format_input_echo(trimmed_text, w);
-                    output.println(echo);
-                }
+                // Clear the pre-printed bottom sep + footer. After
+                // readline, cursor is at the start of the bottom sep
+                // line. \x1b[J clears from cursor to end of screen.
+                print!("\x1b[J");
+                let _ = io::stdout().flush();
                 let trimmed = input.trim().to_string();
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
-                    output.finish();
                     cli.persist_session()?;
                     break;
                 }
@@ -1695,7 +1690,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             input::ReadOutcome::Exit => {
-                output.finish();
                 cli.persist_session()?;
                 break;
             }
@@ -1756,9 +1750,7 @@ fn run_repl_async_dispatch(
         Arc::new(move || sig.abort())
     };
 
-    // Create CliOutput for the async REPL and store on cli.
-    let output = CliOutput::new(cli.config.permission_mode.as_str());
-    cli.output = Some(output.clone());
+    let permission_label = cli.config.permission_mode.as_str().to_string();
 
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
@@ -1770,10 +1762,10 @@ fn run_repl_async_dispatch(
     repl_async::run_coordinator_loop(
         driver,
         shared_mode,
-        output,
         banner,
         completions,
         Some(esc_abort_hook),
+        &permission_label,
     )?;
 
     // All threads spawned by the coordinator loop have already been joined
@@ -1896,9 +1888,6 @@ struct LiveCli {
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
-    /// MultiProgress-based output manager. `Some` in REPL mode; `None` for
-    /// one-shot subcommands. All REPL stdout goes through this.
-    output: Option<CliOutput>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3328,24 +3317,12 @@ impl LiveCli {
         self.persistent_abort_signal.is_some()
     }
 
-    /// Print a line through `CliOutput` (MultiProgress-safe) when available,
-    /// falling back to raw `println!` for one-shot / non-REPL paths.
     fn out_println(&self, msg: impl AsRef<str>) {
-        if let Some(ref output) = self.output {
-            output.println(msg);
-        } else {
-            println!("{}", msg.as_ref());
-        }
+        println!("{}", msg.as_ref());
     }
 
-    /// Suspend MultiProgress bars, run `f`, then redraw. Falls back to
-    /// just calling `f` directly when no CliOutput is set.
     fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
-        if let Some(ref output) = self.output {
-            output.suspend(f)
-        } else {
-            f()
-        }
+        f()
     }
 
     fn new(
@@ -3432,7 +3409,6 @@ impl LiveCli {
             esc_monitor_enabled: true,
             persistent_abort_signal: None,
             shared_queue_mode: None,
-            output: None,
         };
         cli.persist_session()?;
 
@@ -3647,26 +3623,43 @@ impl LiveCli {
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
-        // Coordinator-mode `<task-notification>` push is now
-        // handled inside `ConversationRuntime::run_turn_with_blocks`
-        // so ACP / MCP / print-mode paths inherit it — see the drain
-        // call in `runtime/src/conversation.rs`.  The CLI no longer
-        // duplicates it here.
         let token_budget = crate::render::parse_token_budget(input);
-        let mut spinner = SpinnerHandle::new(
-            "🦀 Thinking...",
-            Some(self.config.model.as_str()),
-            TerminalRenderer::new().color_theme(),
-            token_budget,
-            self.output.as_ref(),
-        );
-        let spinner_ref = spinner.spinner_ref();
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        if let Some(ref output) = self.output {
-            runtime.api_client_mut().set_cli_output(output.clone());
-            runtime.tool_executor_mut().set_cli_output(output.clone());
+        // Use TurnRenderer for unified output routing during REPL turns.
+        // Non-interactive (piped) mode uses the standalone indicatif spinner.
+        let use_turn_renderer = io::stdout().is_terminal();
+        let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
+        let mut spinner: Option<SpinnerHandle> = None;
+
+        if use_turn_renderer {
+            let renderer = repl_ui::TurnRenderer::new(
+                "🦀 Thinking...",
+                Some(self.config.model.as_str()),
+                token_budget,
+            );
+            let spinner_state = renderer.spinner().clone();
+            // Wire the spinner state into the existing SpinnerRef API
+            // so streaming/tool layers can update bytes + thinking.
+            let spinner_ref = render::SpinnerRef::from_state(
+                &spinner_state.response_bytes,
+                &spinner_state.is_thinking,
+                &spinner_state.is_paused,
+            );
+            runtime.api_client_mut().set_spinner(spinner_ref.clone());
+            runtime.tool_executor_mut().set_spinner(spinner_ref);
+            turn_renderer = Some(renderer);
+        } else {
+            let s = SpinnerHandle::new(
+                "🦀 Thinking...",
+                Some(self.config.model.as_str()),
+                TerminalRenderer::new().color_theme(),
+                token_budget,
+            );
+            let spinner_ref = s.spinner_ref();
+            runtime.api_client_mut().set_spinner(spinner_ref.clone());
+            runtime.tool_executor_mut().set_spinner(spinner_ref);
+            spinner = Some(s);
         }
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
+
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
             input,
@@ -3678,9 +3671,17 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    spinner.fail("⏹ Cancelled");
+                    if let Some(mut r) = turn_renderer {
+                        r.fail("⏹ Cancelled");
+                    } else if let Some(ref mut s) = spinner {
+                        s.fail("⏹ Cancelled");
+                    }
                 } else {
-                    spinner.clear();
+                    if let Some(mut r) = turn_renderer {
+                        r.clear();
+                    } else if let Some(ref mut s) = spinner {
+                        s.clear();
+                    }
                     if let Some(event) = summary.auto_compaction {
                         self.out_println(format_auto_compaction_notice(
                             event.removed_message_count,
@@ -3714,7 +3715,11 @@ impl LiveCli {
             Err(error) => {
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
-                spinner.fail("❌ Request failed");
+                if let Some(mut r) = turn_renderer {
+                    r.fail("❌ Request failed");
+                } else if let Some(ref mut s) = spinner {
+                    s.fail("❌ Request failed");
+                }
                 Err(Box::new(error))
             }
         }
@@ -4231,10 +4236,6 @@ impl LiveCli {
         self.config.permission_mode = permission_mode_from_label(normalized);
         let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
         self.replace_runtime(runtime)?;
-        // Update the footer bar to reflect the new permission mode.
-        if let Some(ref output) = self.output {
-            output.set_footer(normalized);
-        }
         self.out_println(format_permissions_switch_report(&previous, normalized));
         Ok(true)
     }

@@ -20,6 +20,7 @@ compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
+iocraft = "0.8"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

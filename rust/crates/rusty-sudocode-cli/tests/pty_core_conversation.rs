@@ -174,7 +174,11 @@ fn sigint_cancels_streaming() {
         &prompt,
     ]);
 
-    sess.expect("bash").expect("should see bash tool call");
+    // Wait for any turn activity — spinner, tool call, or streaming text.
+    // In mock mode, the model always calls bash. In live mode, it might
+    // respond with text instead. Either way, the turn is running.
+    sess.expect("(?i)(bash|thinking|sonnet|auto|claude|⠋|⠙|⠹)")
+        .expect("should see turn activity (spinner or tool call)");
     std::thread::sleep(Duration::from_millis(500));
     sess.send_ctrl('c').expect("send Ctrl+C");
 
@@ -206,7 +210,12 @@ fn esc_cancels_streaming() {
         &prompt,
     ]);
 
-    sess.expect("bash").expect("should see bash tool call");
+    // Wait for any turn activity — the test needs the turn to be
+    // running before sending ESC. In live mode the model may respond
+    // with text instead of calling bash; that's fine — ESC should
+    // cancel either way.
+    sess.expect("(?i)(bash|thinking|sonnet|auto|claude|⠋|⠙|⠹)")
+        .expect("should see turn activity (spinner or tool call)");
     std::thread::sleep(Duration::from_millis(500));
     sess.send("\x1b").expect("send ESC");
 

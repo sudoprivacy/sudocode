@@ -60,12 +60,9 @@ fn esc_cancels_turn_in_repl() {
     // The abort signal can only cancel once tokio::select! is polling
     // the stream — during TLS/connection setup the future hasn't yielded
     // yet, so the cancel has no effect until streaming begins.
-    let pre_esc_delay = if env.is_live() {
-        Duration::from_secs(8)
-    } else {
-        Duration::from_millis(500)
-    };
-    std::thread::sleep(pre_esc_delay);
+    // Short delay — just enough for the streaming to start. The prompt
+    // asks for `sleep 30` so the turn should still be running.
+    std::thread::sleep(Duration::from_millis(500));
 
     // Press ESC to cancel the turn.
     sess.send("\x1b").expect("send ESC");

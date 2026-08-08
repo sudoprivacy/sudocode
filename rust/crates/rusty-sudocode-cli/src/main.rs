@@ -273,6 +273,9 @@ fn main() {
     enable_windows_ansi_support();
 
     if let Err(error) = run() {
+        // (error handling below — success path exits via process::exit(0)
+        // at the end of this function to ensure abandoned threads don't
+        // keep the process alive)
         let message = error.to_string();
         // When --output-format json is active, emit errors as JSON so downstream
         // tools can parse failures the same way they parse successes (ROADMAP #42).
@@ -317,6 +320,9 @@ Run `scode --help` for usage."
         }
         std::process::exit(1);
     }
+    // Explicit exit ensures abandoned threads (HookAbortMonitor, iocraft
+    // render loop) don't keep the process alive after main work is done.
+    std::process::exit(0);
 }
 
 /// #77: Classify a stringified error message into a machine-readable kind.
@@ -550,6 +556,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     duration_ms,
                 );
             }
+            // Force exit after single-turn to avoid blocking on abandoned
+            // HookAbortMonitor threads during LiveCli drop.
+            std::process::exit(0);
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Acp {
@@ -3425,6 +3434,16 @@ impl HookAbortMonitor {
             let _ = stop_tx.send(());
         }
         if let Some(join_handle) = self.join_handle.take() {
+            // Timed join: the monitor thread should exit within 100ms
+            // after receiving the stop signal. If it hangs (e.g. tokio
+            // signal handler keeping the runtime alive), abandon it.
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while !join_handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
             let _ = join_handle.join();
         }
     }

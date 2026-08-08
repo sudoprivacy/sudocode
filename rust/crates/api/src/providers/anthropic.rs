@@ -891,10 +891,18 @@ impl MessageStream {
 
     fn observe_event(&mut self, event: &StreamEvent) {
         match event {
-            StreamEvent::MessageDelta(MessageDeltaEvent { usage, .. }) => {
+            StreamEvent::MessageDelta(MessageDeltaEvent { usage, delta, .. }) => {
                 self.latest_usage = Some(usage.clone());
+                // When stop_reason is present (e.g. "end_turn"), no more
+                // content will follow. Mark done so next_event doesn't
+                // block on chunk().await when the proxy keeps the
+                // connection alive after the logical stream has ended.
+                if delta.stop_reason.is_some() {
+                    self.done = true;
+                }
             }
             StreamEvent::MessageStop(_) => {
+                self.done = true;
                 if !self.usage_recorded {
                     if let Some(usage) = self.latest_usage.as_ref() {
                         if let Some(prompt_cache) = &self.prompt_cache {

@@ -307,6 +307,10 @@ impl CliStreamState {
         };
         match event {
             ApiStreamEvent::MessageStart(start) => {
+                if !start.message.model.is_empty() {
+                    self.buffer
+                        .push_back(AssistantEvent::Model(start.message.model.clone()));
+                }
                 for block in start.message.content {
                     push_output_block(
                         block,

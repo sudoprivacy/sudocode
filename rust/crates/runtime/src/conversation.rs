@@ -64,6 +64,8 @@ pub struct ApiRequest {
 /// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
+    /// Wire model ID from the API response (emitted on message_start).
+    Model(String),
     Thinking {
         thinking: String,
         signature: Option<String>,
@@ -278,6 +280,11 @@ pub struct TurnSummary {
     /// results, interruption marker) has already been committed to the
     /// session so the model has full context on the next turn.
     pub cancelled: bool,
+    /// Wire model ID from the API response (the last iteration's
+    /// `message_start` event). Use this — not `config.model` — for
+    /// context window / capability lookups, because `config.model` may
+    /// be an alias like "auto" that doesn't map to any capabilities entry.
+    pub response_model: Option<String>,
 }
 
 /// Details about automatic session compaction applied during a turn.
@@ -651,7 +658,8 @@ where
                         thought_signature,
                     });
                 }
-                AssistantEvent::Usage(_)
+                AssistantEvent::Model(_)
+                | AssistantEvent::Usage(_)
                 | AssistantEvent::PromptCache(_)
                 | AssistantEvent::MessageStop => {}
             }
@@ -766,6 +774,7 @@ where
             session_usage,
             auto_compaction: None,
             cancelled: true,
+            response_model: None,
         }
     }
 
@@ -853,6 +862,7 @@ where
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
         let mut retried_empty_post_tool_deliverable = false;
+        let mut response_model: Option<String> = None;
 
         loop {
             if self.hook_abort_signal.is_aborted() {
@@ -868,6 +878,7 @@ where
                     session_usage,
                     auto_compaction: None,
                     cancelled: true,
+                    response_model: None,
                 });
             }
 
@@ -904,6 +915,7 @@ where
                             session_usage,
                             auto_compaction: None,
                             cancelled: true,
+                            response_model: None,
                         });
                     }
                     result = self.api_client.stream(request) => match result {
@@ -940,6 +952,7 @@ where
                                 session_usage,
                                 auto_compaction: None,
                                 cancelled: true,
+                                response_model: None,
                             });
                         }
                         next = stream.next() => {
@@ -976,7 +989,7 @@ where
                 collected
             };
 
-            let (mut assistant_message, usage, turn_prompt_cache_events) =
+            let (mut assistant_message, usage, turn_prompt_cache_events, iter_response_model) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
                     Err(error)
@@ -1018,6 +1031,7 @@ where
                             session_usage,
                             auto_compaction,
                             cancelled: false,
+                            response_model: None,
                         };
                         self.record_turn_completed(&summary);
                         return Ok(summary);
@@ -1027,6 +1041,7 @@ where
                         return Err(error);
                     }
                 };
+            response_model = iter_response_model;
             assistant_message.model.clone_from(&self.session.model);
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
@@ -1248,6 +1263,7 @@ where
             session_usage,
             auto_compaction,
             cancelled: false,
+            response_model,
         };
         self.record_turn_completed(&summary);
 
@@ -1647,6 +1663,7 @@ fn build_assistant_message(
         ConversationMessage,
         Option<TokenUsage>,
         Vec<PromptCacheEvent>,
+        Option<String>,
     ),
     RuntimeError,
 > {
@@ -1655,9 +1672,13 @@ fn build_assistant_message(
     let mut prompt_cache_events = Vec::new();
     let mut finished = false;
     let mut usage = None;
+    let mut response_model = None;
 
     for event in events {
         match event {
+            AssistantEvent::Model(model) => {
+                response_model = Some(model);
+            }
             AssistantEvent::Thinking {
                 thinking,
                 signature,
@@ -1705,6 +1726,7 @@ fn build_assistant_message(
         ConversationMessage::assistant_with_usage(blocks, usage),
         usage,
         prompt_cache_events,
+        response_model,
     ))
 }
 

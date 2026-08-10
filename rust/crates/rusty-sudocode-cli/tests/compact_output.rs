@@ -227,7 +227,15 @@ fn piped_stdin_with_compact_flag_produces_clean_output() {
         .env("HOME", &home)
         .env("NO_COLOR", "1")
         .env("PATH", "/usr/bin:/bin")
-        .args(["--auth", "api-key", "--model", "sonnet", "--permission-mode", "read-only", "--compact"])
+        .args([
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "read-only",
+            "--compact",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

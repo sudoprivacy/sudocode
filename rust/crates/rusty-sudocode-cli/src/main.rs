@@ -94,7 +94,9 @@ use cli::status::{
     print_status_snapshot, print_version, sandbox_json_value, status_context, status_json_value,
     version_json_value, StatusContext, StatusUsage,
 };
-use cli::tool_executor::{permission_policy, CliToolExecutor};
+use cli::tool_executor::{
+    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
+};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
@@ -1603,6 +1605,7 @@ fn run_repl(
 /// The synchronous REPL loop. Handles both new sessions and resumed
 /// sessions identically: banner → existing messages (if any) → prompt.
 fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
@@ -1736,6 +1739,7 @@ fn run_repl_async_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
@@ -2007,6 +2011,7 @@ fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let banner = cli.startup_banner();
     let permission_label = cli.config.permission_mode.as_str().to_string();
 
@@ -2300,6 +2305,9 @@ struct LiveCli {
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
+    /// True when running in REPL mode (interactive). Plan mode confirmation
+    /// dialog only shows in REPL mode.
+    is_repl: bool,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3831,6 +3839,7 @@ impl LiveCli {
             esc_monitor_enabled: true,
             persistent_abort_signal: None,
             shared_queue_mode: None,
+            is_repl: false,
         };
         cli.persist_session()?;
 
@@ -4068,6 +4077,7 @@ impl LiveCli {
             );
             runtime.api_client_mut().set_spinner(spinner_ref.clone());
             runtime.tool_executor_mut().set_spinner(spinner_ref);
+            runtime.tool_executor_mut().set_repl_mode(self.is_repl);
             turn_renderer = Some(renderer);
         } else {
             let s = SpinnerHandle::new(
@@ -4079,6 +4089,7 @@ impl LiveCli {
             let spinner_ref = s.spinner_ref();
             runtime.api_client_mut().set_spinner(spinner_ref.clone());
             runtime.tool_executor_mut().set_spinner(spinner_ref);
+            runtime.tool_executor_mut().set_repl_mode(self.is_repl);
             spinner = Some(s);
         }
 
@@ -4132,9 +4143,33 @@ impl LiveCli {
                     ));
                 }
                 self.persist_session()?;
+
+                // Check whether the ExitPlanMode dialog requested a
+                // "clear context & execute" flow. If so, start a fresh
+                // session with the plan as the new prompt and auto-run.
+                if let Some(plan) = take_pending_plan_execution() {
+                    let prompt = format!("Implement the following plan:\n\n{plan}");
+                    self.out_println("\x1b[2mClearing session and executing plan...\x1b[0m");
+
+                    let session_state = new_cli_session()?;
+                    let next_handle = create_managed_session_handle(&session_state.session_id)?;
+                    let fresh_runtime = self.build_replacement_runtime(
+                        session_state.with_persistence_path(next_handle.path.clone()),
+                        next_handle.id.clone(),
+                        self.config.clone(),
+                    )?;
+                    self.session = next_handle;
+                    self.replace_runtime(fresh_runtime)?;
+
+                    return self.run_turn(&prompt);
+                }
+
                 Ok(())
             }
             Err(error) => {
+                // Clean up the thread-local in case the turn failed after
+                // the ExitPlanMode dialog set it.
+                clear_pending_plan_execution();
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
                 if let Some(mut r) = turn_renderer {
@@ -4180,6 +4215,9 @@ impl LiveCli {
                 ui.clone(),
                 pending_question_answer,
             )));
+        if self.is_repl {
+            runtime.tool_executor_mut().set_repl_mode(true);
+        }
 
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(

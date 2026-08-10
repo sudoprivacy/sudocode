@@ -96,7 +96,8 @@ When summarizing the conversation focus on typescript code changes and also reme
 When you are using compact - please focus on test output and code changes. Include file reads verbatim.\n\
 </example>";
 
-const NO_TOOLS_TRAILER: &str = "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — \
+const NO_TOOLS_TRAILER: &str =
+    "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — \
 an <analysis> block followed by a <summary> block. \
 Tool calls will be rejected and you will fail the task.";
 
@@ -431,7 +432,12 @@ pub async fn compact_session<C: ApiClient>(
 
     // Call the LLM
     let llm_summary = api_client
-        .send_compaction(model, COMPACTION_SYSTEM_PROMPT, compaction_messages, max_tokens)
+        .send_compaction(
+            model,
+            COMPACTION_SYSTEM_PROMPT,
+            compaction_messages,
+            max_tokens,
+        )
         .await
         .map_err(|e| CompactionError::ApiError(e.to_string()))?;
 
@@ -1167,8 +1173,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_compact_session_uses_llm_summary() {
-        use async_trait::async_trait;
         use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
 
         struct MockCompactionClient;
 
@@ -1218,20 +1224,19 @@ mod tests {
         };
 
         let mut client = MockCompactionClient;
-        let result = super::compact_session(
-            &session,
-            config,
-            &mut client,
-            "claude-sonnet-4-6",
-            None,
-        )
-        .await
-        .expect("LLM compaction should succeed");
+        let result =
+            super::compact_session(&session, config, &mut client, "claude-sonnet-4-6", None)
+                .await
+                .expect("LLM compaction should succeed");
 
         assert!(result.removed_message_count > 0);
-        assert!(result.formatted_summary.contains("User asked to test compaction"));
-        assert!(!result.formatted_summary.contains("Mock analysis"),
-            "analysis block should be stripped");
+        assert!(result
+            .formatted_summary
+            .contains("User asked to test compaction"));
+        assert!(
+            !result.formatted_summary.contains("Mock analysis"),
+            "analysis block should be stripped"
+        );
         assert_eq!(
             result.compacted_session.messages[0].role,
             MessageRole::System,
@@ -1240,8 +1245,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_compact_session_falls_through_on_not_supported() {
-        use async_trait::async_trait;
         use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
 
         // Use the default ApiClient impl which returns "not supported"
         struct NoCompactionClient;
@@ -1274,14 +1279,8 @@ mod tests {
         };
 
         let mut client = NoCompactionClient;
-        let result = super::compact_session(
-            &session,
-            config,
-            &mut client,
-            "claude-sonnet-4-6",
-            None,
-        )
-        .await;
+        let result =
+            super::compact_session(&session, config, &mut client, "claude-sonnet-4-6", None).await;
 
         // Should fail with ApiError since default impl returns "not supported"
         assert!(result.is_err());

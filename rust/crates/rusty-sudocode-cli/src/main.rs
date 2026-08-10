@@ -4197,7 +4197,7 @@ impl LiveCli {
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    output.println(&format_turn_status_line_with_branch(
+                    ui.set_status_line(&format_turn_status_line_with_branch(
                         &self.config.model,
                         turns,
                         &usage,

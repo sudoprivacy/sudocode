@@ -176,6 +176,7 @@ pub struct QuestionPromptView {
 pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
+    SetStatusLine(String),
 }
 
 #[derive(Clone)]
@@ -190,6 +191,10 @@ impl UiCommandSender {
 
     pub fn clear_question(&self) {
         let _ = self.tx.send(UiCommand::ClearQuestion);
+    }
+
+    pub fn set_status_line(&self, text: &str) {
+        let _ = self.tx.send(UiCommand::SetStatusLine(text.to_string()));
     }
 }
 
@@ -330,6 +335,27 @@ impl ReplHandle {
     }
 }
 
+/// Strip ANSI escape sequences (ESC[...m) to count visible characters.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Consume '[' then everything up to and including the terminating letter.
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     output_rx: Arc<Mutex<Receiver<String>>>,
@@ -349,11 +375,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     drop(ctx);
 
+    // use_terminal_size must be called before use_future and use_terminal_events
+    // to maintain consistent hook ordering.
+    let (term_width, _) = hooks.use_terminal_size();
+
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
+    let mut status_line = hooks.use_state(String::new);
     let mut question_state = hooks.use_state(|| None::<QuestionPromptView>);
     let mut question_selection = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
@@ -393,6 +424,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             question_state.set(None);
                             question_selection.set(0);
                             input_value.set(String::new());
+                        }
+                        Ok(UiCommand::SetStatusLine(text)) => {
+                            status_line.set(text);
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
@@ -546,8 +580,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     let perm = permission_mode.clone();
 
-    let term_width = crossterm::terminal::size().map_or(80, |(w, _)| w as usize);
-    let sep = "\u{2500}".repeat(term_width);
+    let w = term_width as usize;
+    let status = status_line.read().clone();
+    let top_bar = if status.is_empty() {
+        "\u{2500}".repeat(w)
+    } else {
+        let visible_len = strip_ansi(&status).chars().count();
+        let fill = w.saturating_sub(visible_len + 1);
+        format!("{status} {}", "\u{2500}".repeat(fill))
+    };
+    let bottom_sep = "\u{2500}".repeat(w);
 
     element! {
         View(flex_direction: FlexDirection::Column) {
@@ -559,7 +601,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(question_panel.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            Text(content: sep.clone(), color: Color::DarkGrey)
+            Text(content: top_bar, color: Color::DarkGrey)
             View(flex_direction: FlexDirection::Row) {
                 Text(content: prompt_label)
                 TextInput(
@@ -570,7 +612,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     },
                 )
             }
-            Text(content: sep, color: Color::DarkGrey)
+            Text(content: bottom_sep, color: Color::DarkGrey)
             Text(
                 content: format!("  \u{23f5}\u{23f5} {perm} \u{00b7} /help \u{00b7} /exit to quit"),
                 color: Color::DarkGrey,

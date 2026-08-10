@@ -192,6 +192,77 @@ stderr:
     fs::remove_dir_all(&workspace).expect("workspace cleanup should succeed");
 }
 
+/// Piped stdin with --compact should produce clean output (no permission
+/// prompts, no tool call details). Regression test for the `compact: false`
+/// hardcoding that previously disabled compact mode for piped input.
+#[test]
+fn piped_stdin_with_compact_flag_produces_clean_output() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should build");
+    let server = runtime
+        .block_on(MockAnthropicService::spawn())
+        .expect("mock service should start");
+    let base_url = server.base_url();
+
+    let workspace = unique_temp_dir("compact-piped-stdin");
+    let config_home = workspace.join("config-home");
+    let home = workspace.join("home");
+    fs::create_dir_all(&workspace).expect("workspace should exist");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+
+    let sample = runtime::SAMPLE_SUDOCODE_JSON
+        .replace("https://api.anthropic.com", &base_url)
+        .replace("<YOUR_ANTHROPIC_API_KEY>", "test-compact-piped-key");
+    fs::write(config_home.join("sudocode.json"), sample).expect("sudocode.json should be written");
+
+    let prompt = format!("{SCENARIO_PREFIX}streaming_text");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scode"))
+        .current_dir(&workspace)
+        .env_clear()
+        .env("SUDO_CODE_CONFIG_HOME", &config_home)
+        .env("HOME", &home)
+        .env("NO_COLOR", "1")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--auth", "api-key", "--model", "sonnet", "--permission-mode", "read-only", "--compact"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("scode should spawn");
+
+    // Write prompt to stdin then close it
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(prompt.as_bytes())
+        .expect("stdin write should succeed");
+
+    let output = child.wait_with_output().expect("scode should finish");
+
+    assert!(
+        output.status.success(),
+        "piped compact run should succeed\nstdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert_eq!(
+        stdout, "Mock streaming says hello from the parity harness.\n",
+        "piped compact stdout should contain only the final assistant text"
+    );
+    assert!(
+        !stdout.contains("Approve"),
+        "piped compact stdout must not contain permission prompts ({stdout:?})"
+    );
+
+    fs::remove_dir_all(&workspace).expect("workspace cleanup should succeed");
+}
+
 fn run_scode(
     cwd: &std::path::Path,
     config_home: &std::path::Path,

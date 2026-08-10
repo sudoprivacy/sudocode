@@ -605,6 +605,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 TextInput(
                     value: val,
                     has_focus: true,
+                    multiline: true,
                     on_change: move |new_val: String| {
                         input_value.set(new_val);
                     },

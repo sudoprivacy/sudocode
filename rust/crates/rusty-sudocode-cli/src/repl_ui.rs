@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 // ── SpinnerState ───────────────────────────────────────────────────────
@@ -389,6 +390,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut question_selection = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
+    let mut history = hooks.use_state(Vec::<String>::new);
+    let mut history_cursor = hooks.use_state(|| None::<usize>);
+    let mut saved_input = hooks.use_state(String::new);
+    let mut tab_candidates = hooks.use_state(Vec::<String>::new);
+    let mut tab_index = hooks.use_state(|| 0usize);
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -464,13 +470,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         {
                             match event {
                                 InputEvent::Exit => {
-                                    let _ = input_tx_for_events.send(InputEvent::Exit);
                                     should_exit.set(true);
+                                    let _ = input_tx_for_events.send(InputEvent::Exit);
                                 }
-                                InputEvent::Submit(_) => {
+                                InputEvent::Submit(text) => {
+                                    let trimmed = text.trim();
+                                    if !trimmed.is_empty() {
+                                        let mut h = history.write();
+                                        if h.last().map_or(true, |last| last != trimmed) {
+                                            h.push(trimmed.to_string());
+                                        }
+                                    }
                                     stdout_for_events
                                         .println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
-                                    let _ = input_tx_for_events.send(InputEvent::Submit(val));
+                                    let _ = input_tx_for_events.send(InputEvent::Submit(text));
                                 }
                                 InputEvent::QuestionAnswer(_) => {
                                     let _ =
@@ -479,6 +492,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 InputEvent::Abort => {}
                             }
                             input_value.set(String::new());
+                            if history_cursor.get().is_some() {
+                                history_cursor.set(None);
+                                saved_input.set(String::new());
+                            }
                         }
                     }
                     KeyCode::Up
@@ -502,6 +519,35 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             .map_or(0, |question| question.options.len());
                         let current = *question_selection.read();
                         question_selection.set((current + 1).min(option_count.saturating_sub(1)));
+                    }
+                    KeyCode::Up if question_state.read().is_none() => {
+                        let h = history.read();
+                        if !h.is_empty() {
+                            let cursor = history_cursor.get();
+                            let new_cursor = match cursor {
+                                None => {
+                                    saved_input.set(input_value.read().clone());
+                                    h.len() - 1
+                                }
+                                Some(0) => 0,
+                                Some(c) => c - 1,
+                            };
+                            input_value.set(h[new_cursor].clone());
+                            history_cursor.set(Some(new_cursor));
+                        }
+                    }
+                    KeyCode::Down if question_state.read().is_none() => {
+                        if let Some(cursor) = history_cursor.get() {
+                            let h = history.read();
+                            if cursor + 1 < h.len() {
+                                let new_cursor = cursor + 1;
+                                input_value.set(h[new_cursor].clone());
+                                history_cursor.set(Some(new_cursor));
+                            } else {
+                                input_value.set(saved_input.read().clone());
+                                history_cursor.set(None);
+                            }
+                        }
                     }
                     KeyCode::Char(ch)
                         if question_state.read().as_ref().is_some_and(|q| {
@@ -528,6 +574,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                         input_value.set(String::new());
+                        history_cursor.set(None);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl-C: first press shows hint + cancels turn;
@@ -550,8 +597,36 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         let _ = input_tx_for_events.send(InputEvent::Abort);
                         input_value.set(String::new());
                     }
+                    KeyCode::Tab
+                        if question_state.read().is_none()
+                            && !modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        let val = input_value.read().clone();
+                        if val.starts_with('/') {
+                            let candidates = tab_candidates.read().clone();
+                            if candidates.len() > 1 && candidates.contains(&val) {
+                                let idx = (tab_index.get() + 1) % candidates.len();
+                                tab_index.set(idx);
+                                input_value.set(candidates[idx].clone());
+                            } else {
+                                let suggestions = suggest_slash_commands(&val, 10);
+                                if !suggestions.is_empty() {
+                                    input_value.set(suggestions[0].clone());
+                                    tab_candidates.set(suggestions);
+                                    tab_index.set(0);
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         // Let TextInput handle all other keys via on_change.
+                        // Reset tab completion on non-Tab keys, but only when
+                        // there are stored candidates — avoids spurious state
+                        // changes that would short-circuit poll_change before
+                        // UseTerminalEventsImpl processes queued events.
+                        if code != KeyCode::Tab && !tab_candidates.read().is_empty() {
+                            tab_candidates.set(Vec::new());
+                        }
                     }
                 }
             }
@@ -606,10 +681,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     value: val,
                     has_focus: true,
                     multiline: true,
-                    // auto_grow: true causes exit hang in complex component
-                    // trees — see sudoprivacy/iocraft investigation. Text
-                    // wraps at terminal width when auto_grow is resolved.
-                    auto_grow: false,
+                    auto_grow: true,
                     on_change: move |new_val: String| {
                         input_value.set(new_val);
                     },
@@ -751,5 +823,63 @@ mod tests {
         assert!(panel.contains("[Setup]"));
         assert!(panel.contains("  1. Project recommended"));
         assert!(panel.contains("> 2. User"));
+    }
+
+    #[test]
+    fn exit_command_routes_as_exit_event() {
+        assert_eq!(
+            enter_key_event_for_value(None, 0, "/exit"),
+            Some(InputEvent::Exit)
+        );
+        assert_eq!(
+            enter_key_event_for_value(None, 0, "/quit"),
+            Some(InputEvent::Exit)
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_none() {
+        assert_eq!(enter_key_event_for_value(None, 0, ""), None);
+        assert_eq!(enter_key_event_for_value(None, 0, "   "), None);
+    }
+
+    #[test]
+    fn slash_commands_route_as_submit() {
+        assert_eq!(
+            enter_key_event_for_value(None, 0, "/status"),
+            Some(InputEvent::Submit("/status".to_string()))
+        );
+        assert_eq!(
+            enter_key_event_for_value(None, 0, "/cost"),
+            Some(InputEvent::Submit("/cost".to_string()))
+        );
+    }
+
+    #[test]
+    fn suggest_slash_commands_finds_version_prefix() {
+        let suggestions = suggest_slash_commands("/ver", 10);
+        assert!(
+            suggestions.contains(&"/version".to_string()),
+            "expected /version in suggestions for /ver, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_slash_commands_finds_help_prefix() {
+        let suggestions = suggest_slash_commands("/he", 10);
+        assert!(
+            suggestions.contains(&"/help".to_string()),
+            "expected /help in suggestions for /he, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_slash_commands_no_false_positives_for_unrelated_prefix() {
+        let suggestions = suggest_slash_commands("/ver", 10);
+        // /ver prefix should NOT match unrelated commands like /cost
+        assert!(
+            !suggestions.contains(&"/cost".to_string()),
+            "/cost should not appear in suggestions for /ver, got: {suggestions:?}"
+        );
     }
 }

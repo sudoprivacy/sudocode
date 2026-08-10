@@ -122,3 +122,4 @@ fn exit_plan_mode_choice_keep_planning_rejects_tool() {
         "exit code should be 0; got {exit}"
     );
 }
+// CI trigger

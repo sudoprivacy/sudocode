@@ -50,9 +50,7 @@ fn iocraft_repl_keyboard_input_not_frozen() {
     // never appears because key events are never distributed.
     sess.expect("/exit").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!(
-            "typed text must appear in terminal (keyboard input frozen?): {e}\nPTY:\n{screen}"
-        );
+        panic!("typed text must appear in terminal (keyboard input frozen?): {e}\nPTY:\n{screen}");
     });
 
     // Now press Enter to submit /exit and verify clean process exit.

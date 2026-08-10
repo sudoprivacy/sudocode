@@ -4093,7 +4093,10 @@ impl LiveCli {
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary.response_model.as_deref().unwrap_or(&self.config.model);
+                    let model_for_caps = summary
+                        .response_model
+                        .as_deref()
+                        .unwrap_or(&self.config.model);
                     let context_window =
                         runtime::model_capabilities::context_window_or_default(model_for_caps);
                     let branch = env::current_dir()
@@ -4197,7 +4200,10 @@ impl LiveCli {
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary.response_model.as_deref().unwrap_or(&self.config.model);
+                    let model_for_caps = summary
+                        .response_model
+                        .as_deref()
+                        .unwrap_or(&self.config.model);
                     let context_window =
                         runtime::model_capabilities::context_window_or_default(model_for_caps);
                     let branch = env::current_dir()

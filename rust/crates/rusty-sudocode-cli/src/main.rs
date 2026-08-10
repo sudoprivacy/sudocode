@@ -1876,6 +1876,144 @@ impl repl_async::TurnDriver for LiveCliDriver {
 /// The coordinator reads `InputEvent`s from the iocraft UI and dispatches
 /// turns on runner threads, identical to the rustyline-based coordinator
 /// but with iocraft owning stdin+stdout.
+type PendingQuestionAnswer = Arc<Mutex<Option<mpsc::SyncSender<String>>>>;
+
+fn consume_pending_question_answer(pending: &PendingQuestionAnswer, text: String) -> bool {
+    let Some(tx) = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return false;
+    };
+    let _ = tx.send(text);
+    true
+}
+
+fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
+    let _ = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+}
+
+struct IocraftQuestionPrompter {
+    output: repl_ui::OutputSender,
+    pending_answer: PendingQuestionAnswer,
+}
+
+impl IocraftQuestionPrompter {
+    fn new(output: repl_ui::OutputSender, pending_answer: PendingQuestionAnswer) -> Self {
+        Self {
+            output,
+            pending_answer,
+        }
+    }
+
+    fn render_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
+        if index == 0 {
+            if let Some(title) = request.title.as_deref().filter(|title| !title.is_empty()) {
+                self.output.println(&format!("\n[Question Set] {title}"));
+            }
+            if let Some(description) = request
+                .description
+                .as_deref()
+                .filter(|description| !description.is_empty())
+            {
+                self.output.println(description);
+            }
+        }
+
+        let field = &request.fields[index];
+        self.output
+            .println(&format!("\n[Question] {}. {}", index + 1, field.prompt));
+        for (option_index, option) in field.options.iter().enumerate() {
+            let suffix = option
+                .description
+                .as_deref()
+                .filter(|description| !description.is_empty())
+                .map_or(String::new(), |description| format!(" - {description}"));
+            self.output.println(&format!(
+                "  {}. {}{}",
+                option_index + 1,
+                option.label,
+                suffix
+            ));
+        }
+        if field.options.is_empty() {
+            self.output.println("Your answer:");
+        } else {
+            self.output
+                .println(&format!("Enter choice (1-{}):", field.options.len()));
+        }
+    }
+
+    fn prepare_answer_receiver(&self) -> Result<mpsc::Receiver<String>, String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        {
+            let mut pending = self
+                .pending_answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending.is_some() {
+                return Err("question prompt already pending".to_string());
+            }
+            *pending = Some(tx);
+        }
+        Ok(rx)
+    }
+
+    fn wait_for_answer(rx: mpsc::Receiver<String>) -> Result<String, String> {
+        rx.recv()
+            .map(|answer| answer.trim().to_string())
+            .map_err(|_| "question prompt cancelled".to_string())
+    }
+
+    fn answer_for_field(
+        field: &runtime::QuestionField,
+        raw_answer: String,
+    ) -> runtime::QuestionPromptAnswer {
+        let matched = if field.options.is_empty() {
+            None
+        } else if let Ok(index) = raw_answer.parse::<usize>() {
+            index
+                .checked_sub(1)
+                .and_then(|zero_based| field.options.get(zero_based))
+        } else {
+            field
+                .options
+                .iter()
+                .find(|option| option.label == raw_answer || option.value == raw_answer)
+        };
+
+        runtime::QuestionPromptAnswer {
+            id: field.id.clone(),
+            value: matched
+                .map(|option| option.value.clone())
+                .unwrap_or_else(|| raw_answer.clone()),
+            label: matched
+                .map(|option| option.label.clone())
+                .or_else(|| (!raw_answer.is_empty()).then_some(raw_answer)),
+        }
+    }
+}
+
+impl runtime::QuestionPrompter for IocraftQuestionPrompter {
+    fn ask(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        let mut answers = Vec::with_capacity(request.fields.len());
+        for index in 0..request.fields.len() {
+            let rx = self.prepare_answer_receiver()?;
+            self.render_field(request, index);
+            let raw_answer = Self::wait_for_answer(rx)?;
+            answers.push(Self::answer_for_field(&request.fields[index], raw_answer));
+        }
+        Ok(answers)
+    }
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -1898,6 +2036,7 @@ fn run_repl_iocraft_dispatch(
 
     // Spawn the iocraft REPL UI on a dedicated thread.
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
+    let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
@@ -1917,6 +2056,7 @@ fn run_repl_iocraft_dispatch(
             match repl.input_rx.recv() {
                 Ok(evt) => Some(evt),
                 Err(_) => {
+                    cancel_pending_question_answer(&pending_question_answer);
                     if let Some(h) = runner_handle.take() {
                         abort_signal.abort();
                         let _ = h.join();
@@ -1943,6 +2083,7 @@ fn run_repl_iocraft_dispatch(
                                 next.prompt,
                                 repl.output.clone(),
                                 repl.spinner.clone(),
+                                Arc::clone(&pending_question_answer),
                                 turn_tx.clone(),
                             ));
                         }
@@ -1950,6 +2091,7 @@ fn run_repl_iocraft_dispatch(
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    cancel_pending_question_answer(&pending_question_answer);
                     // Render loop exited — clean up runner if active.
                     if let Some(h) = runner_handle.take() {
                         abort_signal.abort();
@@ -1964,6 +2106,7 @@ fn run_repl_iocraft_dispatch(
 
         match event {
             repl_ui::InputEvent::Exit => {
+                cancel_pending_question_answer(&pending_question_answer);
                 if let Some(h) = runner_handle.take() {
                     abort_signal.abort();
                     let _ = h.join();
@@ -1975,12 +2118,17 @@ fn run_repl_iocraft_dispatch(
                 break;
             }
             repl_ui::InputEvent::Abort => {
+                cancel_pending_question_answer(&pending_question_answer);
                 if runner_handle.is_some() {
                     abort_signal.abort();
                 }
             }
             repl_ui::InputEvent::Submit(text) => {
+                if consume_pending_question_answer(&pending_question_answer, text.clone()) {
+                    continue;
+                }
                 if text.trim() == "/exit" || text.trim() == "/quit" {
+                    cancel_pending_question_answer(&pending_question_answer);
                     if runner_handle.is_some() {
                         abort_signal.abort();
                     }
@@ -2030,6 +2178,7 @@ fn run_repl_iocraft_dispatch(
                         next.prompt,
                         repl.output.clone(),
                         repl.spinner.clone(),
+                        Arc::clone(&pending_question_answer),
                         turn_tx.clone(),
                     ));
                 } else {
@@ -2106,6 +2255,7 @@ fn spawn_iocraft_turn(
     prompt: String,
     output: repl_ui::OutputSender,
     spinner: repl_ui::SpinnerState,
+    pending_question_answer: PendingQuestionAnswer,
     done_tx: mpsc::SyncSender<()>,
 ) -> thread::JoinHandle<()> {
     let abort = abort_signal.clone();
@@ -2114,7 +2264,9 @@ fn spawn_iocraft_turn(
         .spawn(move || {
             abort.reset();
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
-            if let Err(e) = cli.run_turn_iocraft(&prompt, &output, &spinner) {
+            if let Err(e) =
+                cli.run_turn_iocraft(&prompt, &output, &spinner, pending_question_answer)
+            {
                 output.println(&format!("\x1b[31m{e}\x1b[0m"));
             }
             let _ = done_tx.send(());
@@ -4003,6 +4155,7 @@ impl LiveCli {
         input: &str,
         output: &repl_ui::OutputSender,
         spinner_state: &repl_ui::SpinnerState,
+        pending_question_answer: PendingQuestionAnswer,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
@@ -4020,6 +4173,12 @@ impl LiveCli {
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
         runtime.api_client_mut().set_spinner(spinner_ref.clone());
         runtime.tool_executor_mut().set_spinner(spinner_ref);
+        runtime
+            .tool_executor_mut()
+            .set_question_prompter(Box::new(IocraftQuestionPrompter::new(
+                output.clone(),
+                pending_question_answer,
+            )));
 
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -6418,5 +6577,31 @@ mod auth_mode_tests {
         .expect("explicit proxy auth should allow passthrough models");
 
         assert_eq!(mode, AuthMode::Proxy);
+    }
+
+    #[test]
+    fn pending_question_consumes_next_iocraft_submit() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let pending = Arc::new(Mutex::new(Some(tx)));
+
+        assert!(consume_pending_question_answer(
+            &pending,
+            "answer from ui".to_string()
+        ));
+        assert_eq!(
+            rx.recv().expect("answer should be routed"),
+            "answer from ui"
+        );
+        assert!(pending.lock().expect("pending lock").is_none());
+    }
+
+    #[test]
+    fn absent_pending_question_leaves_submit_for_normal_repl_flow() {
+        let pending = Arc::new(Mutex::new(None));
+
+        assert!(!consume_pending_question_answer(
+            &pending,
+            "normal prompt".to_string()
+        ));
     }
 }

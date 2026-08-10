@@ -11,7 +11,7 @@
 use std::fs;
 
 use runtime::{
-    compact_session, CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session,
+    compact_session_sync, CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session,
 };
 
 fn temp_path(label: &str) -> std::path::PathBuf {
@@ -42,7 +42,7 @@ fn compacted_summary_survives_save_and_reload() {
     let original_len = session.messages.len();
 
     // when — force compaction, keeping only the last 2 messages.
-    let result = compact_session(
+    let result = compact_session_sync(
         &session,
         CompactionConfig {
             preserve_recent_messages: 2,

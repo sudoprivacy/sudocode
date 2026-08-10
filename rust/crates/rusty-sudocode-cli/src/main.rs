@@ -4158,7 +4158,11 @@ impl LiveCli {
         // and tool layers can update bytes + thinking flags atomically.
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
         runtime.api_client_mut().set_spinner(spinner_ref.clone());
+        runtime.api_client_mut().set_output_writer(output.clone());
         runtime.tool_executor_mut().set_spinner(spinner_ref);
+        runtime
+            .tool_executor_mut()
+            .set_output_writer(output.clone());
         runtime.tool_executor_mut().set_repl_mode(self.is_repl);
         runtime
             .tool_executor_mut()

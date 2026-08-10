@@ -18,6 +18,7 @@ use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
 use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer};
+use crate::repl_ui::OutputSender;
 use std::sync::Arc;
 
 use crate::{
@@ -44,6 +45,9 @@ pub(crate) struct AnthropicRuntimeClient {
     /// Shared spinner reference for pausing, thinking indicator, and
     /// response-byte counting.
     pub(crate) spinner: Option<SpinnerRef>,
+    /// Optional channel-backed writer that routes output through the iocraft
+    /// render loop instead of writing directly to stdout.
+    pub(crate) output_writer: Option<OutputSender>,
 }
 
 impl AnthropicRuntimeClient {
@@ -80,11 +84,16 @@ impl AnthropicRuntimeClient {
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
             spinner: None,
+            output_writer: None,
         })
     }
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
+    }
+
+    pub(crate) fn set_output_writer(&mut self, writer: OutputSender) {
+        self.output_writer = Some(writer);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -254,6 +263,9 @@ struct CliStreamState {
     client: ApiProviderClient,
     /// Non-streaming fallback request (used when streaming yields no events).
     fallback_request: Option<MessageRequest>,
+    /// Optional channel-backed writer that routes output through the iocraft
+    /// render loop instead of writing directly to stdout.
+    output_writer: Option<OutputSender>,
 }
 
 impl CliStreamState {
@@ -283,8 +295,13 @@ impl CliStreamState {
     fn process_provider_event(&mut self, event: ApiStreamEvent) -> Result<(), RuntimeError> {
         let mut stdout = io::stdout();
         let mut sink = io::sink();
+        let mut writer_clone = self.output_writer.clone();
         let out: &mut dyn Write = if self.emit_output {
-            &mut stdout
+            if let Some(ref mut w) = writer_clone {
+                w
+            } else {
+                &mut stdout
+            }
         } else {
             &mut sink
         };
@@ -483,6 +500,7 @@ impl AnthropicRuntimeClient {
                 message_request,
                 is_post_tool,
             )),
+            output_writer: self.output_writer.clone(),
         };
 
         Ok(Box::pin(futures::stream::try_unfold(
@@ -538,8 +556,13 @@ impl AnthropicRuntimeClient {
                                 // so the dyn Write borrow is safe here.
                                 let mut stdout = io::stdout();
                                 let mut sink = io::sink();
+                                let mut writer_clone = state.output_writer.clone();
                                 let out: &mut dyn Write = if state.emit_output {
-                                    &mut stdout
+                                    if let Some(ref mut w) = writer_clone {
+                                        w
+                                    } else {
+                                        &mut stdout
+                                    }
                                 } else {
                                     &mut sink
                                 };

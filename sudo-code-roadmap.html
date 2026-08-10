@@ -1742,7 +1742,7 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   the sudocode runtime routes through one
   <code>FsBackend</code> trait with three impls:
   <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
-  syscalls when running inside <code>sudocode-host</code>),
+  syscalls when <code>scode</code> runs as an in-process managed agent),
   <code>StdFsBackend</code> (host <code>std::fs</code> for the
   standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
   kernel from an edge / dev CLI). No code path bypasses the trait —
@@ -1773,8 +1773,8 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   path layout is the SSOT for permissions and the error message
   is the teaching channel.</li>
 
-  <li><strong>Session state placement.</strong> Inside
-  <code>sudocode-host</code>, session jsonl transcripts live at
+  <li><strong>Session state placement.</strong> Inside the
+  in-process managed-agent host (<code>scode</code> on <code>KernelFsBackend</code>), session jsonl transcripts live at
   <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
   on the kernel VFS, not on the host filesystem. Booting a worker
   reads its profile + the requested <code>--session-id</code>
@@ -1786,6 +1786,18 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   writes, close streams, release locks. No long-running
   in-memory state that doesn't survive a host restart; the
   <code>--session-id</code> transcript is the SSOT.</li>
+
+  <li><strong>Concurrency model.</strong> Each managed-agent loop
+  currently runs on its own OS thread (<code>std::thread::spawn</code>
+  per pid, with a per-thread current-thread tokio runtime driving the
+  turn). An agent is a sequential conversation — one turn at a time —
+  so it needs no internal parallelism; parallelism is across agents.
+  This is correct and simplest for a modest number of co-hosted agents.
+  <strong>Planned evolution:</strong> move each agent loop from
+  <code>std::thread</code> onto <code>tokio::spawn</code> as a task on a
+  shared multi-thread runtime, so N agents become N cheap tasks rather
+  than N OS threads (each with a multi-MB stack) — the scaling path for
+  a large agent fleet.</li>
 </ol>
 
 <h3>What is NOT sudocode's job here</h3>
@@ -1810,17 +1822,18 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   needs to do nothing to participate.</li>
 </ul>
 
-<h3 id="linkage">Linkage: <code>sudocode-host</code> links the kernel statically</h3>
+<h3 id="linkage">Linkage: the sudocode binary links the kernel statically</h3>
 
-<p><code>sudocode-host</code> is a single binary that links the nexus
-kernel crate directly and monomorphises
-<code>KernelFsBackend&lt;Kernel&gt;</code>, so an agent's file operations
-are ordinary in-process Rust calls. nexus also offers a C-ABI dylib
-plugin boundary (<code>plugin-abi</code>), which FUSE and the vault use.
-sudocode does not: <strong>the dylib boundary is reserved for code that
-is third-party, untrusted, or must stay ABI-stable across independent
-release cycles.</strong> Our own runtime, sitting on the agent's IOPS
-path, links statically.</p>
+<p>The sudocode binary links the nexus kernel crate directly and
+monomorphises <code>KernelFsBackend&lt;Kernel&gt;</code>, so an agent's
+file operations are ordinary in-process Rust calls. The same
+<code>scode</code> binary that runs standalone (on <code>StdFsBackend</code>)
+is the managed-agent host in-process — there is no separate host binary.
+nexus also offers a C-ABI dylib plugin boundary (<code>plugin-abi</code>),
+which FUSE and the vault use. sudocode does not: <strong>the dylib
+boundary is reserved for code that is third-party, untrusted, or must
+stay ABI-stable across independent release cycles.</strong> Our own
+runtime, sitting on the agent's IOPS path, links statically.</p>
 
 <p>The cost is in the marshalling, and it lands hardest on exactly the
 operations a coding agent issues most. Per-call overhead versus the
@@ -1868,11 +1881,14 @@ proceed in parallel.</p>
   nexus <code>NexusVFSService.Call</code> surface. First end-to-end
   validation: a standalone scode pointing at a remote nexus serves
   its session jsonl from the kernel. <strong>PARTIAL — code exists, lacks e2e validation.</strong></li>
-  <li><strong>KernelFsBackend + <code>sudocode-host</code>
-  binary.</strong> The binary edge that links nexus
-  <code>kernel</code> + <code>services</code> in-process and
-  monomorphises <code>SpawnTask&lt;Kernel&gt;</code>. This is where
-  the dependency edge sudocode → nexus is realised. <strong>PARTIAL — KernelFsBackend implemented, <code>sudocode-host</code> binary not yet created.</strong></li>
+  <li><strong>KernelFsBackend + in-process managed-agent host.</strong>
+  The <code>scode</code> binary links nexus <code>kernel</code> +
+  <code>services</code> in-process and monomorphises
+  <code>SpawnTask&lt;Kernel&gt;</code> — this is where the dependency
+  edge sudocode → nexus is realised. <strong>PARTIAL —
+  <code>KernelFsBackend</code> + <code>spawn_task</code> implemented in
+  the runtime; remaining: wire the managed-agent entry point + the
+  nexus-side <code>install_managed_agent_with_spawn</code> seam.</strong></li>
   <li><strong>Mailbox read/write loop.</strong> Inside the managed
   runtime, replace stdin/stdout prompts with
   <code>sys_watch</code> on <code>/proc/{self_pid}/chat-with-me</code>
@@ -1917,16 +1933,17 @@ path; the backend determines where bytes land.</p>
   <tbody>
     <tr><td><strong>Standalone CLI</strong></td><td><code>scode</code></td><td><code>StdFsBackend</code></td><td>Developer laptop, direct filesystem</td><td>Current production path</td></tr>
     <tr><td><strong>Edge / Dev CLI</strong></td><td><code>scode</code></td><td><code>NexusVfsFsBackend</code></td><td>CLI connecting to remote nexus kernel via gRPC</td><td>Code exists, lacks e2e validation</td></tr>
-    <tr><td><strong>Managed agent</strong></td><td><code>sudocode-host</code></td><td><code>KernelFsBackend&lt;Kernel&gt;</code></td><td>In-process inside nexus, direct Rust syscalls</td><td>Target production path; binary not yet created</td></tr>
+    <tr><td><strong>Managed agent</strong></td><td><code>scode</code> (in-process mode)</td><td><code>KernelFsBackend&lt;Kernel&gt;</code></td><td>In-process inside nexus, direct Rust syscalls</td><td>Target production path; runtime pieces implemented, entry-point + nexus seam pending</td></tr>
   </tbody>
 </table>
 
 <div class="callout">
-  <strong>Migration note:</strong> The target production path is <code>sudocode-host</code>
-  (managed agent mode). Current production runs standalone <code>scode</code> with
-  <code>StdFsBackend</code>. Migration requires: (1) create <code>sudocode-host</code> binary
-  crate, (2) validate session/config/cache paths work identically on <code>KernelFsBackend</code>,
-  (3) coordinate with sudowork for gRPC client wiring. Track in Goal&nbsp;4 sequencing PR&nbsp;#3.
+  <strong>Migration note:</strong> The target production path is <code>scode</code>
+  in in-process managed-agent mode. Current production runs standalone <code>scode</code> with
+  <code>StdFsBackend</code>. Migration requires: (1) wire the managed-agent entry point
+  (no separate host binary — <code>scode</code> already links the kernel via the runtime),
+  (2) validate session/config/cache paths work identically on <code>KernelFsBackend</code>,
+  (3) the nexus-side <code>install_managed_agent_with_spawn</code> seam. Track in Goal&nbsp;4 sequencing PR&nbsp;#3.
 </div>
 
 <h2 id="model-capabilities-service">Model Capabilities Service</h2>

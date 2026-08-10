@@ -117,7 +117,9 @@ pub trait ApiClient: Send {
         _messages: Vec<ConversationMessage>,
         _max_tokens: u32,
     ) -> Result<String, RuntimeError> {
-        Err(RuntimeError::new("compaction not supported by this API client"))
+        Err(RuntimeError::new(
+            "compaction not supported by this API client",
+        ))
     }
 }
 
@@ -1426,20 +1428,27 @@ where
             .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
         // Try LLM-based compaction first; fall back to sync if unsupported
-        let result =
-            match compact_session(&self.session, config, &mut self.api_client, &model, None).await {
-                Ok(result) => result,
-                Err(crate::compact::CompactionError::NothingToCompact) => {
-                    self.consecutive_auto_compact_noops =
-                        self.consecutive_auto_compact_noops.saturating_add(1);
-                    return None;
-                }
-                Err(_) => {
-                    // LLM compaction failed (not supported or API error) — fall
-                    // back to the synchronous local heuristic.
-                    compact_session_sync(&self.session, config)
-                }
-            };
+        let result = match compact_session(
+            &self.session,
+            config,
+            &mut self.api_client,
+            &model,
+            None,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(crate::compact::CompactionError::NothingToCompact) => {
+                self.consecutive_auto_compact_noops =
+                    self.consecutive_auto_compact_noops.saturating_add(1);
+                return None;
+            }
+            Err(_) => {
+                // LLM compaction failed (not supported or API error) — fall
+                // back to the synchronous local heuristic.
+                compact_session_sync(&self.session, config)
+            }
+        };
 
         if result.removed_message_count == 0 {
             self.consecutive_auto_compact_noops =

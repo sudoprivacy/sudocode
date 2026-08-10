@@ -94,7 +94,9 @@ use cli::status::{
     print_status_snapshot, print_version, sandbox_json_value, status_context, status_json_value,
     version_json_value, StatusContext, StatusUsage,
 };
-use cli::tool_executor::{permission_policy, CliToolExecutor};
+use cli::tool_executor::{
+    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
+};
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
@@ -1605,6 +1607,7 @@ fn run_repl(
 /// The synchronous REPL loop. Handles both new sessions and resumed
 /// sessions identically: banner → existing messages (if any) → prompt.
 fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let mut editor =
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
@@ -1738,6 +1741,7 @@ fn run_repl_async_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
@@ -2009,6 +2013,7 @@ fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cli.is_repl = true;
     let banner = cli.startup_banner();
     let permission_label = cli.config.permission_mode.as_str().to_string();
 
@@ -2302,6 +2307,8 @@ struct LiveCli {
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
+    /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
+    is_repl: bool,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3833,6 +3840,7 @@ impl LiveCli {
             esc_monitor_enabled: true,
             persistent_abort_signal: None,
             shared_queue_mode: None,
+            is_repl: false,
         };
         cli.persist_session()?;
 
@@ -4057,6 +4065,7 @@ impl LiveCli {
         let spinner_ref = spinner.spinner_ref();
         runtime.api_client_mut().set_spinner(spinner_ref.clone());
         runtime.tool_executor_mut().set_spinner(spinner_ref);
+        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
 
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -4100,9 +4109,21 @@ impl LiveCli {
                     ));
                 }
                 self.persist_session()?;
+                // If the plan confirmation dialog chose "clear context &
+                // execute", pick up the plan and re-run in a fresh session.
+                if let Some(plan) = take_pending_plan_execution() {
+                    let session = runtime::Session::new();
+                    let session_id = self.session.id.clone();
+                    let fresh =
+                        self.build_replacement_runtime(session, session_id, self.config.clone())?;
+                    self.replace_runtime(fresh)?;
+                    let prompt = format!("Implement the following plan:\n\n{plan}");
+                    return self.run_turn(&prompt);
+                }
                 Ok(())
             }
             Err(error) => {
+                clear_pending_plan_execution();
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
                 spinner.fail("❌ Request failed");
@@ -4138,6 +4159,7 @@ impl LiveCli {
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
         runtime.api_client_mut().set_spinner(spinner_ref.clone());
         runtime.tool_executor_mut().set_spinner(spinner_ref);
+        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
         runtime
             .tool_executor_mut()
             .set_question_prompter(Box::new(IocraftQuestionPrompter::new(

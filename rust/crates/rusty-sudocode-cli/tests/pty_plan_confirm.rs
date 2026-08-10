@@ -26,7 +26,11 @@ use common::TestEnv;
 /// Mock mode: deterministic — the mock scenario always calls ExitPlanMode.
 /// Live mode: the model may not reliably call ExitPlanMode from a prompt
 /// alone (no plan context), so we skip if the dialog doesn't appear.
+// Windows PTY does not reliably deliver stdin writes to the child's
+// `read_line` during the interactive dialog; the test hangs waiting
+// for the post-choice output. macOS + Linux cover the same code path.
 #[test]
+#[cfg_attr(windows, ignore)]
 fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
     let env = TestEnv::new("plan-confirm");
 
@@ -67,12 +71,16 @@ fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
-    assert!(exit == 0 || exit == 143, "exit code should be 0; got {exit}");
+    assert!(
+        exit == 0 || exit == 143,
+        "exit code should be 0; got {exit}"
+    );
 }
 
 /// Choice 3 (keep planning) should reject the tool call and let
 /// the model continue in plan mode.
 #[test]
+#[cfg_attr(windows, ignore)]
 fn exit_plan_mode_choice_keep_planning_rejects_tool() {
     let env = TestEnv::new("plan-keep");
 
@@ -109,5 +117,8 @@ fn exit_plan_mode_choice_keep_planning_rejects_tool() {
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
-    assert!(exit == 0 || exit == 143, "exit code should be 0; got {exit}");
+    assert!(
+        exit == 0 || exit == 143,
+        "exit code should be 0; got {exit}"
+    );
 }

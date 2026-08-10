@@ -656,7 +656,9 @@ impl CliToolExecutor {
                 };
                 set_pending_plan_execution(plan_for_execution);
 
-                print_line("\x1b[32m\u{2714} Plan confirmed. Will clear context and execute...\x1b[0m");
+                print_line(
+                    "\x1b[32m\u{2714} Plan confirmed. Will clear context and execute...\x1b[0m",
+                );
                 self.resume_spinner();
                 Ok(result)
             }

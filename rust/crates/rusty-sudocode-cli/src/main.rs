@@ -4000,11 +4000,9 @@ impl LiveCli {
                     self.out_println("\x1b[2mClearing session and executing plan...\x1b[0m");
 
                     let session_state = new_cli_session()?;
-                    let next_handle =
-                        create_managed_session_handle(&session_state.session_id)?;
+                    let next_handle = create_managed_session_handle(&session_state.session_id)?;
                     let fresh_runtime = self.build_replacement_runtime(
-                        session_state
-                            .with_persistence_path(next_handle.path.clone()),
+                        session_state.with_persistence_path(next_handle.path.clone()),
                         next_handle.id.clone(),
                         self.config.clone(),
                     )?;

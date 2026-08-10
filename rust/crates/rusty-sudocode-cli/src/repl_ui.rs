@@ -606,6 +606,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     value: val,
                     has_focus: true,
                     multiline: true,
+                    // auto_grow: true causes exit hang in complex component
+                    // trees — see sudoprivacy/iocraft investigation. Text
+                    // wraps at terminal width when auto_grow is resolved.
+                    auto_grow: false,
                     on_change: move |new_val: String| {
                         input_value.set(new_val);
                     },

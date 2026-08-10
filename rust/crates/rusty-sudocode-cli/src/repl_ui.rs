@@ -1,16 +1,9 @@
 //! iocraft-based terminal UI for the REPL.
 //!
-//! Two layers:
-//!
-//! 1. **`TurnRenderer`** — per-turn render thread that manages a spinner +
-//!    output channel for routing `println!`-style text from the runner thread
-//!    to stdout without racing the spinner line.  Used by `LiveCli::run_turn`.
-//!
-//! 2. **`ReplApp` / `spawn_repl_ui`** — full iocraft REPL component that
-//!    replaces rustyline for interactive input.  Owns stdin+stdout via
-//!    `render_loop()`, shows a persistent prompt with spinner overlay.
-//!    The coordinator thread reads `InputEvent`s from the returned
-//!    `ReplHandle` and dispatches turns.
+//! **`ReplApp` / `spawn_repl_ui`** — full iocraft REPL component that
+//! replaces rustyline for interactive input.  Shows a persistent prompt
+//! with spinner overlay.  The coordinator thread reads `InputEvent`s from
+//! the returned `ReplHandle` and dispatches turns.
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
@@ -20,44 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iocraft::prelude::*;
-
-// ── TurnOutput ─────────────────────────────────────────────────────────
-
-/// Messages from the runner thread to the render thread.
-enum OutputMsg {
-    Print(String),
-    Println(String),
-}
-
-/// Channel-backed output handle for routing terminal output through the
-/// render thread during a turn. Clone is cheap. Implements `Write` so it
-/// can be used as a drop-in replacement for `io::stdout()`.
-#[derive(Clone)]
-pub struct TurnOutput {
-    tx: SyncSender<OutputMsg>,
-}
-
-impl TurnOutput {
-    pub fn print(&self, text: &str) {
-        let _ = self.tx.send(OutputMsg::Print(text.to_string()));
-    }
-
-    pub fn println(&self, text: &str) {
-        let _ = self.tx.send(OutputMsg::Println(text.to_string()));
-    }
-}
-
-impl Write for TurnOutput {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let text = String::from_utf8_lossy(buf).to_string();
-        let _ = self.tx.send(OutputMsg::Print(text));
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 // ── SpinnerState ───────────────────────────────────────────────────────
 
@@ -89,21 +44,6 @@ impl SpinnerState {
             label: Arc::new(Mutex::new(String::new())),
             model: Arc::new(Mutex::new(None)),
             token_budget: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Create a new active spinner state (used by TurnRenderer).
-    #[must_use]
-    pub fn new(label: &str, model: Option<&str>, token_budget: Option<u32>) -> Self {
-        Self {
-            response_bytes: Arc::new(AtomicU32::new(0)),
-            is_thinking: Arc::new(AtomicBool::new(false)),
-            is_paused: Arc::new(AtomicBool::new(false)),
-            active: Arc::new(AtomicBool::new(true)),
-            start_time: Arc::new(Mutex::new(Instant::now())),
-            label: Arc::new(Mutex::new(label.to_string())),
-            model: Arc::new(Mutex::new(model.map(ToString::to_string))),
-            token_budget: Arc::new(Mutex::new(token_budget)),
         }
     }
 
@@ -205,171 +145,6 @@ fn format_compact_tokens(tokens: u32) -> String {
         format!("{:.1}k", f64::from(tokens) / 1_000.0)
     } else {
         tokens.to_string()
-    }
-}
-
-/// Write to stdout from the render thread. Errors are silently ignored
-/// (the spinner is cosmetic -- losing a frame is harmless).
-fn write_render(data: &[u8]) {
-    let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(data);
-    let _ = stdout.flush();
-}
-
-// ── Render thread ──────────────────────────────────────────────────────
-
-/// The render loop: drains the output channel and prints to stdout.
-/// The spinner is a single-line overwrite (`\r\x1b[2K` + text).
-fn render_loop(output_rx: Receiver<OutputMsg>, spinner: SpinnerState, stop: Arc<AtomicBool>) {
-    let mut frame_index: usize = 0;
-    let mut spinner_visible = false;
-
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-
-        // Drain pending output messages.
-        let mut had_output = false;
-        loop {
-            match output_rx.try_recv() {
-                Ok(msg) => {
-                    if !had_output && spinner_visible {
-                        write_render(b"\r\x1b[2K");
-                        spinner_visible = false;
-                    }
-                    match msg {
-                        OutputMsg::Print(text) => {
-                            write_render(text.as_bytes());
-                        }
-                        OutputMsg::Println(text) => {
-                            let mut buf = text.into_bytes();
-                            buf.push(b'\n');
-                            write_render(&buf);
-                        }
-                    }
-                    had_output = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if spinner_visible {
-                        write_render(b"\r\x1b[2K");
-                    }
-                    return;
-                }
-            }
-        }
-
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-
-        // Update spinner.
-        let spinner_text = spinner.render_frame(frame_index);
-        if !spinner_text.is_empty() {
-            write_render(format!("\r\x1b[2K{spinner_text}").as_bytes());
-            spinner_visible = true;
-        } else if spinner_visible {
-            write_render(b"\r\x1b[2K");
-            spinner_visible = false;
-        }
-
-        frame_index = frame_index.wrapping_add(1);
-        std::thread::sleep(Duration::from_millis(80));
-    }
-
-    if spinner_visible {
-        write_render(b"\r\x1b[2K");
-    }
-}
-
-// ── TurnRenderer ───────────────────────────────────────────────────────
-
-/// Manages a render thread during a turn. Created at the start of
-/// `run_turn()`, stopped at the end.
-pub struct TurnRenderer {
-    output: Option<TurnOutput>,
-    spinner: SpinnerState,
-    stop: Arc<AtomicBool>,
-    join_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TurnRenderer {
-    /// Start a new render thread for a turn.
-    #[must_use]
-    pub fn new(label: &str, model: Option<&str>, token_budget: Option<u32>) -> Self {
-        let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(256);
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let spinner = SpinnerState::new(label, model, token_budget);
-        let spinner_clone = spinner.clone();
-        let stop_clone = Arc::clone(&stop);
-
-        let join_handle = std::thread::Builder::new()
-            .name("repl-render".into())
-            .spawn(move || {
-                render_loop(output_rx, spinner_clone, stop_clone);
-            })
-            .expect("spawn repl-render thread");
-
-        Self {
-            output: Some(TurnOutput { tx: output_tx }),
-            spinner,
-            stop,
-            join_handle: Some(join_handle),
-        }
-    }
-
-    /// Get a cloneable output handle for sending text to the render thread.
-    pub fn output(&self) -> Option<TurnOutput> {
-        self.output.clone()
-    }
-
-    /// Get the shared spinner state for the runner to update.
-    #[must_use]
-    pub fn spinner(&self) -> &SpinnerState {
-        &self.spinner
-    }
-
-    fn stop_render(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Drop the output sender so the render thread sees Disconnected.
-        self.output.take();
-        if let Some(h) = self.join_handle.take() {
-            let deadline = std::time::Instant::now() + Duration::from_millis(500);
-            while !h.is_finished() {
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if h.is_finished() {
-                let _ = h.join();
-            }
-        }
-    }
-
-    /// Signal the render thread to stop and print a success message.
-    pub fn finish(&mut self, label: &str) {
-        self.stop_render();
-        println!("\x1b[32m\u{2714} {label}\x1b[0m");
-    }
-
-    /// Signal the render thread to stop and print a failure message.
-    pub fn fail(&mut self, label: &str) {
-        self.stop_render();
-        println!("\x1b[31m\u{2718} {label}\x1b[0m");
-    }
-
-    /// Stop without printing a final message.
-    pub fn clear(&mut self) {
-        self.stop_render();
-    }
-}
-
-impl Drop for TurnRenderer {
-    fn drop(&mut self) {
-        self.stop_render();
     }
 }
 

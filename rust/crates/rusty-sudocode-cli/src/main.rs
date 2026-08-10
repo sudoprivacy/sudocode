@@ -273,9 +273,7 @@ fn main() {
     enable_windows_ansi_support();
 
     if let Err(error) = run() {
-        // (error handling below — success path exits via process::exit(0)
-        // at the end of this function to ensure abandoned threads don't
-        // keep the process alive)
+        // (error handling below — success path returns from main normally)
         let message = error.to_string();
         // When --output-format json is active, emit errors as JSON so downstream
         // tools can parse failures the same way they parse successes (ROADMAP #42).
@@ -320,9 +318,10 @@ Run `scode --help` for usage."
         }
         std::process::exit(1);
     }
-    // Explicit exit ensures abandoned threads (HookAbortMonitor, iocraft
-    // render loop) don't keep the process alive after main work is done.
-    std::process::exit(0);
+    // NOTE: `run_repl_iocraft_dispatch` calls `process::exit(0)` itself
+    // because the iocraft render loop thread cannot be joined portably.
+    // All other paths (single-turn prompt, doctor, etc.) return here and
+    // exit naturally via `main` returning.
 }
 
 /// #77: Classify a stringified error message into a machine-readable kind.
@@ -556,9 +555,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     duration_ms,
                 );
             }
-            // Force exit after single-turn to avoid blocking on abandoned
-            // HookAbortMonitor threads during LiveCli drop.
-            std::process::exit(0);
+            // Initiate background shutdown of the tokio runtime so that
+            // lingering tasks (reqwest connection pool, fire-and-forget spawns)
+            // don't block the Runtime::drop that happens when `cli` goes out
+            // of scope.
+            cli.tokio_runtime
+                .shutdown_timeout(Duration::from_millis(500));
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Acp {
@@ -4046,41 +4048,15 @@ impl LiveCli {
         let turn_start = Instant::now();
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
-        // Use TurnRenderer for unified output routing during REPL turns.
-        // Non-interactive (piped) mode uses the standalone indicatif spinner.
-        let use_turn_renderer = io::stdout().is_terminal();
-        let mut turn_renderer: Option<repl_ui::TurnRenderer> = None;
-        let mut spinner: Option<SpinnerHandle> = None;
-
-        if use_turn_renderer {
-            let renderer = repl_ui::TurnRenderer::new(
-                "🦀 Thinking...",
-                Some(self.config.model.as_str()),
-                token_budget,
-            );
-            let spinner_state = renderer.spinner().clone();
-            // Wire the spinner state into the existing SpinnerRef API
-            // so streaming/tool layers can update bytes + thinking.
-            let spinner_ref = render::SpinnerRef::from_state(
-                &spinner_state.response_bytes,
-                &spinner_state.is_thinking,
-                &spinner_state.is_paused,
-            );
-            runtime.api_client_mut().set_spinner(spinner_ref.clone());
-            runtime.tool_executor_mut().set_spinner(spinner_ref);
-            turn_renderer = Some(renderer);
-        } else {
-            let s = SpinnerHandle::new(
-                "🦀 Thinking...",
-                Some(self.config.model.as_str()),
-                TerminalRenderer::new().color_theme(),
-                token_budget,
-            );
-            let spinner_ref = s.spinner_ref();
-            runtime.api_client_mut().set_spinner(spinner_ref.clone());
-            runtime.tool_executor_mut().set_spinner(spinner_ref);
-            spinner = Some(s);
-        }
+        let mut spinner = SpinnerHandle::new(
+            "🦀 Thinking...",
+            Some(self.config.model.as_str()),
+            TerminalRenderer::new().color_theme(),
+            token_budget,
+        );
+        let spinner_ref = spinner.spinner_ref();
+        runtime.api_client_mut().set_spinner(spinner_ref.clone());
+        runtime.tool_executor_mut().set_spinner(spinner_ref);
 
         let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
         let result = self.tokio_runtime.block_on(runtime.run_turn(
@@ -4093,17 +4069,9 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    if let Some(mut r) = turn_renderer {
-                        r.fail("⏹ Cancelled");
-                    } else if let Some(ref mut s) = spinner {
-                        s.fail("⏹ Cancelled");
-                    }
+                    spinner.fail("⏹ Cancelled");
                 } else {
-                    if let Some(mut r) = turn_renderer {
-                        r.clear();
-                    } else if let Some(ref mut s) = spinner {
-                        s.clear();
-                    }
+                    spinner.clear();
                     if let Some(event) = summary.auto_compaction {
                         self.out_println(format_auto_compaction_notice(
                             event.removed_message_count,
@@ -4137,11 +4105,7 @@ impl LiveCli {
             Err(error) => {
                 runtime.shutdown_mcp()?;
                 runtime.shutdown_plugins()?;
-                if let Some(mut r) = turn_renderer {
-                    r.fail("❌ Request failed");
-                } else if let Some(ref mut s) = spinner {
-                    s.fail("❌ Request failed");
-                }
+                spinner.fail("❌ Request failed");
                 Err(Box::new(error))
             }
         }

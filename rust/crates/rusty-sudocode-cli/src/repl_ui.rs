@@ -546,6 +546,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     let perm = permission_mode.clone();
 
+    let term_width = crossterm::terminal::size().map_or(80, |(w, _)| w as usize);
+    let sep = "\u{2500}".repeat(term_width);
+
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(if !st.is_empty() {
@@ -556,7 +559,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(question_panel.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            Text(content: "\u{2500}".repeat(60), color: Color::DarkGrey)
+            Text(content: sep.clone(), color: Color::DarkGrey)
             View(flex_direction: FlexDirection::Row) {
                 Text(content: prompt_label)
                 TextInput(
@@ -567,7 +570,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     },
                 )
             }
-            Text(content: "\u{2500}".repeat(60), color: Color::DarkGrey)
+            Text(content: sep, color: Color::DarkGrey)
             Text(
                 content: format!("  \u{23f5}\u{23f5} {perm} \u{00b7} /help \u{00b7} /exit to quit"),
                 color: Color::DarkGrey,

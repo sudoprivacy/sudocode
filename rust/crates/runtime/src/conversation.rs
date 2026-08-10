@@ -9,7 +9,8 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    compact_session, estimate_session_tokens, CompactionConfig, CompactionResult,
+    compact_session, compact_session_sync, estimate_session_tokens, CompactionConfig,
+    CompactionResult, AUTOCOMPACT_BUFFER_TOKENS,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -104,6 +105,20 @@ pub type AssistantEventStream =
 #[async_trait]
 pub trait ApiClient: Send {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
+
+    /// Send a non-streaming compaction request and return the raw summary text.
+    ///
+    /// The default implementation returns an error — providers that support
+    /// LLM-based compaction override this (see `AnthropicRuntimeClient`).
+    async fn send_compaction(
+        &mut self,
+        _model: &str,
+        _system_prompt: &str,
+        _messages: Vec<ConversationMessage>,
+        _max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        Err(RuntimeError::new("compaction not supported by this API client"))
+    }
 }
 
 /// Optional observer for runtime events emitted while processing a turn.
@@ -986,7 +1001,7 @@ where
                             self.record_turn_failed(iterations, &error);
                             return Err(error);
                         }
-                        let auto_compaction = self.maybe_auto_compact();
+                        let auto_compaction = self.maybe_auto_compact().await;
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
                         self.user_request_intent = None;
@@ -1216,7 +1231,7 @@ where
             }
         }
 
-        let auto_compaction = self.maybe_auto_compact();
+        let auto_compaction = self.maybe_auto_compact().await;
 
         self.finish_current_turn_tracking();
 
@@ -1237,9 +1252,36 @@ where
         Ok(summary)
     }
 
+    /// Compact using the LLM path. Falls back to sync if the API client
+    /// doesn't support `send_compaction`.
+    pub async fn compact(
+        &mut self,
+        config: CompactionConfig,
+        custom_instructions: Option<&str>,
+    ) -> CompactionResult {
+        let model = self
+            .session
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        match compact_session(
+            &self.session,
+            config,
+            &mut self.api_client,
+            &model,
+            custom_instructions,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => compact_session_sync(&self.session, config),
+        }
+    }
+
+    /// Synchronous compaction (local heuristic only, no LLM call).
     #[must_use]
-    pub fn compact(&self, config: CompactionConfig) -> CompactionResult {
-        compact_session(&self.session, config)
+    pub fn compact_sync(&self, config: CompactionConfig) -> CompactionResult {
+        compact_session_sync(&self.session, config)
     }
 
     #[must_use]
@@ -1356,7 +1398,7 @@ where
         self.session
     }
 
-    fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
+    async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
         if self.usage_tracker.cumulative_usage().input_tokens
             < self.auto_compaction_input_tokens_threshold
         {
@@ -1371,13 +1413,33 @@ where
             return None;
         }
 
-        let result = compact_session(
-            &self.session,
-            CompactionConfig {
-                max_estimated_tokens: 0,
-                ..CompactionConfig::default()
-            },
-        );
+        let config = CompactionConfig {
+            max_estimated_tokens: 0,
+            ..CompactionConfig::default()
+        };
+
+        // Resolve model for the compaction call
+        let model = self
+            .session
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+        // Try LLM-based compaction first; fall back to sync if unsupported
+        let result =
+            match compact_session(&self.session, config, &mut self.api_client, &model, None).await {
+                Ok(result) => result,
+                Err(crate::compact::CompactionError::NothingToCompact) => {
+                    self.consecutive_auto_compact_noops =
+                        self.consecutive_auto_compact_noops.saturating_add(1);
+                    return None;
+                }
+                Err(_) => {
+                    // LLM compaction failed (not supported or API error) — fall
+                    // back to the synchronous local heuristic.
+                    compact_session_sync(&self.session, config)
+                }
+            };
 
         if result.removed_message_count == 0 {
             self.consecutive_auto_compact_noops =
@@ -1537,6 +1599,28 @@ pub fn auto_compaction_threshold_from_env() -> u32 {
             .ok()
             .as_deref(),
     )
+}
+
+/// Per-model auto-compact threshold: `context_window - max_output - buffer`.
+///
+/// Matches CC's dynamic threshold calculation instead of a flat 100K default.
+/// Falls back to the env-var or built-in default when the model is unknown.
+#[must_use]
+pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
+    // Env-var override takes precedence (explicit user intent).
+    if let Ok(raw) = std::env::var(AUTO_COMPACTION_THRESHOLD_ENV_VAR) {
+        if let Ok(threshold) = raw.trim().parse::<u32>() {
+            if threshold > 0 {
+                return threshold;
+            }
+        }
+    }
+
+    let context_window = crate::model_capabilities::context_window_or_default(model);
+    let max_output = crate::model_capabilities::max_output_tokens_or_default(model);
+    // Clamp max_output to avoid overflow on small context windows
+    let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
+    context_window.saturating_sub(effective_max_output + AUTOCOMPACT_BUFFER_TOKENS)
 }
 
 #[must_use]
@@ -3004,7 +3088,7 @@ mod tests {
         runtime.run_turn("b", None, None).await.expect("turn b");
         runtime.run_turn("c", None, None).await.expect("turn c");
 
-        let result = runtime.compact(CompactionConfig {
+        let result = runtime.compact_sync(CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
         });

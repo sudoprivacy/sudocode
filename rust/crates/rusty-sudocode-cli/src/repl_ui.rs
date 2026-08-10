@@ -377,6 +377,117 @@ impl Drop for TurnRenderer {
 // iocraft REPL — replaces rustyline for interactive input
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionOptionView {
+    pub label: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub recommended: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionPromptView {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub index: usize,
+    pub total: usize,
+    pub prompt: String,
+    pub options: Vec<QuestionOptionView>,
+    pub allow_custom_input: bool,
+    pub custom_input_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiCommand {
+    ShowQuestion(QuestionPromptView),
+    ClearQuestion,
+}
+
+#[derive(Clone)]
+pub struct UiCommandSender {
+    tx: SyncSender<UiCommand>,
+}
+
+impl UiCommandSender {
+    pub fn show_question(&self, question: QuestionPromptView) {
+        let _ = self.tx.send(UiCommand::ShowQuestion(question));
+    }
+
+    pub fn clear_question(&self) {
+        let _ = self.tx.send(UiCommand::ClearQuestion);
+    }
+}
+
+fn enter_key_event_for_value(
+    question: Option<&QuestionPromptView>,
+    selected_index: usize,
+    value: &str,
+) -> Option<InputEvent> {
+    if let Some(question) = question {
+        if question.options.is_empty() {
+            return (!value.trim().is_empty())
+                .then(|| InputEvent::QuestionAnswer(value.to_string()));
+        }
+        if value.trim().is_empty() {
+            let selected = selected_index.min(question.options.len().saturating_sub(1));
+            return Some(InputEvent::QuestionAnswer((selected + 1).to_string()));
+        }
+        return Some(InputEvent::QuestionAnswer(value.to_string()));
+    }
+
+    if value.trim().is_empty() {
+        return None;
+    }
+
+    let trimmed = value.trim();
+    if trimmed == "/exit" || trimmed == "/quit" {
+        Some(InputEvent::Exit)
+    } else {
+        Some(InputEvent::Submit(value.to_string()))
+    }
+}
+
+fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -> String {
+    let mut lines = Vec::new();
+    if let Some(title) = question.title.as_deref().filter(|title| !title.is_empty()) {
+        lines.push(format!("[{title}]"));
+    }
+    if let Some(description) = question
+        .description
+        .as_deref()
+        .filter(|description| !description.is_empty())
+    {
+        lines.push(description.to_string());
+    }
+    lines.push(format!(
+        "{}/{}  {}",
+        question.index + 1,
+        question.total.max(1),
+        question.prompt
+    ));
+    for (index, option) in question.options.iter().enumerate() {
+        let selector = if index == selected_index { ">" } else { " " };
+        let marker = if option.recommended {
+            " recommended"
+        } else {
+            ""
+        };
+        let description = option
+            .description
+            .as_deref()
+            .filter(|description| !description.is_empty())
+            .map_or(String::new(), |description| format!(" - {description}"));
+        lines.push(format!(
+            "{selector} {}. {}{}{}",
+            index + 1,
+            option.label,
+            marker,
+            description
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Channel-backed output handle for routing text from the runner thread
 /// to the iocraft render loop. Clone is cheap. Implements `std::io::Write`
 /// so it can be used as a stdout replacement.
@@ -404,8 +515,10 @@ impl Write for OutputSender {
 }
 
 /// Events from the iocraft UI to the coordinator thread.
+#[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
     Submit(String),
+    QuestionAnswer(String),
     /// ESC pressed — cancel the running turn.
     Abort,
     Exit,
@@ -414,6 +527,7 @@ pub enum InputEvent {
 /// Handle returned by `spawn_repl_ui` for the coordinator to use.
 pub struct ReplHandle {
     pub output: OutputSender,
+    pub ui: UiCommandSender,
     pub input_rx: Receiver<InputEvent>,
     pub spinner: SpinnerState,
     ui_thread: Option<std::thread::JoinHandle<()>>,
@@ -426,6 +540,7 @@ impl ReplHandle {
     pub fn join(self) {
         // Drop channels so the render loop sees Disconnected and exits.
         drop(self.output);
+        drop(self.ui);
         drop(self.input_rx);
         if let Some(h) = self.ui_thread {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
@@ -443,6 +558,7 @@ impl ReplHandle {
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     output_rx: Arc<Mutex<Receiver<String>>>,
+    ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
     input_tx: SyncSender<InputEvent>,
     spinner: SpinnerState,
     permission_mode: String,
@@ -452,6 +568,7 @@ struct ReplContext {
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
     let output_rx = Arc::clone(&ctx.output_rx);
+    let ui_rx = Arc::clone(&ctx.ui_rx);
     let input_tx = ctx.input_tx.clone();
     let spinner = ctx.spinner.clone();
     let permission_mode = ctx.permission_mode.clone();
@@ -462,6 +579,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
+    let mut question_state = hooks.use_state(|| None::<QuestionPromptView>);
+    let mut question_selection = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
 
@@ -469,8 +588,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let stdout_for_future = stdout.clone();
     let spinner_for_future = spinner.clone();
     let output_rx_for_future = Arc::clone(&output_rx);
+    let ui_rx_for_future = Arc::clone(&ui_rx);
 
-    // 80ms tick loop: drain output channel, update spinner text.
+    // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
@@ -480,6 +600,25 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     match rx.try_recv() {
                         Ok(text) => stdout_for_future.println(text),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+            }
+
+            if let Ok(rx) = ui_rx_for_future.lock() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(UiCommand::ShowQuestion(question)) => {
+                            question_state.set(Some(question));
+                            question_selection.set(0);
+                            input_value.set(String::new());
+                        }
+                        Ok(UiCommand::ClearQuestion) => {
+                            question_state.set(None);
+                            question_selection.set(0);
+                            input_value.set(String::new());
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
@@ -509,16 +648,68 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 match code {
                     KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
                         let val = input_value.read().clone();
-                        if !val.trim().is_empty() {
-                            let trimmed = val.trim();
-                            if trimmed == "/exit" || trimmed == "/quit" {
-                                let _ = input_tx_for_events.send(InputEvent::Exit);
-                                should_exit.set(true);
-                            } else {
-                                // Echo the input above.
-                                stdout_for_events.println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
-                                let _ = input_tx_for_events.send(InputEvent::Submit(val));
+                        let question = question_state.read().clone();
+                        let selected_index = *question_selection.read();
+                        if let Some(event) =
+                            enter_key_event_for_value(question.as_ref(), selected_index, &val)
+                        {
+                            match event {
+                                InputEvent::Exit => {
+                                    let _ = input_tx_for_events.send(InputEvent::Exit);
+                                    should_exit.set(true);
+                                }
+                                InputEvent::Submit(_) => {
+                                    stdout_for_events
+                                        .println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
+                                    let _ = input_tx_for_events.send(InputEvent::Submit(val));
+                                }
+                                InputEvent::QuestionAnswer(_) => {
+                                    let _ =
+                                        input_tx_for_events.send(InputEvent::QuestionAnswer(val));
+                                }
+                                InputEvent::Abort => {}
                             }
+                            input_value.set(String::new());
+                        }
+                    }
+                    KeyCode::Up
+                        if question_state
+                            .read()
+                            .as_ref()
+                            .is_some_and(|q| !q.options.is_empty()) =>
+                    {
+                        let current = *question_selection.read();
+                        question_selection.set(current.saturating_sub(1));
+                    }
+                    KeyCode::Down
+                        if question_state
+                            .read()
+                            .as_ref()
+                            .is_some_and(|q| !q.options.is_empty()) =>
+                    {
+                        let option_count = question_state
+                            .read()
+                            .as_ref()
+                            .map_or(0, |question| question.options.len());
+                        let current = *question_selection.read();
+                        question_selection.set((current + 1).min(option_count.saturating_sub(1)));
+                    }
+                    KeyCode::Char(ch)
+                        if question_state.read().as_ref().is_some_and(|q| {
+                            q.options.len() >= 2
+                                && ch.is_ascii_digit()
+                                && !modifiers.contains(KeyModifiers::CONTROL)
+                                && !modifiers.contains(KeyModifiers::ALT)
+                        }) =>
+                    {
+                        let digit = ch.to_digit(10).unwrap_or(0) as usize;
+                        let option_count = question_state
+                            .read()
+                            .as_ref()
+                            .map_or(0, |question| question.options.len());
+                        if digit >= 1 && digit <= option_count {
+                            let _ = input_tx_for_events
+                                .send(InputEvent::QuestionAnswer(digit.to_string()));
                             input_value.set(String::new());
                         }
                     }
@@ -568,6 +759,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let st = spinner_text.read().clone();
     let val = input_value.read().clone();
+    let question = question_state.read().clone();
+    let selected_index = *question_selection.read();
+    let question_panel = question
+        .as_ref()
+        .map(|question| format_question_panel(question, selected_index));
+    let prompt_label = if question.is_some() {
+        "\u{2753} "
+    } else {
+        "\u{276f} "
+    };
     let perm = permission_mode.clone();
 
     element! {
@@ -577,9 +778,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 None
             })
+            #(question_panel.map(|panel| element! {
+                Text(content: panel, color: Color::Cyan)
+            }))
             Text(content: "\u{2500}".repeat(60), color: Color::DarkGrey)
             View(flex_direction: FlexDirection::Row) {
-                Text(content: "\u{276f} ")
+                Text(content: prompt_label)
                 TextInput(
                     value: val,
                     has_focus: true,
@@ -605,11 +809,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// shared so the runner thread can update it atomically.
 pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<String>(512);
+    let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
     let spinner = SpinnerState::new_inactive();
 
     let ctx = ReplContext {
         output_rx: Arc::new(Mutex::new(output_rx)),
+        ui_rx: Arc::new(Mutex::new(ui_rx)),
         input_tx: input_tx.clone(),
         spinner: spinner.clone(),
         permission_mode: permission_mode.to_string(),
@@ -641,8 +847,86 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
 
     ReplHandle {
         output: OutputSender { tx: output_tx },
+        ui: UiCommandSender { tx: ui_tx },
         input_rx,
         spinner,
         ui_thread: Some(join_handle),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn question_with_options() -> QuestionPromptView {
+        QuestionPromptView {
+            title: Some("Setup".to_string()),
+            description: None,
+            index: 0,
+            total: 1,
+            prompt: "Pick one".to_string(),
+            options: vec![
+                QuestionOptionView {
+                    label: "Project".to_string(),
+                    value: "project".to_string(),
+                    description: None,
+                    recommended: true,
+                },
+                QuestionOptionView {
+                    label: "User".to_string(),
+                    value: "user".to_string(),
+                    description: None,
+                    recommended: false,
+                },
+            ],
+            allow_custom_input: false,
+            custom_input_hint: None,
+        }
+    }
+
+    #[test]
+    fn enter_in_question_mode_routes_answer_instead_of_prompt() {
+        let question = QuestionPromptView {
+            title: None,
+            description: None,
+            index: 0,
+            total: 1,
+            prompt: "Paste content".to_string(),
+            options: vec![],
+            allow_custom_input: true,
+            custom_input_hint: None,
+        };
+
+        assert_eq!(
+            enter_key_event_for_value(Some(&question), 0, "answer"),
+            Some(InputEvent::QuestionAnswer("answer".to_string()))
+        );
+    }
+
+    #[test]
+    fn enter_in_normal_mode_routes_submit() {
+        assert_eq!(
+            enter_key_event_for_value(None, 0, "hello"),
+            Some(InputEvent::Submit("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn enter_in_option_question_confirms_selected_option() {
+        let question = question_with_options();
+
+        assert_eq!(
+            enter_key_event_for_value(Some(&question), 1, ""),
+            Some(InputEvent::QuestionAnswer("2".to_string()))
+        );
+    }
+
+    #[test]
+    fn question_panel_marks_selected_option() {
+        let panel = format_question_panel(&question_with_options(), 1);
+
+        assert!(panel.contains("[Setup]"));
+        assert!(panel.contains("  1. Project recommended"));
+        assert!(panel.contains("> 2. User"));
     }
 }

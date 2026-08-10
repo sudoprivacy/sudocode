@@ -9,8 +9,8 @@ use plugins::{
     PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary,
 };
 use runtime::{
-    compact_session_sync, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
-    ScopedMcpServerConfig, Session,
+    compact_session_sync, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig,
+    McpServerConfig, ScopedMcpServerConfig, Session,
 };
 use serde_json::{json, Value};
 

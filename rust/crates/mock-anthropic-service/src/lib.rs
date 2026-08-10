@@ -1163,10 +1163,9 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 }),
             ),
         },
-        Scenario::LlmCompactionRoundtrip => text_message_response(
-            "msg_llm_compaction",
-            CANNED_COMPACTION_SUMMARY,
-        ),
+        Scenario::LlmCompactionRoundtrip => {
+            text_message_response("msg_llm_compaction", CANNED_COMPACTION_SUMMARY)
+        }
     }
 }
 

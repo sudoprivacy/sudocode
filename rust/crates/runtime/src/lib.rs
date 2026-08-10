@@ -86,8 +86,10 @@ pub use bash::{
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{
-    compact_session, estimate_block_tokens, estimate_session_tokens, format_compact_summary,
-    get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
+    compact_session, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
+    format_compact_summary, get_compact_continuation_message, should_compact,
+    CompactionConfig, CompactionError, CompactionResult,
+    AUTOCOMPACT_BUFFER_TOKENS, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
@@ -104,10 +106,10 @@ pub use config_validate::{
     DiagnosticKind, ValidationResult,
 };
 pub use conversation::{
-    auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent,
-    AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
-    RuntimeObserver, StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor, TurnSummary,
-    FORK_BOILERPLATE_TAG,
+    auto_compact_threshold_for_model, auto_compaction_threshold_from_env, ApiClient, ApiRequest,
+    AssistantEvent, AssistantEventStream, AutoCompactionEvent, ConversationRuntime,
+    PromptCacheEvent, RuntimeError, RuntimeObserver, StaticToolExecutor, ToolDispatchContext,
+    ToolError, ToolExecutor, TurnSummary, FORK_BOILERPLATE_TAG,
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{

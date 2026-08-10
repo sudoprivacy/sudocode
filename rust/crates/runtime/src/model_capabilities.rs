@@ -187,6 +187,22 @@ pub fn context_window_or_default(model_id: &str) -> u32 {
     )
 }
 
+/// Max output tokens for a wire model ID, falling back to the SSOT file's
+/// `default` entry when the model is unknown. Mirrors
+/// [`context_window_or_default`] for the output-token dimension.
+#[must_use]
+pub fn max_output_tokens_or_default(model_id: &str) -> u32 {
+    lookup(model_id).map_or_else(
+        || {
+            CAPABILITIES
+                .get_or_init(ModelCapabilitiesFile::default)
+                .default
+                .max_output_tokens
+        },
+        |cap| cap.max_output_tokens,
+    )
+}
+
 /// Load the SSOT file into the in-memory snapshot. Call once at startup.
 ///
 /// If the file doesn't exist, copies the bundled defaults into place and

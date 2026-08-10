@@ -13,6 +13,48 @@ use tokio::task::JoinHandle;
 pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
+/// Canned compaction summary returned by the `LlmCompactionRoundtrip`
+/// scenario. Follows the CC `<analysis>` + `<summary>` format that
+/// `format_compact_summary` expects.
+pub const CANNED_COMPACTION_SUMMARY: &str = "\
+<analysis>
+The user asked the assistant to investigate parity test coverage.
+The assistant read several files and identified gaps in compact output tests.
+</analysis>
+
+<summary>
+1. Primary Request and Intent:
+   User requested investigation of parity test coverage for compact output.
+
+2. Key Technical Concepts:
+   - Mock Anthropic service for integration testing
+   - LLM-based session compaction with CC-verbatim prompts
+   - Piped stdin compact mode
+
+3. Files and Code Sections:
+   - rust/crates/runtime/src/compact.rs
+     - Core compaction logic with CC prompt constants
+
+4. Errors and fixes:
+   - No errors encountered
+
+5. Problem Solving:
+   Identified that compact output integration tests existed but lacked LLM compaction coverage.
+
+6. All user messages:
+   - \"Investigate parity test coverage for compact output\"
+
+7. Pending Tasks:
+   - Add LLM compaction mock scenario
+   - Add piped stdin compact test
+
+8. Current Work:
+   Adding mock compaction scenario to the parity test harness.
+
+9. Optional Next Step:
+   Run the new tests to verify the compaction roundtrip works end-to-end.
+</summary>";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedRequest {
     pub method: String,
@@ -116,6 +158,7 @@ enum Scenario {
     SleepShortRoundtrip,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
+    LlmCompactionRoundtrip,
 }
 
 impl Scenario {
@@ -151,6 +194,7 @@ impl Scenario {
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
             }
+            "llm_compaction_roundtrip" => Some(Self::LlmCompactionRoundtrip),
             _ => None,
         }
     }
@@ -185,6 +229,7 @@ impl Scenario {
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
+            Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
         }
     }
 }
@@ -316,7 +361,8 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
-    request.messages.iter().rev().find_map(|message| {
+    // Check messages for explicit PARITY_SCENARIO markers first.
+    let from_marker = request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
             InputContentBlock::Text { text } => text
                 .split_whitespace()
@@ -324,7 +370,19 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
                 .and_then(Scenario::parse),
             _ => None,
         })
-    })
+    });
+    if from_marker.is_some() {
+        return from_marker;
+    }
+
+    // Fallback: detect LLM compaction requests by their system prompt.
+    if let Some(system) = &request.system {
+        if system.contains("summarizing conversations") {
+            return Some(Scenario::LlmCompactionRoundtrip);
+        }
+    }
+
+    None
 }
 
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
@@ -705,6 +763,13 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
+        Scenario::LlmCompactionRoundtrip => {
+            // Non-streaming compaction response — return a canned summary.
+            // The compaction path uses `send_message` (stream=false), so
+            // this arm is hit via `build_message_response`. If it ever
+            // switches to streaming, this SSE path serves as a fallback.
+            final_text_sse(CANNED_COMPACTION_SUMMARY)
+        }
     }
 }
 
@@ -1098,6 +1163,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 }),
             ),
         },
+        Scenario::LlmCompactionRoundtrip => text_message_response(
+            "msg_llm_compaction",
+            CANNED_COMPACTION_SUMMARY,
+        ),
     }
 }
 
@@ -1133,6 +1202,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ForkSubagentRecursionGuardRoundtrip => {
             "req_fork_subagent_recursion_guard_roundtrip"
         }
+        Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
     }
 }
 

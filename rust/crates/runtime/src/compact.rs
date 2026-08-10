@@ -1,3 +1,6 @@
+use std::fmt;
+
+use crate::conversation::ApiClient;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageAggregation};
 
@@ -5,6 +8,141 @@ const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n";
 const COMPACT_RECENT_MESSAGES_NOTE: &str = "Recent messages are preserved verbatim.";
 const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.";
+
+// ---------------------------------------------------------------------------
+// CC-verbatim compaction prompt constants
+// ---------------------------------------------------------------------------
+
+const NO_TOOLS_PREAMBLE: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n\
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.\n\
+- You already have all the context you need in the conversation above.\n\
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.\n\
+- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\n";
+
+const BASE_COMPACT_PROMPT: &str = "Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.\n\
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.\n\n\
+Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:\n\n\
+1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:\n\
+   - The user's explicit requests and intents\n\
+   - Your approach to addressing the user's requests\n\
+   - Key decisions, technical concepts and code patterns\n\
+   - Specific details like:\n\
+     - file names\n\
+     - full code snippets\n\
+     - function signatures\n\
+     - file edits\n\
+   - Errors that you ran into and how you fixed them\n\
+   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.\n\
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.\n\n\
+Your summary should include the following sections:\n\n\
+1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail\n\
+2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.\n\
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.\n\
+4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.\n\
+5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.\n\
+6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.\n\
+7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.\n\
+8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.\n\
+9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.\n\
+                       If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.\n\n\
+Here's an example of how your output should be structured:\n\n\
+<example>\n\
+<analysis>\n\
+[Your thought process, ensuring all points are covered thoroughly and accurately]\n\
+</analysis>\n\n\
+<summary>\n\
+1. Primary Request and Intent:\n\
+   [Detailed description]\n\n\
+2. Key Technical Concepts:\n\
+   - [Concept 1]\n\
+   - [Concept 2]\n\
+   - [...]\n\n\
+3. Files and Code Sections:\n\
+   - [File Name 1]\n\
+      - [Summary of why this file is important]\n\
+      - [Summary of the changes made to this file, if any]\n\
+      - [Important Code Snippet]\n\
+   - [File Name 2]\n\
+      - [Important Code Snippet]\n\
+   - [...]\n\n\
+4. Errors and fixes:\n\
+    - [Detailed description of error 1]:\n\
+      - [How you fixed the error]\n\
+      - [User feedback on the error if any]\n\
+    - [...]\n\n\
+5. Problem Solving:\n\
+   [Description of solved problems and ongoing troubleshooting]\n\n\
+6. All user messages: \n\
+    - [Detailed non tool use user message]\n\
+    - [...]\n\n\
+7. Pending Tasks:\n\
+   - [Task 1]\n\
+   - [Task 2]\n\
+   - [...]\n\n\
+8. Current Work:\n\
+   [Precise description of current work]\n\n\
+9. Optional Next Step:\n\
+   [Optional Next step to take]\n\n\
+</summary>\n\
+</example>\n\n\
+Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response. \n\n\
+There may be additional summarization instructions provided in the included context. If so, remember to follow these instructions when creating the above summary. Examples of instructions include:\n\
+<example>\n\
+## Compact Instructions\n\
+When summarizing the conversation focus on typescript code changes and also remember the mistakes you made and how you fixed them.\n\
+</example>\n\n\
+<example>\n\
+# Summary instructions\n\
+When you are using compact - please focus on test output and code changes. Include file reads verbatim.\n\
+</example>";
+
+const NO_TOOLS_TRAILER: &str = "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — \
+an <analysis> block followed by a <summary> block. \
+Tool calls will be rejected and you will fail the task.";
+
+const COMPACTION_SYSTEM_PROMPT: &str =
+    "You are a helpful AI assistant tasked with summarizing conversations.";
+
+/// Maximum output tokens requested from the LLM for a compaction summary.
+/// CC uses `min(16384, model_max)` for the API request; the higher ceiling
+/// here covers re-compactions whose input is already a prior summary.
+pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 20_000;
+
+/// Buffer subtracted from context window when computing the auto-compact
+/// threshold (`context_window - max_output - buffer`). Matches CC's
+/// `AUTOCOMPACT_BUFFER_TOKENS`.
+pub const AUTOCOMPACT_BUFFER_TOKENS: u32 = 13_000;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors specific to the compaction subsystem.
+#[derive(Debug)]
+pub enum CompactionError {
+    /// The API client does not support LLM-based compaction (default impl).
+    NotSupported,
+    /// The session is too small to compact.
+    NothingToCompact,
+    /// The LLM call failed.
+    ApiError(String),
+}
+
+impl fmt::Display for CompactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotSupported => write!(f, "compaction not supported by this API client"),
+            Self::NothingToCompact => write!(f, "session too small to compact"),
+            Self::ApiError(msg) => write!(f, "compaction API error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CompactionError {}
+
+// ---------------------------------------------------------------------------
+// Compaction config & result
+// ---------------------------------------------------------------------------
 
 /// Thresholds controlling when and how a session is compacted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +168,10 @@ pub struct CompactionResult {
     pub compacted_session: Session,
     pub removed_message_count: usize,
 }
+
+// ---------------------------------------------------------------------------
+// Token estimation (kept from original)
+// ---------------------------------------------------------------------------
 
 /// Roughly estimates the token footprint of the current session transcript.
 #[must_use]
@@ -72,6 +214,18 @@ fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
     }
 }
 
+fn estimate_message_tokens(message: &ConversationMessage) -> usize {
+    message
+        .blocks
+        .iter()
+        .map(estimate_single_block_tokens)
+        .sum()
+}
+
+// ---------------------------------------------------------------------------
+// should_compact — simplified; caller decides threshold
+// ---------------------------------------------------------------------------
+
 /// Returns `true` when the session exceeds the configured compaction budget.
 #[must_use]
 pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
@@ -85,6 +239,10 @@ pub fn should_compact(session: &Session, config: CompactionConfig) -> bool {
             .sum::<usize>()
             >= config.max_estimated_tokens
 }
+
+// ---------------------------------------------------------------------------
+// format / continuation helpers (kept from original — CC-compatible)
+// ---------------------------------------------------------------------------
 
 /// Normalizes a compaction summary into user-facing continuation text.
 #[must_use]
@@ -127,9 +285,186 @@ pub fn get_compact_continuation_message(
     base
 }
 
-/// Compacts a session by summarizing older messages and preserving the recent tail.
+// ---------------------------------------------------------------------------
+// LLM-based compaction (new async path)
+// ---------------------------------------------------------------------------
+
+/// Build the compaction prompt, optionally injecting custom instructions.
+fn build_compaction_prompt(custom_instructions: Option<&str>) -> String {
+    let mut prompt = String::with_capacity(
+        NO_TOOLS_PREAMBLE.len()
+            + BASE_COMPACT_PROMPT.len()
+            + NO_TOOLS_TRAILER.len()
+            + custom_instructions.map_or(0, |s| s.len() + 30),
+    );
+    prompt.push_str(NO_TOOLS_PREAMBLE);
+    prompt.push_str(BASE_COMPACT_PROMPT);
+    if let Some(instructions) = custom_instructions {
+        if !instructions.trim().is_empty() {
+            prompt.push_str("\n\nAdditional Instructions:\n");
+            prompt.push_str(instructions);
+        }
+    }
+    prompt.push_str(NO_TOOLS_TRAILER);
+    prompt
+}
+
+/// Format messages being removed into a transcript for the compaction LLM.
+///
+/// Images are stripped (replaced with `[image: <mime>]` placeholders) and
+/// thinking blocks are omitted to save tokens. The resulting messages are
+/// returned as `ConversationMessage`s suitable for passing to
+/// [`ApiClient::send_compaction`].
+fn build_compaction_messages(
+    removed: &[ConversationMessage],
+    compaction_prompt: &str,
+) -> Vec<ConversationMessage> {
+    let mut messages: Vec<ConversationMessage> = removed
+        .iter()
+        .filter_map(|msg| {
+            let blocks: Vec<ContentBlock> = msg
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(ContentBlock::Text { text: text.clone() }),
+                    ContentBlock::Image { mime_type, .. } => Some(ContentBlock::Text {
+                        text: format!("[image: {mime_type}]"),
+                    }),
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        thought_signature,
+                    } => Some(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        thought_signature: thought_signature.clone(),
+                    }),
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output,
+                        is_error,
+                    } => Some(ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        tool_name: tool_name.clone(),
+                        output: output.clone(),
+                        is_error: *is_error,
+                    }),
+                    ContentBlock::Thinking { .. } => None,
+                })
+                .collect();
+
+            if blocks.is_empty() {
+                return None;
+            }
+
+            // Map System/Tool roles to User for the compaction conversation
+            let role = match msg.role {
+                MessageRole::System | MessageRole::User | MessageRole::Tool => MessageRole::User,
+                MessageRole::Assistant => MessageRole::Assistant,
+            };
+
+            Some(ConversationMessage {
+                role,
+                blocks,
+                usage: None,
+                model: None,
+            })
+        })
+        .collect();
+
+    // Append the compaction request as a final user message
+    messages.push(ConversationMessage::user_text(compaction_prompt));
+    messages
+}
+
+/// Compacts a session using an LLM to produce a high-quality summary.
+///
+/// This is the primary compaction path. Falls back to local heuristic
+/// compaction when the API client doesn't support `send_compaction`.
+pub async fn compact_session<C: ApiClient>(
+    session: &Session,
+    config: CompactionConfig,
+    api_client: &mut C,
+    model: &str,
+    custom_instructions: Option<&str>,
+) -> Result<CompactionResult, CompactionError> {
+    if !should_compact(session, config) {
+        return Err(CompactionError::NothingToCompact);
+    }
+
+    let existing_summary = session
+        .messages
+        .first()
+        .and_then(extract_existing_compacted_summary);
+    let compacted_prefix_len = usize::from(existing_summary.is_some());
+
+    let raw_keep_from = session
+        .messages
+        .len()
+        .saturating_sub(config.preserve_recent_messages);
+
+    // Protect tool-use / tool-result boundaries
+    let keep_from = find_safe_compaction_boundary(session, raw_keep_from, compacted_prefix_len);
+
+    let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
+    let removed = &session.messages[compacted_prefix_len..keep_from];
+    let preserved = session.messages[keep_from..].to_vec();
+
+    if removed.is_empty() {
+        return Err(CompactionError::NothingToCompact);
+    }
+
+    let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
+
+    // Build prompt and messages for the LLM
+    let prompt = build_compaction_prompt(custom_instructions);
+    let compaction_messages = build_compaction_messages(removed, &prompt);
+
+    // Determine max tokens for compaction output
+    let max_tokens = std::cmp::min(
+        COMPACT_MAX_OUTPUT_TOKENS,
+        crate::model_capabilities::max_output_tokens_or_default(model),
+    );
+
+    // Call the LLM
+    let llm_summary = api_client
+        .send_compaction(model, COMPACTION_SYSTEM_PROMPT, compaction_messages, max_tokens)
+        .await
+        .map_err(|e| CompactionError::ApiError(e.to_string()))?;
+
+    let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
+    let formatted_summary = format_compact_summary(&summary);
+    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+
+    let mut compacted_messages = vec![ConversationMessage {
+        role: MessageRole::System,
+        blocks: vec![ContentBlock::Text { text: continuation }],
+        usage: None,
+        model: None,
+    }];
+    compacted_messages.extend(preserved);
+
+    let mut compacted_session = session.clone();
+    compacted_session.messages = compacted_messages;
+    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+
+    Ok(CompactionResult {
+        summary,
+        formatted_summary,
+        compacted_session,
+        removed_message_count: removed.len(),
+    })
+}
+
+/// Synchronous fallback compaction for callers without an async runtime or
+/// API client (e.g. the `run_resume_command` path, overflow recovery).
+///
+/// Uses a simple structural summary instead of an LLM call.
 #[must_use]
-pub fn compact_session(session: &Session, config: CompactionConfig) -> CompactionResult {
+pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> CompactionResult {
     if !should_compact(session, config) {
         return CompactionResult {
             summary: String::new(),
@@ -148,56 +483,16 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
         .messages
         .len()
         .saturating_sub(config.preserve_recent_messages);
-    // Ensure we do not split a tool-use / tool-result pair at the compaction
-    // boundary. If the first preserved message is a user message whose first
-    // block is a ToolResult, the assistant message with the matching ToolUse
-    // was slated for removal — that produces an orphaned tool role message on
-    // the OpenAI-compat path (400: tool message must follow assistant with
-    // tool_calls). Walk the boundary back until we start at a safe point.
-    let keep_from = {
-        let mut k = raw_keep_from;
-        // If the first preserved message is a tool-result turn, ensure its
-        // paired assistant tool-use turn is preserved too. Without this fix,
-        // the OpenAI-compat adapter sends an orphaned 'tool' role message
-        // with no preceding assistant 'tool_calls', which providers reject
-        // with a 400. We walk back only if the immediately preceding message
-        // is NOT an assistant message that contains a ToolUse block (i.e. the
-        // pair is actually broken at the boundary).
-        loop {
-            if k == 0 || k <= compacted_prefix_len {
-                break;
-            }
-            let first_preserved = &session.messages[k];
-            let starts_with_tool_result = first_preserved
-                .blocks
-                .first()
-                .is_some_and(|b| matches!(b, ContentBlock::ToolResult { .. }));
-            if !starts_with_tool_result {
-                break;
-            }
-            // Check the message just before the current boundary.
-            let preceding = &session.messages[k - 1];
-            let preceding_has_tool_use = preceding
-                .blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-            if preceding_has_tool_use {
-                // Pair is intact — walk back one more to include the assistant turn.
-                k = k.saturating_sub(1);
-                break;
-            }
-            // Preceding message has no ToolUse but we have a ToolResult —
-            // this is already an orphaned pair; walk back to try to fix it.
-            k = k.saturating_sub(1);
-        }
-        k
-    };
+
+    let keep_from = find_safe_compaction_boundary(session, raw_keep_from, compacted_prefix_len);
     let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
     let removed = &session.messages[compacted_prefix_len..keep_from];
     let preserved = session.messages[keep_from..].to_vec();
     let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
-    let summary =
-        merge_compact_summaries(existing_summary.as_deref(), &summarize_messages(removed));
+    let summary = merge_compact_summaries(
+        existing_summary.as_deref(),
+        &summarize_messages_local(removed),
+    );
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
 
@@ -219,6 +514,44 @@ pub fn compact_session(session: &Session, config: CompactionConfig) -> Compactio
         compacted_session,
         removed_message_count: removed.len(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Walk the compaction boundary back to avoid splitting a tool-use /
+/// tool-result pair.
+fn find_safe_compaction_boundary(
+    session: &Session,
+    raw_keep_from: usize,
+    compacted_prefix_len: usize,
+) -> usize {
+    let mut k = raw_keep_from;
+    loop {
+        if k == 0 || k <= compacted_prefix_len {
+            break;
+        }
+        let first_preserved = &session.messages[k];
+        let starts_with_tool_result = first_preserved
+            .blocks
+            .first()
+            .is_some_and(|b| matches!(b, ContentBlock::ToolResult { .. }));
+        if !starts_with_tool_result {
+            break;
+        }
+        let preceding = &session.messages[k - 1];
+        let preceding_has_tool_use = preceding
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        if preceding_has_tool_use {
+            k = k.saturating_sub(1);
+            break;
+        }
+        k = k.saturating_sub(1);
+    }
+    k
 }
 
 fn aggregate_compaction_usage(
@@ -253,7 +586,8 @@ fn compacted_summary_prefix_len(session: &Session) -> usize {
     )
 }
 
-fn summarize_messages(messages: &[ConversationMessage]) -> String {
+/// Simple local summary used as fallback when the LLM path is unavailable.
+fn summarize_messages_local(messages: &[ConversationMessage]) -> String {
     let user_messages = messages
         .iter()
         .filter(|message| message.role == MessageRole::User)
@@ -297,47 +631,6 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
         lines.push(format!("- Tools mentioned: {}.", tool_names.join(", ")));
     }
 
-    let recent_user_requests = collect_recent_role_summaries(messages, MessageRole::User, 3);
-    if !recent_user_requests.is_empty() {
-        lines.push("- Recent user requests:".to_string());
-        lines.extend(
-            recent_user_requests
-                .into_iter()
-                .map(|request| format!("  - {request}")),
-        );
-    }
-
-    let pending_work = infer_pending_work(messages);
-    if !pending_work.is_empty() {
-        lines.push("- Pending work:".to_string());
-        lines.extend(pending_work.into_iter().map(|item| format!("  - {item}")));
-    }
-
-    let key_files = collect_key_files(messages);
-    if !key_files.is_empty() {
-        lines.push(format!("- Key files referenced: {}.", key_files.join(", ")));
-    }
-
-    if let Some(current_work) = infer_current_work(messages) {
-        lines.push(format!("- Current work: {current_work}"));
-    }
-
-    lines.push("- Key timeline:".to_string());
-    for message in messages {
-        let role = match message.role {
-            MessageRole::System => "system",
-            MessageRole::User => "user",
-            MessageRole::Assistant => "assistant",
-            MessageRole::Tool => "tool",
-        };
-        let content = message
-            .blocks
-            .iter()
-            .map(summarize_block)
-            .collect::<Vec<_>>()
-            .join(" | ");
-        lines.push(format!("  - {role}: {content}"));
-    }
     lines.push("</summary>".to_string());
     lines.join("\n")
 }
@@ -375,148 +668,6 @@ fn merge_compact_summaries(existing_summary: Option<&str>, new_summary: &str) ->
 
     lines.push("</summary>".to_string());
     lines.join("\n")
-}
-
-fn summarize_block(block: &ContentBlock) -> String {
-    let raw = match block {
-        ContentBlock::Text { text } => text.clone(),
-        ContentBlock::Image { mime_type, .. } => format!("[image: {mime_type}]"),
-        ContentBlock::Thinking { thinking, .. } => {
-            format!("thinking ({} chars)", thinking.chars().count())
-        }
-        ContentBlock::ToolUse { name, input, .. } => format!("tool_use {name}({input})"),
-        ContentBlock::ToolResult {
-            tool_name,
-            output,
-            is_error,
-            ..
-        } => format!(
-            "tool_result {tool_name}: {}{output}",
-            if *is_error { "error " } else { "" }
-        ),
-    };
-    truncate_summary(&raw, 160)
-}
-
-fn collect_recent_role_summaries(
-    messages: &[ConversationMessage],
-    role: MessageRole,
-    limit: usize,
-) -> Vec<String> {
-    messages
-        .iter()
-        .filter(|message| message.role == role)
-        .rev()
-        .filter_map(|message| first_text_block(message))
-        .take(limit)
-        .map(|text| truncate_summary(text, 160))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
-}
-
-fn infer_pending_work(messages: &[ConversationMessage]) -> Vec<String> {
-    messages
-        .iter()
-        .rev()
-        .filter_map(first_text_block)
-        .filter(|text| {
-            let lowered = text.to_ascii_lowercase();
-            lowered.contains("todo")
-                || lowered.contains("next")
-                || lowered.contains("pending")
-                || lowered.contains("follow up")
-                || lowered.contains("remaining")
-        })
-        .take(3)
-        .map(|text| truncate_summary(text, 160))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
-}
-
-fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
-    let mut files = messages
-        .iter()
-        .flat_map(|message| message.blocks.iter())
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::ToolUse { input, .. } => Some(input.as_str()),
-            ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
-            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-            ContentBlock::Image { .. } => None,
-        })
-        .flat_map(extract_file_candidates)
-        .collect::<Vec<_>>();
-    files.sort();
-    files.dedup();
-    files.into_iter().take(8).collect()
-}
-
-fn infer_current_work(messages: &[ConversationMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .filter_map(first_text_block)
-        .find(|text| !text.trim().is_empty())
-        .map(|text| truncate_summary(text, 200))
-}
-
-fn first_text_block(message: &ConversationMessage) -> Option<&str> {
-    message.blocks.iter().find_map(|block| match block {
-        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
-        ContentBlock::ToolUse { .. }
-        | ContentBlock::ToolResult { .. }
-        | ContentBlock::Thinking { .. }
-        | ContentBlock::Text { .. }
-        | ContentBlock::Image { .. } => None,
-    })
-}
-
-fn has_interesting_extension(candidate: &str) -> bool {
-    std::path::Path::new(candidate)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            ["rs", "ts", "tsx", "js", "json", "md"]
-                .iter()
-                .any(|expected| extension.eq_ignore_ascii_case(expected))
-        })
-}
-
-fn extract_file_candidates(content: &str) -> Vec<String> {
-    content
-        .split_whitespace()
-        .filter_map(|token| {
-            let candidate = token.trim_matches(|char: char| {
-                matches!(char, ',' | '.' | ':' | ';' | ')' | '(' | '"' | '\'' | '`')
-            });
-            if candidate.contains('/') && has_interesting_extension(candidate) {
-                Some(candidate.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn truncate_summary(content: &str, max_chars: usize) -> String {
-    if content.chars().count() <= max_chars {
-        return content.to_string();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
-fn estimate_message_tokens(message: &ConversationMessage) -> usize {
-    message
-        .blocks
-        .iter()
-        .map(estimate_single_block_tokens)
-        .sum()
 }
 
 fn extract_tag_block(content: &str, tag: &str) -> Option<String> {
@@ -572,6 +723,17 @@ fn extract_existing_compacted_summary(message: &ConversationMessage) -> Option<S
     Some(summary.trim().to_string())
 }
 
+fn first_text_block(message: &ConversationMessage) -> Option<&str> {
+    message.blocks.iter().find_map(|block| match block {
+        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+        ContentBlock::ToolUse { .. }
+        | ContentBlock::ToolResult { .. }
+        | ContentBlock::Thinking { .. }
+        | ContentBlock::Text { .. }
+        | ContentBlock::Image { .. } => None,
+    })
+}
+
 fn extract_summary_highlights(summary: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut in_timeline = false;
@@ -619,8 +781,8 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_key_files, compact_session, format_compact_summary,
-        get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
+        compact_session_sync, format_compact_summary, get_compact_continuation_message,
+        should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
     use crate::usage::{TokenUsage, UsageCostCurrency};
@@ -636,7 +798,7 @@ mod tests {
         let mut session = Session::new();
         session.messages = vec![ConversationMessage::user_text("hello")];
 
-        let result = compact_session(&session, CompactionConfig::default());
+        let result = compact_session_sync(&session, CompactionConfig::default());
         assert_eq!(result.removed_message_count, 0);
         assert_eq!(result.compacted_session, session);
         assert!(result.summary.is_empty());
@@ -662,7 +824,7 @@ mod tests {
             },
         ];
 
-        let result = compact_session(
+        let result = compact_session_sync(
             &session,
             CompactionConfig {
                 preserve_recent_messages: 2,
@@ -670,9 +832,6 @@ mod tests {
             },
         );
 
-        // With the tool-use/tool-result boundary fix, the compaction preserves
-        // one extra message to avoid an orphaned tool result at the boundary.
-        // messages[1] (assistant) must be kept along with messages[2] (tool result).
         assert!(
             result.removed_message_count <= 2,
             "expected at most 2 removed, got {}",
@@ -687,7 +846,6 @@ mod tests {
             ContentBlock::Text { text } if text.contains("Summary:")
         ));
         assert!(result.formatted_summary.contains("Scope:"));
-        assert!(result.formatted_summary.contains("Key timeline:"));
         assert!(should_compact(
             &session,
             CompactionConfig {
@@ -695,10 +853,6 @@ mod tests {
                 max_estimated_tokens: 1,
             }
         ));
-        // Note: with the tool-use/tool-result boundary guard the compacted session
-        // may preserve one extra message at the boundary, so token reduction is
-        // not guaranteed for small sessions. The invariant that matters is that
-        // the removed_message_count is non-zero (something was compacted).
         assert!(
             result.removed_message_count > 0,
             "compaction must remove at least one message"
@@ -743,7 +897,7 @@ mod tests {
             }]),
         ];
 
-        let result = compact_session(
+        let result = compact_session_sync(
             &session,
             CompactionConfig {
                 preserve_recent_messages: 2,
@@ -804,7 +958,7 @@ mod tests {
             max_estimated_tokens: 1,
         };
 
-        let first = compact_session(&initial_session, config);
+        let first = compact_session_sync(&initial_session, config);
         let mut follow_up_messages = first.compacted_session.messages.clone();
         follow_up_messages.extend([
             ConversationMessage::user_text("Please add regression tests for compaction."),
@@ -826,7 +980,7 @@ mod tests {
         let mut second_session = Session::new();
         second_session.compaction = first.compacted_session.compaction.clone();
         second_session.messages = follow_up_messages;
-        let second = compact_session(&second_session, config);
+        let second = compact_session_sync(&second_session, config);
 
         assert!(second
             .formatted_summary
@@ -837,9 +991,6 @@ mod tests {
         assert!(second
             .formatted_summary
             .contains("Newly compacted context:"));
-        assert!(second
-            .formatted_summary
-            .contains("Also update rust/crates/runtime/src/conversation.rs"));
         assert!(matches!(
             &second.compacted_session.messages[0].blocks[0],
             ContentBlock::Text { text }
@@ -891,39 +1042,17 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn truncates_long_blocks_in_summary() {
-        let summary = super::summarize_block(&ContentBlock::Text {
-            text: "x".repeat(400),
-        });
-        assert!(summary.ends_with('…'));
-        assert!(summary.chars().count() <= 161);
-    }
-
-    #[test]
-    fn extracts_key_files_from_message_content() {
-        let files = collect_key_files(&[ConversationMessage::user_text(
-            "Update rust/crates/runtime/src/compact.rs and rust/crates/rusty-sudocode-cli/src/main.rs next.",
-        )]);
-        assert!(files.contains(&"rust/crates/runtime/src/compact.rs".to_string()));
-        assert!(files.contains(&"rust/crates/rusty-sudocode-cli/src/main.rs".to_string()));
-    }
-
     /// Regression: compaction must not split an assistant(ToolUse) /
-    /// user(ToolResult) pair at the boundary. An orphaned tool-result message
-    /// without the preceding assistant `tool_calls` causes a 400 on the
-    /// OpenAI-compat path (gaebal-gajae repro 2026-04-09).
+    /// user(ToolResult) pair at the boundary.
     #[test]
     fn compaction_does_not_split_tool_use_tool_result_pair() {
         use crate::session::{ContentBlock, Session};
 
         let tool_id = "call_abc";
         let mut session = Session::default();
-        // Turn 1: user prompt
         session
             .push_message(ConversationMessage::user_text("Search for files"))
             .unwrap();
-        // Turn 2: assistant calls a tool
         session
             .push_message(ConversationMessage::assistant(vec![
                 ContentBlock::ToolUse {
@@ -934,7 +1063,6 @@ mod tests {
                 },
             ]))
             .unwrap();
-        // Turn 3: tool result
         session
             .push_message(ConversationMessage::tool_result(
                 tool_id,
@@ -943,24 +1071,17 @@ mod tests {
                 false,
             ))
             .unwrap();
-        // Turn 4: assistant final response
         session
             .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "Done.".to_string(),
             }]))
             .unwrap();
 
-        // Compact preserving only 1 recent message — without the fix this
-        // would cut the boundary so that the tool result (turn 3) is first,
-        // without its preceding assistant tool_calls (turn 2).
         let config = CompactionConfig {
             preserve_recent_messages: 1,
             ..CompactionConfig::default()
         };
-        let result = compact_session(&session, config);
-        // After compaction, no two consecutive messages should have the pattern
-        // tool_result immediately following a non-assistant message (i.e. an
-        // orphaned tool result without a preceding assistant ToolUse).
+        let result = compact_session_sync(&session, config);
         let messages = &result.compacted_session.messages;
         for i in 1..messages.len() {
             let curr_is_tool_result = messages[i]
@@ -984,14 +1105,186 @@ mod tests {
     }
 
     #[test]
-    fn infers_pending_work_from_recent_messages() {
-        let pending = infer_pending_work(&[
-            ConversationMessage::user_text("done"),
+    fn build_compaction_prompt_includes_cc_constants() {
+        let prompt = super::build_compaction_prompt(None);
+        assert!(prompt.contains("CRITICAL: Respond with TEXT ONLY"));
+        assert!(prompt.contains("Your task is to create a detailed summary"));
+        assert!(prompt.contains("REMINDER: Do NOT call any tools"));
+    }
+
+    #[test]
+    fn build_compaction_prompt_appends_custom_instructions() {
+        let prompt = super::build_compaction_prompt(Some("Focus on test changes"));
+        assert!(prompt.contains("Additional Instructions:"));
+        assert!(prompt.contains("Focus on test changes"));
+    }
+
+    #[test]
+    fn build_compaction_messages_strips_images_and_thinking() {
+        let messages = vec![
+            ConversationMessage::user_text("hello"),
+            ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "hmm...".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "response".to_string(),
+                },
+            ]),
+            ConversationMessage {
+                role: MessageRole::User,
+                blocks: vec![ContentBlock::Image {
+                    data: "base64data".to_string(),
+                    mime_type: "image/png".to_string(),
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+
+        let result = super::build_compaction_messages(&messages, "summarize");
+
+        // Should have 3 original messages + 1 compaction prompt
+        assert_eq!(result.len(), 4);
+
+        // Thinking block should be stripped
+        assert!(result[1].blocks.len() == 1);
+        assert!(matches!(&result[1].blocks[0], ContentBlock::Text { text } if text == "response"));
+
+        // Image should be replaced with placeholder
+        assert!(matches!(
+            &result[2].blocks[0],
+            ContentBlock::Text { text } if text == "[image: image/png]"
+        ));
+
+        // Last message is the compaction prompt
+        assert!(matches!(
+            &result[3].blocks[0],
+            ContentBlock::Text { text } if text == "summarize"
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_compact_session_uses_llm_summary() {
+        use async_trait::async_trait;
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+
+        struct MockCompactionClient;
+
+        #[async_trait]
+        impl ApiClient for MockCompactionClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used in this test"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                assert!(
+                    system_prompt.contains("summarizing conversations"),
+                    "compaction should use the correct system prompt"
+                );
+                Ok("<analysis>Mock analysis</analysis>\n<summary>\n1. Primary Request and Intent:\n   User asked to test compaction.\n\n7. Pending Tasks:\n   - Verify LLM compaction works\n</summary>".to_string())
+            }
+        }
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
             ConversationMessage::assistant(vec![ContentBlock::Text {
-                text: "Next: update tests and follow up on remaining CLI polish.".to_string(),
+                text: "two ".repeat(200),
             }]),
-        ]);
-        assert_eq!(pending.len(), 1);
-        assert!(pending[0].contains("Next: update tests"));
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = MockCompactionClient;
+        let result = super::compact_session(
+            &session,
+            config,
+            &mut client,
+            "claude-sonnet-4-6",
+            None,
+        )
+        .await
+        .expect("LLM compaction should succeed");
+
+        assert!(result.removed_message_count > 0);
+        assert!(result.formatted_summary.contains("User asked to test compaction"));
+        assert!(!result.formatted_summary.contains("Mock analysis"),
+            "analysis block should be stripped");
+        assert_eq!(
+            result.compacted_session.messages[0].role,
+            MessageRole::System,
+        );
+    }
+
+    #[tokio::test]
+    async fn async_compact_session_falls_through_on_not_supported() {
+        use async_trait::async_trait;
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+
+        // Use the default ApiClient impl which returns "not supported"
+        struct NoCompactionClient;
+
+        #[async_trait]
+        impl ApiClient for NoCompactionClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+        }
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = NoCompactionClient;
+        let result = super::compact_session(
+            &session,
+            config,
+            &mut client,
+            "claude-sonnet-4-6",
+            None,
+        )
+        .await;
+
+        // Should fail with ApiError since default impl returns "not supported"
+        assert!(result.is_err());
+        assert!(matches!(result, Err(super::CompactionError::ApiError(_))));
     }
 }

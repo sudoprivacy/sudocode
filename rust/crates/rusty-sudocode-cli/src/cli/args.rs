@@ -633,7 +633,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 allowed_tools,
                 permission_mode,
                 output_format,
-                compact: false,
+                compact: cli.compact,
                 base_commit: cli.base_commit,
                 reasoning_effort: cli.reasoning_effort,
                 allow_broad_cwd: cli.allow_broad_cwd,

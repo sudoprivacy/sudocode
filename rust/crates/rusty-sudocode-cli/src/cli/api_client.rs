@@ -121,6 +121,57 @@ pub(crate) fn resolve_cli_auth_source_for_cwd() -> Result<AuthSource, api::ApiEr
 
 #[async_trait]
 impl ApiClient for AnthropicRuntimeClient {
+    async fn send_compaction(
+        &mut self,
+        model: &str,
+        system_prompt: &str,
+        messages: Vec<runtime::ConversationMessage>,
+        max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        let request = MessageRequest {
+            model: model.to_string(),
+            max_tokens,
+            messages: convert_messages(&messages),
+            system: Some(system_prompt.to_string()),
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            reasoning_effort: None,
+            cache_hints: None,
+            ..Default::default()
+        };
+
+        let response = self
+            .client
+            .send_message(&request, None)
+            .await
+            .map_err(|error| {
+                RuntimeError::new(format!(
+                    "compaction API error: {}",
+                    format_user_visible_api_error(&self.session_id, &error)
+                ))
+            })?;
+
+        // Extract text content from the response
+        let text = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                OutputContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        if text.is_empty() {
+            return Err(RuntimeError::new(
+                "compaction response contained no text content",
+            ));
+        }
+
+        Ok(text)
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         if let Some(progress_reporter) = &self.progress_reporter {

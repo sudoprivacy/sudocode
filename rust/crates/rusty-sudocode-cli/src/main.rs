@@ -112,7 +112,7 @@ use plugins::{
 };
 use render::{MarkdownStreamState, SpinnerHandle, TerminalRenderer};
 use runtime::{
-    check_base_commit, compact_session, estimate_block_tokens, estimate_session_tokens,
+    check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
     pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, AcpError,
     ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
@@ -1151,7 +1151,7 @@ fn run_resume_command(
             json: Some(serde_json::json!({ "kind": "help", "text": render_repl_help() })),
         }),
         SlashCommand::Compact => {
-            let result = runtime::compact_session(
+            let result = runtime::compact_session_sync(
                 session,
                 CompactionConfig {
                     max_estimated_tokens: 0,
@@ -3169,7 +3169,7 @@ impl AcpSdkDelegate {
                     preserve_recent_messages: 2,
                     max_estimated_tokens: 0, // Force compaction
                 };
-                let result = compact_session(session.runtime.session(), compaction_config);
+                let result = compact_session_sync(session.runtime.session(), compaction_config);
                 if result.removed_message_count > 0 {
                     // Update session with compacted version
                     *session.runtime.session_mut() = result.compacted_session.clone();
@@ -4088,12 +4088,15 @@ impl LiveCli {
 
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
-            Some(&mut permission_prompter),
-            None,
-        ));
+        let result = if io::stdin().is_terminal() {
+            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
+            self.tokio_runtime
+                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
+        } else {
+            let mut prompter = AutoDenyPermissionPrompter;
+            self.tokio_runtime
+                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
+        };
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -4105,12 +4108,15 @@ impl LiveCli {
 
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
-            Some(&mut permission_prompter),
-            None,
-        ));
+        let result = if io::stdin().is_terminal() {
+            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
+            self.tokio_runtime
+                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
+        } else {
+            let mut prompter = AutoDenyPermissionPrompter;
+            self.tokio_runtime
+                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
+        };
         hook_abort_monitor.stop();
         let summary = result?;
         self.replace_runtime(runtime)?;
@@ -5232,7 +5238,9 @@ impl LiveCli {
     }
 
     fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self.runtime.compact(CompactionConfig::default());
+        let result = self
+            .tokio_runtime
+            .block_on(self.runtime.compact(CompactionConfig::default(), None));
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
@@ -5997,6 +6005,24 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
             Err(error) => runtime::PermissionPromptDecision::Deny {
                 reason: format!("permission approval failed: {error}"),
             },
+        }
+    }
+}
+
+/// Permission prompter that auto-denies all requests. Used in compact/pipe
+/// mode where interactive prompts would corrupt the output stream.
+struct AutoDenyPermissionPrompter;
+
+impl runtime::PermissionPrompter for AutoDenyPermissionPrompter {
+    fn decide(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        runtime::PermissionPromptDecision::Deny {
+            reason: format!(
+                "tool '{}' auto-denied in non-interactive compact mode",
+                request.tool_name
+            ),
         }
     }
 }

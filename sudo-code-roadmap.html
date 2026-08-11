@@ -1742,7 +1742,8 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   the sudocode runtime routes through one
   <code>FsBackend</code> trait with three impls:
   <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
-  syscalls when <code>scode</code> runs as an in-process managed agent),
+  syscalls when the sudocode runtime is hosted in-process by the nexus
+  daemon <code>nexusd-cluster</code>),
   <code>StdFsBackend</code> (host <code>std::fs</code> for the
   standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
   kernel from an edge / dev CLI). No code path bypasses the trait —
@@ -1773,8 +1774,8 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   path layout is the SSOT for permissions and the error message
   is the teaching channel.</li>
 
-  <li><strong>Session state placement.</strong> Inside the
-  in-process managed-agent host (<code>scode</code> on <code>KernelFsBackend</code>), session jsonl transcripts live at
+  <li><strong>Session state placement.</strong> When hosted in-process by
+  <code>nexusd-cluster</code> (on <code>KernelFsBackend</code>), session jsonl transcripts live at
   <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
   on the kernel VFS, not on the host filesystem. Booting a worker
   reads its profile + the requested <code>--session-id</code>
@@ -1822,13 +1823,14 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   needs to do nothing to participate.</li>
 </ul>
 
-<h3 id="linkage">Linkage: the sudocode binary links the kernel statically</h3>
+<h3 id="linkage">Linkage: sudocode_runtime is statically linked into the daemon</h3>
 
-<p>The sudocode binary links the nexus kernel crate directly and
-monomorphises <code>KernelFsBackend&lt;Kernel&gt;</code>, so an agent's
-file operations are ordinary in-process Rust calls. The same
-<code>scode</code> binary that runs standalone (on <code>StdFsBackend</code>)
-is the managed-agent host in-process — there is no separate host binary.
+<p>In managed-agent mode the sudocode runtime is compiled <em>into</em> the
+nexus daemon <code>nexusd-cluster</code> (which already links the nexus
+<code>kernel</code> crate), and <code>KernelFsBackend&lt;Kernel&gt;</code>
+monomorphises there, so an agent's file operations are ordinary in-process
+Rust calls. The daemon is the host — there is no separate sudocode host
+binary; <code>scode</code> standalone stays on <code>StdFsBackend</code>.
 nexus also offers a C-ABI dylib plugin boundary (<code>plugin-abi</code>),
 which FUSE and the vault use. sudocode does not: <strong>the dylib
 boundary is reserved for code that is third-party, untrusted, or must
@@ -1881,13 +1883,15 @@ proceed in parallel.</p>
   nexus <code>NexusVFSService.Call</code> surface. First end-to-end
   validation: a standalone scode pointing at a remote nexus serves
   its session jsonl from the kernel. <strong>PARTIAL — code exists, lacks e2e validation.</strong></li>
-  <li><strong>KernelFsBackend + in-process managed-agent host.</strong>
-  The <code>scode</code> binary links nexus <code>kernel</code> +
-  <code>services</code> in-process and monomorphises
-  <code>SpawnTask&lt;Kernel&gt;</code> — this is where the dependency
-  edge sudocode → nexus is realised. <strong>PARTIAL —
-  <code>KernelFsBackend</code> + <code>spawn_task</code> implemented in
-  the runtime; remaining: wire the managed-agent entry point + the
+  <li><strong>KernelFsBackend + in-process host in the daemon.</strong>
+  The nexus daemon <code>nexusd-cluster</code> (nexus repo <code>rust/nexusd</code>)
+  links <code>kernel</code> + <code>services</code> + <code>sudocode_runtime</code>
+  and monomorphises <code>SpawnTask&lt;Kernel&gt;</code> against one kernel rev —
+  the single <code>nexus → sudocode</code> edge, at that binary leaf only.
+  <strong>PARTIAL — <code>KernelFsBackend</code> + <code>spawn_task</code>
+  implemented in this runtime; remaining on our side: bump the nexus-vfs
+  <code>kernel</code> pin to match the daemon's rev + expose the
+  <code>spawn_task</code> adapter shape. The daemon wires it via the
   nexus-side <code>install_managed_agent_with_spawn</code> seam.</strong></li>
   <li><strong>Mailbox read/write loop.</strong> Inside the managed
   runtime, replace stdin/stdout prompts with
@@ -1933,17 +1937,20 @@ path; the backend determines where bytes land.</p>
   <tbody>
     <tr><td><strong>Standalone CLI</strong></td><td><code>scode</code></td><td><code>StdFsBackend</code></td><td>Developer laptop, direct filesystem</td><td>Current production path</td></tr>
     <tr><td><strong>Edge / Dev CLI</strong></td><td><code>scode</code></td><td><code>NexusVfsFsBackend</code></td><td>CLI connecting to remote nexus kernel via gRPC</td><td>Code exists, lacks e2e validation</td></tr>
-    <tr><td><strong>Managed agent</strong></td><td><code>scode</code> (in-process mode)</td><td><code>KernelFsBackend&lt;Kernel&gt;</code></td><td>In-process inside nexus, direct Rust syscalls</td><td>Target production path; runtime pieces implemented, entry-point + nexus seam pending</td></tr>
+    <tr><td><strong>Managed agent</strong></td><td><code>nexusd-cluster</code> (hosts sudocode_runtime)</td><td><code>KernelFsBackend&lt;Kernel&gt;</code></td><td>In-process inside the nexus daemon, direct Rust syscalls</td><td>Target production path; runtime pieces implemented, kernel-pin bump + daemon adapter pending</td></tr>
   </tbody>
 </table>
 
 <div class="callout">
-  <strong>Migration note:</strong> The target production path is <code>scode</code>
-  in in-process managed-agent mode. Current production runs standalone <code>scode</code> with
-  <code>StdFsBackend</code>. Migration requires: (1) wire the managed-agent entry point
-  (no separate host binary — <code>scode</code> already links the kernel via the runtime),
+  <strong>Migration note:</strong> The target production path is
+  <code>sudocode_runtime</code> hosted in-process by <code>nexusd-cluster</code>
+  (the nexus daemon), via the <code>SpawnTask</code> adapter. Current production
+  runs standalone <code>scode</code> with <code>StdFsBackend</code>. Migration
+  requires: (1) bump this runtime's nexus-vfs <code>kernel</code> pin to match the
+  daemon's rev (so <code>SpawnTask&lt;Kernel&gt;</code> is one type),
   (2) validate session/config/cache paths work identically on <code>KernelFsBackend</code>,
-  (3) the nexus-side <code>install_managed_agent_with_spawn</code> seam. Track in Goal&nbsp;4 sequencing PR&nbsp;#3.
+  (3) the nexus daemon (<code>rust/nexusd</code>) wires the adapter via
+  <code>install_managed_agent_with_spawn</code>. Track in Goal&nbsp;4 sequencing PR&nbsp;#3.
 </div>
 
 <h2 id="model-capabilities-service">Model Capabilities Service</h2>

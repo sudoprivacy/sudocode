@@ -93,3 +93,85 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     });
     assert_eq!(exit, 0, "clean exit code");
 }
+
+/// **P0 streaming regression guard**: markdown code blocks in model
+/// responses must render with intact box-drawing borders.
+///
+/// Root cause of the bug this guards: every streaming chunk had a
+/// spurious `\n` appended before being handed to the markdown renderer.
+/// This broke the fenced code block parser — the renderer saw the
+/// opening fence, a blank line, then the content on separate virtual
+/// lines, causing it to emit plain text instead of a decorated block.
+/// The box-drawing border characters (`╭─` / `╰─`) were absent entirely.
+///
+/// Journey: boot iocraft REPL in queue mode → send prompt that elicits
+/// a fenced code block → verify `╭─` (opening border) appears → verify
+/// `╰─` (closing border) appears → clean exit.
+///
+/// This MUST be a live test: mock responses are pre-recorded and bypass
+/// the streaming chunk path that contained the bug.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_streaming_code_block_not_corrupted() {
+    let env = TestEnv::new("iocraft-code-block");
+
+    if env.is_mock() {
+        // This test targets a streaming-path bug that only manifests
+        // with a real model producing chunks. Skip gracefully in mock
+        // mode so CI continues unimpeded.
+        eprintln!(
+            "iocraft_repl_streaming_code_block_not_corrupted: \
+             skipped in mock mode (requires SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("initial prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Send a prompt that elicits a fenced code block response.
+    let prompt = "Write a one-line hello world bash script in a fenced code block. Output only the code block, nothing else.";
+    sess.send(&format!("{prompt}\r")).expect("send prompt");
+
+    // The markdown renderer must emit box-drawing borders around fenced
+    // code blocks. If the spurious-newline bug is present the renderer
+    // falls back to plain text and these characters never appear.
+    sess.expect("╭─").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!(
+            "code block opening border '╭─' missing — \
+             streaming chunk corruption suspected: {e}\nPTY:\n{screen}"
+        );
+    });
+
+    sess.expect("╰─").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!(
+            "code block closing border '╰─' missing — \
+             code block split by spurious blank lines?: {e}\nPTY:\n{screen}"
+        );
+    });
+
+    // Clean exit via /exit in the REPL.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("REPL prompt not seen after response: {e}\nPTY:\n{screen}");
+    });
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("clean exit after code-block test: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}

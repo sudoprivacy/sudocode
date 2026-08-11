@@ -269,24 +269,34 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
     lines.join("\n")
 }
 
+/// Message type for the output channel: distinguishes complete lines
+/// (which need a trailing newline) from raw byte chunks (which already
+/// include their own newlines from the markdown renderer).
+enum OutputMsg {
+    /// Complete line — `StdoutHandle::println` will append `\n`.
+    Line(String),
+    /// Raw chunk — `StdoutHandle::print`, no extra newline.
+    Raw(String),
+}
+
 /// Channel-backed output handle for routing text from the runner thread
 /// to the iocraft render loop. Clone is cheap. Implements `std::io::Write`
 /// so it can be used as a stdout replacement.
 #[derive(Clone)]
 pub struct OutputSender {
-    tx: SyncSender<String>,
+    tx: SyncSender<OutputMsg>,
 }
 
 impl OutputSender {
     pub fn println(&self, text: &str) {
-        let _ = self.tx.send(text.to_string());
+        let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
 }
 
 impl Write for OutputSender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let text = String::from_utf8_lossy(buf).to_string();
-        let _ = self.tx.send(text);
+        let _ = self.tx.send(OutputMsg::Raw(text));
         Ok(buf.len())
     }
 
@@ -359,7 +369,7 @@ fn strip_ansi(input: &str) -> String {
 
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
-    output_rx: Arc<Mutex<Receiver<String>>>,
+    output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
     input_tx: SyncSender<InputEvent>,
     spinner: SpinnerState,
@@ -411,7 +421,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
                     match rx.try_recv() {
-                        Ok(text) => stdout_for_future.println(text),
+                        Ok(OutputMsg::Line(text)) => stdout_for_future.println(text),
+                        Ok(OutputMsg::Raw(text)) => stdout_for_future.print(text),
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
@@ -703,7 +714,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// sends output text via `ReplHandle::output`. The spinner state is
 /// shared so the runner thread can update it atomically.
 pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle {
-    let (output_tx, output_rx) = mpsc::sync_channel::<String>(512);
+    let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
     let spinner = SpinnerState::new_inactive();

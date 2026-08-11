@@ -11,7 +11,7 @@
 use std::io;
 use std::sync::Arc;
 
-use kernel::abi::KernelAbi;
+use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
 // ---------------------------------------------------------------------------
@@ -214,16 +214,16 @@ impl FsBackend for StdFsBackend {
 
 /// Kernel-backed filesystem for in-process execution inside nexusd.
 ///
-/// Forwards every operation through the [`KernelAbi`] trait so managed
+/// Forwards every operation through the [`KernelSyscall`] trait so managed
 /// agents read/write the VFS trie via `sys_read` / `sys_write` /
 /// `sys_stat` / `sys_readdir` instead of touching the host
 /// filesystem.
-pub struct KernelFsBackend<K: KernelAbi> {
+pub struct KernelFsBackend<K: KernelSyscall> {
     kernel: Arc<K>,
     ctx: OperationContext,
 }
 
-impl<K: KernelAbi> KernelFsBackend<K> {
+impl<K: KernelSyscall> KernelFsBackend<K> {
     pub fn new(kernel: Arc<K>, ctx: OperationContext) -> Self {
         Self { kernel, ctx }
     }
@@ -234,7 +234,7 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
     io::Error::other(format!("{e:?}"))
 }
 
-impl<K: KernelAbi + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
+impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         self.kernel
             .sys_read(path, &self.ctx, 0, 0)

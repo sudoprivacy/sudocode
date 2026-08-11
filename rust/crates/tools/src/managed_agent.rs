@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelAbi, SpawnHandle};
+use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelSyscall, SpawnHandle};
 use runtime::{
     ModelFamilyIdentity, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
     ToolExecutor,
@@ -48,7 +48,7 @@ pub fn spawn_managed_agent<K, F>(
     state_callback: F,
 ) -> SpawnHandle
 where
-    K: KernelAbi + Send + Sync + 'static,
+    K: KernelSyscall + Send + Sync + 'static,
     F: Fn(AgentLoopState) + Send + 'static,
 {
     let model = desc

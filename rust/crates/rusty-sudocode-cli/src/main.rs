@@ -3947,15 +3947,12 @@ impl LiveCli {
             })
             .collect();
 
-        let hint = "  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for /command completions";
-
         format!(
-            "{}\n\n{}\n{}\n{}\n\n{}",
+            "{}\n\n{}\n{}\n{}",
             logo,
             top,
             boxed_lines.join("\n"),
             bottom,
-            hint,
         )
     }
 

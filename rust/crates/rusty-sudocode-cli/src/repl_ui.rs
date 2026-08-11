@@ -15,6 +15,7 @@
 //! [StatusSlot]    ← spinner | turn_result (auto-dismiss) | tips (first-run) | empty
 //! ──── separator ────
 //! [InputSlot]     ← text_input | question_panel   (Option<QuestionPromptView>)
+//! ──── separator ────
 //! [FooterSlot]    ← full | minimal | turn_active
 //! ```
 
@@ -788,7 +789,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 StatusSlot::Empty => None,
             })
             // Separator
-            Text(content: sep, color: Color::DarkGrey)
+            Text(content: sep.clone(), color: Color::DarkGrey)
             // InputSlot
             #(question_panel.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
@@ -805,6 +806,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     },
                 )
             }
+            // Separator
+            Text(content: sep, color: Color::DarkGrey)
             // FooterSlot
             Text(content: footer_text, color: Color::DarkGrey)
         }

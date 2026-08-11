@@ -279,6 +279,68 @@ enum OutputMsg {
     Raw(String),
 }
 
+/// A single call to iocraft's stdout handle. Borrows from the message being
+/// split — the only allocation on this per-delta path is the one iocraft's
+/// own `ToString` bound makes when the op is issued.
+#[derive(Debug, PartialEq, Eq)]
+enum OutputOp<'a> {
+    /// `StdoutHandle::println` — iocraft appends the line terminator itself,
+    /// choosing `\r\n` in raw mode and `\n` otherwise.
+    Println(&'a str),
+    /// `StdoutHandle::print` — written verbatim, no terminator.
+    Print(&'a str),
+}
+
+/// Split one output message into the sequence of iocraft stdout calls that
+/// renders it with correct line endings.
+///
+/// **Why this exists.** The iocraft render loop holds the terminal in raw
+/// mode, where `OPOST`/`ONLCR` are off and a bare `\n` moves the cursor down
+/// *without* returning it to column 0. iocraft handles that for its own
+/// canvas, and `StdoutHandle::println` terminates the message it is given —
+/// but only the *end* of it: interior `\n` are passed through untouched, and
+/// `StdoutHandle::print` writes its argument completely verbatim. Since
+/// streaming markdown arrives as `Raw` chunks full of interior newlines,
+/// every line after the first started where the previous one ended and the
+/// response walked off the right edge of the screen as a staircase.
+///
+/// Splitting on `\n` and handing iocraft one line at a time makes iocraft
+/// terminate each of them. That deliberately keeps raw-mode detection inside
+/// iocraft — this crate links crossterm 0.28 while iocraft links 0.29, so the
+/// two hold separate raw-mode statics and a local
+/// `is_raw_mode_enabled()` query would never observe iocraft's state.
+///
+/// `terminated` distinguishes `Line` (the whole message is a line, so every
+/// segment is `println`) from `Raw` (the tail is a partial line still being
+/// streamed, so it is `print`).
+///
+/// Splitting is per-message and stateless: a literal `\r\n` straddling two
+/// `Raw` chunks would come out as `…\r` + `\r\n`. That renders identically
+/// (carriage returns are idempotent) and no current writer emits `\r\n` at
+/// all — the markdown renderer and the tool formatters produce bare `\n`,
+/// and `str::lines()` strips the `\r` from embedded tool output — so the
+/// cost of carrying cross-message state isn't paid.
+fn split_for_iocraft(text: &str, terminated: bool, mut issue: impl FnMut(OutputOp<'_>)) {
+    let mut segments = text.split('\n').peekable();
+    while let Some(segment) = segments.next() {
+        let is_last = segments.peek().is_none();
+        if is_last && !terminated {
+            // Partial trailing line — no terminator yet.
+            if !segment.is_empty() {
+                issue(OutputOp::Print(segment));
+            }
+        } else {
+            // `strip_suffix`, not `trim_end_matches`: this drops the `\r` of an
+            // existing `\r\n` so iocraft's terminator does not produce `\r\r\n`,
+            // while leaving any other carriage returns (e.g. the `\r\x1b[2K`
+            // that rewrites the spinner line) intact.
+            issue(OutputOp::Println(
+                segment.strip_suffix('\r').unwrap_or(segment),
+            ));
+        }
+    }
+}
+
 /// Channel-backed output handle for routing text from the runner thread
 /// to the iocraft render loop. Clone is cheap. Implements `std::io::Write`
 /// so it can be used as a stdout replacement.
@@ -420,12 +482,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Drain output channel.
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
-                    match rx.try_recv() {
-                        Ok(OutputMsg::Line(text)) => stdout_for_future.println(text),
-                        Ok(OutputMsg::Raw(text)) => stdout_for_future.print(text),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
+                    let (text, terminated) = match rx.try_recv() {
+                        Ok(OutputMsg::Line(text)) => (text, true),
+                        Ok(OutputMsg::Raw(text)) => (text, false),
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                    };
+                    split_for_iocraft(&text, terminated, |op| match op {
+                        OutputOp::Println(line) => stdout_for_future.println(line),
+                        OutputOp::Print(chunk) => stdout_for_future.print(chunk),
+                    });
                 }
             }
 

@@ -156,6 +156,7 @@ enum Scenario {
     TaskListEmptyRoundtrip,
     TaskCreateThenListRoundtrip,
     SleepShortRoundtrip,
+    MarkdownRenderingShowcase,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
@@ -190,6 +191,7 @@ impl Scenario {
             "task_list_empty_roundtrip" => Some(Self::TaskListEmptyRoundtrip),
             "task_create_then_list_roundtrip" => Some(Self::TaskCreateThenListRoundtrip),
             "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
+            "markdown_rendering_showcase" => Some(Self::MarkdownRenderingShowcase),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
@@ -227,6 +229,7 @@ impl Scenario {
             Self::TaskListEmptyRoundtrip => "task_list_empty_roundtrip",
             Self::TaskCreateThenListRoundtrip => "task_create_then_list_roundtrip",
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
+            Self::MarkdownRenderingShowcase => "markdown_rendering_showcase",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
@@ -465,6 +468,7 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario) -> String {
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
         Scenario::StreamingText => streaming_text_sse(),
+        Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "read_file roundtrip complete: {}",
@@ -776,6 +780,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::MarkdownRenderingShowcase => {
+            text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
+        }
         Scenario::StreamingText => text_message_response(
             "msg_streaming_text",
             "Mock streaming says hello from the parity harness.",
@@ -1172,6 +1179,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::GrepChunkAssembly => "req_grep_chunk_assembly",
         Scenario::WriteFileAllowed => "req_write_file_allowed",
@@ -1314,6 +1322,85 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
         },
         request_id: None,
     }
+}
+
+/// Markdown document exercising the terminal renderer's block-spacing and
+/// list-marker rules: an adjacent label+list (must bind), a heading (exactly
+/// one blank line before it), an author-written blank line before a list
+/// (must survive), a bullet nested under an ordered item (must align under
+/// the parent's text), and a nested list with a following sibling (no blank
+/// hole). Consumed by `pty_raw_mode_line_endings.rs`.
+pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n\nAfter blank:\n\n- gamma\n\n1. parent\n   - child\n\n- outer\n  - inner\n- second\n\nDone.";
+
+/// Stream `MARKDOWN_SHOWCASE_DOC` as several text deltas with boundaries that
+/// deliberately fall mid-line, so the CLI's blank-line chunker — not the
+/// delta framing — decides how the renderer sees the text.
+fn markdown_showcase_sse() -> String {
+    let mut body = String::new();
+    append_sse(
+        &mut body,
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_markdown_showcase",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": DEFAULT_MODEL,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": usage_json(11, 0)
+            }
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        }),
+    );
+    // Cut roughly every 25 bytes at char boundaries — mid-word, mid-line.
+    let mut rest = MARKDOWN_SHOWCASE_DOC;
+    while !rest.is_empty() {
+        let mut cut = rest.len().min(25);
+        while !rest.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let (delta, tail) = rest.split_at(cut);
+        rest = tail;
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": delta}
+            }),
+        );
+    }
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        json!({
+            "type": "content_block_stop",
+            "index": 0
+        }),
+    );
+    append_sse(
+        &mut body,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": usage_json(11, 60)
+        }),
+    );
+    append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
+    body
 }
 
 fn streaming_text_sse() -> String {

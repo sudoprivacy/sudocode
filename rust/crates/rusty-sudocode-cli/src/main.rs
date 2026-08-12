@@ -2064,6 +2064,9 @@ fn run_repl_iocraft_dispatch(
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
+    // Route LiveCli output through iocraft's OutputSender so it goes
+    // through split_for_iocraft and renders correctly in raw mode.
+    cli.iocraft_output = Some(repl.output.clone());
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
@@ -2395,6 +2398,10 @@ struct LiveCli {
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
+    /// When set, `out_println` routes through this sender instead of bare
+    /// `println!`. Set by the iocraft REPL dispatch so slash command output
+    /// goes through `split_for_iocraft` and renders correctly in raw mode.
+    iocraft_output: Option<repl_ui::OutputSender>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3835,7 +3842,11 @@ impl LiveCli {
     }
 
     fn out_println(&self, msg: impl AsRef<str>) {
-        println!("{}", msg.as_ref());
+        if let Some(ref out) = self.iocraft_output {
+            out.println(msg.as_ref());
+        } else {
+            println!("{}", msg.as_ref());
+        }
     }
 
     fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
@@ -3927,6 +3938,7 @@ impl LiveCli {
             persistent_abort_signal: None,
             shared_queue_mode: None,
             is_repl: false,
+            iocraft_output: None,
         };
         cli.persist_session()?;
 

@@ -46,7 +46,6 @@ pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
-use crate::fs_backend::KernelFsBackend;
 use crate::hooks::HookAbortSignal;
 use crate::permissions::PermissionPolicy;
 use crate::prompt::SystemPrompt;
@@ -175,11 +174,10 @@ fn run_loop<K, C, T, F>(
     // -- WARMING_UP --
     state_cb(AgentLoopState::WarmingUp);
 
-    // Build the KernelFsBackend for VFS-backed file operations.
-    let _fs_backend = KernelFsBackend::new(
-        Arc::clone(&kernel),
-        OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&desc.name), true),
-    );
+    // The VFS-backed file tools are constructed by the spawn factory
+    // (`tools::managed_agent::spawn_managed_agent`), which injects a
+    // `KernelFsBackend` into the `tool_executor` this loop receives — so
+    // the loop itself no longer builds one.
 
     let session = Session::new();
     let mut runtime = ConversationRuntime::new(

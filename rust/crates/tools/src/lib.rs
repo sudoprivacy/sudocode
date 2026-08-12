@@ -532,13 +532,7 @@ impl GlobalToolRegistry {
             .map(|name| (normalize_tool_name(name), name.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        for (alias, canonical) in [
-            ("read", "read_file"),
-            ("write", "write_file"),
-            ("edit", "edit_file"),
-            ("glob", "glob_search"),
-            ("grep", "grep_search"),
-        ] {
+        for &(alias, canonical) in TOOL_ALIASES {
             name_map.insert(alias.to_string(), canonical.to_string());
         }
 
@@ -1441,6 +1435,33 @@ pub fn execute_tool_with_abort(
     execute_tool_with_enforcer(None, name, input, abort_signal, None)
 }
 
+/// PascalCase / short-name → canonical snake_case tool name.
+///
+/// SSOT: the alias pairs live here once and are consumed by both
+/// `parse_allowed_tools` (for `--allowedTools` CLI flag) and
+/// `execute_tool_with_enforcer` (for model-returned tool names).
+const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("read", "read_file"),
+    ("write", "write_file"),
+    ("edit", "edit_file"),
+    ("glob", "glob_search"),
+    ("grep", "grep_search"),
+];
+
+/// Canonicalize a tool name from the model into the internal name used
+/// by the `execute_tool` match. Models may return PascalCase names
+/// (CC-style: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) while
+/// scode registers snake_case (`bash`, `read_file`, etc.).
+fn canonicalize_tool_name(name: &str) -> String {
+    let normalized = normalize_tool_name(name);
+    for &(alias, canonical) in TOOL_ALIASES {
+        if normalized == alias {
+            return canonical.to_string();
+        }
+    }
+    normalized
+}
+
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
@@ -1448,6 +1469,8 @@ fn execute_tool_with_enforcer(
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
 ) -> Result<String, String> {
+    let name = canonicalize_tool_name(name);
+    let name = name.as_str();
     // Coordinator hard tool-gate — belt-and-suspenders against a
     // non-compliant model that hallucinates a forbidden tool name
     // even though the LLM schema hides it (see

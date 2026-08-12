@@ -203,6 +203,13 @@ fn format_footer_text(slot: &FooterSlot, perm: &str) -> String {
     }
 }
 
+/// Maximum number of options for DialPad mode (digit-key shortcuts 1–9).
+/// Questions with more options auto-route to FuzzySelect.
+const DIALPAD_MAX_OPTIONS: usize = 9;
+
+/// Number of visible candidates in the FuzzySelect scroll window.
+const FUZZY_WINDOW_SIZE: usize = 11;
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // iocraft REPL — replaces rustyline for interactive input
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -225,6 +232,125 @@ pub struct QuestionPromptView {
     pub options: Vec<QuestionOptionView>,
     pub allow_custom_input: bool,
     pub custom_input_hint: Option<String>,
+}
+
+/// ChromeSlot: primary interaction area between the two separators.
+/// Exactly one variant renders at a time.
+#[derive(Clone, Debug)]
+enum InputSlot {
+    /// Normal text input with ❯ prompt.
+    TextInput,
+    /// ≤9 options, digit-key shortcut per item (tool approval, init).
+    /// Named after a phone dial pad — the constraint is self-evident.
+    DialPad(QuestionPromptView),
+    /// Filterable list with scroll window (model picker, session switch).
+    /// Auto-selected when options.len() > DIALPAD_MAX_OPTIONS.
+    FuzzySelect(FuzzySelectState),
+}
+
+#[derive(Clone, Debug)]
+struct FuzzySelectState {
+    question: QuestionPromptView,
+    filter: String,
+    /// Indices into `question.options` that match the current filter.
+    filtered: Vec<usize>,
+    /// Index into `filtered` of the currently highlighted item.
+    cursor: usize,
+    /// Scroll offset — first visible row in the filtered list.
+    scroll: usize,
+}
+
+impl FuzzySelectState {
+    fn new(question: QuestionPromptView) -> Self {
+        let filtered: Vec<usize> = (0..question.options.len()).collect();
+        let cursor = question
+            .options
+            .iter()
+            .position(|o| o.recommended)
+            .unwrap_or(0);
+        let scroll = cursor.saturating_sub(FUZZY_WINDOW_SIZE / 2);
+        Self {
+            question,
+            filter: String::new(),
+            filtered,
+            cursor,
+            scroll,
+        }
+    }
+
+    fn apply_filter(&mut self) {
+        let lower = self.filter.to_ascii_lowercase();
+        self.filtered = self
+            .question
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| lower.is_empty() || o.label.to_ascii_lowercase().contains(&lower))
+            .map(|(i, _)| i)
+            .collect();
+        self.cursor = 0;
+        self.scroll = 0;
+    }
+
+    fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if !self.filtered.is_empty() {
+            self.cursor = (self.cursor + 1).min(self.filtered.len() - 1);
+            if self.cursor >= self.scroll + FUZZY_WINDOW_SIZE {
+                self.scroll = self.cursor + 1 - FUZZY_WINDOW_SIZE;
+            }
+        }
+    }
+
+    fn selected_value(&self) -> Option<String> {
+        self.filtered.get(self.cursor).map(|&i| (i + 1).to_string())
+    }
+
+    fn format_panel(&self) -> String {
+        let mut lines = Vec::new();
+        if let Some(title) = self.question.title.as_deref().filter(|t| !t.is_empty()) {
+            lines.push(format!("[{title}]"));
+        }
+        if let Some(desc) = self
+            .question
+            .description
+            .as_deref()
+            .filter(|d| !d.is_empty())
+        {
+            lines.push(desc.to_string());
+        }
+        let total = self.filtered.len();
+        if self.filter.is_empty() {
+            lines.push(format!("{} items  {}", total, self.question.prompt));
+        } else {
+            lines.push(format!(
+                "{total} match  {} (filter: {})",
+                self.question.prompt, self.filter
+            ));
+        }
+        let end = (self.scroll + FUZZY_WINDOW_SIZE).min(self.filtered.len());
+        for (vi, &oi) in self.filtered[self.scroll..end].iter().enumerate() {
+            let abs_vi = self.scroll + vi;
+            let option = &self.question.options[oi];
+            let selector = if abs_vi == self.cursor { ">" } else { " " };
+            let marker = if option.recommended {
+                " \x1b[2m(recommended)\x1b[0;36m"
+            } else {
+                ""
+            };
+            lines.push(format!("{selector} {}{marker}", option.label));
+        }
+        if end < self.filtered.len() {
+            lines.push(format!("  … {} more", self.filtered.len() - end));
+        }
+        lines.join("\n")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -515,8 +641,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut spinner_text = hooks.use_state(String::new);
     let mut turn_result = hooks.use_state(|| None::<String>);
     let mut has_submitted = hooks.use_state(|| false);
-    let mut question_state = hooks.use_state(|| None::<QuestionPromptView>);
-    let mut question_selection = hooks.use_state(|| 0usize);
+    let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
     let mut history = hooks.use_state(Vec::<String>::new);
@@ -555,13 +680,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     match rx.try_recv() {
                         Ok(UiCommand::ShowQuestion(question)) => {
-                            question_state.set(Some(question));
-                            question_selection.set(0);
+                            let slot = if question.options.len() > DIALPAD_MAX_OPTIONS {
+                                InputSlot::FuzzySelect(FuzzySelectState::new(question))
+                            } else {
+                                InputSlot::DialPad(question)
+                            };
+                            input_slot.set(slot);
                             input_value.set(String::new());
                         }
                         Ok(UiCommand::ClearQuestion) => {
-                            question_state.set(None);
-                            question_selection.set(0);
+                            input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
                         }
                         Ok(UiCommand::SetTurnResult(text)) => {
@@ -598,70 +726,96 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 modifiers,
                 ..
             }) if kind != KeyEventKind::Release => {
+                let current_slot = input_slot.read().clone();
                 match code {
+                    // ── Enter ──────────────────────────────────────────
                     KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
-                        let val = input_value.read().clone();
-                        let question = question_state.read().clone();
-                        let selected_index = *question_selection.read();
-                        if let Some(event) =
-                            enter_key_event_for_value(question.as_ref(), selected_index, &val)
-                        {
-                            if !*has_submitted.read() {
-                                has_submitted.set(true);
-                            }
-                            match event {
-                                InputEvent::Exit => {
-                                    should_exit.set(true);
-                                    let _ = input_tx_for_events.send(InputEvent::Exit);
+                        match &current_slot {
+                            InputSlot::DialPad(question) => {
+                                let val = input_value.read().clone();
+                                let selected_index = match &*input_slot.read() {
+                                    InputSlot::DialPad(q) => q.options.iter().position(|o| o.recommended).unwrap_or(0),
+                                    _ => 0,
+                                };
+                                if let Some(event) = enter_key_event_for_value(Some(question), selected_index, &val) {
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    let _ = input_tx_for_events.send(match event {
+                                        InputEvent::QuestionAnswer(_) => InputEvent::QuestionAnswer(val.clone()),
+                                        other => other,
+                                    });
+                                    input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
                                 }
-                                InputEvent::Submit(text) => {
-                                    let trimmed = text.trim();
-                                    if !trimmed.is_empty() {
-                                        let mut h = history.write();
-                                        if h.last().map_or(true, |last| last != trimmed) {
-                                            h.push(trimmed.to_string());
-                                        }
+                            }
+                            InputSlot::FuzzySelect(_) => {
+                                let answer = {
+                                    let slot = input_slot.read();
+                                    if let InputSlot::FuzzySelect(fs) = &*slot {
+                                        fs.selected_value()
+                                    } else {
+                                        None
                                     }
-                                    stdout_for_events
-                                        .println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
-                                    let _ = input_tx_for_events.send(InputEvent::Submit(text));
+                                };
+                                if let Some(answer) = answer {
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(answer));
+                                    input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
                                 }
-                                InputEvent::QuestionAnswer(_) => {
-                                    let _ =
-                                        input_tx_for_events.send(InputEvent::QuestionAnswer(val));
-                                }
-                                InputEvent::Abort => {}
                             }
-                            input_value.set(String::new());
-                            if history_cursor.get().is_some() {
-                                history_cursor.set(None);
-                                saved_input.set(String::new());
+                            InputSlot::TextInput => {
+                                let val = input_value.read().clone();
+                                if let Some(event) = enter_key_event_for_value(None, 0, &val) {
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    match event {
+                                        InputEvent::Exit => {
+                                            should_exit.set(true);
+                                            let _ = input_tx_for_events.send(InputEvent::Exit);
+                                        }
+                                        InputEvent::Submit(text) => {
+                                            let trimmed = text.trim();
+                                            if !trimmed.is_empty() {
+                                                let mut h = history.write();
+                                                if h.last().map_or(true, |last| last != trimmed) {
+                                                    h.push(trimmed.to_string());
+                                                }
+                                            }
+                                            stdout_for_events.println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
+                                            let _ = input_tx_for_events.send(InputEvent::Submit(text));
+                                        }
+                                        InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
+                                    }
+                                    input_value.set(String::new());
+                                    if history_cursor.get().is_some() {
+                                        history_cursor.set(None);
+                                        saved_input.set(String::new());
+                                    }
+                                }
                             }
                         }
                     }
-                    KeyCode::Up
-                        if question_state
-                            .read()
-                            .as_ref()
-                            .is_some_and(|q| !q.options.is_empty()) =>
-                    {
-                        let current = *question_selection.read();
-                        question_selection.set(current.saturating_sub(1));
+                    // ── Up/Down — DialPad option selection ─────────────
+                    KeyCode::Up if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {
+                        // DialPad doesn't track cursor separately — uses
+                        // the question's recommended field for initial highlight.
+                        // Up/Down not needed for ≤9 digit-key items.
                     }
-                    KeyCode::Down
-                        if question_state
-                            .read()
-                            .as_ref()
-                            .is_some_and(|q| !q.options.is_empty()) =>
-                    {
-                        let option_count = question_state
-                            .read()
-                            .as_ref()
-                            .map_or(0, |question| question.options.len());
-                        let current = *question_selection.read();
-                        question_selection.set((current + 1).min(option_count.saturating_sub(1)));
+                    KeyCode::Down if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {}
+                    // ── Up/Down — FuzzySelect cursor ───────────────────
+                    KeyCode::Up if matches!(current_slot, InputSlot::FuzzySelect(_)) => {
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.move_up();
+                        }
                     }
-                    KeyCode::Up if question_state.read().is_none() => {
+                    KeyCode::Down if matches!(current_slot, InputSlot::FuzzySelect(_)) => {
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.move_down();
+                        }
+                    }
+                    // ── Up/Down — TextInput history ────────────────────
+                    KeyCode::Up if matches!(current_slot, InputSlot::TextInput) => {
                         let h = history.read();
                         if !h.is_empty() {
                             let cursor = history_cursor.get();
@@ -677,7 +831,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             history_cursor.set(Some(new_cursor));
                         }
                     }
-                    KeyCode::Down if question_state.read().is_none() => {
+                    KeyCode::Down if matches!(current_slot, InputSlot::TextInput) => {
                         if let Some(cursor) = history_cursor.get() {
                             let h = history.read();
                             if cursor + 1 < h.len() {
@@ -690,25 +844,44 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                     }
+                    // ── Digit shortcut — DialPad only ─────────────────
                     KeyCode::Char(ch)
-                        if question_state.read().as_ref().is_some_and(|q| {
-                            q.options.len() >= 2
-                                && ch.is_ascii_digit()
-                                && !modifiers.contains(KeyModifiers::CONTROL)
-                                && !modifiers.contains(KeyModifiers::ALT)
-                        }) =>
+                        if matches!(current_slot, InputSlot::DialPad(ref q) if q.options.len() >= 2)
+                            && ch.is_ascii_digit()
+                            && !modifiers.contains(KeyModifiers::CONTROL)
+                            && !modifiers.contains(KeyModifiers::ALT) =>
                     {
                         let digit = ch.to_digit(10).unwrap_or(0) as usize;
-                        let option_count = question_state
-                            .read()
-                            .as_ref()
-                            .map_or(0, |question| question.options.len());
+                        let option_count = match &current_slot {
+                            InputSlot::DialPad(q) => q.options.len(),
+                            _ => 0,
+                        };
                         if digit >= 1 && digit <= option_count {
                             let _ = input_tx_for_events
                                 .send(InputEvent::QuestionAnswer(digit.to_string()));
                             input_value.set(String::new());
                         }
                     }
+                    // ── Typing in FuzzySelect updates filter ──────────
+                    KeyCode::Char(ch)
+                        if matches!(current_slot, InputSlot::FuzzySelect(_))
+                            && !modifiers.contains(KeyModifiers::CONTROL)
+                            && !modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.filter.push(ch);
+                            fs.apply_filter();
+                        }
+                    }
+                    KeyCode::Backspace if matches!(current_slot, InputSlot::FuzzySelect(_)) => {
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.filter.pop();
+                            fs.apply_filter();
+                        }
+                    }
+                    // ── Global keys ───────────────────────────────────
                     KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let _ = input_tx_for_events.send(InputEvent::Exit);
                         should_exit.set(true);
@@ -718,8 +891,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         history_cursor.set(None);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl-C: first press shows hint + cancels turn;
-                        // second press within 800ms exits.
                         let now = Instant::now();
                         if last_ctrlc
                             .read()
@@ -735,11 +906,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Esc => {
-                        let _ = input_tx_for_events.send(InputEvent::Abort);
-                        input_value.set(String::new());
+                        // In FuzzySelect/DialPad, ESC cancels the selection.
+                        if !matches!(current_slot, InputSlot::TextInput) {
+                            input_slot.set(InputSlot::TextInput);
+                            input_value.set(String::new());
+                            let _ = input_tx_for_events.send(InputEvent::Abort);
+                        } else {
+                            let _ = input_tx_for_events.send(InputEvent::Abort);
+                            input_value.set(String::new());
+                        }
                     }
                     KeyCode::Tab
-                        if question_state.read().is_none()
+                        if matches!(current_slot, InputSlot::TextInput)
                             && !modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         let val = input_value.read().clone();
@@ -760,11 +938,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     _ => {
-                        // Let TextInput handle all other keys via on_change.
-                        // Reset tab completion on non-Tab keys, but only when
-                        // there are stored candidates — avoids spurious state
-                        // changes that would short-circuit poll_change before
-                        // UseTerminalEventsImpl processes queued events.
                         if code != KeyCode::Tab && !tab_candidates.read().is_empty() {
                             tab_candidates.set(Vec::new());
                         }
@@ -785,8 +958,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── Derive ChromeSlots from state ──────────────────────────────────
     let st = spinner_text.read().clone();
     let val = input_value.read().clone();
-    let question = question_state.read().clone();
-    let selected_index = *question_selection.read();
+    let current_input_slot = input_slot.read().clone();
     let submitted = *has_submitted.read();
 
     // StatusSlot: Spinner > TurnResult > Tips > Empty
@@ -809,14 +981,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         FooterSlot::Full
     };
 
-    // InputSlot (ChromeSlot: text_input | question_panel — driven by question_state)
-    let question_panel = question
-        .as_ref()
-        .map(|question| format_question_panel(question, selected_index));
-    let prompt_label = if question.is_some() {
-        "\u{2753} "
-    } else {
-        "\u{276f} "
+    // InputSlot rendering
+    let (panel_text, prompt_label) = match &current_input_slot {
+        InputSlot::TextInput => (None, "\u{276f} "),
+        InputSlot::DialPad(q) => {
+            let selected = q.options.iter().position(|o| o.recommended).unwrap_or(0);
+            (Some(format_question_panel(q, selected)), "\u{2753} ")
+        }
+        InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
     };
 
     let perm = permission_mode.clone();
@@ -836,21 +1008,38 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             Text(content: sep.clone(), color: Color::DarkGrey)
             // InputSlot
-            #(question_panel.map(|panel| element! {
+            #(panel_text.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_label)
-                TextInput(
-                    value: val,
-                    has_focus: true,
-                    multiline: true,
-                    auto_grow: true,
-                    on_change: move |new_val: String| {
-                        input_value.set(new_val);
-                    },
-                )
-            }
+            #(if matches!(current_input_slot, InputSlot::FuzzySelect(_)) {
+                // FuzzySelect owns keyboard input — render filter as
+                // static text so TextInput's on_change doesn't compete.
+                let filter_display = match &current_input_slot {
+                    InputSlot::FuzzySelect(fs) if !fs.filter.is_empty() => fs.filter.clone(),
+                    _ => String::new(),
+                };
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: prompt_label)
+                        Text(content: filter_display)
+                    }
+                }
+            } else {
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: prompt_label)
+                        TextInput(
+                            value: val,
+                            has_focus: true,
+                            multiline: true,
+                            auto_grow: true,
+                            on_change: move |new_val: String| {
+                                input_value.set(new_val);
+                            },
+                        )
+                    }
+                }
+            })
             // Separator
             Text(content: sep, color: Color::DarkGrey)
             // FooterSlot

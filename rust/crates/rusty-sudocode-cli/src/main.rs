@@ -1903,6 +1903,35 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
         .take();
 }
 
+/// Callback type for interactive slash commands that need user selection
+/// via iocraft's InputSlot (replaces dialoguer FuzzySelect/Select in the
+/// iocraft REPL path).
+type SlashSelectionHandler = Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender)>;
+
+/// Show an interactive selection question via iocraft's InputSlot and
+/// register a callback to handle the answer. The coordinator loop routes
+/// the `QuestionAnswer` event to the returned handler.
+///
+/// `resolve_answer` maps the raw answer string (1-indexed option number
+/// or custom text) to the value to pass to `on_selected`.
+#[inline]
+fn show_slash_selection(
+    ui: &repl_ui::UiCommandSender,
+    question: repl_ui::QuestionPromptView,
+    items: Vec<String>,
+    on_selected: impl FnOnce(String, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) + 'static,
+) -> SlashSelectionHandler {
+    ui.show_question(question);
+    Box::new(move |answer: &str, cli, out| {
+        let resolved = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
+            .unwrap_or_else(|| answer.to_string());
+        on_selected(resolved, cli, out);
+    })
+}
+
 struct IocraftQuestionPrompter {
     ui: repl_ui::UiCommandSender,
     pending_answer: PendingQuestionAnswer,
@@ -2034,6 +2063,9 @@ fn run_repl_iocraft_dispatch(
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
+    // Route LiveCli output through iocraft's OutputSender so it goes
+    // through split_for_iocraft and renders correctly in raw mode.
+    cli.iocraft_output = Some(repl.output.clone());
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
@@ -2044,6 +2076,12 @@ fn run_repl_iocraft_dispatch(
     let (turn_tx, turn_rx) = mpsc::sync_channel::<()>(1);
     let mut turn_active = false;
     let mut runner_handle: Option<thread::JoinHandle<()>> = None;
+    // Pending interactive slash command state: when a slash command needs
+    // user selection (e.g. `/model` without args), we show a question via
+    // iocraft's InputSlot and store the callback here. The coordinator
+    // loop routes the QuestionAnswer to this closure instead of the
+    // tool-question path.
+    let mut pending_slash_selection: Option<SlashSelectionHandler> = None;
 
     loop {
         // When idle, block on input; when a turn is running, poll both
@@ -2144,6 +2182,53 @@ fn run_repl_iocraft_dispatch(
                 // Try slash command dispatch.
                 let trimmed = text.trim();
                 let is_slash = match SlashCommand::parse(trimmed) {
+                    Ok(Some(SlashCommand::Model { model: None })) => {
+                        // Interactive model picker via iocraft InputSlot.
+                        let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                        let sudocode_config = load_sudocode_config_for_current_dir();
+                        let config_keys: Vec<String> =
+                            sudocode_config.models.keys().cloned().collect();
+                        let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+                        let current = cli_lock.config.model.clone();
+                        drop(cli_lock);
+
+                        let options = models
+                            .iter()
+                            .map(|m| repl_ui::QuestionOptionView {
+                                label: m.clone(),
+                                value: m.clone(),
+                                description: None,
+                                recommended: *m == current,
+                            })
+                            .collect();
+                        pending_slash_selection = Some(show_slash_selection(
+                            &repl.ui,
+                            repl_ui::QuestionPromptView {
+                                title: Some("Model".to_string()),
+                                description: Some(format!("Current: {current}")),
+                                index: 0,
+                                total: 1,
+                                prompt: "Select model".to_string(),
+                                options,
+                                allow_custom_input: true,
+                                custom_input_hint: Some("or type a model name".to_string()),
+                            },
+                            models,
+                            |model_name, cli, out| {
+                                let mut cli_lock = cli.lock().expect("LiveCli mutex poisoned");
+                                match cli_lock.set_model(Some(model_name)) {
+                                    Ok(true) => {
+                                        if let Err(e) = cli_lock.persist_session() {
+                                            out.println(&format!("\x1b[31m{e}\x1b[0m"));
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => out.println(&format!("\x1b[31m{e}\x1b[0m")),
+                                }
+                            },
+                        ));
+                        true
+                    }
                     Ok(Some(command)) => {
                         let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                         match cli_lock.handle_repl_command(command) {
@@ -2200,7 +2285,9 @@ fn run_repl_iocraft_dispatch(
                 }
             }
             repl_ui::InputEvent::QuestionAnswer(text) => {
-                if !consume_pending_question_answer(&pending_question_answer, text) {
+                if let Some(handler) = pending_slash_selection.take() {
+                    handler(&text, &cli_shared, &repl.output);
+                } else if !consume_pending_question_answer(&pending_question_answer, text) {
                     repl.output
                         .println("\x1b[2m(no question is waiting for an answer)\x1b[0m");
                 }
@@ -2309,6 +2396,10 @@ struct LiveCli {
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
+    /// When set, `out_println` routes through this sender instead of bare
+    /// `println!`. Set by the iocraft REPL dispatch so slash command output
+    /// goes through `split_for_iocraft` and renders correctly in raw mode.
+    iocraft_output: Option<repl_ui::OutputSender>,
 }
 
 pub(crate) struct RuntimePluginState {
@@ -3749,7 +3840,11 @@ impl LiveCli {
     }
 
     fn out_println(&self, msg: impl AsRef<str>) {
-        println!("{}", msg.as_ref());
+        if let Some(ref out) = self.iocraft_output {
+            out.println(msg.as_ref());
+        } else {
+            println!("{}", msg.as_ref());
+        }
     }
 
     fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
@@ -3841,6 +3936,7 @@ impl LiveCli {
             persistent_abort_signal: None,
             shared_queue_mode: None,
             is_repl: false,
+            iocraft_output: None,
         };
         cli.persist_session()?;
 

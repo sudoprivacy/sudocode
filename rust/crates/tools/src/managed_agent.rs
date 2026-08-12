@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelSyscall, SpawnHandle};
 use runtime::{
-    ModelFamilyIdentity, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
-    ToolExecutor,
+    FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
+    SystemPromptBuilder, ToolError, ToolExecutor,
 };
 
-use crate::{execute_tool, ProviderRuntimeClient};
+use crate::{execute_tool_with_backend, ProviderRuntimeClient};
 
 /// Label key where `ManagedAgentService` stores the model id in the
 /// `AgentDescriptor.labels` map.
@@ -62,8 +62,22 @@ where
     let api_client = ProviderRuntimeClient::new(model, BTreeSet::new())
         .expect("failed to construct API client from model label");
 
-    // -- ToolExecutor: dispatch through the global tool registry --
-    let tool_executor = ManagedToolExecutor;
+    // -- FsBackend: in-process VFS, NOT host std::fs. The co-hosted
+    // agent's file tools (read/write/edit/glob/grep) route through
+    // `KernelFsBackend` so they hit the kernel trie via syscalls, with
+    // the agent's procfs workspace as the relative-path root.
+    let workspace_root = format!("/proc/{}/workspace", desc.pid);
+    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+        Arc::clone(&kernel),
+        &desc.owner_id,
+        &desc.zone_id,
+        &desc.name,
+        workspace_root,
+    ));
+
+    // -- ToolExecutor: dispatch through the global tool registry, bound
+    // to the VFS backend so every file tool is in-process. --
+    let tool_executor = ManagedToolExecutor { fs };
 
     // -- SystemPrompt: minimal prompt for managed-agent context --
     let system_prompt = SystemPromptBuilder::new()
@@ -88,14 +102,18 @@ where
 }
 
 /// Tool executor that dispatches through the `tools` crate's global
-/// registry. Wraps `execute_tool(name, input)` into the `ToolExecutor`
-/// trait expected by `ConversationRuntime`.
-struct ManagedToolExecutor;
+/// registry, bound to a VFS [`FsBackend`]. Wraps
+/// `execute_tool_with_backend(name, input, fs)` into the `ToolExecutor`
+/// trait expected by `ConversationRuntime`, so the file tools stay
+/// in-process against the kernel trie.
+struct ManagedToolExecutor {
+    fs: Arc<dyn FsBackend>,
+}
 
 impl ToolExecutor for ManagedToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
-        execute_tool(tool_name, &input_value).map_err(ToolError::new)
+        execute_tool_with_backend(tool_name, &input_value, self.fs.as_ref()).map_err(ToolError::new)
     }
 }

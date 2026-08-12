@@ -233,11 +233,11 @@ use runtime::{
     task_registry::TaskRegistry,
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, HookAbortSignal, LaneCommitProvenance, LaneEvent,
-    LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport,
-    MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig,
-    RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext, ToolError,
-    ToolExecutor, FORK_BOILERPLATE_TAG,
+    ConversationRuntime, FsBackend, GrepSearchInput, HookAbortSignal, LaneCommitProvenance,
+    LaneEvent, LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass,
+    McpDegradedReport, MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent,
+    ProviderFallbackConfig, RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext,
+    ToolError, ToolExecutor, FORK_BOILERPLATE_TAG,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -696,6 +696,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
+                &StdFsBackend,
             );
         }
         self.plugin_tools
@@ -1433,12 +1434,27 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_abort(name, input, None)
 }
 
+/// Dispatch a tool against an explicit filesystem backend.
+///
+/// This is the entry the co-hosted managed agent uses: it passes a
+/// `KernelFsBackend` so the file tools (`read_file` / `write_file` /
+/// `edit_file` / `glob_search` / `grep_search`) hit the VFS in-process via
+/// kernel syscalls instead of the host `std::fs`. The standalone CLI keeps
+/// using [`execute_tool`], which defaults to [`StdFsBackend`].
+pub fn execute_tool_with_backend(
+    name: &str,
+    input: &Value,
+    fs: &dyn FsBackend,
+) -> Result<String, String> {
+    execute_tool_with_enforcer(None, name, input, None, None, fs)
+}
+
 pub fn execute_tool_with_abort(
     name: &str,
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, abort_signal, None)
+    execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
 }
 
 fn execute_tool_with_enforcer(
@@ -1447,6 +1463,7 @@ fn execute_tool_with_enforcer(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
+    fs: &dyn FsBackend,
 ) -> Result<String, String> {
     // Coordinator hard tool-gate — belt-and-suspenders against a
     // non-compliant model that hallucinates a forbidden tool name
@@ -1468,23 +1485,23 @@ fn execute_tool_with_enforcer(
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<ReadFileInput>(input).and_then(run_read_file)
+            from_value::<ReadFileInput>(input).and_then(|input| run_read_file(input, fs))
         }
         "write_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<WriteFileInput>(input).and_then(run_write_file)
+            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, fs))
         }
         "edit_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<EditFileInput>(input).and_then(run_edit_file)
+            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, fs))
         }
         "glob_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GlobSearchInputValue>(input).and_then(run_glob_search)
+            from_value::<GlobSearchInputValue>(input).and_then(|input| run_glob_search(input, fs))
         }
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GrepSearchInput>(input).and_then(run_grep_search)
+            from_value::<GrepSearchInput>(input).and_then(|input| run_grep_search(input, fs))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
@@ -2849,19 +2866,20 @@ fn branch_divergence_output(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(
-        read_file(&StdFsBackend, &input.path, input.offset, input.limit).map_err(io_to_string)?,
-    )
+fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(read_file(fs, &input.path, input.offset, input.limit).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    // Detect file intent and redirect if draft
+fn run_write_file(input: WriteFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    // Detect file intent and redirect if draft. The workspace root comes
+    // from the backend (`current_dir` for std, the agent's VFS workspace
+    // for the kernel backend) so the draft redirect lands in the same
+    // namespace the write targets.
     let intent = runtime::detect_file_intent(&input.path, &input.content, None);
     let actual_path = match intent {
         runtime::FileIntent::Draft => {
-            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
             runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
         }
         runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
@@ -2869,7 +2887,7 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
 
     to_pretty_json(
         write_file(
-            &StdFsBackend,
+            fs,
             actual_path.to_str().unwrap_or(&input.path),
             &input.content,
         )
@@ -2878,9 +2896,10 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    // Read existing content for intent detection
-    let existing_content = std::fs::read_to_string(&input.path).ok();
+fn run_edit_file(input: EditFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    // Read existing content for intent detection through the backend so a
+    // co-hosted agent inspects the VFS, not the host filesystem.
+    let existing_content = fs.read_to_string(&input.path).ok();
     let content_for_detection = existing_content.as_deref().unwrap_or(&input.new_string);
 
     // Detect file intent
@@ -2888,7 +2907,7 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 
     // Draft files should not be edited from workspace root - they're in .drafts/
     // If file is draft and not in .drafts/, redirect
-    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
     let actual_path = if intent == runtime::FileIntent::Draft
         && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
     {
@@ -2899,7 +2918,7 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 
     to_pretty_json(
         edit_file(
-            &StdFsBackend,
+            fs,
             actual_path.to_str().unwrap_or(&input.path),
             &input.old_string,
             &input.new_string,
@@ -2910,13 +2929,13 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
-    to_pretty_json(glob_search(&input.pattern, input.path.as_deref()).map_err(io_to_string)?)
+fn run_glob_search(input: GlobSearchInputValue, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(glob_search(fs, &input.pattern, input.path.as_deref()).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
-    to_pretty_json(grep_search(&input).map_err(io_to_string)?)
+fn run_grep_search(input: GrepSearchInput, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(grep_search(fs, &input).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -6914,8 +6933,15 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value, None, Some(ctx))
-            .map_err(ToolError::new)
+        execute_tool_with_enforcer(
+            self.enforcer.as_ref(),
+            tool_name,
+            &value,
+            None,
+            Some(ctx),
+            &StdFsBackend,
+        )
+        .map_err(ToolError::new)
     }
 }
 

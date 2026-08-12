@@ -668,11 +668,22 @@ impl PermissionPrompter for AcpPermissionBridge {
                 reason: "permission bridge closed".to_string(),
             };
         }
-        response_rx
-            .blocking_recv()
-            .unwrap_or(PermissionPromptDecision::Deny {
-                reason: "permission response channel closed".to_string(),
-            })
+        // `decide()` is reached from inside the conversation runtime's
+        // `tokio_runtime.block_on(run_turn)`, so this thread is driving
+        // asynchronous tasks. Plain `blocking_recv()` there triggers tokio's
+        // "Cannot block the current thread from within a runtime" panic,
+        // which aborts the prompt task and surfaces to the client as a
+        // generic "blocking task failed" Internal error. `block_in_place`
+        // tells the multi-thread scheduler this thread is about to block,
+        // allowing the recv to complete safely (same pattern as
+        // `AcpQuestionBridge::ask` below).
+        tokio::task::block_in_place(|| {
+            response_rx
+                .blocking_recv()
+                .unwrap_or(PermissionPromptDecision::Deny {
+                    reason: "permission response channel closed".to_string(),
+                })
+        })
     }
 }
 

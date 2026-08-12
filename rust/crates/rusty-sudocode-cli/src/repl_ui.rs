@@ -744,6 +744,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         other => other,
                                     });
                                     input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
                                 }
                             }
                             InputSlot::FuzzySelect(_) => {
@@ -759,6 +760,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     if !*has_submitted.read() { has_submitted.set(true); }
                                     let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(answer));
                                     input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
                                 }
                             }
                             InputSlot::TextInput => {
@@ -1009,18 +1011,35 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(panel_text.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_label)
-                TextInput(
-                    value: val,
-                    has_focus: true,
-                    multiline: true,
-                    auto_grow: true,
-                    on_change: move |new_val: String| {
-                        input_value.set(new_val);
-                    },
-                )
-            }
+            #(if matches!(current_input_slot, InputSlot::FuzzySelect(_)) {
+                // FuzzySelect owns keyboard input — render filter as
+                // static text so TextInput's on_change doesn't compete.
+                let filter_display = match &current_input_slot {
+                    InputSlot::FuzzySelect(fs) if !fs.filter.is_empty() => fs.filter.clone(),
+                    _ => String::new(),
+                };
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: prompt_label)
+                        Text(content: filter_display)
+                    }
+                }
+            } else {
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: prompt_label)
+                        TextInput(
+                            value: val,
+                            has_focus: true,
+                            multiline: true,
+                            auto_grow: true,
+                            on_change: move |new_val: String| {
+                                input_value.set(new_val);
+                            },
+                        )
+                    }
+                }
+            })
             // Separator
             Text(content: sep, color: Color::DarkGrey)
             // FooterSlot

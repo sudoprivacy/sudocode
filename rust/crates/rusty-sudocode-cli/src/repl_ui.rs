@@ -4,6 +4,20 @@
 //! replaces rustyline for interactive input.  Shows a persistent prompt
 //! with spinner overlay.  The coordinator thread reads `InputEvent`s from
 //! the returned `ReplHandle` and dispatches turns.
+//!
+//! # ChromeSlot pattern
+//!
+//! The REPL chrome uses a **ChromeSlot** convention: each position in the
+//! layout is an enum that renders exactly one variant at a time.  The enum
+//! + match makes the contract visible to any reader:
+//!
+//! ```text
+//! [StatusSlot]    ← spinner | turn_result (auto-dismiss) | tips (first-run) | empty
+//! ──── separator ────
+//! [InputSlot]     ← text_input | question_panel   (Option<QuestionPromptView>)
+//! ──── separator ────
+//! [FooterSlot]    ← full | minimal | turn_active
+//! ```
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
@@ -149,6 +163,46 @@ fn format_compact_tokens(tokens: u32) -> String {
     }
 }
 
+// ── ChromeSlot enums ──────────────────────────────────────────────────
+
+/// ChromeSlot: status area above the separator. One variant renders at a time.
+///
+/// Priority: Spinner > TurnResult > Tips > Empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StatusSlot {
+    /// Animated progress during a turn.
+    Spinner(String),
+    /// Turn result (tokens/cost/ctx). Auto-dismisses after ~5 seconds.
+    TurnResult(String),
+    /// First-run tips. Dismissed on first submit.
+    Tips,
+    /// Nothing — slot not rendered, saves vertical space.
+    Empty,
+}
+
+/// ChromeSlot: bottom hint line. Content varies by lifecycle phase.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FooterSlot {
+    /// Before first submit — full hints.
+    Full,
+    /// After first submit — just permission mode + essentials.
+    Minimal,
+    /// During turn — permission mode only.
+    TurnActive,
+}
+
+fn format_footer_text(slot: &FooterSlot, perm: &str) -> String {
+    match slot {
+        FooterSlot::Full => format!(
+            "  \u{23f5}\u{23f5} {perm} \u{00b7} /help for commands \u{00b7} /exit to quit \u{00b7} Tab for /commands"
+        ),
+        FooterSlot::Minimal => format!(
+            "  \u{23f5}\u{23f5} {perm} \u{00b7} /help \u{00b7} /exit to quit"
+        ),
+        FooterSlot::TurnActive => format!("  \u{23f5}\u{23f5} {perm}"),
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // iocraft REPL — replaces rustyline for interactive input
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -177,7 +231,7 @@ pub struct QuestionPromptView {
 pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
-    SetStatusLine(String),
+    SetTurnResult(String),
 }
 
 #[derive(Clone)]
@@ -194,8 +248,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ClearQuestion);
     }
 
-    pub fn set_status_line(&self, text: &str) {
-        let _ = self.tx.send(UiCommand::SetStatusLine(text.to_string()));
+    pub fn set_turn_result(&self, text: &str) {
+        let _ = self.tx.send(UiCommand::SetTurnResult(text.to_string()));
     }
 }
 
@@ -269,24 +323,96 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
     lines.join("\n")
 }
 
+/// Message type for the output channel: distinguishes complete lines
+/// (which need a trailing newline) from raw byte chunks (which already
+/// include their own newlines from the markdown renderer).
+enum OutputMsg {
+    /// Complete line — `StdoutHandle::println` will append `\n`.
+    Line(String),
+    /// Raw chunk — `StdoutHandle::print`, no extra newline.
+    Raw(String),
+}
+
+/// A single call to iocraft's stdout handle. Borrows from the message being
+/// split — the only allocation on this per-delta path is the one iocraft's
+/// own `ToString` bound makes when the op is issued.
+#[derive(Debug, PartialEq, Eq)]
+enum OutputOp<'a> {
+    /// `StdoutHandle::println` — iocraft appends the line terminator itself,
+    /// choosing `\r\n` in raw mode and `\n` otherwise.
+    Println(&'a str),
+    /// `StdoutHandle::print` — written verbatim, no terminator.
+    Print(&'a str),
+}
+
+/// Split one output message into the sequence of iocraft stdout calls that
+/// renders it with correct line endings.
+///
+/// **Why this exists.** The iocraft render loop holds the terminal in raw
+/// mode, where `OPOST`/`ONLCR` are off and a bare `\n` moves the cursor down
+/// *without* returning it to column 0. iocraft handles that for its own
+/// canvas, and `StdoutHandle::println` terminates the message it is given —
+/// but only the *end* of it: interior `\n` are passed through untouched, and
+/// `StdoutHandle::print` writes its argument completely verbatim. Since
+/// streaming markdown arrives as `Raw` chunks full of interior newlines,
+/// every line after the first started where the previous one ended and the
+/// response walked off the right edge of the screen as a staircase.
+///
+/// Splitting on `\n` and handing iocraft one line at a time makes iocraft
+/// terminate each of them. That deliberately keeps raw-mode detection inside
+/// iocraft — this crate links crossterm 0.28 while iocraft links 0.29, so the
+/// two hold separate raw-mode statics and a local
+/// `is_raw_mode_enabled()` query would never observe iocraft's state.
+///
+/// `terminated` distinguishes `Line` (the whole message is a line, so every
+/// segment is `println`) from `Raw` (the tail is a partial line still being
+/// streamed, so it is `print`).
+///
+/// Splitting is per-message and stateless: a literal `\r\n` straddling two
+/// `Raw` chunks would come out as `…\r` + `\r\n`. That renders identically
+/// (carriage returns are idempotent) and no current writer emits `\r\n` at
+/// all — the markdown renderer and the tool formatters produce bare `\n`,
+/// and `str::lines()` strips the `\r` from embedded tool output — so the
+/// cost of carrying cross-message state isn't paid.
+fn split_for_iocraft(text: &str, terminated: bool, mut issue: impl FnMut(OutputOp<'_>)) {
+    let mut segments = text.split('\n').peekable();
+    while let Some(segment) = segments.next() {
+        let is_last = segments.peek().is_none();
+        if is_last && !terminated {
+            // Partial trailing line — no terminator yet.
+            if !segment.is_empty() {
+                issue(OutputOp::Print(segment));
+            }
+        } else {
+            // `strip_suffix`, not `trim_end_matches`: this drops the `\r` of an
+            // existing `\r\n` so iocraft's terminator does not produce `\r\r\n`,
+            // while leaving any other carriage returns (e.g. the `\r\x1b[2K`
+            // that rewrites the spinner line) intact.
+            issue(OutputOp::Println(
+                segment.strip_suffix('\r').unwrap_or(segment),
+            ));
+        }
+    }
+}
+
 /// Channel-backed output handle for routing text from the runner thread
 /// to the iocraft render loop. Clone is cheap. Implements `std::io::Write`
 /// so it can be used as a stdout replacement.
 #[derive(Clone)]
 pub struct OutputSender {
-    tx: SyncSender<String>,
+    tx: SyncSender<OutputMsg>,
 }
 
 impl OutputSender {
     pub fn println(&self, text: &str) {
-        let _ = self.tx.send(text.to_string());
+        let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
 }
 
 impl Write for OutputSender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let text = String::from_utf8_lossy(buf).to_string();
-        let _ = self.tx.send(text);
+        let _ = self.tx.send(OutputMsg::Raw(text));
         Ok(buf.len())
     }
 
@@ -359,11 +485,12 @@ fn strip_ansi(input: &str) -> String {
 
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
-    output_rx: Arc<Mutex<Receiver<String>>>,
+    output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
     input_tx: SyncSender<InputEvent>,
     spinner: SpinnerState,
     permission_mode: String,
+    tips_line: String,
 }
 
 #[component]
@@ -374,6 +501,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let input_tx = ctx.input_tx.clone();
     let spinner = ctx.spinner.clone();
     let permission_mode = ctx.permission_mode.clone();
+    let tips_text = ctx.tips_line.clone();
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -385,7 +513,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
-    let mut status_line = hooks.use_state(String::new);
+    let mut turn_result = hooks.use_state(|| None::<String>);
+    let mut turn_result_time = hooks.use_state(|| None::<Instant>);
+    let mut has_submitted = hooks.use_state(|| false);
     let mut question_state = hooks.use_state(|| None::<QuestionPromptView>);
     let mut question_selection = hooks.use_state(|| 0usize);
     let mut should_exit = hooks.use_state(|| false);
@@ -410,11 +540,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Drain output channel.
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
-                    match rx.try_recv() {
-                        Ok(text) => stdout_for_future.println(text),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
+                    let (text, terminated) = match rx.try_recv() {
+                        Ok(OutputMsg::Line(text)) => (text, true),
+                        Ok(OutputMsg::Raw(text)) => (text, false),
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                    };
+                    split_for_iocraft(&text, terminated, |op| match op {
+                        OutputOp::Println(line) => stdout_for_future.println(line),
+                        OutputOp::Print(chunk) => stdout_for_future.print(chunk),
+                    });
                 }
             }
 
@@ -431,13 +565,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             question_selection.set(0);
                             input_value.set(String::new());
                         }
-                        Ok(UiCommand::SetStatusLine(text)) => {
-                            status_line.set(text);
+                        Ok(UiCommand::SetTurnResult(text)) => {
+                            turn_result.set(Some(text));
+                            turn_result_time.set(Some(Instant::now()));
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
                 }
+            }
+
+            // Auto-dismiss turn result after 5 seconds.
+            if turn_result_time
+                .read()
+                .is_some_and(|t| t.elapsed() >= Duration::from_secs(5))
+            {
+                turn_result.set(None);
+                turn_result_time.set(None);
             }
 
             // Update spinner.
@@ -468,6 +612,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         if let Some(event) =
                             enter_key_event_for_value(question.as_ref(), selected_index, &val)
                         {
+                            if !*has_submitted.read() {
+                                has_submitted.set(true);
+                            }
                             match event {
                                 InputEvent::Exit => {
                                     should_exit.set(true);
@@ -641,10 +788,34 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         system.exit();
     }
 
+    // ── Derive ChromeSlots from state ──────────────────────────────────
     let st = spinner_text.read().clone();
     let val = input_value.read().clone();
     let question = question_state.read().clone();
     let selected_index = *question_selection.read();
+    let submitted = *has_submitted.read();
+
+    // StatusSlot: Spinner > TurnResult > Tips > Empty
+    let status_slot = if !st.is_empty() {
+        StatusSlot::Spinner(st)
+    } else if let Some(ref tr) = *turn_result.read() {
+        StatusSlot::TurnResult(tr.clone())
+    } else if !submitted {
+        StatusSlot::Tips
+    } else {
+        StatusSlot::Empty
+    };
+
+    // FooterSlot
+    let footer_slot = if matches!(status_slot, StatusSlot::Spinner(_)) {
+        FooterSlot::TurnActive
+    } else if submitted {
+        FooterSlot::Minimal
+    } else {
+        FooterSlot::Full
+    };
+
+    // InputSlot (ChromeSlot: text_input | question_panel — driven by question_state)
     let question_panel = question
         .as_ref()
         .map(|question| format_question_panel(question, selected_index));
@@ -653,28 +824,27 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else {
         "\u{276f} "
     };
-    let perm = permission_mode.clone();
 
+    let perm = permission_mode.clone();
     let w = term_width as usize;
-    let status = status_line.read().clone();
     let sep = "\u{2500}".repeat(w);
+    let footer_text = format_footer_text(&footer_slot, &perm);
 
     element! {
         View(flex_direction: FlexDirection::Column) {
-            #(if !st.is_empty() {
-                Some(element! { Text(content: st.clone()) })
-            } else {
-                None
+            // StatusSlot
+            #(match &status_slot {
+                StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
+                StatusSlot::TurnResult(s) => Some(element! { Text(content: s.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Tips => Some(element! { Text(content: tips_text.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Empty => None,
             })
+            // Separator
+            Text(content: sep.clone(), color: Color::DarkGrey)
+            // InputSlot
             #(question_panel.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            #(if !status.is_empty() {
-                Some(element! { Text(content: status.clone(), color: Color::DarkGrey) })
-            } else {
-                None
-            })
-            Text(content: sep.clone(), color: Color::DarkGrey)
             View(flex_direction: FlexDirection::Row) {
                 Text(content: prompt_label)
                 TextInput(
@@ -687,11 +857,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     },
                 )
             }
+            // Separator
             Text(content: sep, color: Color::DarkGrey)
-            Text(
-                content: format!("  \u{23f5}\u{23f5} {perm} \u{00b7} /help \u{00b7} /exit to quit"),
-                color: Color::DarkGrey,
-            )
+            // FooterSlot
+            Text(content: footer_text, color: Color::DarkGrey)
         }
     }
 }
@@ -703,7 +872,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// sends output text via `ReplHandle::output`. The spinner state is
 /// shared so the runner thread can update it atomically.
 pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle {
-    let (output_tx, output_rx) = mpsc::sync_channel::<String>(512);
+    let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
     let spinner = SpinnerState::new_inactive();
@@ -714,6 +883,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         input_tx: input_tx.clone(),
         spinner: spinner.clone(),
         permission_mode: permission_mode.to_string(),
+        tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
     };
 
     let banner = startup_banner.to_string();

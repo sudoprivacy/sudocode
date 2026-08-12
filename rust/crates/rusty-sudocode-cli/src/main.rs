@@ -3947,15 +3947,12 @@ impl LiveCli {
             })
             .collect();
 
-        let hint = "  Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for /command completions";
-
         format!(
-            "{}\n\n{}\n{}\n{}\n\n{}",
+            "{}\n\n{}\n{}\n{}",
             logo,
             top,
             boxed_lines.join("\n"),
             bottom,
-            hint,
         )
     }
 
@@ -4093,7 +4090,10 @@ impl LiveCli {
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary.response_model.as_deref().unwrap_or(&self.config.model);
+                    let model_for_caps = summary
+                        .response_model
+                        .as_deref()
+                        .unwrap_or(&self.config.model);
                     let context_window =
                         runtime::model_capabilities::context_window_or_default(model_for_caps);
                     let branch = env::current_dir()
@@ -4197,13 +4197,16 @@ impl LiveCli {
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary.response_model.as_deref().unwrap_or(&self.config.model);
+                    let model_for_caps = summary
+                        .response_model
+                        .as_deref()
+                        .unwrap_or(&self.config.model);
                     let context_window =
                         runtime::model_capabilities::context_window_or_default(model_for_caps);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    ui.set_status_line(&format_turn_status_line_with_branch(
+                    ui.set_turn_result(&format_turn_status_line_with_branch(
                         &self.config.model,
                         turns,
                         &usage,

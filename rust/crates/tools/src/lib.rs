@@ -532,13 +532,7 @@ impl GlobalToolRegistry {
             .map(|name| (normalize_tool_name(name), name.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        for (alias, canonical) in [
-            ("read", "read_file"),
-            ("write", "write_file"),
-            ("edit", "edit_file"),
-            ("glob", "glob_search"),
-            ("grep", "grep_search"),
-        ] {
+        for &(alias, canonical) in TOOL_ALIASES {
             name_map.insert(alias.to_string(), canonical.to_string());
         }
 
@@ -1457,6 +1451,33 @@ pub fn execute_tool_with_abort(
     execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
 }
 
+/// PascalCase / short-name → canonical snake_case tool name.
+///
+/// SSOT: the alias pairs live here once and are consumed by both
+/// `parse_allowed_tools` (for `--allowedTools` CLI flag) and
+/// `execute_tool_with_enforcer` (for model-returned tool names).
+const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("read", "read_file"),
+    ("write", "write_file"),
+    ("edit", "edit_file"),
+    ("glob", "glob_search"),
+    ("grep", "grep_search"),
+];
+
+/// Canonicalize a tool name from the model into the internal name used
+/// by the `execute_tool` match. Models may return PascalCase names
+/// (CC-style: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) while
+/// scode registers snake_case (`bash`, `read_file`, etc.).
+fn canonicalize_tool_name(name: &str) -> String {
+    let normalized = normalize_tool_name(name);
+    for &(alias, canonical) in TOOL_ALIASES {
+        if normalized == alias {
+            return canonical.to_string();
+        }
+    }
+    normalized
+}
+
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
@@ -1465,6 +1486,8 @@ fn execute_tool_with_enforcer(
     ctx: Option<&ToolDispatchContext>,
     fs: &dyn FsBackend,
 ) -> Result<String, String> {
+    let name = canonicalize_tool_name(name);
+    let name = name.as_str();
     // Coordinator hard tool-gate — belt-and-suspenders against a
     // non-compliant model that hallucinates a forbidden tool name
     // even though the LLM schema hides it (see
@@ -8796,7 +8819,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -12710,48 +12733,41 @@ printf 'pwsh:%s' "$1"
     impl TestServer {
         fn spawn(handler: Arc<dyn Fn(&str) -> HttpResponse + Send + Sync + 'static>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-            listener
-                .set_nonblocking(true)
-                .expect("set nonblocking listener");
             let addr = listener.local_addr().expect("local addr");
+            // Blocking accept with a short timeout: reliable on all
+            // platforms (the old non-blocking spin-poll caused
+            // "connection refused" flakes on Windows CI).
+            listener
+                .set_nonblocking(false)
+                .expect("set blocking listener");
             let (tx, rx) = std::sync::mpsc::channel::<()>();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
 
             let handle = thread::spawn(move || {
-                // Signal that the accept loop is about to start.
                 let _ = ready_tx.send(());
                 loop {
-                    if rx.try_recv().is_ok() {
-                        break;
-                    }
-
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Check shutdown AFTER accept unblocks.
+                            if rx.try_recv().is_ok() {
+                                break;
+                            }
                             let mut buffer = [0_u8; 4096];
                             let size = match stream.read(&mut buffer) {
                                 Ok(n) => n,
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                                Err(e) => panic!("read request: {e}"),
+                                Err(_) => continue,
                             };
                             let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                             let request_line =
                                 request.lines().next().unwrap_or_default().to_string();
                             let response = handler(&request_line);
-                            stream
-                                .write_all(response.to_bytes().as_slice())
-                                .expect("write response");
+                            let _ = stream.write_all(response.to_bytes().as_slice());
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("server accept failed: {error}"),
+                        Err(_) => break,
                     }
                 }
             });
 
-            // Wait for the server thread to enter the accept loop before
-            // returning. Without this, the client can connect before the
-            // thread is scheduled, causing "connection refused" on macOS CI.
             ready_rx.recv().expect("server readiness signal");
 
             Self {
@@ -12770,6 +12786,8 @@ printf 'pwsh:%s' "$1"
         fn drop(&mut self) {
             if let Some(tx) = self.shutdown.take() {
                 let _ = tx.send(());
+                // Self-connect to unblock the blocking accept() call.
+                let _ = TcpStream::connect(self.addr);
             }
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();

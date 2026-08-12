@@ -1456,7 +1456,14 @@ pub fn execute_tool_with_abort(
 /// SSOT: the alias pairs live here once and are consumed by both
 /// `parse_allowed_tools` (for `--allowedTools` CLI flag) and
 /// `execute_tool_with_enforcer` (for model-returned tool names).
+///
+/// Keys are the NORMALIZED (lower-cased) alias form — the CC PascalCase
+/// names (`Bash`, `Read`, …) normalize to these. Only tools whose
+/// `execute_tool` match arm is lower/snake_case appear here; PascalCase-
+/// native tools (`EnterPlanMode`, `TodoWrite`, `Skill`, `Agent`, …) are
+/// NOT aliased — [`canonicalize_tool_name`] passes them through unchanged.
 const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("bash", "bash"),
     ("read", "read_file"),
     ("write", "write_file"),
     ("edit", "edit_file"),
@@ -1468,6 +1475,12 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
 /// by the `execute_tool` match. Models may return PascalCase names
 /// (CC-style: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) while
 /// scode registers snake_case (`bash`, `read_file`, etc.).
+///
+/// Names NOT in [`TOOL_ALIASES`] pass through UNCHANGED — critical for
+/// the PascalCase-native tools (`EnterPlanMode`, `ExitPlanMode`,
+/// `TodoWrite`, `WebFetch`, `Skill`, `Agent`, `TaskCreate`, …) whose
+/// `execute_tool` match arms are PascalCase: lower-casing them (the prior
+/// behaviour) turned every one into `unsupported tool`.
 fn canonicalize_tool_name(name: &str) -> String {
     let normalized = normalize_tool_name(name);
     for &(alias, canonical) in TOOL_ALIASES {
@@ -1475,7 +1488,7 @@ fn canonicalize_tool_name(name: &str) -> String {
             return canonical.to_string();
         }
     }
-    normalized
+    name.to_string()
 }
 
 fn execute_tool_with_enforcer(
@@ -8828,14 +8841,14 @@ mod tests {
 
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, auto_background_threshold,
-        await_agent_output, build_agent_system_prompt, classify_lane_failure, derive_agent_state,
-        execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
-        maybe_commit_provenance, mvp_tool_specs, normalize_subagent_type,
-        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
-        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
-        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
-        LaneEventName, LaneFailureClass, SubagentToolExecutor,
+        await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
+        classify_lane_failure, derive_agent_state, execute_agent_inline_with_work,
+        execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
+        global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
+        normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
+        push_output_block, run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput,
+        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
+        GlobalToolRegistry, LaneEventName, LaneFailureClass, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -8974,6 +8987,36 @@ mod tests {
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
+    }
+
+    #[test]
+    fn canonicalize_maps_aliases_and_preserves_pascalcase_native_tools() {
+        // CC-style aliases fold to the snake_case match arm.
+        assert_eq!(canonicalize_tool_name("Bash"), "bash");
+        assert_eq!(canonicalize_tool_name("Read"), "read_file");
+        assert_eq!(canonicalize_tool_name("Grep"), "grep_search");
+        assert_eq!(canonicalize_tool_name("read_file"), "read_file");
+        // PascalCase-native tools MUST pass through unchanged — lower-casing
+        // them turns every one into `unsupported tool` (the pty_plan_mode
+        // regression). Guard the whole PascalCase-arm family.
+        for tool in [
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "TodoWrite",
+            "WebFetch",
+            "WebSearch",
+            "Skill",
+            "Agent",
+            "TaskCreate",
+            "StructuredOutput",
+            "NotebookEdit",
+        ] {
+            assert_eq!(
+                canonicalize_tool_name(tool),
+                tool,
+                "{tool} must not be mangled"
+            );
+        }
     }
 
     #[test]

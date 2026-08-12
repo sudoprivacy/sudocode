@@ -4690,6 +4690,7 @@ dependencies = [
  "commands",
  "flate2",
  "futures",
+ "kernel",
  "plugins",
  "reqwest",
  "runtime",

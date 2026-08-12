@@ -172,7 +172,7 @@ fn format_compact_tokens(tokens: u32) -> String {
 enum StatusSlot {
     /// Animated progress during a turn.
     Spinner(String),
-    /// Turn result (tokens/cost/ctx). Auto-dismisses after ~5 seconds.
+    /// Turn result (tokens/cost/ctx). Cleared when the next turn starts.
     TurnResult(String),
     /// First-run tips. Dismissed on first submit.
     Tips,
@@ -514,7 +514,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
     let mut turn_result = hooks.use_state(|| None::<String>);
-    let mut turn_result_time = hooks.use_state(|| None::<Instant>);
     let mut has_submitted = hooks.use_state(|| false);
     let mut question_state = hooks.use_state(|| None::<QuestionPromptView>);
     let mut question_selection = hooks.use_state(|| 0usize);
@@ -567,7 +566,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
-                            turn_result_time.set(Some(Instant::now()));
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
@@ -575,19 +573,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
 
-            // Auto-dismiss turn result after 5 seconds.
-            if turn_result_time
-                .read()
-                .is_some_and(|t| t.elapsed() >= Duration::from_secs(5))
-            {
-                turn_result.set(None);
-                turn_result_time.set(None);
-            }
-
-            // Update spinner.
+            // Update spinner.  When a new turn starts (spinner becomes
+            // active), clear the previous turn's result — the spinner
+            // takes priority in the StatusSlot and the old result is stale.
             let idx = frame.get();
             frame.set(idx.wrapping_add(1));
             let text = spinner_for_future.render_frame(idx);
+            if !text.is_empty() && turn_result.read().is_some() {
+                turn_result.set(None);
+            }
             spinner_text.set(text);
         }
     });

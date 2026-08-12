@@ -93,6 +93,55 @@ fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
     result
 }
 
+/// Render a closed box with a titled header for scrollback output.
+///
+/// ```text
+///   ╭─ Title ─────────────╮
+///   │ content line 1      │
+///   │ content line 2      │
+///   ╰─────────────────────╯
+/// ```
+///
+/// Box width is capped at terminal width. Content lines that exceed
+/// the inner area are wrapped (height grows instead of overflow).
+#[inline]
+pub(crate) fn format_box(title: &str, content: &str) -> String {
+    let term_w = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
+    let title_width = display_width(title);
+    // Total visible line = 2 (indent) + 1 (╭) + border_chars + 1 (╮).
+    let max_border = term_w.saturating_sub(4);
+    let header_min = title_width + 4; // "─ Title ─"
+    let content_area = max_border.saturating_sub(2);
+
+    let wrapped = wrap_ansi(content, content_area);
+
+    let content_max = wrapped
+        .iter()
+        .map(|line| display_width(&strip_ansi_codes(line)))
+        .max()
+        .unwrap_or(0);
+    let border_chars = header_min.max(content_max + 2).min(max_border);
+    let inner = border_chars.saturating_sub(2);
+
+    let g = "\x1b[38;5;245m";
+    let r = "\x1b[0m";
+    let ct = "\x1b[1;36m";
+
+    let header_fill = border_chars.saturating_sub(title_width + 3);
+    let header = format!("  {g}╭─ {ct}{title}{r}{g} {}╮{r}", "─".repeat(header_fill));
+
+    let mut body = String::new();
+    for line in &wrapped {
+        let vis = display_width(&strip_ansi_codes(line));
+        let pad = inner.saturating_sub(vis);
+        body.push_str(&format!("\n  {g}│{r} {line}{}{g} │{r}", " ".repeat(pad)));
+    }
+
+    let bottom = format!("  {g}╰{}╯{r}", "─".repeat(border_chars));
+
+    format!("{header}{body}\n{bottom}")
+}
+
 // ---------------------------------------------------------------------------
 // Unified message rendering pipeline
 // ---------------------------------------------------------------------------
@@ -903,48 +952,7 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         _ => summarize_tool_payload(input),
     };
 
-    // Closed box drawing:
-    //   ╭─ Name ───────────────╮
-    //   │ content line 1       │
-    //   │ wrapped continuation │
-    //   ╰──────────────────────╯
-    //
-    // Box width is capped at terminal width. Content lines that exceed
-    // the inner area are wrapped (height grows).
-    let term_w = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-    let name_width = display_width(name);
-    // Total visible line = 2 (indent) + 1 (╭) + border_chars + 1 (╮).
-    let max_border = term_w.saturating_sub(4);
-    let header_min = name_width + 4; // "─ Name ─"
-    let content_area = max_border.saturating_sub(2);
-
-    let wrapped = wrap_ansi(&detail, content_area);
-
-    let content_max = wrapped
-        .iter()
-        .map(|line| display_width(&strip_ansi_codes(line)))
-        .max()
-        .unwrap_or(0);
-    let border_chars = header_min.max(content_max + 2).min(max_border);
-    let inner = border_chars.saturating_sub(2);
-
-    let g = "\x1b[38;5;245m";
-    let r = "\x1b[0m";
-    let cn = "\x1b[1;36m";
-
-    let header_fill = border_chars.saturating_sub(name_width + 3);
-    let header = format!("  {g}╭─ {cn}{name}{r}{g} {}╮{r}", "─".repeat(header_fill));
-
-    let mut body = String::new();
-    for line in &wrapped {
-        let vis = display_width(&strip_ansi_codes(line));
-        let pad = inner.saturating_sub(vis);
-        body.push_str(&format!("\n  {g}│{r} {line}{}{g} │{r}", " ".repeat(pad)));
-    }
-
-    let bottom = format!("  {g}╰{}╯{r}", "─".repeat(border_chars));
-
-    format!("{header}{body}\n{bottom}")
+    format_box(name, &detail)
 }
 
 /// Split a `ToolResult.output` string into its JSON-payload prefix and any

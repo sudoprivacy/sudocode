@@ -48,6 +48,51 @@ use crate::{
     PRIMARY_SESSION_EXTENSION, VERSION,
 };
 
+/// Wrap a string (possibly containing ANSI escape sequences) to `width`
+/// visible columns. Each input line that exceeds `width` is hard-broken
+/// into multiple output lines. ANSI sequences are copied verbatim and
+/// don't count towards visible width.
+fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return text.lines().map(String::from).collect();
+    }
+    let mut result = Vec::new();
+    for line in text.lines() {
+        let mut current = String::new();
+        let mut vis = 0usize;
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                current.push(ch);
+                if chars.peek() == Some(&'[') {
+                    current.push(chars.next().unwrap());
+                    for c in chars.by_ref() {
+                        current.push(c);
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                if vis + ch_w > width {
+                    current.push_str("\x1b[0m");
+                    result.push(current);
+                    current = String::new();
+                    vis = 0;
+                }
+                current.push(ch);
+                vis += ch_w;
+            }
+        }
+        result.push(current);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Unified message rendering pipeline
 // ---------------------------------------------------------------------------
@@ -858,13 +903,54 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         _ => summarize_tool_payload(input),
     };
 
-    // Top: ╭─ {name} ─╮  →  visual width of inner = name_width + 4 (─ SP name SP ─)
+    // Closed box drawing:
+    //   ╭─ Name ───────────────╮
+    //   │ content line 1       │
+    //   │ wrapped continuation │
+    //   ╰──────────────────────╯
+    //
+    // Box width is capped at terminal width. Content lines that exceed
+    // the inner area are wrapped (height grows).
+    let term_w = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
     let name_width = display_width(name);
-    let border = "─".repeat(name_width + 4);
-    let detail_indented = detail.replace('\n', "\n  ");
-    format!(
-        "  \x1b[38;5;245m╭─ \x1b[1;36m{name}\x1b[0;38;5;245m ─╮\x1b[0m\n  \x1b[38;5;245m│\x1b[0m {detail_indented}\n  \x1b[38;5;245m╰{border}╯\x1b[0m"
-    )
+    // border_chars = chars between ╭ and ╮ (or ╰ and ╯).
+    // Total visible line width = 2 (indent) + 1 (╭) + border_chars + 1 (╮).
+    let max_border = term_w.saturating_sub(4);
+    let header_min = name_width + 4; // "─ Name ─"
+                                     // Content area = border_chars - 2 (spaces flanking content between │…│).
+    let content_area = max_border.saturating_sub(2);
+
+    // Wrap detail lines to fit content_area.
+    let wrapped = wrap_ansi(&detail, content_area);
+
+    let content_max = wrapped
+        .iter()
+        .map(|line| display_width(&strip_ansi_codes(line)))
+        .max()
+        .unwrap_or(0);
+    let border_chars = header_min.max(content_max + 2).min(max_border);
+    let inner = border_chars.saturating_sub(2);
+
+    let g = "\x1b[38;5;245m"; // grey
+    let r = "\x1b[0m"; // reset
+    let cn = "\x1b[1;36m"; // cyan bold (name)
+
+    // Header: ╭─ Name ──...──╮
+    let header_fill = border_chars.saturating_sub(name_width + 3);
+    let header = format!("  {g}╭─ {cn}{name}{r}{g} {}╮{r}", "─".repeat(header_fill));
+
+    // Content lines: │ content{padding} │
+    let mut body = String::new();
+    for line in &wrapped {
+        let vis = display_width(&strip_ansi_codes(line));
+        let pad = inner.saturating_sub(vis);
+        body.push_str(&format!("\n  {g}│{r} {line}{}{g} │{r}", " ".repeat(pad)));
+    }
+
+    // Bottom: ╰──────╯
+    let bottom = format!("  {g}╰{}╯{r}", "─".repeat(border_chars));
+
+    format!("{header}{body}\n{bottom}")
 }
 
 /// Split a `ToolResult.output` string into its JSON-payload prefix and any

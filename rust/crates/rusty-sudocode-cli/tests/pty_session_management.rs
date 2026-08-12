@@ -284,9 +284,27 @@ fn compact_reduces_messages() {
     )
     .expect("spawn scode --resume /compact");
 
-    // Verify compact ran — output mentions removed messages or compact.
-    sess.expect("(?i)(compact|removed|skipped|kept)")
-        .expect("should see compact result");
+    // The compact report format is:
+    //   Compact
+    //     Result           compacted
+    //     Messages removed N
+    //     Messages kept    M
+    // Or:
+    //     Result           skipped
+    //
+    // Verify the output says "compacted" (not "skipped") for a 24-msg session,
+    // and that Messages removed is > 0.
+    let output = sess
+        .expect("(?i)Result\\s+(compacted|skipped)")
+        .expect("should see compact result status");
+
+    assert!(
+        output.to_ascii_lowercase().contains("compacted"),
+        "24-message session must compact (not skip): {output:?}"
+    );
+
+    sess.expect("Messages removed")
+        .expect("should show removed count");
 
     let exit = sess.expect_eof().expect("should exit");
     assert_eq!(exit, 0);

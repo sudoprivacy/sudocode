@@ -1286,4 +1286,320 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result, Err(super::CompactionError::ApiError(_))));
     }
+
+    #[tokio::test]
+    async fn async_compact_nothing_to_compact_on_small_session() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+
+        struct PanicIfCalled;
+
+        #[async_trait]
+        impl ApiClient for PanicIfCalled {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                panic!("stream should not be called");
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                panic!("send_compaction should not be called on a small session");
+            }
+        }
+
+        let mut session = Session::new();
+        session.messages = vec![ConversationMessage::user_text("hello")];
+
+        let config = super::CompactionConfig::default();
+        let mut client = PanicIfCalled;
+        let result =
+            super::compact_session(&session, config, &mut client, "claude-sonnet-4-6", None).await;
+
+        assert!(matches!(
+            result,
+            Err(super::CompactionError::NothingToCompact)
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_recompaction_merges_previous_and_new_summaries() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static CALL_COUNT: AtomicU8 = AtomicU8::new(0);
+
+        struct RecompactionMock;
+
+        #[async_trait]
+        impl ApiClient for RecompactionMock {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                let call = CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                if call == 0 {
+                    Ok("<summary>\n1. Primary Request and Intent:\n   User investigated compaction flow.\n</summary>".to_string())
+                } else {
+                    Ok("<summary>\n1. Primary Request and Intent:\n   User added regression tests.\n</summary>".to_string())
+                }
+            }
+        }
+
+        CALL_COUNT.store(0, Ordering::Relaxed);
+
+        // First compaction
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("Investigate compact ".repeat(100)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Inspecting the flow ".repeat(100),
+            }]),
+            ConversationMessage::user_text("recent turn 1"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept 1".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = RecompactionMock;
+        let first = super::compact_session(&session, config, &mut client, "sonnet", None)
+            .await
+            .expect("first compaction");
+        assert!(first.removed_message_count > 0);
+
+        // Add new messages to compacted session
+        let mut second_session = first.compacted_session.clone();
+        second_session
+            .push_user_text("Add regression tests ".repeat(100))
+            .unwrap();
+        second_session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Working on coverage ".repeat(100),
+            }]))
+            .unwrap();
+        second_session.compaction = first.compacted_session.compaction;
+
+        // Second compaction — should merge
+        let second = super::compact_session(&second_session, config, &mut client, "sonnet", None)
+            .await
+            .expect("second compaction");
+
+        assert!(second
+            .formatted_summary
+            .contains("Previously compacted context:"));
+        assert!(second
+            .formatted_summary
+            .contains("Newly compacted context:"));
+        assert!(matches!(
+            &second.compacted_session.messages[0].blocks[0],
+            ContentBlock::Text { text }
+                if text.contains("Previously compacted context:")
+                    && text.contains("Newly compacted context:")
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_compact_passes_custom_instructions_to_llm() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static SAW_INSTRUCTIONS: AtomicBool = AtomicBool::new(false);
+
+        struct InstructionVerifyingMock;
+
+        #[async_trait]
+        impl ApiClient for InstructionVerifyingMock {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                // The last message is the compaction prompt — verify it
+                // contains the custom instructions.
+                let last = messages.last().expect("messages should not be empty");
+                let prompt_text = match &last.blocks[0] {
+                    ContentBlock::Text { text } => text,
+                    _ => panic!("last message should be text"),
+                };
+                if prompt_text.contains("Focus on TypeScript changes only") {
+                    SAW_INSTRUCTIONS.store(true, Ordering::Relaxed);
+                }
+                Ok("<summary>\nCustom summary.\n</summary>".to_string())
+            }
+        }
+
+        SAW_INSTRUCTIONS.store(false, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = InstructionVerifyingMock;
+        let result = super::compact_session(
+            &session,
+            config,
+            &mut client,
+            "sonnet",
+            Some("Focus on TypeScript changes only"),
+        )
+        .await
+        .expect("compaction with custom instructions");
+
+        assert!(result.removed_message_count > 0);
+        assert!(
+            SAW_INSTRUCTIONS.load(Ordering::Relaxed),
+            "custom instructions must reach the LLM via the compaction prompt"
+        );
+    }
+
+    #[test]
+    fn build_compaction_messages_filters_thinking_only_messages() {
+        // A message with ONLY thinking blocks should be filtered out entirely.
+        let messages = vec![
+            ConversationMessage::user_text("hello"),
+            ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "deep thought".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: "more thought".to_string(),
+                    signature: None,
+                },
+            ]),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "actual response".to_string(),
+            }]),
+        ];
+
+        let result = super::build_compaction_messages(&messages, "summarize");
+
+        // Original: 3 messages. After filter: user + text-only assistant = 2, plus prompt = 3.
+        // The thinking-only assistant message should be dropped.
+        assert_eq!(
+            result.len(),
+            3,
+            "thinking-only message should be filtered out: got {:?}",
+            result.iter().map(|m| m.blocks.len()).collect::<Vec<_>>()
+        );
+
+        // Verify the kept assistant message has the right text
+        assert!(matches!(
+            &result[1].blocks[0],
+            ContentBlock::Text { text } if text == "actual response"
+        ));
+    }
+
+    #[test]
+    fn compaction_usage_aggregation_handles_partial_none() {
+        // Some assistant messages have usage, some don't — should aggregate
+        // only the ones with usage.
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "two ".repeat(200),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_creation_input_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cost_units: Some(100),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
+            ConversationMessage::user_text("three ".repeat(200)),
+            // This assistant message has NO usage
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("five ".repeat(200)),
+            ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text {
+                    text: "six ".repeat(200),
+                }],
+                Some(TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 8,
+                    cache_creation_input_tokens: 3,
+                    cache_read_input_tokens: 2,
+                    cost_units: Some(200),
+                    cost_currency: Some(UsageCostCurrency::SudoPoint),
+                }),
+            ),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let result = compact_session_sync(
+            &session,
+            CompactionConfig {
+                preserve_recent_messages: 2,
+                max_estimated_tokens: 1,
+            },
+        );
+
+        let usage = result
+            .compacted_session
+            .compaction
+            .expect("compaction")
+            .usage
+            .expect("compacted usage");
+
+        // Should aggregate only the two messages WITH usage, skipping the None one
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 13);
+        assert_eq!(usage.cache_creation_input_tokens, 4);
+        assert_eq!(usage.cache_read_input_tokens, 2);
+        assert_eq!(usage.cost_units, Some(300));
+    }
 }

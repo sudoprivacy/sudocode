@@ -1906,8 +1906,7 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
 /// Callback type for interactive slash commands that need user selection
 /// via iocraft's InputSlot (replaces dialoguer FuzzySelect/Select in the
 /// iocraft REPL path).
-type SlashSelectionHandler =
-    Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender)>;
+type SlashSelectionHandler = Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender)>;
 
 /// Show an interactive selection question via iocraft's InputSlot and
 /// register a callback to handle the answer. The coordinator loop routes
@@ -2189,8 +2188,7 @@ fn run_repl_iocraft_dispatch(
                         let sudocode_config = load_sudocode_config_for_current_dir();
                         let config_keys: Vec<String> =
                             sudocode_config.models.keys().cloned().collect();
-                        let models =
-                            runtime::model_capabilities::merge_discovery_ids(&config_keys);
+                        let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
                         let current = cli_lock.config.model.clone();
                         drop(cli_lock);
 

@@ -309,9 +309,7 @@ impl FuzzySelectState {
     }
 
     fn selected_value(&self) -> Option<String> {
-        self.filtered
-            .get(self.cursor)
-            .map(|&i| (i + 1).to_string())
+        self.filtered.get(self.cursor).map(|&i| (i + 1).to_string())
     }
 
     fn format_panel(&self) -> String {
@@ -319,15 +317,17 @@ impl FuzzySelectState {
         if let Some(title) = self.question.title.as_deref().filter(|t| !t.is_empty()) {
             lines.push(format!("[{title}]"));
         }
-        if let Some(desc) = self.question.description.as_deref().filter(|d| !d.is_empty()) {
+        if let Some(desc) = self
+            .question
+            .description
+            .as_deref()
+            .filter(|d| !d.is_empty())
+        {
             lines.push(desc.to_string());
         }
         let total = self.filtered.len();
         if self.filter.is_empty() {
-            lines.push(format!(
-                "{} items  {}",
-                total, self.question.prompt
-            ));
+            lines.push(format!("{} items  {}", total, self.question.prompt));
         } else {
             lines.push(format!(
                 "{total} match  {} (filter: {})",

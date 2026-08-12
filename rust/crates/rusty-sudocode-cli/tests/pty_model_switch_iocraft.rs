@@ -31,7 +31,8 @@ fn model_switch_changes_active_model() {
     });
 
     // Switch to a specific model via /model <name>
-    sess.send("/model claude-sonnet-4-6\r").expect("send /model");
+    sess.send("/model claude-sonnet-4-6\r")
+        .expect("send /model");
     sess.expect("Model updated").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("model switch report: {e}\nPTY:\n{screen}");

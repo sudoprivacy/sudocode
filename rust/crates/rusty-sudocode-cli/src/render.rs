@@ -513,6 +513,18 @@ struct RenderState {
     heading_level: Option<u8>,
     quote: usize,
     list_stack: Vec<ListKind>,
+    /// Column where markers of the list at each `list_stack` level start.
+    /// Top-level lists start at 0; a nested list starts at its parent item's
+    /// content column, so its markers align under the parent's text
+    /// regardless of the parent marker's width ("• " = 2, "10. " = 4).
+    list_indents: Vec<usize>,
+    /// Column where the current item's content starts (marker column plus
+    /// marker width). Continuation lines inside the item (soft/hard breaks)
+    /// indent to this column so they align under the first line's text.
+    item_content_col: usize,
+    /// Set by the driver loop at `Start(Tag::List)`: true when the source has
+    /// no blank line between the previous block and this top-level list.
+    bind_top_level_list: bool,
     link_stack: Vec<LinkState>,
     table: Option<TableState>,
 }
@@ -625,7 +637,18 @@ impl TerminalRenderer {
         let mut code_buffer = String::new();
         let mut in_code_block = false;
 
-        for event in Parser::new_ext(&normalized, Options::all()) {
+        for (event, range) in Parser::new_ext(&normalized, Options::all()).into_offset_iter() {
+            // Decide top-level list binding from the SOURCE, not from the
+            // rendered output: pulldown-cmark emits identical events for
+            // "Label\n- a" and "Label\n\n- a", but the byte offset lets us
+            // look at what the author actually wrote. Keying on the source
+            // keeps the behaviour identical across every caller — streamed
+            // chunks, non-streaming blocks, and transcript replay — where an
+            // output-based heuristic diverged between them.
+            if let Event::Start(Tag::List(_)) = &event {
+                state.bind_top_level_list = state.list_stack.is_empty()
+                    && !Self::blank_line_precedes_impl(&normalized, range.start);
+            }
             self.render_event(
                 event,
                 &mut state,
@@ -642,6 +665,26 @@ impl TerminalRenderer {
     #[must_use]
     pub fn markdown_to_ansi(&self, markdown: &str) -> String {
         self.render_markdown(markdown)
+    }
+
+    /// Whether the source has a blank line immediately before byte offset
+    /// `start` (the start of a block, as reported by pulldown-cmark's offset
+    /// iterator). Walks back over the block's own leading indentation and any
+    /// whitespace-only lines; two or more newlines mean the author separated
+    /// the blocks with a blank line.
+    fn blank_line_precedes_impl(source: &str, start: usize) -> bool {
+        let bytes = source.as_bytes();
+        let mut newlines = 0usize;
+        for &byte in bytes[..start].iter().rev() {
+            match byte {
+                b'\n' => newlines += 1,
+                // Trailing spaces/tabs on the prior line, indentation of this
+                // one, and CRs of CRLF endings don't affect blankness.
+                b' ' | b'\t' | b'\r' => {}
+                _ => break,
+            }
+        }
+        newlines >= 2
     }
 
     #[allow(clippy::too_many_lines)]
@@ -673,19 +716,66 @@ impl TerminalRenderer {
                 state.heading_level = None;
                 output.push_str("\n\n");
             }
-            Event::End(TagEnd::Item) | Event::SoftBreak | Event::HardBreak => {
+            Event::End(TagEnd::Item) => {
+                // A nested list that just closed inside this item already
+                // ends with its own newline; pushing another here opened a
+                // blank hole between the nested items and the next sibling.
+                if !output.ends_with('\n') {
+                    state.append_raw(output, "\n");
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
                 state.append_raw(output, "\n");
+                // Inside a list item, align the continuation line under the
+                // item's text — without this it landed at column 0, hanging
+                // left of the marker.
+                if !state.list_stack.is_empty() && state.item_content_col > 0 {
+                    state.append_raw(output, &" ".repeat(state.item_content_col));
+                }
             }
             Event::Start(Tag::List(first_item)) => {
+                let indent = if state.list_stack.is_empty() {
+                    // Bind a top-level list to the block that introduces it:
+                    // `End(Paragraph)` emitted "\n\n", which put a blank line
+                    // between a label and its own bullets even when the
+                    // author wrote them adjacent. `bind_top_level_list` is
+                    // decided from the source text by the driver loop, so an
+                    // author-written blank line is never collapsed.
+                    if state.bind_top_level_list && output.ends_with("\n\n") {
+                        output.truncate(output.len() - 1);
+                    }
+                    0
+                } else {
+                    // A nested list opens while its parent item's text is
+                    // still on the current line, and only `End(Item)` emits a
+                    // break — so without this the child items rendered inline
+                    // after their parent ("• outer  • inner" on one row).
+                    if !output.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    // Nested markers start at the parent item's content
+                    // column, aligning under its text whatever the parent
+                    // marker's width.
+                    state.item_content_col
+                };
                 let kind = match first_item {
                     Some(index) => ListKind::Ordered { next_index: index },
                     None => ListKind::Unordered,
                 };
                 state.list_stack.push(kind);
+                state.list_indents.push(indent);
             }
             Event::End(TagEnd::List(..)) => {
                 state.list_stack.pop();
-                output.push('\n');
+                state.list_indents.pop();
+                // Only a top-level list closes the block (its last item's
+                // newline plus this one separate it from what follows). A
+                // nested close leaves the newline to the enclosing
+                // `End(Item)` — emitting one here as well stacked up into
+                // blank lines in the middle of the outer list.
+                if state.list_stack.is_empty() {
+                    output.push('\n');
+                }
             }
             Event::Start(Tag::Item) => Self::start_item(state, output),
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -803,7 +893,24 @@ impl TerminalRenderer {
 
     fn start_heading(state: &mut RenderState, level: u8, output: &mut String) {
         state.heading_level = Some(level);
-        if !output.is_empty() {
+        if output.is_empty() {
+            return;
+        }
+        if output.ends_with('\n') {
+            // Normalise to exactly one blank line before the heading.
+            //
+            // Pushing a newline unconditionally used to stack on top of the
+            // separator the previous block had already emitted —
+            // `End(Paragraph)` writes `\n\n`, and a list writes `\n` from
+            // `End(Item)` plus `\n` from `End(List)` — so every heading ended
+            // up preceded by `\n\n\n`, i.e. two blank lines.
+            let content_len = output.trim_end_matches('\n').len();
+            output.truncate(content_len);
+            output.push_str("\n\n");
+        } else {
+            // Mid-line (e.g. after a blockquote's "│ " prefix): just break
+            // the line, exactly as before — normalising here would insert a
+            // blank row that never used to exist.
             output.push('\n');
         }
     }
@@ -814,8 +921,8 @@ impl TerminalRenderer {
     }
 
     fn start_item(state: &mut RenderState, output: &mut String) {
-        let depth = state.list_stack.len().saturating_sub(1);
-        output.push_str(&"  ".repeat(depth));
+        let indent = state.list_indents.last().copied().unwrap_or(0);
+        output.push_str(&" ".repeat(indent));
 
         let marker = match state.list_stack.last_mut() {
             Some(ListKind::Ordered { next_index }) => {
@@ -823,8 +930,17 @@ impl TerminalRenderer {
                 *next_index += 1;
                 format!("{value}. ")
             }
-            _ => String::new(),
+            // Unordered items used to render with no marker at all, so a
+            // bulleted list came out as a wall of bare lines indistinguishable
+            // from consecutive paragraphs. Indentation alone carries nesting;
+            // the bullet is what marks the line as a list item.
+            Some(ListKind::Unordered) => String::from("\u{2022} "),
+            None => String::new(),
         };
+        // Content column = marker column + marker width; nested lists and
+        // continuation lines align to this. `chars().count()` is the right
+        // width here — both marker shapes are single-column characters.
+        state.item_content_col = indent + marker.chars().count();
         output.push_str(&marker);
     }
 

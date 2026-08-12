@@ -41,8 +41,8 @@ use std::thread;
 
 // Re-export kernel types so downstream crates (e.g. `tools`) can
 // reference them without adding a direct `kernel` dependency.
-pub use kernel::kernel::syscall::KernelSyscall;
 pub use kernel::core::agents::registry::AgentDescriptor;
+pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
@@ -296,7 +296,11 @@ fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> 
 // v1 echo loop — retained for tests and backward compatibility
 // ---------------------------------------------------------------------------
 
-fn run_echo_loop<K: KernelSyscall>(kernel: &Arc<K>, desc: &AgentDescriptor, abort: &HookAbortSignal) {
+fn run_echo_loop<K: KernelSyscall>(
+    kernel: &Arc<K>,
+    desc: &AgentDescriptor,
+    abort: &HookAbortSignal,
+) {
     let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
     let agent_id = desc.name.as_str();
     let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);

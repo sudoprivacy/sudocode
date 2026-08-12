@@ -1,6 +1,5 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -8,7 +7,6 @@ use std::time::Instant;
 use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
-use walkdir::{DirEntry, WalkDir};
 
 use crate::fs_backend::FsBackend;
 
@@ -184,8 +182,7 @@ pub fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
-    let absolute_path = normalize_path(path)?;
-    let abs_str = absolute_path.to_string_lossy();
+    let abs_str = fs.normalize(path)?;
 
     // Size check via stat (works for both local and remote backends).
     if let Ok(meta) = fs.stat(&abs_str) {
@@ -231,7 +228,7 @@ pub fn read_file(
     Ok(ReadFileOutput {
         kind: String::from("text"),
         file: TextFilePayload {
-            file_path: absolute_path.to_string_lossy().into_owned(),
+            file_path: abs_str.clone(),
             content: selected,
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
@@ -253,14 +250,12 @@ pub fn write_file(fs: &dyn FsBackend, path: &str, content: &str) -> io::Result<W
         ));
     }
 
-    let absolute_path = normalize_path_allow_missing(path)?;
-    let abs_str = absolute_path.to_string_lossy().into_owned();
+    let abs_str = fs.normalize_allow_missing(path)?;
 
     let original_file = fs.read_to_string(&abs_str).ok();
 
-    if let Some(parent) = absolute_path.parent() {
-        let parent_str = parent.to_string_lossy();
-        let _ = fs.create_dir_all(&parent_str);
+    if let Some(parent) = Path::new(&abs_str).parent() {
+        let _ = fs.create_dir_all(&parent.to_string_lossy());
     }
     fs.write(&abs_str, content.as_bytes())?;
 
@@ -286,8 +281,7 @@ pub fn edit_file(
     new_string: &str,
     replace_all: bool,
 ) -> io::Result<EditFileOutput> {
-    let absolute_path = normalize_path(path)?;
-    let abs_str = absolute_path.to_string_lossy().into_owned();
+    let abs_str = fs.normalize(path)?;
 
     let original_file = fs.read_to_string(&abs_str)?;
 
@@ -325,53 +319,52 @@ pub fn edit_file(
 }
 
 // ---------------------------------------------------------------------------
-// Intentional std::fs exclusions (NOT migrated to FsBackend)
+// FsBackend-routed traversal
 //
-// The following functions remain on std::fs because they depend on host
-// filesystem traversal (WalkDir) or host-only metadata that has no VFS
-// equivalent:
-//
-// - glob_search: WalkDir-based host traversal + fs::metadata for mtime sort
-// - grep_search: WalkDir-based host traversal + fs::read_to_string per file
-//
-// Other intentional exclusions in the runtime crate:
-// - sandbox.rs: /proc/1/cgroup — host OS container detection
-// - bash.rs: sandbox dirs — host filesystem isolation
-// - oauth.rs: /dev/urandom — crypto random source (File::open)
-// - trust_resolver.rs: #[cfg(test)] only module
+// `glob_search` (namespace) and `grep_search` (content) walk through the
+// injected `&dyn FsBackend` so a co-hosted managed agent hits the VFS
+// in-process (`sys_readdir` / `sys_read`) instead of the host filesystem.
+// The `StdFsBackend` path preserves the standalone CLI's behaviour exactly
+// (host `read_dir` + `metadata`). The recursion is composed from
+// single-level `readdir` calls; the mount-aware one-call recursive
+// `sys_readdir` (nexus-vfs #222) is a later kernel-rev optimisation and is
+// tracked separately — in-process single-level composition adds no gRPC
+// hop, so it is cheap today.
 // ---------------------------------------------------------------------------
 
-/// Expands a glob pattern and returns matching filenames.
-pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
+/// Expands a glob pattern and returns matching filenames, walking the
+/// namespace through the [`FsBackend`].
+pub fn glob_search(
+    fs: &dyn FsBackend,
+    pattern: &str,
+    path: Option<&str>,
+) -> io::Result<GlobSearchOutput> {
     let started = Instant::now();
-    // Use `normalize_path_for_glob` (not `normalize_path`) here:
-    // `canonicalize()` returns Windows verbatim paths (`\\?\C:\…`),
-    // and the forward-slash rewrite below then produces `//?/C:/…`,
-    // which is not a Verbatim-prefixed path under Path::components
-    // semantics — `derive_glob_walk_root` then fails to recover the
-    // base directory and silently falls back to `current_dir()`,
-    // sending WalkDir off into the cwd of the test (the runtime
-    // crate, not the test's temp dir). Just absolutise without
-    // canonicalising.
-    let base_dir = path
-        .map(normalize_path_for_glob)
-        .transpose()?
-        .unwrap_or(std::env::current_dir()?);
-    // The `glob` crate's pattern grammar reserves `\` as an escape
-    // character, so a Windows path like `C:\Users\...` would be
-    // misparsed (e.g. `\U` is treated as an escaped `U`, breaking
-    // every match). The crate's documented rule is to feed it
-    // forward-slash patterns regardless of host; it handles
-    // matching against backslash-separated entries internally.
-    let search_pattern = if Path::new(pattern).is_absolute() {
-        pattern.replace('\\', "/")
-    } else {
-        base_dir.join(pattern).to_string_lossy().replace('\\', "/")
+    // Base directory for relative patterns. Resolve *without* host
+    // canonicalisation: on Windows `canonicalize()` yields a verbatim
+    // `\\?\C:\…` prefix that, once rewritten to forward slashes for the
+    // `glob` crate, breaks `derive_glob_walk_root_str`; on a VFS backend it
+    // would fail outright. `working_root()` (cwd for std, the agent
+    // workspace for the kernel backend) plus a lexical join is the correct,
+    // backend-agnostic base.
+    let base_dir = match path {
+        Some(p) if is_absolute_path(p) => p.to_string(),
+        Some(p) => format!("{}/{}", fs.working_root()?.trim_end_matches(['/', '\\']), p),
+        None => fs.working_root()?,
     };
 
-    // The `glob` crate does not support brace expansion ({a,b,c}).
-    // Expand braces into multiple patterns so patterns like
-    // `Assets/**/*.{cs,uxml,uss}` work correctly.
+    // The `glob` crate reserves `\` as an escape character, so a Windows
+    // path like `C:\Users\...` would be misparsed. Feed it forward-slash
+    // patterns regardless of host; it matches backslash-separated entries
+    // internally.
+    let search_pattern = if is_absolute_path(pattern) {
+        pattern.replace('\\', "/")
+    } else {
+        format!("{}/{}", base_dir.trim_end_matches(['/', '\\']), pattern).replace('\\', "/")
+    };
+
+    // The `glob` crate does not support brace expansion ({a,b,c}). Expand
+    // into multiple patterns so `Assets/**/*.{cs,uxml,uss}` works.
     let expanded = expand_braces(&search_pattern);
 
     let mut seen = HashSet::new();
@@ -379,41 +372,34 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     for pat in &expanded {
         let compiled = Pattern::new(pat)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-        let walk_root = derive_glob_walk_root(pat);
-        let entries = WalkDir::new(&walk_root)
-            .into_iter()
-            .filter_entry(|entry| !should_skip_glob_dir(entry));
-        for entry in entries.flatten() {
-            let candidate = entry.path();
-            // Compare against a forward-slash-normalised string so the
-            // forward-slash glob pattern (see the search_pattern
-            // construction above) matches the Windows-side
-            // backslash-separated WalkDir output. `matches_path` would
-            // walk OS-native Path components and mismatch the slash
-            // orientation.
-            let candidate_str = candidate.to_string_lossy().replace('\\', "/");
-            if entry.file_type().is_file()
-                && compiled.matches(&candidate_str)
-                && seen.insert(candidate.to_path_buf())
-            {
-                matches.push(candidate.to_path_buf());
+        let walk_root = derive_glob_walk_root_str(pat, &base_dir);
+        let mut candidates = Vec::new();
+        walk_files_via_backend(
+            fs,
+            &walk_root,
+            &|name| GLOB_SEARCH_IGNORED_DIRS.contains(&name),
+            &mut candidates,
+        );
+        for candidate in candidates {
+            // Match against a forward-slash-normalised string so the
+            // forward-slash glob pattern matches the Windows-side
+            // backslash-separated entries.
+            let candidate_str = candidate.replace('\\', "/");
+            if compiled.matches(&candidate_str) && seen.insert(candidate_str.clone()) {
+                matches.push(candidate_str);
             }
         }
     }
 
     matches.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
+        fs.stat(path)
             .ok()
+            .and_then(|metadata| metadata.modified)
             .map(Reverse)
     });
 
     let truncated = matches.len() > 100;
-    let filenames = matches
-        .into_iter()
-        .take(100)
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let filenames = matches.into_iter().take(100).collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {
         duration_ms: started.elapsed().as_millis(),
@@ -424,13 +410,11 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
 }
 
 /// Runs a regex search over workspace files with optional context lines.
-pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
-    let base_path = input
-        .path
-        .as_deref()
-        .map(normalize_path)
-        .transpose()?
-        .unwrap_or(std::env::current_dir()?);
+pub fn grep_search(fs: &dyn FsBackend, input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
+    let base_path = match input.path.as_deref() {
+        Some(p) => fs.normalize(p)?,
+        None => fs.working_root()?,
+    };
 
     let regex = RegexBuilder::new(&input.pattern)
         .case_insensitive(input.case_insensitive.unwrap_or(false))
@@ -455,19 +439,19 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let mut content_lines = Vec::new();
     let mut total_matches = 0usize;
 
-    for file_path in collect_search_files(&base_path)? {
-        if !matches_optional_filters(&file_path, glob_filter.as_ref(), file_type) {
+    for file_path in collect_search_files_via_backend(fs, &base_path) {
+        if !matches_optional_filters(Path::new(&file_path), glob_filter.as_ref(), file_type) {
             continue;
         }
 
-        let Ok(file_contents) = fs::read_to_string(&file_path) else {
+        let Ok(file_contents) = fs.read_to_string(&file_path) else {
             continue;
         };
 
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
             if count > 0 {
-                filenames.push(file_path.to_string_lossy().into_owned());
+                filenames.push(file_path.clone());
                 total_matches += count;
             }
             continue;
@@ -486,16 +470,16 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             continue;
         }
 
-        filenames.push(file_path.to_string_lossy().into_owned());
+        filenames.push(file_path.clone());
         if output_mode == "content" {
             for index in matched_lines {
                 let start = index.saturating_sub(input.before.unwrap_or(context));
                 let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
                     let prefix = if input.line_numbers.unwrap_or(true) {
-                        format!("{}:{}:", file_path.to_string_lossy(), current + 1)
+                        format!("{file_path}:{}:", current + 1)
                     } else {
-                        format!("{}:", file_path.to_string_lossy())
+                        format!("{file_path}:")
                     };
                     content_lines.push(format!("{prefix}{line}"));
                 }
@@ -533,32 +517,59 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     })
 }
 
-fn should_skip_glob_dir(entry: &DirEntry) -> bool {
-    entry.file_type().is_dir()
-        && entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| GLOB_SEARCH_IGNORED_DIRS.contains(&name))
+/// Recursively collect absolute file paths under `root` via the backend's
+/// single-level `readdir`, skipping directories for which `skip_dir`
+/// returns true. Composed in-process from `readdir` calls — no host
+/// `WalkDir` — so a co-hosted agent descends the VFS trie.
+fn walk_files_via_backend(
+    fs: &dyn FsBackend,
+    root: &str,
+    skip_dir: &dyn Fn(&str) -> bool,
+    out: &mut Vec<String>,
+) {
+    let entries = fs.readdir(root).unwrap_or_default();
+    if entries.is_empty() {
+        // Either an empty directory or an exact-path root that names a
+        // file (readdir on a file yields nothing) — include the file so
+        // glob/grep on a concrete path still resolves it.
+        if let Ok(meta) = fs.stat(root) {
+            if meta.is_file {
+                out.push(root.to_string());
+            }
+        }
+        return;
+    }
+    for entry in entries {
+        let child = fs.join_path(root, &entry.name);
+        if entry.is_dir {
+            if skip_dir(&entry.name) {
+                continue;
+            }
+            walk_files_via_backend(fs, &child, skip_dir, out);
+        } else {
+            out.push(child);
+        }
+    }
 }
 
-fn derive_glob_walk_root(pattern: &str) -> PathBuf {
-    let path = Path::new(pattern);
-    let mut prefix = PathBuf::new();
-    let mut saw_component = false;
-
-    for component in path.components() {
-        let text = component.as_os_str().to_string_lossy();
-        if component_contains_glob(&text) {
+/// Longest leading glob-free prefix of a forward-slash pattern — the
+/// directory the walk starts from. Falls back to `fallback` when the
+/// pattern begins with a wildcard component.
+fn derive_glob_walk_root_str(pattern: &str, fallback: &str) -> String {
+    let mut prefix: Vec<&str> = Vec::new();
+    for comp in pattern.split('/') {
+        if component_contains_glob(comp) {
             break;
         }
-        prefix.push(component.as_os_str());
-        saw_component = true;
+        prefix.push(comp);
     }
-
-    if saw_component {
-        prefix
+    // A leading `/` yields an empty first segment; keep it so the rejoined
+    // root stays absolute. Fall back only when there is no glob-free
+    // component at all (the pattern starts with a wildcard).
+    if prefix.iter().any(|c| !c.is_empty()) {
+        prefix.join("/")
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        fallback.to_string()
     }
 }
 
@@ -566,19 +577,28 @@ fn component_contains_glob(component: &str) -> bool {
     component.contains('*') || component.contains('?') || component.contains('[')
 }
 
-fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
-    if base_path.is_file() {
-        return Ok(vec![base_path.to_path_buf()]);
-    }
+/// Absolute-path test that spans both namespaces `glob_search` serves: a
+/// leading `/` (VFS / Unix) OR a host-absolute path (`Path::is_absolute`,
+/// which on Windows requires a drive/UNC prefix — a bare `/ws` is NOT
+/// Windows-absolute, so the leading-slash check is what recognises VFS
+/// paths on Windows).
+fn is_absolute_path(p: &str) -> bool {
+    p.starts_with('/') || Path::new(p).is_absolute()
+}
 
-    let mut files = Vec::new();
-    for entry in WalkDir::new(base_path) {
-        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
-        if entry.file_type().is_file() {
-            files.push(entry.path().to_path_buf());
+/// Collect the files `grep_search` scans under `base`, walking the backend.
+/// Unlike `glob_search` this does NOT prune heavy directories — grep over an
+/// explicit path searches everything the caller pointed at (parity with the
+/// prior `WalkDir`-over-everything behaviour).
+fn collect_search_files_via_backend(fs: &dyn FsBackend, base: &str) -> Vec<String> {
+    if let Ok(meta) = fs.stat(base) {
+        if meta.is_file {
+            return vec![base.to_string()];
         }
     }
-    Ok(files)
+    let mut files = Vec::new();
+    walk_files_via_backend(fs, base, &|_| false, &mut files);
+    files
 }
 
 fn matches_optional_filters(
@@ -587,8 +607,12 @@ fn matches_optional_filters(
     file_type: Option<&str>,
 ) -> bool {
     if let Some(glob_filter) = glob_filter {
-        let path_string = path.to_string_lossy();
-        if !glob_filter.matches(&path_string) && !glob_filter.matches_path(path) {
+        // Match against a forward-slash-normalised string (the glob crate's
+        // documented convention) so a `**/*.rs` filter matches regardless
+        // of host separator or a Windows verbatim `\\?\C:\…` prefix that
+        // `matches_path`'s OS-component walk chokes on.
+        let normalised = path.to_string_lossy().replace('\\', "/");
+        if !glob_filter.matches(&normalised) && !glob_filter.matches_path(path) {
             return false;
         }
     }
@@ -642,51 +666,6 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
     }]
 }
 
-fn normalize_path(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    candidate.canonicalize()
-}
-
-/// Like [`normalize_path`] but without `canonicalize`. Required by
-/// `glob_search` on Windows: the verbatim prefix that
-/// `canonicalize()` adds (`\\?\C:\…`) breaks `derive_glob_walk_root`
-/// once the path is rewritten to forward slashes for the glob crate.
-fn normalize_path_for_glob(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    Ok(candidate)
-}
-
-fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-
-    if let Ok(canonical) = candidate.canonicalize() {
-        return Ok(canonical);
-    }
-
-    if let Some(parent) = candidate.parent() {
-        let canonical_parent = parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf());
-        if let Some(name) = candidate.file_name() {
-            return Ok(canonical_parent.join(name));
-        }
-    }
-
-    Ok(candidate)
-}
-
 /// Read a file with workspace boundary enforcement.
 #[allow(dead_code)]
 pub fn read_file_in_workspace(
@@ -696,11 +675,11 @@ pub fn read_file_in_workspace(
     limit: Option<usize>,
     workspace_root: &Path,
 ) -> io::Result<ReadFileOutput> {
-    let absolute_path = normalize_path(path)?;
+    let absolute_path = fs.normalize(path)?;
     let canonical_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
-    validate_workspace_boundary(&absolute_path, &canonical_root)?;
+    validate_workspace_boundary(Path::new(&absolute_path), &canonical_root)?;
     read_file(fs, path, offset, limit)
 }
 
@@ -712,11 +691,11 @@ pub fn write_file_in_workspace(
     content: &str,
     workspace_root: &Path,
 ) -> io::Result<WriteFileOutput> {
-    let absolute_path = normalize_path_allow_missing(path)?;
+    let absolute_path = fs.normalize_allow_missing(path)?;
     let canonical_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
-    validate_workspace_boundary(&absolute_path, &canonical_root)?;
+    validate_workspace_boundary(Path::new(&absolute_path), &canonical_root)?;
     write_file(fs, path, content)
 }
 
@@ -730,11 +709,11 @@ pub fn edit_file_in_workspace(
     replace_all: bool,
     workspace_root: &Path,
 ) -> io::Result<EditFileOutput> {
-    let absolute_path = normalize_path(path)?;
+    let absolute_path = fs.normalize(path)?;
     let canonical_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
-    validate_workspace_boundary(&absolute_path, &canonical_root)?;
+    validate_workspace_boundary(Path::new(&absolute_path), &canonical_root)?;
     edit_file(fs, path, old_string, new_string, replace_all)
 }
 
@@ -913,11 +892,10 @@ pub fn edit_file_with_intent(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        component_contains_glob, derive_glob_walk_root, edit_file, expand_braces, glob_search,
+        component_contains_glob, derive_glob_walk_root_str, edit_file, expand_braces, glob_search,
         grep_search, is_symlink_escape, read_file, read_file_in_workspace, write_file,
         GrepSearchInput, MAX_WRITE_SIZE,
     };
@@ -1048,26 +1026,29 @@ mod tests {
         )
         .expect("file write should succeed");
 
-        let globbed = glob_search("**/*.rs", Some(dir.to_string_lossy().as_ref()))
+        let globbed = glob_search(fs, "**/*.rs", Some(dir.to_string_lossy().as_ref()))
             .expect("glob should succeed");
         assert_eq!(globbed.num_files, 1);
 
-        let grep_output = grep_search(&GrepSearchInput {
-            pattern: String::from("hello"),
-            path: Some(dir.to_string_lossy().into_owned()),
-            glob: Some(String::from("**/*.rs")),
-            output_mode: Some(String::from("content")),
-            before: None,
-            after: None,
-            context_short: None,
-            context: None,
-            line_numbers: Some(true),
-            case_insensitive: Some(false),
-            file_type: None,
-            head_limit: Some(10),
-            offset: Some(0),
-            multiline: Some(false),
-        })
+        let grep_output = grep_search(
+            fs,
+            &GrepSearchInput {
+                pattern: String::from("hello"),
+                path: Some(dir.to_string_lossy().into_owned()),
+                glob: Some(String::from("**/*.rs")),
+                output_mode: Some(String::from("content")),
+                before: None,
+                after: None,
+                context_short: None,
+                context: None,
+                line_numbers: Some(true),
+                case_insensitive: Some(false),
+                file_type: None,
+                head_limit: Some(10),
+                offset: Some(0),
+                multiline: Some(false),
+            },
+        )
         .expect("grep should succeed");
         assert!(grep_output.content.unwrap_or_default().contains("hello"));
     }
@@ -1110,8 +1091,8 @@ mod tests {
         std::fs::write(dir.join("b.toml"), "[package]").unwrap();
         std::fs::write(dir.join("c.txt"), "hello").unwrap();
 
-        let result =
-            glob_search("*.{rs,toml}", Some(dir.to_str().unwrap())).expect("glob should succeed");
+        let result = glob_search(&StdFsBackend, "*.{rs,toml}", Some(dir.to_str().unwrap()))
+            .expect("glob should succeed");
         assert_eq!(
             result.num_files, 2,
             "should match .rs and .toml but not .txt"
@@ -1134,8 +1115,8 @@ mod tests {
         std::fs::write(dir.join(".build/checkouts/pkg/AGENTS.md"), ".build").unwrap();
         std::fs::write(dir.join("target/debug/deps/AGENTS.md"), "target").unwrap();
 
-        let result =
-            glob_search("**/AGENTS.md", Some(dir.to_str().unwrap())).expect("glob should succeed");
+        let result = glob_search(&StdFsBackend, "**/AGENTS.md", Some(dir.to_str().unwrap()))
+            .expect("glob should succeed");
 
         assert_eq!(result.num_files, 2, "ignored dirs should be pruned");
         // Normalise the OS-native path separator (`\` on Windows) to
@@ -1161,8 +1142,8 @@ mod tests {
 
     #[test]
     fn derive_glob_walk_root_stops_at_first_glob_component() {
-        let root = derive_glob_walk_root("/tmp/demo/**/AGENTS.md");
-        assert_eq!(root, PathBuf::from("/tmp/demo"));
+        let root = derive_glob_walk_root_str("/tmp/demo/**/AGENTS.md", "/fallback");
+        assert_eq!(root, "/tmp/demo");
         assert!(component_contains_glob("**"));
         assert!(component_contains_glob("*.rs"));
         assert!(!component_contains_glob("src"));

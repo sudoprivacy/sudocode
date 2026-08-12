@@ -28,15 +28,16 @@ futures = "0.3"
 # trees ever drop it.
 getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# Nexus kernel rlib — provides `kernel::abi::KernelAbi` trait that
-# `runtime::spawn_task::<K>` is generic over. `default-features =
-# false` keeps the kernel runtime defaults (mimalloc, connector
-# stack, py-hook adapters) off in the sudocode build — sudocode does
-# not need them and they would bloat the standalone CLI.
+# Nexus kernel rlib — provides `kernel::kernel::syscall::KernelSyscall`
+# trait that `runtime::spawn_task::<K>` is generic over. `default-features
+# = false` keeps the kernel runtime defaults (mimalloc, connector stack,
+# py-hook adapters) off in the sudocode build — sudocode does not need
+# them and they would bloat the standalone CLI.
 #
-# Points at nexus-vfs main (the kernel crate's canonical home after
-# the DRY repo extraction, #4259).
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", default-features = false }
+# Pinned to the SAME nexus-vfs rev the nexus daemon (rust/nexusd) uses, so
+# `SpawnTask<Kernel>` monomorphises to one type when nexusd links both
+# sudocode_runtime and the nexus service crates (co-host binary edge).
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "c9ecc9da2b755039a1028bbb619ee7cbb86f5dad", default-features = false }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

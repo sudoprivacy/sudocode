@@ -233,11 +233,11 @@ use runtime::{
     task_registry::TaskRegistry,
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
-    ConversationRuntime, GrepSearchInput, HookAbortSignal, LaneCommitProvenance, LaneEvent,
-    LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport,
-    MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig,
-    RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext, ToolError,
-    ToolExecutor, FORK_BOILERPLATE_TAG,
+    ConversationRuntime, FsBackend, GrepSearchInput, HookAbortSignal, LaneCommitProvenance,
+    LaneEvent, LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass,
+    McpDegradedReport, MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent,
+    ProviderFallbackConfig, RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext,
+    ToolError, ToolExecutor, FORK_BOILERPLATE_TAG,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -690,6 +690,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
+                &StdFsBackend,
             );
         }
         self.plugin_tools
@@ -1427,12 +1428,27 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_abort(name, input, None)
 }
 
+/// Dispatch a tool against an explicit filesystem backend.
+///
+/// This is the entry the co-hosted managed agent uses: it passes a
+/// `KernelFsBackend` so the file tools (`read_file` / `write_file` /
+/// `edit_file` / `glob_search` / `grep_search`) hit the VFS in-process via
+/// kernel syscalls instead of the host `std::fs`. The standalone CLI keeps
+/// using [`execute_tool`], which defaults to [`StdFsBackend`].
+pub fn execute_tool_with_backend(
+    name: &str,
+    input: &Value,
+    fs: &dyn FsBackend,
+) -> Result<String, String> {
+    execute_tool_with_enforcer(None, name, input, None, None, fs)
+}
+
 pub fn execute_tool_with_abort(
     name: &str,
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, abort_signal, None)
+    execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
 }
 
 /// PascalCase / short-name → canonical snake_case tool name.
@@ -1440,7 +1456,14 @@ pub fn execute_tool_with_abort(
 /// SSOT: the alias pairs live here once and are consumed by both
 /// `parse_allowed_tools` (for `--allowedTools` CLI flag) and
 /// `execute_tool_with_enforcer` (for model-returned tool names).
+///
+/// Keys are the NORMALIZED (lower-cased) alias form — the CC PascalCase
+/// names (`Bash`, `Read`, …) normalize to these. Only tools whose
+/// `execute_tool` match arm is lower/snake_case appear here; PascalCase-
+/// native tools (`EnterPlanMode`, `TodoWrite`, `Skill`, `Agent`, …) are
+/// NOT aliased — [`canonicalize_tool_name`] passes them through unchanged.
 const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("bash", "bash"),
     ("read", "read_file"),
     ("write", "write_file"),
     ("edit", "edit_file"),
@@ -1452,6 +1475,12 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
 /// by the `execute_tool` match. Models may return PascalCase names
 /// (CC-style: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) while
 /// scode registers snake_case (`bash`, `read_file`, etc.).
+///
+/// Names NOT in [`TOOL_ALIASES`] pass through UNCHANGED — critical for
+/// the PascalCase-native tools (`EnterPlanMode`, `ExitPlanMode`,
+/// `TodoWrite`, `WebFetch`, `Skill`, `Agent`, `TaskCreate`, …) whose
+/// `execute_tool` match arms are PascalCase: lower-casing them (the prior
+/// behaviour) turned every one into `unsupported tool`.
 fn canonicalize_tool_name(name: &str) -> String {
     let normalized = normalize_tool_name(name);
     for &(alias, canonical) in TOOL_ALIASES {
@@ -1459,7 +1488,7 @@ fn canonicalize_tool_name(name: &str) -> String {
             return canonical.to_string();
         }
     }
-    normalized
+    name.to_string()
 }
 
 fn execute_tool_with_enforcer(
@@ -1468,6 +1497,7 @@ fn execute_tool_with_enforcer(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
+    fs: &dyn FsBackend,
 ) -> Result<String, String> {
     let name = canonicalize_tool_name(name);
     let name = name.as_str();
@@ -1491,23 +1521,23 @@ fn execute_tool_with_enforcer(
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<ReadFileInput>(input).and_then(run_read_file)
+            from_value::<ReadFileInput>(input).and_then(|input| run_read_file(input, fs))
         }
         "write_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<WriteFileInput>(input).and_then(run_write_file)
+            from_value::<WriteFileInput>(input).and_then(|input| run_write_file(input, fs))
         }
         "edit_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<EditFileInput>(input).and_then(run_edit_file)
+            from_value::<EditFileInput>(input).and_then(|input| run_edit_file(input, fs))
         }
         "glob_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GlobSearchInputValue>(input).and_then(run_glob_search)
+            from_value::<GlobSearchInputValue>(input).and_then(|input| run_glob_search(input, fs))
         }
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GrepSearchInput>(input).and_then(run_grep_search)
+            from_value::<GrepSearchInput>(input).and_then(|input| run_grep_search(input, fs))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
@@ -2872,19 +2902,20 @@ fn branch_divergence_output(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(
-        read_file(&StdFsBackend, &input.path, input.offset, input.limit).map_err(io_to_string)?,
-    )
+fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(read_file(fs, &input.path, input.offset, input.limit).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    // Detect file intent and redirect if draft
+fn run_write_file(input: WriteFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    // Detect file intent and redirect if draft. The workspace root comes
+    // from the backend (`current_dir` for std, the agent's VFS workspace
+    // for the kernel backend) so the draft redirect lands in the same
+    // namespace the write targets.
     let intent = runtime::detect_file_intent(&input.path, &input.content, None);
     let actual_path = match intent {
         runtime::FileIntent::Draft => {
-            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
             runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
         }
         runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
@@ -2892,7 +2923,7 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
 
     to_pretty_json(
         write_file(
-            &StdFsBackend,
+            fs,
             actual_path.to_str().unwrap_or(&input.path),
             &input.content,
         )
@@ -2901,9 +2932,10 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    // Read existing content for intent detection
-    let existing_content = std::fs::read_to_string(&input.path).ok();
+fn run_edit_file(input: EditFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    // Read existing content for intent detection through the backend so a
+    // co-hosted agent inspects the VFS, not the host filesystem.
+    let existing_content = fs.read_to_string(&input.path).ok();
     let content_for_detection = existing_content.as_deref().unwrap_or(&input.new_string);
 
     // Detect file intent
@@ -2911,7 +2943,7 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 
     // Draft files should not be edited from workspace root - they're in .drafts/
     // If file is draft and not in .drafts/, redirect
-    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
     let actual_path = if intent == runtime::FileIntent::Draft
         && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
     {
@@ -2922,7 +2954,7 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 
     to_pretty_json(
         edit_file(
-            &StdFsBackend,
+            fs,
             actual_path.to_str().unwrap_or(&input.path),
             &input.old_string,
             &input.new_string,
@@ -2933,13 +2965,13 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
-    to_pretty_json(glob_search(&input.pattern, input.path.as_deref()).map_err(io_to_string)?)
+fn run_glob_search(input: GlobSearchInputValue, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(glob_search(fs, &input.pattern, input.path.as_deref()).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
-    to_pretty_json(grep_search(&input).map_err(io_to_string)?)
+fn run_grep_search(input: GrepSearchInput, fs: &dyn FsBackend) -> Result<String, String> {
+    to_pretty_json(grep_search(fs, &input).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -6937,8 +6969,15 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(self.enforcer.as_ref(), tool_name, &value, None, Some(ctx))
-            .map_err(ToolError::new)
+        execute_tool_with_enforcer(
+            self.enforcer.as_ref(),
+            tool_name,
+            &value,
+            None,
+            Some(ctx),
+            &StdFsBackend,
+        )
+        .map_err(ToolError::new)
     }
 }
 
@@ -8802,14 +8841,14 @@ mod tests {
 
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, auto_background_threshold,
-        await_agent_output, build_agent_system_prompt, classify_lane_failure, derive_agent_state,
-        execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
-        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
-        maybe_commit_provenance, mvp_tool_specs, normalize_subagent_type,
-        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
-        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
-        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
-        LaneEventName, LaneFailureClass, SubagentToolExecutor,
+        await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
+        classify_lane_failure, derive_agent_state, execute_agent_inline_with_work,
+        execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
+        global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
+        normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
+        push_output_block, run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput,
+        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
+        GlobalToolRegistry, LaneEventName, LaneFailureClass, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -8948,6 +8987,36 @@ mod tests {
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
+    }
+
+    #[test]
+    fn canonicalize_maps_aliases_and_preserves_pascalcase_native_tools() {
+        // CC-style aliases fold to the snake_case match arm.
+        assert_eq!(canonicalize_tool_name("Bash"), "bash");
+        assert_eq!(canonicalize_tool_name("Read"), "read_file");
+        assert_eq!(canonicalize_tool_name("Grep"), "grep_search");
+        assert_eq!(canonicalize_tool_name("read_file"), "read_file");
+        // PascalCase-native tools MUST pass through unchanged — lower-casing
+        // them turns every one into `unsupported tool` (the pty_plan_mode
+        // regression). Guard the whole PascalCase-arm family.
+        for tool in [
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "TodoWrite",
+            "WebFetch",
+            "WebSearch",
+            "Skill",
+            "Agent",
+            "TaskCreate",
+            "StructuredOutput",
+            "NotebookEdit",
+        ] {
+            assert_eq!(
+                canonicalize_tool_name(tool),
+                tool,
+                "{tool} must not be mangled"
+            );
+        }
     }
 
     #[test]

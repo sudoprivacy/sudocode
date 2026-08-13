@@ -61,11 +61,7 @@ fn plan_mode_state(env: &TestEnv) -> PathBuf {
 fn read_json_or_empty(path: &std::path::Path) -> Value {
     // Use retry to handle the race where the child process has exited
     // but the OS file cache hasn't flushed yet (common on CI VMs).
-    let text = common::read_file_with_retry(
-        path,
-        10,
-        std::time::Duration::from_millis(100),
-    );
+    let text = common::read_file_with_retry(path, 10, std::time::Duration::from_millis(100));
     match text {
         Some(t) => serde_json::from_str::<Value>(&t).unwrap_or(Value::Object(Default::default())),
         None => Value::Object(Default::default()),

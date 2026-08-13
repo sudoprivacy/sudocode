@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
+use runtime::spawn_task::Mailbox;
 use tools::managed_agent::spawn_managed_agent;
 
 const DT_STREAM: i32 = 4;
@@ -167,9 +168,14 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     let desc = make_desc(pid, agent_id);
 
     // Spawn the REAL managed-agent loop — the same factory nexusd's
-    // SudoCodeSpawnAdapter calls. State transitions are printed so the
-    // WarmingUp → Ready → Busy → Ready progression is observable.
-    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state| {
+    // SudoCodeSpawnAdapter calls. Node-local single-stream mailbox (the
+    // agent reads + replies on /proc/{pid}/chat-with-me). State transitions
+    // are printed so WarmingUp → Ready → Busy → Ready is observable.
+    let mailbox = Mailbox::LocalStream {
+        path: format!("/proc/{pid}/chat-with-me"),
+        self_id: agent_id.to_string(),
+    };
+    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, mailbox, |state| {
         eprintln!("[agent state] {state:?}");
     });
 

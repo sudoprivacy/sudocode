@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelSyscall, SpawnHandle};
+use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelSyscall, Mailbox, SpawnHandle};
 use runtime::{
     FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
     SystemPromptBuilder, ToolError, ToolExecutor,
@@ -40,11 +40,15 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 ///
 /// * `kernel` — shared kernel handle (in-process, monomorphised)
 /// * `desc` — agent descriptor planted by `ManagedAgentService`
+/// * `mailbox` — where the loop reads inbound + writes replies: a
+///   node-local `/proc/{pid}` stream, or a raft-replicated A2A
+///   `/agents/<name>` per-recipient inbox for cross-machine conversation
 /// * `state_callback` — called on every state transition so the caller
 ///   can forward to `AgentRegistry::update_state`
 pub fn spawn_managed_agent<K, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
+    mailbox: Mailbox,
     state_callback: F,
 ) -> SpawnHandle
 where
@@ -93,6 +97,7 @@ where
     runtime::spawn_task::spawn_task(
         kernel,
         desc,
+        mailbox,
         api_client,
         tool_executor,
         system_prompt,

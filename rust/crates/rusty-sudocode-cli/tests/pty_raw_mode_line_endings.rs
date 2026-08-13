@@ -30,6 +30,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::TestEnv;
 
 /// Spawn the iocraft REPL — the only path that puts the terminal in raw
@@ -40,6 +42,8 @@ fn spawn_iocraft_repl(env: &TestEnv, permission_mode: &str) -> pty_expect::PtySe
         &["--permission-mode", permission_mode],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
+    // Generous timeout for CI VMs where PTY output can be slow.
+    sess.set_default_timeout(Duration::from_secs(30));
     // A tall, wide screen keeps the turn's output from scrolling away and
     // gives a runaway staircase room to be unmistakable.
     sess.resize(50, 100).expect("resize pty");

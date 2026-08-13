@@ -305,6 +305,27 @@ impl Drop for HarnessWorkspace {
     }
 }
 
+/// Read a file with retries — handles the race where a child process has
+/// exited but the OS file cache hasn't flushed yet (common on CI VMs).
+/// Returns `None` if the file still doesn't exist after all retries.
+pub fn read_file_with_retry(
+    path: &std::path::Path,
+    retries: u32,
+    interval: Duration,
+) -> Option<String> {
+    for _ in 0..retries {
+        if let Ok(content) = fs::read_to_string(path) {
+            if !content.trim().is_empty() {
+                return Some(content);
+            }
+        }
+        std::thread::sleep(interval);
+    }
+    fs::read_to_string(path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Spawn scode under a PTY via `env VAR=val ... scode <args>`.
 ///
 /// `config_home_override`: if `Some`, sets `SUDO_CODE_CONFIG_HOME`

@@ -345,7 +345,11 @@ impl FuzzySelectState {
             let option = &self.question.options[oi];
             let selector = if abs_vi == self.cursor { ">" } else { " " };
             let marker = if option.recommended {
-                format!(" {}(recommended){}", crate::render::DIM, crate::render::RESET)
+                format!(
+                    " {}(recommended){}",
+                    crate::render::DIM,
+                    crate::render::RESET
+                )
             } else {
                 String::new()
             };

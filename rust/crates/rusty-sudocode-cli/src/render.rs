@@ -200,10 +200,10 @@ impl ColorTheme {
             code: Color::DarkGreen,
             code_bg: 253, // light grey bg
             border: Color::AnsiValue(240),
-            diff_added: Color::AnsiValue(22),  // dark green
+            diff_added: Color::AnsiValue(22),    // dark green
             diff_removed: Color::AnsiValue(124), // dark red
             hook_feedback: Color::AnsiValue(130),
-            logo: Color::AnsiValue(25),  // dark blue
+            logo: Color::AnsiValue(25),         // dark blue
             logo_accent: Color::AnsiValue(166), // dark orange
             quote: Color::Grey,
             heading_h2: Color::Black,
@@ -967,8 +967,7 @@ impl TerminalRenderer {
             Event::Start(Tag::Strong) => state.strong += 1,
             Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
             Event::Code(code) => {
-                let rendered =
-                    format!("{}", format!("`{code}`").with(self.color_theme.code));
+                let rendered = format!("{}", format!("`{code}`").with(self.color_theme.code));
                 state.append_raw(output, &rendered);
             }
             Event::Rule => output.push_str("---\n"),
@@ -1122,19 +1121,13 @@ impl TerminalRenderer {
         let _ = writeln!(
             output,
             "{}",
-            format!("╭─ {label}")
-                .bold()
-                .with(self.color_theme.border)
+            format!("╭─ {label}").bold().with(self.color_theme.border)
         );
     }
 
     fn finish_code_block(&self, code_buffer: &str, code_language: &str, output: &mut String) {
         output.push_str(&self.highlight_code(code_buffer, code_language));
-        let _ = write!(
-            output,
-            "{}",
-            "╰─".bold().with(self.color_theme.border)
-        );
+        let _ = write!(output, "{}", "╰─".bold().with(self.color_theme.border));
         output.push_str("\n\n");
     }
 

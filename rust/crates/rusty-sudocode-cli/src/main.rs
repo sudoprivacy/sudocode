@@ -112,7 +112,9 @@ use init::initialize_repo;
 use plugins::{
     render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
 };
-use render::{ansi_fg, ansi_bold_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET};
+use render::{
+    ansi_bold_fg, ansi_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET,
+};
 use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -2151,7 +2153,8 @@ fn run_repl_iocraft_dispatch(
                 }
                 let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                 if let Err(e) = cli_lock.persist_session() {
-                    repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                    repl.output
+                        .println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                 }
                 break;
             }
@@ -2174,7 +2177,8 @@ fn run_repl_iocraft_dispatch(
                     }
                     let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                     if let Err(e) = cli_lock.persist_session() {
-                        repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                        repl.output
+                            .println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                     }
                     break;
                 }
@@ -2219,11 +2223,19 @@ fn run_repl_iocraft_dispatch(
                                 match cli_lock.set_model(Some(model_name)) {
                                     Ok(true) => {
                                         if let Err(e) = cli_lock.persist_session() {
-                                            out.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                                            out.println(&format!(
+                                                "{}{e}{}",
+                                                ansi_fg(theme().error),
+                                                RESET
+                                            ));
                                         }
                                     }
                                     Ok(false) => {}
-                                    Err(e) => out.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET)),
+                                    Err(e) => out.println(&format!(
+                                        "{}{e}{}",
+                                        ansi_fg(theme().error),
+                                        RESET
+                                    )),
                                 }
                             },
                         ));
@@ -2234,17 +2246,26 @@ fn run_repl_iocraft_dispatch(
                         match cli_lock.handle_repl_command(command) {
                             Ok(true) => {
                                 if let Err(e) = cli_lock.persist_session() {
-                                    repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                                    repl.output.println(&format!(
+                                        "{}{e}{}",
+                                        ansi_fg(theme().error),
+                                        RESET
+                                    ));
                                 }
                             }
                             Ok(false) => {}
-                            Err(e) => repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET)),
+                            Err(e) => repl.output.println(&format!(
+                                "{}{e}{}",
+                                ansi_fg(theme().error),
+                                RESET
+                            )),
                         }
                         true
                     }
                     Ok(None) => false,
                     Err(error) => {
-                        repl.output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                        repl.output
+                            .println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
                         true
                     }
                 };
@@ -2288,8 +2309,9 @@ fn run_repl_iocraft_dispatch(
                 if let Some(handler) = pending_slash_selection.take() {
                     handler(&text, &cli_shared, &repl.output);
                 } else if !consume_pending_question_answer(&pending_question_answer, text) {
-                    repl.output
-                        .println(&format!("{DIM}(no question is waiting for an answer){RESET}"));
+                    repl.output.println(&format!(
+                        "{DIM}(no question is waiting for an answer){RESET}"
+                    ));
                 }
             }
         }
@@ -4001,13 +4023,15 @@ impl LiveCli {
         let t = theme();
         let logo_fg = ansi_fg(t.logo);
         let accent_fg = ansi_fg(t.logo_accent);
-        let logo = format!("{logo_fg}\
+        let logo = format!(
+            "{logo_fg}\
 ███████╗██╗   ██╗██████╗  ██████╗ \n\
 ██╔════╝██║   ██║██╔══██╗██╔═══██╗\n\
 ███████╗██║   ██║██║  ██║██║   ██║\n\
 ╚════██║██║   ██║██║  ██║██║   ██║\n\
 ███████║╚██████╔╝██████╔╝╚██████╔╝\n\
-╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}");
+╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}"
+        );
 
         let lines = [
             format!("  {DIM}Model{RESET}            {}", self.config.model),
@@ -4284,7 +4308,11 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    output.println(&format!("{}\u{23f9} Cancelled{}", ansi_fg(theme().error), RESET));
+                    output.println(&format!(
+                        "{}\u{23f9} Cancelled{}",
+                        ansi_fg(theme().error),
+                        RESET
+                    ));
                 } else {
                     if let Some(event) = summary.auto_compaction {
                         output.println(&format_auto_compaction_notice(event.removed_message_count));

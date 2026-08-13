@@ -1368,9 +1368,9 @@ pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> Str
                 "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
             )
         }
-        _ => format!(
-            "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",
-        ),
+        _ => {
+            format!("{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
+        }
     };
     match original {
         Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)

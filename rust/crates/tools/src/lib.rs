@@ -683,7 +683,14 @@ impl GlobalToolRegistry {
         abort_signal: Option<&HookAbortSignal>,
         ctx: Option<&ToolDispatchContext>,
     ) -> Result<String, String> {
-        if mvp_tool_specs().iter().any(|spec| spec.name == name) {
+        // Gate on the CANONICAL name: models may return CC-style
+        // PascalCase aliases (`Bash` → `bash`, `Read` → `read_file`, …)
+        // which `execute_tool_with_enforcer` folds via
+        // `canonicalize_tool_name`. Comparing the raw name here sent
+        // every aliased call down the plugin lookup and out as
+        // `unsupported tool: Bash`.
+        let canonical = canonicalize_tool_name(name);
+        if mvp_tool_specs().iter().any(|spec| spec.name == canonical) {
             return execute_tool_with_enforcer(
                 self.enforcer.as_ref(),
                 name,
@@ -9038,6 +9045,35 @@ mod tests {
 
         // then
         assert!(error.contains("requires workspace-write permission"));
+    }
+
+    #[test]
+    fn global_tool_registry_folds_cc_alias_before_mvp_gate() {
+        // given — `Bash` is a CC-style alias for the `bash` match arm. The
+        // registry gate must compare the CANONICAL name against
+        // `mvp_tool_specs`; gating on the raw name sent every aliased call
+        // down the plugin lookup and out as `unsupported tool: Bash` (the
+        // ACP-mode regression: permission prompt approved, then dispatch
+        // rejected the tool anyway).
+        let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
+        let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+
+        // when — a write-classified command under a read-only policy is
+        // denied by the enforcer INSIDE the bash arm, proving dispatch got
+        // past the gate without ever spawning a shell.
+        let error = registry
+            .execute("Bash", &json!({ "command": "touch blocked.txt" }))
+            .expect_err("write-classified bash should be denied by the enforcer");
+
+        // then
+        assert!(
+            !error.contains("unsupported tool"),
+            "alias fell through the mvp gate: {error}"
+        );
+        assert!(
+            error.contains("permission"),
+            "expected permission denial: {error}"
+        );
     }
 
     #[test]

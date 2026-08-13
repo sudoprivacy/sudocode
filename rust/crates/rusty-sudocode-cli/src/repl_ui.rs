@@ -147,9 +147,14 @@ impl SpinnerState {
         }
 
         // Stall detection: yellow when no new bytes for 3+ seconds.
+        let t = crate::render::theme();
         let is_stalled = bytes > 0 && !thinking && elapsed > 3.0;
-        let color_code = if is_stalled { "33" } else { "34" };
-        format!("\x1b[{color_code}m{line}\x1b[0m")
+        let color = if is_stalled {
+            crate::render::ansi_fg(t.warning)
+        } else {
+            crate::render::ansi_fg(t.info)
+        };
+        format!("{color}{line}{}", crate::render::RESET)
     }
 }
 
@@ -340,9 +345,9 @@ impl FuzzySelectState {
             let option = &self.question.options[oi];
             let selector = if abs_vi == self.cursor { ">" } else { " " };
             let marker = if option.recommended {
-                " \x1b[2m(recommended)\x1b[0;36m"
+                format!(" {}(recommended){}", crate::render::DIM, crate::render::RESET)
             } else {
-                ""
+                String::new()
             };
             lines.push(format!("{selector} {}{marker}", option.label));
         }
@@ -780,7 +785,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                     h.push(trimmed.to_string());
                                                 }
                                             }
-                                            stdout_for_events.println(format!("\x1b[1m\u{276f} {val}\x1b[0m"));
+                                            stdout_for_events.println(format!("{}\u{276f} {val}{}", crate::render::BOLD, crate::render::RESET));
                                             let _ = input_tx_for_events.send(InputEvent::Submit(text));
                                         }
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
@@ -901,7 +906,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         } else {
                             last_ctrlc.set(Some(now));
                             let _ = input_tx_for_events.send(InputEvent::Abort);
-                            stdout_for_events.println("  \x1b[2mPress Ctrl-C again to exit\x1b[0m");
+                            stdout_for_events.println(format!("  {}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET));
                             input_value.set(String::new());
                         }
                     }

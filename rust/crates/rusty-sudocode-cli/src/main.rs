@@ -112,7 +112,7 @@ use init::initialize_repo;
 use plugins::{
     render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
 };
-use render::{MarkdownStreamState, SpinnerHandle, TerminalRenderer};
+use render::{ansi_fg, ansi_bold_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET};
 use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
@@ -1023,10 +1023,10 @@ fn run_resume(
         let mode = input_queue::QueueMode::from_env();
         if !matches!(mode, input_queue::QueueMode::Off) {
             if let Err(e) = run_repl_iocraft_dispatch(cli, mode) {
-                eprintln!("\x1b[31m{e}\x1b[0m");
+                eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
             }
         } else if let Err(e) = run_repl_loop(cli) {
-            eprintln!("\x1b[31m{e}\x1b[0m");
+            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
         }
         return;
     }
@@ -1667,19 +1667,19 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                         match cli.handle_repl_command(command) {
                             Ok(true) => {
                                 if let Err(e) = cli.persist_session() {
-                                    eprintln!("\x1b[31m{e}\x1b[0m");
+                                    eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                                 }
                             }
                             Ok(false) => {}
                             Err(e) => {
-                                eprintln!("\x1b[31m{e}\x1b[0m");
+                                eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                             }
                         }
                         continue;
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        eprintln!("\x1b[31m{error}\x1b[0m");
+                        eprintln!("{}{error}{}", ansi_fg(theme().error), RESET);
                         continue;
                     }
                 }
@@ -1694,13 +1694,13 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 ) {
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn(&prompt) {
-                        eprintln!("\x1b[31m{e}\x1b[0m");
+                        eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                     }
                     continue;
                 }
                 cli.record_prompt_history(&trimmed);
                 if let Err(e) = cli.run_turn(&trimmed) {
-                    eprintln!("\x1b[31m{e}\x1b[0m");
+                    eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                 }
             }
             input::ReadOutcome::Exit => {
@@ -1835,17 +1835,17 @@ impl repl_async::TurnDriver for LiveCliDriver {
                 match cli.handle_repl_command(command) {
                     Ok(true) => {
                         if let Err(e) = cli.persist_session() {
-                            eprintln!("\x1b[31m{e}\x1b[0m");
+                            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                         }
                     }
                     Ok(false) => {}
-                    Err(e) => eprintln!("\x1b[31m{e}\x1b[0m"),
+                    Err(e) => eprintln!("{}{e}{}", ansi_fg(theme().error), RESET),
                 }
                 true
             }
             Ok(None) => false,
             Err(error) => {
-                eprintln!("\x1b[31m{error}\x1b[0m");
+                eprintln!("{}{error}{}", ansi_fg(theme().error), RESET);
                 true
             }
         }
@@ -1854,7 +1854,7 @@ impl repl_async::TurnDriver for LiveCliDriver {
     fn run_turn(&self, prompt: &str) {
         let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
         if let Err(e) = cli.run_turn(prompt) {
-            eprintln!("\x1b[31m{e}\x1b[0m");
+            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
         }
     }
 
@@ -1865,7 +1865,7 @@ impl repl_async::TurnDriver for LiveCliDriver {
         // sync run_repl's /exit branch).
         let cli = self.cli.lock().expect("LiveCli mutex poisoned");
         if let Err(e) = cli.persist_session() {
-            eprintln!("\x1b[31m{e}\x1b[0m");
+            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
         }
     }
 
@@ -2151,7 +2151,7 @@ fn run_repl_iocraft_dispatch(
                 }
                 let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                 if let Err(e) = cli_lock.persist_session() {
-                    repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                    repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                 }
                 break;
             }
@@ -2174,7 +2174,7 @@ fn run_repl_iocraft_dispatch(
                     }
                     let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
                     if let Err(e) = cli_lock.persist_session() {
-                        repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                        repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                     }
                     break;
                 }
@@ -2219,11 +2219,11 @@ fn run_repl_iocraft_dispatch(
                                 match cli_lock.set_model(Some(model_name)) {
                                     Ok(true) => {
                                         if let Err(e) = cli_lock.persist_session() {
-                                            out.println(&format!("\x1b[31m{e}\x1b[0m"));
+                                            out.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                                         }
                                     }
                                     Ok(false) => {}
-                                    Err(e) => out.println(&format!("\x1b[31m{e}\x1b[0m")),
+                                    Err(e) => out.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET)),
                                 }
                             },
                         ));
@@ -2234,17 +2234,17 @@ fn run_repl_iocraft_dispatch(
                         match cli_lock.handle_repl_command(command) {
                             Ok(true) => {
                                 if let Err(e) = cli_lock.persist_session() {
-                                    repl.output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                                    repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                                 }
                             }
                             Ok(false) => {}
-                            Err(e) => repl.output.println(&format!("\x1b[31m{e}\x1b[0m")),
+                            Err(e) => repl.output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET)),
                         }
                         true
                     }
                     Ok(None) => false,
                     Err(error) => {
-                        repl.output.println(&format!("\x1b[31m{error}\x1b[0m"));
+                        repl.output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
                         true
                     }
                 };
@@ -2278,7 +2278,7 @@ fn run_repl_iocraft_dispatch(
                         }
                         input_queue::SubmitOutcome::Rejected => {
                             repl.output.println(
-                                "\x1b[2m(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead)\x1b[0m",
+                                &format!("{DIM}(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead){RESET}"),
                             );
                         }
                     }
@@ -2289,7 +2289,7 @@ fn run_repl_iocraft_dispatch(
                     handler(&text, &cli_shared, &repl.output);
                 } else if !consume_pending_question_answer(&pending_question_answer, text) {
                     repl.output
-                        .println("\x1b[2m(no question is waiting for an answer)\x1b[0m");
+                        .println(&format!("{DIM}(no question is waiting for an answer){RESET}"));
                 }
             }
         }
@@ -2361,7 +2361,7 @@ fn spawn_iocraft_turn(
             if let Err(e) =
                 cli.run_turn_iocraft(&prompt, &output, &ui, &spinner, pending_question_answer)
             {
-                output.println(&format!("\x1b[31m{e}\x1b[0m"));
+                output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
             }
             let _ = done_tx.send(());
         })
@@ -3998,34 +3998,37 @@ impl LiveCli {
         .map(|r| r.base_url)
         .unwrap_or_default();
 
-        let logo = "\x1b[38;5;117m\
+        let t = theme();
+        let logo_fg = ansi_fg(t.logo);
+        let accent_fg = ansi_fg(t.logo_accent);
+        let logo = format!("{logo_fg}\
 ███████╗██╗   ██╗██████╗  ██████╗ \n\
 ██╔════╝██║   ██║██╔══██╗██╔═══██╗\n\
 ███████╗██║   ██║██║  ██║██║   ██║\n\
 ╚════██║██║   ██║██║  ██║██║   ██║\n\
 ███████║╚██████╔╝██████╔╝╚██████╔╝\n\
-╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝\x1b[0m \x1b[38;5;208mCode\x1b[0m";
+╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝{RESET} {accent_fg}Code{RESET}");
 
         let lines = [
-            format!("  \x1b[2mModel\x1b[0m            {}", self.config.model),
-            format!("  \x1b[2mAuth mode\x1b[0m        {}", auth_mode_str),
-            format!("  \x1b[2mEndpoint\x1b[0m         {}", endpoint),
+            format!("  {DIM}Model{RESET}            {}", self.config.model),
+            format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
+            format!("  {DIM}Endpoint{RESET}         {}", endpoint),
             format!(
-                "  \x1b[2mPermissions\x1b[0m      {}",
+                "  {DIM}Permissions{RESET}      {}",
                 self.config.permission_mode.as_str()
             ),
-            format!("  \x1b[2mBranch\x1b[0m           {}", git_branch),
-            format!("  \x1b[2mWorkspace\x1b[0m        {}", workspace),
-            format!("  \x1b[2mDirectory\x1b[0m        {}", cwd),
-            format!("  \x1b[2mSession\x1b[0m          {}", self.session.id),
-            format!("  \x1b[2mAuto-save\x1b[0m        {}", session_path),
+            format!("  {DIM}Branch{RESET}           {}", git_branch),
+            format!("  {DIM}Workspace{RESET}        {}", workspace),
+            format!("  {DIM}Directory{RESET}        {}", cwd),
+            format!("  {DIM}Session{RESET}          {}", self.session.id),
+            format!("  {DIM}Auto-save{RESET}        {}", session_path),
         ];
 
         let max_width = lines.iter().map(|l| strip_ansi_width(l)).max().unwrap_or(0);
         let box_width = max_width + 2; // 1 space padding on each side
 
-        let grey = "\x1b[38;5;245m";
-        let reset = "\x1b[0m";
+        let grey = t.border_fg();
+        let reset = RESET;
 
         let top = format!("{grey}╭{}╮{reset}", "─".repeat(box_width));
         let bottom = format!("{grey}╰{}╯{reset}", "─".repeat(box_width));
@@ -4281,7 +4284,7 @@ impl LiveCli {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
                 if summary.cancelled {
-                    output.println("\x1b[31m\u{23f9} Cancelled\x1b[0m");
+                    output.println(&format!("{}\u{23f9} Cancelled{}", ansi_fg(theme().error), RESET));
                 } else {
                     if let Some(event) = summary.auto_compaction {
                         output.println(&format_auto_compaction_notice(event.removed_message_count));
@@ -4991,7 +4994,7 @@ impl LiveCli {
                     };
                     shared.store(new_mode.to_u8(), Ordering::Relaxed);
                     self.out_println(format!(
-                        "\x1b[2mauto-interrupt: {}\x1b[0m",
+                        "{DIM}auto-interrupt: {}{RESET}",
                         if on { "on" } else { "off" }
                     ));
                 } else {
@@ -5020,7 +5023,7 @@ impl LiveCli {
                     };
                     shared.store(new_mode.to_u8(), Ordering::Relaxed);
                     self.out_println(format!(
-                        "\x1b[2mqueue: {}\x1b[0m",
+                        "{DIM}queue: {}{RESET}",
                         if on { "on" } else { "off" }
                     ));
                 } else {

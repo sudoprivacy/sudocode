@@ -240,7 +240,7 @@ fn build_compact_memory_instructions(memory_dir: &Path) -> String {
 
 You have a persistent, file-based memory system at `{dir_display}`. The directory already exists — write files into it directly with the Write tool (do not run mkdir or check for its existence). Use it to carry durable context across conversations: who the user is, how they want you to work, and the background behind the work they give you.
 
-Each memory is one file holding one fact, using this frontmatter format:
+Each memory is one `.md` file holding one fact, using this frontmatter format:
 
 ```markdown
 ---
@@ -252,11 +252,13 @@ type: {{{{user, feedback, project, reference}}}}
 {{{{memory content — for feedback/project types: the rule/fact first, then **Why:** and **How to apply:** lines}}}}
 ```
 
+The file must begin with the `---` line. All three fields are required (single line each) and `type` must be exactly one of the four lowercase values — a file that fails to parse is skipped silently, so keep the format exact. Bodies render up to 2,000 chars; the whole section caps at 16,000.
+
 Types: `user` — the user's role, expertise, and preferences. `feedback` — guidance on how to approach work: corrections AND confirmed approaches, with the reason. `project` — ongoing work, goals, deadlines, and constraints not derivable from the code or git history (convert relative dates to absolute when saving). `reference` — pointers to information in external systems (dashboards, trackers, channels).
 
-After writing a memory file, add a pointer line to `MEMORY.md`: `- [Title](file.md) — one-line hook`. `MEMORY.md` is an index, not a memory — one line per entry, under ~150 characters, no frontmatter, and lines after 200 are truncated. Never write memory content directly into it.
+After writing a memory file, add a pointer line to `MEMORY.md` (exact uppercase name): `- [Title](file.md) — one-line hook`. `MEMORY.md` is an index, not a memory — one bullet line per entry, under ~150 characters, no frontmatter. Never write memory content directly into it.
 
-When to save: immediately when the user explicitly asks you to remember something (and find and remove the entry when asked to forget). Otherwise, save when you learn something durable — a preference, a correction, a validated approach, project context, or an external resource. Before writing, check whether an existing memory already covers it and update that file instead of duplicating. Update or remove memories that turn out to be wrong or outdated.
+When to save: immediately when the user explicitly asks you to remember something (and remove the entry when asked to forget). Otherwise, save when you learn something durable — a preference, a correction, a validated approach, project context, or an external resource. Before writing, check whether an existing memory already covers it and update that file instead of duplicating. Update or remove memories that turn out to be wrong or outdated.
 
 Do NOT save what the current project state already records: code structure and conventions, git history, debugging fixes (the fix is in the code), anything documented in AGENTS.md, or ephemeral task details. This applies even when the user explicitly asks to save — ask what was surprising or non-obvious, and save that instead.
 
@@ -376,7 +378,7 @@ type: {{{{user, feedback, project, reference}}}}
 
 **Step 2** — add a pointer to that file in `MEMORY.md`. `MEMORY.md` is an index, not a memory — each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.
 
-- `MEMORY.md` is always loaded into your conversation context — lines after 200 will be truncated, so keep the index concise
+- `MEMORY.md` is always loaded into your conversation context, so keep the index concise
 - Keep the name, description, and type fields in memory files up-to-date with the content
 - Organize memory semantically by topic, not chronologically
 - Update or remove memories that turn out to be wrong or outdated
@@ -597,11 +599,63 @@ mod tests {
             compact.contains("not guarantees about the present"),
             "staleness-verification rule"
         );
+        // Parser-derived warnings and the real budget constants.
+        assert!(
+            compact.contains("skipped silently"),
+            "must warn that malformed files are silently dropped (loader.rs)"
+        );
+        assert!(
+            compact.contains("2,000") && compact.contains("16,000"),
+            "must cite the real ENTRY_BODY_CHAR_CAP / RENDERED_CHAR_CAP values"
+        );
+        assert!(
+            !compact.contains("after 200"),
+            "the 200-line index truncation claim has no code behind it"
+        );
         // Teaching material must NOT survive compression.
         assert!(
             !compact.contains("<types>"),
             "worked-example XML belongs to the full edition only"
         );
+    }
+
+    #[test]
+    fn taught_format_round_trips_through_the_parsers() {
+        // The instructions teach the exact shapes below. entry.rs /
+        // index.rs must accept them: the loader SILENTLY skips files
+        // that fail to parse (loader.rs `load_entries`), so a prompt
+        // that drifts from the parsers would lose memories without
+        // any visible error.
+        let raw = "---\n\
+                   name: sample-fact\n\
+                   description: one-line summary\n\
+                   type: feedback\n\
+                   ---\n\n\
+                   The rule.\n\n\
+                   **Why:** reason.\n\
+                   **How to apply:** always.\n";
+        let entry = MemoryEntry::parse(raw, Path::new("/tmp/sample-fact.md"))
+            .expect("frontmatter shape taught by the prompt must parse");
+        assert_eq!(entry.name, "sample-fact");
+        assert_eq!(entry.description, "one-line summary");
+        assert_eq!(entry.memory_type, MemoryType::Feedback);
+        assert!(entry.body.starts_with("The rule."));
+
+        // All four type values named by the prompt are accepted.
+        for ty in ["user", "feedback", "project", "reference"] {
+            let raw = format!("---\nname: n\ndescription: d\ntype: {ty}\n---\nbody\n");
+            assert!(
+                MemoryEntry::parse(&raw, Path::new("/t.md")).is_ok(),
+                "type `{ty}` must parse"
+            );
+        }
+
+        // The taught index line shape yields a pointer.
+        let index = ParsedIndex::parse("- [Sample](sample-fact.md) — one-line hook\n");
+        assert_eq!(index.pointers.len(), 1);
+        assert_eq!(index.pointers[0].title, "Sample");
+        assert_eq!(index.pointers[0].file, "sample-fact.md");
+        assert_eq!(index.pointers[0].hook.as_deref(), Some("one-line hook"));
     }
 
     #[test]

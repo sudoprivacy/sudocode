@@ -40,20 +40,41 @@
 
 scode **有**"声明记忆权限的子 agent"概念：`custom_agents.rs` 解析 `.md` frontmatter 的 `memory: user|project|local` 字段（此前只解析、无消费方）。因此按 ZCode 方式分层：
 
-- **主循环及内置子 agent**：`# auto memory` 换成新写的**压缩版**（`build_compact_memory_instructions`，约 2.7k 字符，渲染于 `runtime/src/memory/mod.rs`）。保留的操作要点：
+- **主循环及内置子 agent**：`# auto memory` 换成新写的**压缩版**（`build_compact_memory_instructions`，2,991 字符，渲染于 `runtime/src/memory/mod.rs`）。保留的操作要点：
   - 写入触发时机（显式要求立即存/忘；学到持久信息时存）
   - 四种 type 的一行区分（user / feedback / project / reference，含"相对日期转绝对日期"）
   - frontmatter 结构（原样保留 `name/description/type` 模板，与 entry 解析器兼容）
-  - MEMORY.md 一行索引格式 + 200 行截断 + 不往索引写正文
+  - MEMORY.md 一行索引格式 + 不往索引写正文（原文的"200 行截断"说法经核对代码为失实，已改，见下方格式契约核对）
   - 写前查重、更新而非重复、错了就删
   - 不该存什么（repo 可推导的、git 史、AGENTS.md 已有的、临时状态），含"用户坚持要存时问 non-obvious 的部分"
   - 防陈旧："memories are observations from the past, not guarantees about the present"，用前 read/grep 核实，冲突时信当前状态并修正记忆
   - 砍掉的：12 组 user/assistant 示例、`<types>` XML 教学展开、Why/How-to-apply 的长解释、与 Plan/Task 机制的对比章节
   - 压缩版是**按上面清单重新写的**，措辞沿用 scode 原文的用语（"auto memory" 标题、Write tool、budget 措辞等），未照抄 ZCode。
-- **完整版 12.7k 未删**：原函数改名为 `build_full_memory_instructions` 原文保留，路由给 frontmatter 声明了 `memory:` 的自定义子 agent（`prompt.rs::memory_prompt_variant_for_agent`，经 runtime 自己的 `find_custom_agent` 查找，未触碰 tools/lib.rs）。
+- **完整版 12.7k 未删**：原函数改名为 `build_full_memory_instructions`，除删去一句失实的"200 行截断"（见格式契约核对）外原文保留，路由给 frontmatter 声明了 `memory:` 的自定义子 agent（`prompt.rs::memory_prompt_variant_for_agent`，经 runtime 自己的 `find_custom_agent` 查找，未触碰 tools/lib.rs）。
 - MEMORY.md 索引透传和已加载条目的渲染两个变体完全一致（16k 预算、超限 drop 通知等行为不变）。
 
-## 2. 量化对比
+### 格式契约核对（压缩版 vs `entry.rs` / `index.rs` / `loader.rs` 解析侧）
+
+分工前提：memory 模块只负责**读**（1,271 行），写入完全靠模型照 prompt 调 Write——所以压缩版必须教出解析器认得的格式。逐条核对结果：
+
+| 解析侧契约（代码） | 压缩版怎么教 | 结果 |
+|---|---|---|
+| 首行必须是 `---`，且必须有闭合 `---`（`entry.rs:104-120`，缺失分别报 `MissingFrontmatter`/`UnterminatedFrontmatter`） | 模板首行即 `---`，并明文 "The file must begin with the `---` line" | ✓ |
+| `name:`、`description:` 顶层必需，值取行内剩余部分（单行）（`entry.rs:140-143,166-167`） | 模板含两字段；明文 "All three fields are required (single line each)" | ✓ |
+| type 两种写法：`metadata:` + 缩进 `type:`（规范形）或顶层 `type:` 简写（`entry.rs:144-161`，注释 "for friendliness"） | 教顶层 `type:` 简写（与完整版一致，两者解析器都收） | ✓（教了合法子集） |
+| type 合法值恰好四个小写串：`user` / `feedback` / `project` / `reference`（`entry.rs:42-50`，其他值报 `UnknownType`） | 模板枚举四值；明文 "`type` must be exactly one of the four lowercase values" | ✓ |
+| 值允许单/双引号包裹（`entry.rs:175-186` unquote） | 未教（教的裸值本来就合法） | ✓（不必教） |
+| **解析失败静默跳过**（`loader.rs:214` `if let Ok(entry)`——坏文件不报错、不加载，用户和模型都不知道） | 新增明文警告 "a file that fails to parse is skipped silently, so keep the format exact" | ✓（本次补上；这是风险最高的一条） |
+| 条目文件发现规则：`*.md`（扩展名大小写不敏感）、跳过 `.` 开头隐藏文件、跳过 `MEMORY.md`（**文件名大小写不敏感地跳过**）（`loader.rs:196-216`） | 明文 "one `.md` file"；索引 "exact uppercase name" | ✓ |
+| 索引行解析：行首（允许缩进）`- ` 或 `* `，含 `[title](file)`，`)` 后尾巴去掉 `—`/`-`/`:` 前缀作 hook；非 bullet 行忽略（`index.rs:53-97`） | 教 `- [Title](file.md) — one-line hook`，与解析器逐字符兼容 | ✓ |
+| 渲染上限：`ENTRY_BODY_CHAR_CAP = 2_000`（超长 body 截断）、`RENDERED_CHAR_CAP = 16_000`（超预算条目丢弃）（`mod.rs:31-34`） | 明文 "Bodies render up to 2,000 chars; the whole section caps at 16,000" | ✓（数字与常量一致） |
+
+新增回归测试 `memory/mod.rs::taught_format_round_trips_through_the_parsers`：按 prompt 教的模板逐字构造条目文件（含四个 type 值各一遍）和索引行，断言 `MemoryEntry::parse` / `ParsedIndex::parse` 全部接受——prompt 与解析器将来漂移会在 CI 直接红。
+
+**核对中发现的 prompt-代码不一致（以代码为准处理）：**
+
+1. **"lines after 200 will be truncated"（索引 200 行截断）在代码里不存在**——`index.rs`/`mod.rs` 对索引原文没有任何行数截断（这句是 CC memdir.ts 行为的残留，佐证见 `mod.rs:174` 注释 "matching CC's buildMemoryLines()"）。压缩版**不再写这句**，完整版里的同一句也已删去失实的数字（仅此一处改动，其余原文未动）。
+2. 顺带发现的代码侧事实（未改代码，仅记录）：16k 预算**只约束条目**——`render_for_prompt_with` 先无条件拼入索引原文再逐条检查预算，超大 MEMORY.md 仍会整体进 prompt；"budget dropped" 通知只针对条目。压缩版措辞（"the whole section caps at 16,000"）与实际行为的偏差在于超大索引这一角落，属可接受近似。
 
 `scode system-prompt --output-format json` 实测（同一临时 cwd、空记忆目录、macOS debug build）：
 
@@ -61,9 +82,9 @@ scode **有**"声明记忆权限的子 agent"概念：`custom_agents.rs` 解析 
 
 | 指标 | 改动前 | 改动后 | 变化 |
 |---|---|---|---|
-| 总字符数 | 24,227 | 14,349 | **−40.8%** |
-| 静态区（7 节，scope:global 缓存） | 10,566（43.6%） | 10,566（73.6%） | 字节不变 |
-| 动态区（5 节，ephemeral 缓存） | 13,659（56.4%） | 3,781（26.4%） | **−72.3%** |
+| 总字符数 | 24,227 | 14,635 | **−39.6%** |
+| 静态区（7 节，scope:global 缓存） | 10,566（43.6%） | 10,566（72.2%） | 字节不变 |
+| 动态区（5 节，ephemeral 缓存） | 13,659（56.4%） | 4,067（27.8%） | **−70.2%** |
 | 动态区里"每天变"的内容 | 49 字符 / 2 行（两处日期） | **0** | 消除逐日缓存击穿 |
 
 （说明：49 字符看着小，但动态 system block 只有一个尾部缓存断点，任何一个字节变化都会使整个 ~13.7k 动态前缀 miss。）
@@ -72,7 +93,7 @@ scode **有**"声明记忆权限的子 agent"概念：`custom_agents.rs` 解析 
 
 | Section | 改动前 | 改动后 |
 |---|---|---|
-| `# auto memory` | 12,764（52.7%） | **2,937（20.5%）** |
+| `# auto memory` | 12,764（52.7%） | **3,223（22.0%）** |
 | `# Using your tools` | 3,571 | 3,571 |
 | `# Doing tasks` | 2,171 | 2,171 |
 | `# Executing actions with care` | 1,556 | 1,556 |
@@ -129,7 +150,32 @@ $ cat <tmp>/mem/memory.md
 - [Prefers bun over npm](package-manager-preference.md) — use bun instead of npm for all JS package management
 ```
 
-frontmatter 结构、type 选择、独立条目文件、索引一行格式全部正确；中间那次 `read_file ✗` 是模型先尝试读索引查重（写前查重行为保留）。一个瑕疵：索引文件名写成了小写 `memory.md`（macOS 大小写不敏感所以能被加载；Linux 上会失配）。压缩版文本里 `MEMORY.md` 出现了两次且都有代码标记，判断为模型个体行为而非指令缺失（完整版同样只以文件名形式给出）。
+frontmatter 结构、type 选择、独立条目文件、索引一行格式全部正确；中间那次 `read_file ✗` 是模型先尝试读索引查重（写前查重行为保留）。一个瑕疵：索引文件名写成了小写 `memory.md`。对照 loader 代码，后果是：macOS（大小写不敏感 FS）能照常当索引加载；Linux 上 `load_index` 找不到 `MEMORY.md`，而 `load_entries` 又**大小写不敏感地把它当索引跳过**（`loader.rs:208`）——即完全不可见但不报错。此瑕疵抽查发生在契约加固**之前**；压缩版现已明文 "(exact uppercase name)"（完整版原文同样只给文件名，未更强调）。
+
+**②b 契约加固后复跑**（压缩版补上"格式精确/静默跳过/大写 MEMORY.md"后，换一条新记忆再跑一次并用加载器闭环验证）：
+
+```
+$ SUDOCODE_MEMORY_DIR=<tmp>/mem2 scode --print --permission-mode danger-full-access \
+    "Remember this: our CI requires Node 22, never suggest older versions. Save it to memory now."
+🔧 write_file ✓  Bash ✓  write_file ✓ (3 tools, 20.5s)
+
+$ ls <tmp>/mem2
+ci-node-22.md  MEMORY.md          # ← 这次索引是大写
+$ head -5 <tmp>/mem2/ci-node-22.md
+---
+name: CI requires Node 22
+description: CI pipeline requires Node 22; never suggest older Node versions
+type: project
+---
+
+# 闭环：用真实加载器读回模型写的文件
+$ SUDOCODE_MEMORY_DIR=<tmp>/mem2 scode system-prompt | grep -A4 "Loaded memory files"
+## Loaded memory files
+- name: CI requires Node 22  type: project  description: CI pipeline requires Node 22; ...
+  body: CI requires Node 22. Never suggest older Node versions.
+```
+
+模型按压缩版写出的文件被 `entry.rs`/`loader.rs` 原样解析并渲染回 prompt——写侧（prompt 教学）与读侧（模块解析）契约闭环成立。
 
 **③ 普通编码任务（验证行为纪律没丢）**
 
@@ -158,8 +204,9 @@ $ scode --print --permission-mode read-only "Read fib.py and tell me its time
 - `conversation.rs::date_announcement_reinjected_when_session_lost_it` — 模拟 compaction 丢失日期块后自动补注。
 - `prompt.rs::rendered_prompt_carries_no_date` — system prompt 任何位置不得出现日期。
 - `prompt.rs::memory_variant_full_only_for_custom_agents_declaring_memory` — 只有声明 `memory:` 的自定义 agent 拿完整版；无声明的自定义 agent 与内置 agent（Explore 等）拿压缩版。
-- `memory/mod.rs::compact_instructions_stay_small_and_keep_operational_core` — 压缩版 <3k 且逐项包含操作要点、不含 `<types>` 教学块。
+- `memory/mod.rs::compact_instructions_stay_small_and_keep_operational_core` — 压缩版 <3k 且逐项包含操作要点、不含 `<types>` 教学块；并断言含"静默跳过"警告、含真实上限 2,000/16,000、不含失实的 "after 200"。
 - `memory/mod.rs::full_instructions_render_only_for_full_variant` — 变体路由正确、索引/条目渲染与变体无关、默认路径为压缩版。
+- `memory/mod.rs::taught_format_round_trips_through_the_parsers` — prompt 教的条目/索引格式必须被 `entry.rs`/`index.rs` 解析接受（契约回归锁）。
 
 **删除：无。** PTY 记忆测试（`pty_memory.rs`）断言的 `# auto memory` 标题、索引透传、条目渲染、16k 预算文案全部保留，未改一行即通过。
 

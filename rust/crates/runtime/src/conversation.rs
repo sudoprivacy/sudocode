@@ -21,7 +21,6 @@ use crate::prompt::SystemPrompt;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 use crate::usage::{TokenUsage, UsageAggregation, UsageTracker};
 
-const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 100_000;
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 
 /// Stop attempting auto-compaction after this many consecutive turns where the
@@ -313,7 +312,6 @@ pub struct ConversationRuntime<C, T> {
     max_iterations: usize,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
-    auto_compaction_input_tokens_threshold: u32,
     /// Consecutive turns where `maybe_auto_compact` ran and returned a no-op
     /// (compact_session removed zero messages). Reset to 0 on any successful
     /// compaction. When this reaches `MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS`,
@@ -382,7 +380,6 @@ where
             max_iterations: usize::MAX,
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
-            auto_compaction_input_tokens_threshold: auto_compaction_threshold_from_env(),
             consecutive_auto_compact_noops: 0,
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
@@ -419,12 +416,6 @@ where
     #[must_use]
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
-        self
-    }
-
-    #[must_use]
-    pub fn with_auto_compaction_input_tokens_threshold(mut self, threshold: u32) -> Self {
-        self.auto_compaction_input_tokens_threshold = threshold;
         self
     }
 
@@ -1417,9 +1408,9 @@ where
     }
 
     async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
-        if self.usage_tracker.cumulative_usage().input_tokens
-            < self.auto_compaction_input_tokens_threshold
-        {
+        let model = self.session.model.as_deref().unwrap_or("claude-sonnet-4-6");
+        let threshold = auto_compact_threshold_for_model(model);
+        if self.usage_tracker.cumulative_usage().input_tokens < threshold {
             return None;
         }
 
@@ -1616,16 +1607,6 @@ where
     }
 }
 
-/// Reads the automatic compaction threshold from the environment.
-#[must_use]
-pub fn auto_compaction_threshold_from_env() -> u32 {
-    parse_auto_compaction_threshold(
-        std::env::var(AUTO_COMPACTION_THRESHOLD_ENV_VAR)
-            .ok()
-            .as_deref(),
-    )
-}
-
 /// Per-model auto-compact threshold: `context_window - max_output - buffer`.
 ///
 /// Matches CC's dynamic threshold calculation instead of a flat 100K default.
@@ -1646,14 +1627,6 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     // Clamp max_output to avoid overflow on small context windows
     let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
     context_window.saturating_sub(effective_max_output + AUTOCOMPACT_BUFFER_TOKENS)
-}
-
-#[must_use]
-fn parse_auto_compaction_threshold(value: Option<&str>) -> u32 {
-    value
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|threshold| *threshold > 0)
-        .unwrap_or(DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD)
 }
 
 fn build_assistant_message(
@@ -1946,10 +1919,9 @@ impl ToolExecutor for StaticToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_assistant_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
+        auto_compact_threshold_for_model, build_assistant_message, ApiClient, ApiRequest,
         AssistantEvent, AssistantEventStream, AutoCompactionEvent, ConversationRuntime,
         PromptCacheEvent, RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor,
-        DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -3268,6 +3240,9 @@ mod tests {
 
     #[tokio::test]
     async fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
+        // The default SSOT model (claude-sonnet-4-6, 200K context / 64K output)
+        // yields threshold = 200K - min(64K, 20K) - 13K = 167K.
+        // Report 180K cumulative input tokens → exceeds 167K → triggers.
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -3278,7 +3253,7 @@ mod tests {
                 Ok(events_to_stream(vec![
                     AssistantEvent::TextDelta("done".to_string()),
                     AssistantEvent::Usage(TokenUsage {
-                        input_tokens: 120_000,
+                        input_tokens: 180_000,
                         output_tokens: 4,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
@@ -3290,6 +3265,7 @@ mod tests {
         }
 
         let mut session = Session::new();
+        session.model = Some("claude-sonnet-4-6".to_string());
         session.messages = vec![
             crate::session::ConversationMessage::user_text("one"),
             crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -3307,8 +3283,7 @@ mod tests {
             StaticToolExecutor::new(),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             SystemPrompt::default(),
-        )
-        .with_auto_compaction_input_tokens_threshold(100_000);
+        );
 
         let summary = runtime
             .run_turn("trigger", None, None)
@@ -3326,6 +3301,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_auto_compaction_below_threshold() {
+        // Report 99K cumulative input tokens → below 167K threshold → no compact.
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -3347,14 +3323,16 @@ mod tests {
             }
         }
 
+        let mut session = Session::new();
+        session.model = Some("claude-sonnet-4-6".to_string());
+
         let mut runtime = ConversationRuntime::new(
-            Session::new(),
+            session,
             SimpleApi,
             StaticToolExecutor::new(),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             SystemPrompt::default(),
-        )
-        .with_auto_compaction_input_tokens_threshold(100_000);
+        );
 
         let summary = runtime
             .run_turn("trigger", None, None)
@@ -3365,20 +3343,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_compaction_threshold_defaults_and_parses_values() {
-        assert_eq!(
-            parse_auto_compaction_threshold(None),
-            DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
-        );
-        assert_eq!(parse_auto_compaction_threshold(Some("4321")), 4321);
-        assert_eq!(
-            parse_auto_compaction_threshold(Some("0")),
-            DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
-        );
-        assert_eq!(
-            parse_auto_compaction_threshold(Some("not-a-number")),
-            DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD
-        );
+    async fn auto_compact_threshold_uses_per_model_ssot() {
+        // The threshold is context_window - min(max_output, 20K) - 13K.
+        // For claude-sonnet-4-6 (200K context, 64K output):
+        //   200_000 - min(64_000, 20_000) - 13_000 = 167_000
+        let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
+        assert_eq!(threshold, 167_000);
+
+        // Unknown model falls back to SSOT default (200K context, 64K output)
+        let unknown = auto_compact_threshold_for_model("some-unknown-model");
+        assert_eq!(unknown, 167_000);
     }
 
     // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is

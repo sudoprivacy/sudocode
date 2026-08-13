@@ -270,16 +270,11 @@ impl SystemPromptBuilder {
             || "unknown".to_string(),
             |context| context.cwd.display().to_string(),
         );
-        let date = self.project_context.as_ref().map_or_else(
-            || "unknown".to_string(),
-            |context| context.current_date.clone(),
-        );
         let identity = self.model_family.unwrap_or_default();
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
             format!("Model family: {}", identity.family_label()),
             format!("Working directory: {cwd}"),
-            format!("Date: {date}"),
             format!(
                 "Platform: {} {}",
                 self.os_name.as_deref().unwrap_or("unknown"),
@@ -383,11 +378,16 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
+// The current date is deliberately NOT rendered here (or anywhere in the
+// system prompt): a per-day field in the dynamic system block would break
+// the prompt-cache prefix for every session started on a new day.
+// `ConversationRuntime` announces the date as a `<system-reminder>` content
+// block on the first user turn instead, and fires a rollover reminder when
+// the local date changes mid-session (see `inject_date_context`).
 fn render_project_context(project_context: &ProjectContext) -> String {
     let mut lines = vec!["# Project context".to_string()];
     let is_git_repo = project_context.git_context.is_some();
     let mut bullets = vec![
-        format!("Today's date is {}.", project_context.current_date),
         format!("Working directory: {}", project_context.cwd.display()),
         format!(
             "Is a git repository: {}",
@@ -592,11 +592,37 @@ fn load_system_prompt_impl(
     let builder = match agent_type {
         Some(agent) => {
             let dir = crate::memory::agent_memory_dir_for(&cwd, agent);
-            crate::memory::append_to_builder(builder_base, Some(&dir), Some(&cwd))
+            crate::memory::append_to_builder_with(
+                builder_base,
+                Some(&dir),
+                Some(&cwd),
+                memory_prompt_variant_for_agent(agent, &cwd),
+            )
         }
-        None => crate::memory::append_to_builder(builder_base, None, Some(&cwd)),
+        None => crate::memory::append_to_builder_with(
+            builder_base,
+            None,
+            Some(&cwd),
+            crate::memory::MemoryPromptVariant::Compact,
+        ),
     };
     Ok(builder.build())
+}
+
+/// Memory-instruction depth for a sub-agent: custom `.md` agents that
+/// declare a `memory:` scope in their frontmatter are the ones expected to
+/// curate memory deliberately, so they receive the full teaching edition of
+/// the auto-memory instructions. Everything else — the main loop, built-in
+/// sub-agents (Explore, fork, …), and custom agents without a `memory:`
+/// field — carries the ~2k compact digest.
+fn memory_prompt_variant_for_agent(
+    agent_type: &str,
+    cwd: &Path,
+) -> crate::memory::MemoryPromptVariant {
+    match crate::custom_agents::find_custom_agent(agent_type, cwd) {
+        Some(def) if def.memory.is_some() => crate::memory::MemoryPromptVariant::Full,
+        _ => crate::memory::MemoryPromptVariant::Compact,
+    }
 }
 
 fn render_config_section(config: &RuntimeConfig) -> String {
@@ -1182,6 +1208,68 @@ mod tests {
             .render();
         assert!(rendered.contains("Is a git repository: no"));
         assert!(!rendered.contains("Is a git repository: yes"));
+    }
+
+    #[test]
+    fn rendered_prompt_carries_no_date() {
+        // The date must never appear in the system prompt: a per-day field
+        // in the dynamic system block would break the prompt-cache prefix
+        // every new day. ConversationRuntime announces the date via a
+        // user-side system-reminder block instead.
+        let project_context = ProjectContext {
+            cwd: PathBuf::from("/tmp/project"),
+            current_date: "2026-03-31".to_string(),
+            git_status: None,
+            git_diff: None,
+            git_context: None,
+            instruction_files: Vec::new(),
+        };
+        let rendered = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_model_family(ModelFamilyIdentity::Claude)
+            .with_project_context(project_context)
+            .render();
+        assert!(!rendered.contains("2026-03-31"));
+        assert!(!rendered.contains("Today's date"));
+        assert!(!rendered.contains("Date:"));
+    }
+
+    #[test]
+    fn memory_variant_full_only_for_custom_agents_declaring_memory() {
+        use super::memory_prompt_variant_for_agent;
+        use crate::memory::MemoryPromptVariant;
+
+        let root = temp_dir();
+        let agents_dir = root.join(".claude").join("agents");
+        fs::create_dir_all(&agents_dir).expect("agents dir");
+        fs::write(
+            agents_dir.join("archivist.md"),
+            "---\nname: prompt-test-archivist\ndescription: Curates memory.\nmemory: project\n---\nYou curate memory.\n",
+        )
+        .expect("write memory-scoped agent");
+        fs::write(
+            agents_dir.join("plain.md"),
+            "---\nname: prompt-test-plain\ndescription: No memory scope.\n---\nYou do tasks.\n",
+        )
+        .expect("write plain agent");
+
+        assert_eq!(
+            memory_prompt_variant_for_agent("prompt-test-archivist", &root),
+            MemoryPromptVariant::Full,
+            "memory-scoped custom agent gets the full teaching edition"
+        );
+        assert_eq!(
+            memory_prompt_variant_for_agent("prompt-test-plain", &root),
+            MemoryPromptVariant::Compact,
+            "custom agent without memory scope stays compact"
+        );
+        assert_eq!(
+            memory_prompt_variant_for_agent("Explore", &root),
+            MemoryPromptVariant::Compact,
+            "built-in sub-agents stay compact"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]

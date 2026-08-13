@@ -33,6 +33,26 @@ pub const ENTRY_BODY_CHAR_CAP: usize = 2_000;
 /// Cap total rendered output at 16000 chars; entries past the limit are dropped.
 pub const RENDERED_CHAR_CAP: usize = 16_000;
 
+/// Which edition of the auto-memory instructions to render.
+///
+/// The main conversation loop (and built-in sub-agents) get [`Compact`] —
+/// a ~2k-char digest of the memory methodology that keeps the operational
+/// core: when to save, the four types, the frontmatter shape, the
+/// `MEMORY.md` index format, dedupe-before-write, and the
+/// verify-before-trusting staleness rule. The full ~12.7k teaching
+/// edition ([`Full`]) is reserved for custom sub-agents that declare a
+/// `memory:` scope in their frontmatter — they are the ones expected to
+/// curate memory deliberately, so they carry the complete methodology.
+///
+/// [`Compact`]: MemoryPromptVariant::Compact
+/// [`Full`]: MemoryPromptVariant::Full
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryPromptVariant {
+    #[default]
+    Compact,
+    Full,
+}
+
 /// Loaded memory store. Combines an optional `MEMORY.md` index with the
 /// parsed entry files.
 #[derive(Debug, Clone, Default)]
@@ -76,15 +96,35 @@ impl MemoryIndex {
         self.entries.is_empty() && self.index.as_ref().is_none_or(ParsedIndex::is_empty)
     }
 
-    /// Render the memory store as a single prompt section. The caller is
+    /// Render the memory store as a single prompt section using the
+    /// [`Compact`](MemoryPromptVariant::Compact) instructions. The caller is
     /// expected to pass this through [`SystemPromptBuilder::append_section`].
     ///
     /// `memory_dir` is the resolved path to the memory directory, templated
     /// into the instructions so the model knows where to write.
     #[must_use]
     pub fn render_for_prompt(&self, memory_dir: &Path) -> String {
+        self.render_for_prompt_with(memory_dir, MemoryPromptVariant::Compact)
+    }
+
+    /// Variant-aware sibling of [`MemoryIndex::render_for_prompt`]: the
+    /// instruction preamble is chosen by `variant`, while the `MEMORY.md`
+    /// index passthrough and entry rendering are identical for both.
+    #[must_use]
+    pub fn render_for_prompt_with(
+        &self,
+        memory_dir: &Path,
+        variant: MemoryPromptVariant,
+    ) -> String {
         let mut out = String::new();
-        out.push_str(&build_auto_memory_instructions(memory_dir));
+        match variant {
+            MemoryPromptVariant::Compact => {
+                out.push_str(&build_compact_memory_instructions(memory_dir));
+            }
+            MemoryPromptVariant::Full => {
+                out.push_str(&build_full_memory_instructions(memory_dir));
+            }
+        }
         out.push_str("\n\n");
 
         if let Some(index) = self.index.as_ref() {
@@ -134,8 +174,8 @@ impl MemoryIndex {
 }
 
 /// Helper that appends the rendered memory section onto a
-/// [`SystemPromptBuilder`]. No-op when there's nothing to render or when
-/// loading fails.
+/// [`SystemPromptBuilder`] using the compact instructions. See
+/// [`append_to_builder_with`] for the variant-aware form.
 ///
 /// When `memory_dir` is `None`, the directory is derived from `cwd`
 /// (project-scoped path under `~/.scode/projects/<slug>/memory/`).
@@ -145,6 +185,19 @@ pub fn append_to_builder(
     builder: SystemPromptBuilder,
     memory_dir: Option<&Path>,
     cwd: Option<&Path>,
+) -> SystemPromptBuilder {
+    append_to_builder_with(builder, memory_dir, cwd, MemoryPromptVariant::Compact)
+}
+
+/// Variant-aware sibling of [`append_to_builder`]. The instructions are
+/// always injected (even with zero entries) so the model knows the memory
+/// directory path and how to save/forget entries.
+#[must_use]
+pub fn append_to_builder_with(
+    builder: SystemPromptBuilder,
+    memory_dir: Option<&Path>,
+    cwd: Option<&Path>,
+    variant: MemoryPromptVariant,
 ) -> SystemPromptBuilder {
     let owned;
     let dir = if let Some(d) = memory_dir {
@@ -157,24 +210,70 @@ pub fn append_to_builder(
         owned.as_path()
     };
     loader::ensure_memory_dir_exists(dir);
-    // Always inject the auto-memory instructions (even when empty) so the
-    // model knows the memory directory path and how to save/forget entries.
     match MemoryIndex::load(dir) {
-        Ok(idx) => builder.append_section(idx.render_for_prompt(dir)),
+        Ok(idx) => builder.append_section(idx.render_for_prompt_with(dir, variant)),
         _ => {
             let empty = MemoryIndex {
                 directory: dir.to_path_buf(),
                 ..Default::default()
             };
-            builder.append_section(empty.render_for_prompt(dir))
+            builder.append_section(empty.render_for_prompt_with(dir, variant))
         }
     }
+}
+
+/// Build the compact auto-memory instructions (~2k chars) carried by the
+/// main conversation loop on every request. This is a digest of
+/// [`build_full_memory_instructions`] that keeps the operational core —
+/// when to save, the four types, the frontmatter shape, the `MEMORY.md`
+/// index format, dedupe-before-write, and the staleness-verification rule —
+/// while dropping the teaching material (worked examples, expanded
+/// rationale, persistence-mechanism comparisons). The full edition stays
+/// available for memory-scoped custom sub-agents.
+///
+/// The section header (`# auto memory`) is intentionally identical to the
+/// full edition so downstream consumers and tests key on one name.
+fn build_compact_memory_instructions(memory_dir: &Path) -> String {
+    let dir_display = memory_dir.display();
+    format!(
+        r#"# auto memory
+
+You have a persistent, file-based memory system at `{dir_display}`. The directory already exists — write files into it directly with the Write tool (do not run mkdir or check for its existence). Use it to carry durable context across conversations: who the user is, how they want you to work, and the background behind the work they give you.
+
+Each memory is one file holding one fact, using this frontmatter format:
+
+```markdown
+---
+name: {{{{short name}}}}
+description: {{{{one-line summary — used to decide relevance in future conversations, so be specific}}}}
+type: {{{{user, feedback, project, reference}}}}
+---
+
+{{{{memory content — for feedback/project types: the rule/fact first, then **Why:** and **How to apply:** lines}}}}
+```
+
+Types: `user` — the user's role, expertise, and preferences. `feedback` — guidance on how to approach work: corrections AND confirmed approaches, with the reason. `project` — ongoing work, goals, deadlines, and constraints not derivable from the code or git history (convert relative dates to absolute when saving). `reference` — pointers to information in external systems (dashboards, trackers, channels).
+
+After writing a memory file, add a pointer line to `MEMORY.md`: `- [Title](file.md) — one-line hook`. `MEMORY.md` is an index, not a memory — one line per entry, under ~150 characters, no frontmatter, and lines after 200 are truncated. Never write memory content directly into it.
+
+When to save: immediately when the user explicitly asks you to remember something (and find and remove the entry when asked to forget). Otherwise, save when you learn something durable — a preference, a correction, a validated approach, project context, or an external resource. Before writing, check whether an existing memory already covers it and update that file instead of duplicating. Update or remove memories that turn out to be wrong or outdated.
+
+Do NOT save what the current project state already records: code structure and conventions, git history, debugging fixes (the fix is in the code), anything documented in AGENTS.md, or ephemeral task details. This applies even when the user explicitly asks to save — ask what was surprising or non-obvious, and save that instead.
+
+Memories are observations from the past, not guarantees about the present. Before answering from memory or recommending something a memory names (a file, function, or flag), verify it against the current state of the code or resource — "the memory says X exists" is not the same as "X exists now". If memory conflicts with what you observe, trust the current state and update or remove the stale entry. If the user says to ignore memory, proceed as if it were empty."#
+    )
 }
 
 /// Build the full auto-memory instructions section, matching CC's
 /// `buildMemoryLines()` from `memdir.ts`. The memory directory path
 /// is templated in so the model knows where to write.
-fn build_auto_memory_instructions(memory_dir: &Path) -> String {
+///
+/// This 12.7k-char teaching edition is no longer carried by the main
+/// conversation loop (which gets [`build_compact_memory_instructions`]);
+/// it is routed to custom sub-agents that declare a `memory:` scope in
+/// their frontmatter. Keep it in sync with the compact digest when the
+/// operational rules change.
+fn build_full_memory_instructions(memory_dir: &Path) -> String {
     let dir_display = memory_dir.display();
     format!(
         r#"# auto memory
@@ -463,6 +562,64 @@ mod tests {
         assert!(prompt.contains("role"));
         assert!(prompt.contains("habit"));
         assert!(prompt.contains("Key Learnings"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn compact_instructions_stay_small_and_keep_operational_core() {
+        let dir = PathBuf::from("/tmp/mem");
+        let compact = build_compact_memory_instructions(&dir);
+        // The whole point of the compact edition: an order-of-magnitude
+        // smaller always-present footprint than the ~12.7k full edition.
+        assert!(
+            compact.chars().count() < 3_000,
+            "compact edition should stay well under 3k chars, got {}",
+            compact.chars().count()
+        );
+        // Operational core that must survive compression.
+        assert!(compact.starts_with("# auto memory"));
+        assert!(compact.contains("/tmp/mem"), "memory dir templated in");
+        assert!(compact.contains("name:"), "frontmatter shape");
+        assert!(compact.contains("type:"), "frontmatter type field");
+        for ty in ["user", "feedback", "project", "reference"] {
+            assert!(compact.contains(ty), "missing memory type {ty}");
+        }
+        assert!(compact.contains("MEMORY.md"), "index instructions");
+        assert!(
+            compact.contains("- [Title](file.md)"),
+            "one-line index format"
+        );
+        assert!(
+            compact.contains("update that file instead of duplicating"),
+            "dedupe-before-write rule"
+        );
+        assert!(
+            compact.contains("not guarantees about the present"),
+            "staleness-verification rule"
+        );
+        // Teaching material must NOT survive compression.
+        assert!(
+            !compact.contains("<types>"),
+            "worked-example XML belongs to the full edition only"
+        );
+    }
+
+    #[test]
+    fn full_instructions_render_only_for_full_variant() {
+        let dir = temp_dir("variant");
+        let idx = MemoryIndex::load(&dir).expect("load");
+        let compact = idx.render_for_prompt_with(&dir, MemoryPromptVariant::Compact);
+        let full = idx.render_for_prompt_with(&dir, MemoryPromptVariant::Full);
+        assert!(compact.starts_with("# auto memory"));
+        assert!(full.starts_with("# auto memory"));
+        assert!(!compact.contains("<types>"));
+        assert!(full.contains("<types>"));
+        assert!(full.len() > compact.len() * 3);
+        // Entry/index rendering is variant-independent.
+        assert!(compact.contains("(no memory entries loaded)"));
+        assert!(full.contains("(no memory entries loaded)"));
+        // The default render path is the compact one.
+        assert_eq!(idx.render_for_prompt(&dir), compact);
         fs::remove_dir_all(dir).ok();
     }
 

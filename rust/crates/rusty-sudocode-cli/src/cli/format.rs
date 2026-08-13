@@ -193,12 +193,24 @@ pub(crate) fn render_messages(
     parts.join("\n")
 }
 
-/// Extract concatenated text content from a message's blocks.
+/// `true` for Text blocks the runtime injected (date announcements,
+/// rollover reminders, task notifications) rather than the user typing.
+/// These travel to the model inside user messages but must not surface
+/// in user-facing echoes: transcript replay and ↑-history recall.
+pub(crate) fn is_system_reminder_text(text: &str) -> bool {
+    text.trim_start().starts_with("<system-reminder>")
+}
+
+/// Extract concatenated text content from a message's blocks, skipping
+/// runtime-injected `<system-reminder>` blocks (see
+/// [`is_system_reminder_text`]).
 fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|b| match b {
-            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            runtime::ContentBlock::Text { text } if !is_system_reminder_text(text) => {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()

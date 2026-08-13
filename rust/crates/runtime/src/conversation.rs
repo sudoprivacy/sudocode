@@ -1930,6 +1930,13 @@ mod tests {
         PermissionRequest,
     };
     use crate::prompt::{ProjectContext, SystemPrompt, SystemPromptBuilder};
+
+    /// Serialises tests that mutate `CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     use crate::session::{ContentBlock, MessageRole, Session};
     use crate::usage::{TokenUsage, UsageCostCurrency};
     use crate::ToolError;
@@ -3240,9 +3247,10 @@ mod tests {
 
     #[tokio::test]
     async fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
-        // The default SSOT model (claude-sonnet-4-6, 200K context / 64K output)
-        // yields threshold = 200K - min(64K, 20K) - 13K = 167K.
-        // Report 180K cumulative input tokens → exceeds 167K → triggers.
+        let _g = env_guard();
+        // Env-var override sets threshold to 100 — test-only, independent of SSOT.
+        // Mock reports 200 input tokens → crosses 100 → triggers auto-compact.
+        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "100");
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -3253,7 +3261,7 @@ mod tests {
                 Ok(events_to_stream(vec![
                     AssistantEvent::TextDelta("done".to_string()),
                     AssistantEvent::Usage(TokenUsage {
-                        input_tokens: 180_000,
+                        input_tokens: 200,
                         output_tokens: 4,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
@@ -3265,7 +3273,6 @@ mod tests {
         }
 
         let mut session = Session::new();
-        session.model = Some("claude-sonnet-4-6".to_string());
         session.messages = vec![
             crate::session::ConversationMessage::user_text("one"),
             crate::session::ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -3290,6 +3297,8 @@ mod tests {
             .await
             .expect("turn should succeed");
 
+        std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+
         assert_eq!(
             summary.auto_compaction,
             Some(AutoCompactionEvent {
@@ -3301,7 +3310,9 @@ mod tests {
 
     #[tokio::test]
     async fn skips_auto_compaction_below_threshold() {
-        // Report 99K cumulative input tokens → below 167K threshold → no compact.
+        let _g = env_guard();
+        // Env-var override sets threshold to 1000. Mock reports 50 → below → no compact.
+        std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1000");
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -3312,7 +3323,7 @@ mod tests {
                 Ok(events_to_stream(vec![
                     AssistantEvent::TextDelta("done".to_string()),
                     AssistantEvent::Usage(TokenUsage {
-                        input_tokens: 99_999,
+                        input_tokens: 50,
                         output_tokens: 4,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
@@ -3323,11 +3334,8 @@ mod tests {
             }
         }
 
-        let mut session = Session::new();
-        session.model = Some("claude-sonnet-4-6".to_string());
-
         let mut runtime = ConversationRuntime::new(
-            session,
+            Session::new(),
             SimpleApi,
             StaticToolExecutor::new(),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
@@ -3338,12 +3346,18 @@ mod tests {
             .run_turn("trigger", None, None)
             .await
             .expect("turn should succeed");
+
+        std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
+
         assert_eq!(summary.auto_compaction, None);
         assert_eq!(runtime.session().messages.len(), 2);
     }
 
     #[tokio::test]
     async fn auto_compact_threshold_uses_per_model_ssot() {
+        let _g = env_guard();
+        // Ensure no env-var override is active.
+        std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
         // The threshold is context_window - min(max_output, 20K) - 13K.
         // For claude-sonnet-4-6 (200K context, 64K output):
         //   200_000 - min(64_000, 20_000) - 13_000 = 167_000

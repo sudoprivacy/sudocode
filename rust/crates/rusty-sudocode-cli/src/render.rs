@@ -103,37 +103,206 @@ fn ranges_to_plain(ranges: &[(SyntectStyle, &str)]) -> String {
     out
 }
 
+/// Semantic color theme — coder picks a scenario token, never a raw color.
+///
+/// Two built-in palettes: `dark()` (default) and `light()` for light
+/// terminal backgrounds.  All rendering code references `theme.xxx`;
+/// switching palette changes every color at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
-    heading: Color,
-    emphasis: Color,
-    strong: Color,
-    inline_code: Color,
-    link: Color,
-    quote: Color,
-    table_border: Color,
-    code_block_border: Color,
-    spinner_active: Color,
-    spinner_done: Color,
-    spinner_failed: Color,
+    // ── Semantic tokens ──────────────────────────────────────────────
+    /// Primary emphasis — prompt glyph, H1 heading, box title.
+    pub primary: Color,
+    /// Success — tool done, write result, spinner complete.
+    pub success: Color,
+    /// Error — failed, denied, cancelled.
+    pub error: Color,
+    /// Warning — permission prompt title, edit label, stalled spinner.
+    pub warning: Color,
+    /// Info — spinner active, thinking indicator.
+    pub info: Color,
+    /// Muted — footer hints, dim text, labels, separators.
+    pub muted: Color,
+    /// Emphasis — italic text in markdown.
+    pub emphasis: Color,
+    /// Strong — bold text in markdown.
+    pub strong: Color,
+    /// Link — hyperlinks.
+    pub link: Color,
+    /// Inline code — backtick spans.
+    pub code: Color,
+    /// Code block background (256-color index).
+    pub code_bg: u8,
+    /// Border — box/table/code fence chrome.
+    pub border: Color,
+    /// Diff added line.
+    pub diff_added: Color,
+    /// Diff removed line.
+    pub diff_removed: Color,
+    /// Hook feedback text.
+    pub hook_feedback: Color,
+    /// Logo primary color.
+    pub logo: Color,
+    /// Logo accent ("Code" wordmark).
+    pub logo_accent: Color,
+    /// Blockquote prefix.
+    pub quote: Color,
+    /// H2 heading.
+    pub heading_h2: Color,
+    /// H3 heading.
+    pub heading_h3: Color,
+    /// H4+ heading.
+    pub heading_h4: Color,
+}
+
+impl ColorTheme {
+    /// Dark terminal background (default).
+    #[must_use]
+    pub fn dark() -> Self {
+        Self {
+            primary: Color::Cyan,
+            success: Color::Green,
+            error: Color::Red,
+            warning: Color::Yellow,
+            info: Color::Blue,
+            muted: Color::DarkGrey,
+            emphasis: Color::Magenta,
+            strong: Color::Yellow,
+            link: Color::Blue,
+            code: Color::Green,
+            code_bg: 236,
+            border: Color::AnsiValue(245),
+            diff_added: Color::AnsiValue(70),
+            diff_removed: Color::AnsiValue(203),
+            hook_feedback: Color::AnsiValue(214),
+            logo: Color::AnsiValue(117),
+            logo_accent: Color::AnsiValue(208),
+            quote: Color::DarkGrey,
+            heading_h2: Color::White,
+            heading_h3: Color::Blue,
+            heading_h4: Color::Grey,
+        }
+    }
+
+    /// Light terminal background.
+    #[must_use]
+    pub fn light() -> Self {
+        Self {
+            primary: Color::DarkCyan,
+            success: Color::DarkGreen,
+            error: Color::DarkRed,
+            warning: Color::AnsiValue(130), // dark orange
+            info: Color::DarkBlue,
+            muted: Color::Grey,
+            emphasis: Color::DarkMagenta,
+            strong: Color::AnsiValue(130),
+            link: Color::DarkBlue,
+            code: Color::DarkGreen,
+            code_bg: 253, // light grey bg
+            border: Color::AnsiValue(240),
+            diff_added: Color::AnsiValue(22),    // dark green
+            diff_removed: Color::AnsiValue(124), // dark red
+            hook_feedback: Color::AnsiValue(130),
+            logo: Color::AnsiValue(25),         // dark blue
+            logo_accent: Color::AnsiValue(166), // dark orange
+            quote: Color::Grey,
+            heading_h2: Color::Black,
+            heading_h3: Color::DarkBlue,
+            heading_h4: Color::DarkGrey,
+        }
+    }
+
+    /// Detect terminal background and pick the appropriate palette.
+    #[must_use]
+    pub fn detect() -> Self {
+        if Self::is_light_background() {
+            Self::light()
+        } else {
+            Self::dark()
+        }
+    }
+
+    /// ANSI escape for the border color.
+    #[inline]
+    pub fn border_fg(&self) -> String {
+        ansi_fg(self.border)
+    }
+
+    /// ANSI escape for the muted color.
+    #[inline]
+    pub fn muted_fg(&self) -> String {
+        ansi_fg(self.muted)
+    }
+
+    /// ANSI escape for the code block background.
+    #[inline]
+    pub fn code_bg_seq(&self) -> String {
+        format!("\x1b[48;5;{}m", self.code_bg)
+    }
+
+    fn is_light_background() -> bool {
+        // Check COLORFGBG (format: "fg;bg", light if bg >= 8).
+        if let Ok(val) = std::env::var("COLORFGBG") {
+            if let Some(bg) = val.rsplit(';').next().and_then(|s| s.parse::<u8>().ok()) {
+                return bg >= 8 && bg != 8; // 8 = dark grey, not light
+            }
+        }
+        false
+    }
 }
 
 impl Default for ColorTheme {
     fn default() -> Self {
-        Self {
-            heading: Color::Cyan,
-            emphasis: Color::Magenta,
-            strong: Color::Yellow,
-            inline_code: Color::Green,
-            link: Color::Blue,
-            quote: Color::DarkGrey,
-            table_border: Color::DarkCyan,
-            code_block_border: Color::DarkGrey,
-            spinner_active: Color::Blue,
-            spinner_done: Color::Green,
-            spinner_failed: Color::Red,
-        }
+        Self::detect()
     }
+}
+
+/// Convert a `Color` to its ANSI foreground escape sequence.
+#[inline]
+pub fn ansi_fg(color: Color) -> String {
+    match color {
+        Color::Black => "\x1b[30m".to_string(),
+        Color::DarkRed => "\x1b[31m".to_string(),
+        Color::DarkGreen => "\x1b[32m".to_string(),
+        Color::DarkYellow => "\x1b[33m".to_string(),
+        Color::DarkBlue => "\x1b[34m".to_string(),
+        Color::DarkMagenta => "\x1b[35m".to_string(),
+        Color::DarkCyan => "\x1b[36m".to_string(),
+        Color::Grey => "\x1b[37m".to_string(),
+        Color::DarkGrey => "\x1b[90m".to_string(),
+        Color::Red => "\x1b[91m".to_string(),
+        Color::Green => "\x1b[92m".to_string(),
+        Color::Yellow => "\x1b[93m".to_string(),
+        Color::Blue => "\x1b[94m".to_string(),
+        Color::Magenta => "\x1b[95m".to_string(),
+        Color::Cyan => "\x1b[96m".to_string(),
+        Color::White => "\x1b[97m".to_string(),
+        Color::AnsiValue(n) => format!("\x1b[38;5;{n}m"),
+        Color::Rgb { r, g, b } => format!("\x1b[38;2;{r};{g};{b}m"),
+        _ => String::new(),
+    }
+}
+
+/// ANSI bold + fg.
+#[inline]
+pub fn ansi_bold_fg(color: Color) -> String {
+    format!("\x1b[1m{}", ansi_fg(color))
+}
+
+/// ANSI reset.
+pub const RESET: &str = "\x1b[0m";
+/// ANSI dim.
+pub const DIM: &str = "\x1b[2m";
+/// ANSI bold.
+pub const BOLD: &str = "\x1b[1m";
+
+/// Process-wide theme, detected once at startup.
+static THEME: std::sync::OnceLock<ColorTheme> = std::sync::OnceLock::new();
+
+/// Get the global color theme (auto-detected on first call).
+#[inline]
+pub fn theme() -> &'static ColorTheme {
+    THEME.get_or_init(ColorTheme::detect)
 }
 
 /// Shared spinner reference for streaming and tool execution layers.
@@ -548,10 +717,10 @@ impl RenderState {
 
         if let Some(level) = self.heading_level {
             style = match level {
-                1 => style.with(theme.heading),
-                2 => style.white(),
-                3 => style.with(Color::Blue),
-                _ => style.with(Color::Grey),
+                1 => style.with(theme.primary),
+                2 => style.with(theme.heading_h2),
+                3 => style.with(theme.heading_h3),
+                _ => style.with(theme.heading_h4),
             };
         } else if self.strong > 0 {
             style = style.with(theme.strong);
@@ -798,8 +967,7 @@ impl TerminalRenderer {
             Event::Start(Tag::Strong) => state.strong += 1,
             Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
             Event::Code(code) => {
-                let rendered =
-                    format!("{}", format!("`{code}`").with(self.color_theme.inline_code));
+                let rendered = format!("{}", format!("`{code}`").with(self.color_theme.code));
                 state.append_raw(output, &rendered);
             }
             Event::Rule => output.push_str("---\n"),
@@ -953,19 +1121,13 @@ impl TerminalRenderer {
         let _ = writeln!(
             output,
             "{}",
-            format!("╭─ {label}")
-                .bold()
-                .with(self.color_theme.code_block_border)
+            format!("╭─ {label}").bold().with(self.color_theme.border)
         );
     }
 
     fn finish_code_block(&self, code_buffer: &str, code_language: &str, output: &mut String) {
         output.push_str(&self.highlight_code(code_buffer, code_language));
-        let _ = write!(
-            output,
-            "{}",
-            "╰─".bold().with(self.color_theme.code_block_border)
-        );
+        let _ = write!(output, "{}", "╰─".bold().with(self.color_theme.border));
         output.push_str("\n\n");
     }
 
@@ -1006,12 +1168,12 @@ impl TerminalRenderer {
             })
             .collect::<Vec<_>>();
 
-        let border = format!("{}", "│".with(self.color_theme.table_border));
+        let border = format!("{}", "│".with(self.color_theme.border));
         let separator = widths
             .iter()
             .map(|width| "─".repeat(*width + 2))
             .collect::<Vec<_>>()
-            .join(&format!("{}", "┼".with(self.color_theme.table_border)));
+            .join(&format!("{}", "┼".with(self.color_theme.border)));
         let separator = format!("{border}{separator}{border}");
 
         let mut output = String::new();
@@ -1035,7 +1197,7 @@ impl TerminalRenderer {
     }
 
     fn render_table_row(&self, row: &[String], widths: &[usize], is_header: bool) -> String {
-        let border = format!("{}", "│".with(self.color_theme.table_border));
+        let border = format!("{}", "│".with(self.color_theme.border));
         let mut line = String::new();
         line.push_str(&border);
 
@@ -1043,7 +1205,7 @@ impl TerminalRenderer {
             let cell = row.get(index).map_or("", String::as_str);
             line.push(' ');
             if is_header {
-                let _ = write!(line, "{}", cell.bold().with(self.color_theme.heading));
+                let _ = write!(line, "{}", cell.bold().with(self.color_theme.primary));
             } else {
                 line.push_str(cell);
             }

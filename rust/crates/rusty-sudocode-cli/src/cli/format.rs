@@ -42,6 +42,7 @@ fn strip_ansi_codes(input: &str) -> String {
     output
 }
 
+use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, RESET};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
@@ -76,7 +77,7 @@ fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
             } else {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
                 if vis + ch_w > width {
-                    current.push_str("\x1b[0m");
+                    current.push_str(RESET);
                     result.push(current);
                     current = String::new();
                     vis = 0;
@@ -123,9 +124,10 @@ pub(crate) fn format_box(title: &str, content: &str) -> String {
     let border_chars = header_min.max(content_max + 2).min(max_border);
     let inner = border_chars.saturating_sub(2);
 
-    let g = "\x1b[38;5;245m";
-    let r = "\x1b[0m";
-    let ct = "\x1b[1;36m";
+    let t = crate::render::theme();
+    let g = t.border_fg();
+    let ct = crate::render::ansi_bold_fg(t.primary);
+    let r = crate::render::RESET;
 
     let header_fill = border_chars.saturating_sub(title_width + 3);
     let header = format!("  {g}╭─ {ct}{title}{r}{g} {}╮{r}", "─".repeat(header_fill));
@@ -170,7 +172,7 @@ pub(crate) fn render_message(
             if text.is_empty() {
                 return None;
             }
-            let sep = format!("\x1b[2m{}\x1b[0m", "─".repeat(term_width));
+            let sep = format!("{DIM}{}{RESET}", "─".repeat(term_width));
             out.push_str(&sep);
             out.push('\n');
             let (echo, _) = format_input_echo(&text, term_width);
@@ -726,6 +728,7 @@ pub(crate) fn format_internal_prompt_progress_line(
 /// the call site did `replace('\n', " ")`. We now preserve every line so the
 /// echo matches what the user actually typed.
 pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usize) {
+    let t = theme();
     let trimmed = input.trim();
     // `split('\n')` (not `lines()`) so an input that ends with `\n` still
     // contributes a trailing empty echo row — rustyline drew one for it.
@@ -734,6 +737,7 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     } else {
         trimmed.split('\n').collect()
     };
+    let code_bg = t.code_bg_seq();
     let mut rendered = String::new();
     for (idx, line) in raw_lines.iter().enumerate() {
         let prefix = if idx == 0 { " › " } else { "   " };
@@ -743,12 +747,12 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         if idx > 0 {
             rendered.push('\n');
         }
-        rendered.push_str("\x1b[48;5;236m");
+        rendered.push_str(&code_bg);
         rendered.push_str(&body);
         if pad > 0 {
             rendered.push_str(&" ".repeat(pad));
         }
-        rendered.push_str("\x1b[0m");
+        rendered.push_str(RESET);
     }
     (rendered, raw_lines.len())
 }
@@ -906,6 +910,7 @@ pub(crate) fn format_context_window_blocked_error(
 }
 
 pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
+    let t = theme();
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
 
@@ -913,7 +918,7 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         "bash" | "Bash" => format_bash_call(&parsed),
         "read_file" | "Read" => {
             let path = extract_tool_path(&parsed);
-            format!("\x1b[2m📄 Reading {path}…\x1b[0m")
+            format!("{DIM}📄 Reading {path}…{RESET}")
         }
         "write_file" | "Write" => {
             let path = extract_tool_path(&parsed);
@@ -921,7 +926,8 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
                 .get("content")
                 .and_then(|value| value.as_str())
                 .map_or(0, |content| content.lines().count());
-            format!("\x1b[1;32m✏️ Writing {path}\x1b[0m \x1b[2m({lines} lines)\x1b[0m")
+            let success = ansi_bold_fg(t.success);
+            format!("{success}✏️ Writing {path}{RESET} {DIM}({lines} lines){RESET}")
         }
         "edit_file" | "Edit" => {
             let path = extract_tool_path(&parsed);
@@ -935,8 +941,9 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
                 .or_else(|| parsed.get("newString"))
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
+            let warning = ansi_bold_fg(t.warning);
             format!(
-                "\x1b[1;33m📝 Editing {path}\x1b[0m{}",
+                "{warning}📝 Editing {path}{RESET}{}",
                 format_patch_preview(old_value, new_value)
                     .map(|preview| format!("\n{preview}"))
                     .unwrap_or_default()
@@ -971,37 +978,41 @@ pub(crate) fn split_hook_feedback(output: &str) -> (&str, Option<&str>) {
 }
 
 pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
+    let t = theme();
     let icon = if is_error {
-        "\x1b[1;31m⏺\x1b[0m"
+        format!("{}⏺{RESET}", ansi_bold_fg(t.error))
     } else {
-        "\x1b[1;32m⏺\x1b[0m"
+        format!("{}⏺{RESET}", ansi_bold_fg(t.success))
     };
     let (payload, hook_feedback) = split_hook_feedback(output);
+    let muted = t.muted_fg();
     let base = if is_error {
         let summary = truncate_for_summary(output.trim(), 160);
+        let removed = ansi_fg(t.diff_removed);
         if summary.is_empty() {
-            format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
+            format!("{icon} {muted}{name}{RESET}")
         } else {
-            format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n  \x1b[38;5;203m{summary}\x1b[0m")
+            format!("{icon} {muted}{name}{RESET}\n  {removed}{summary}{RESET}")
         }
     } else {
         let parsed: serde_json::Value =
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
-            "bash" | "Bash" => format_bash_result(icon, &parsed),
-            "repl" | "REPL" => format_repl_result(icon, &parsed),
-            "read_file" | "Read" => format_read_result(icon, &parsed),
-            "write_file" | "Write" => format_write_result(icon, &parsed),
-            "edit_file" | "Edit" => format_edit_result(icon, &parsed),
-            "glob_search" | "Glob" => format_glob_result(icon, &parsed),
-            "grep_search" | "Grep" => format_grep_result(icon, &parsed),
-            _ => format_generic_tool_result(icon, name, &parsed),
+            "bash" | "Bash" => format_bash_result(&icon, &parsed),
+            "repl" | "REPL" => format_repl_result(&icon, &parsed),
+            "read_file" | "Read" => format_read_result(&icon, &parsed),
+            "write_file" | "Write" => format_write_result(&icon, &parsed),
+            "edit_file" | "Edit" => format_edit_result(&icon, &parsed),
+            "glob_search" | "Glob" => format_glob_result(&icon, &parsed),
+            "grep_search" | "Grep" => format_grep_result(&icon, &parsed),
+            _ => format_generic_tool_result(&icon, name, &parsed),
         }
     };
     match hook_feedback {
         Some(feedback) if !is_error => {
             let indented = feedback.replace('\n', "\n  ");
-            format!("{base}\n  \x1b[38;5;214m{indented}\x1b[0m")
+            let hook = ansi_fg(t.hook_feedback);
+            format!("{base}\n  {hook}{indented}{RESET}")
         }
         _ => base,
     }
@@ -1026,21 +1037,25 @@ pub(crate) fn format_search_start(label: &str, parsed: &serde_json::Value) -> St
         .get("path")
         .and_then(|value| value.as_str())
         .unwrap_or(".");
-    format!("{label} {pattern}\n\x1b[2min {scope}\x1b[0m")
+    format!("{label} {pattern}\n{DIM}in {scope}{RESET}")
 }
 
 pub(crate) fn format_patch_preview(old_value: &str, new_value: &str) -> Option<String> {
     if old_value.is_empty() && new_value.is_empty() {
         return None;
     }
+    let t = theme();
+    let removed = ansi_fg(t.diff_removed);
+    let added = ansi_fg(t.diff_added);
     Some(format!(
-        "\x1b[38;5;203m- {}\x1b[0m\n\x1b[38;5;70m+ {}\x1b[0m",
+        "{removed}- {}{RESET}\n{added}+ {}{RESET}",
         truncate_for_summary(first_visible_line(old_value), 72),
         truncate_for_summary(first_visible_line(new_value), 72)
     ))
 }
 
 pub(crate) fn format_bash_call(parsed: &serde_json::Value) -> String {
+    let t = theme();
     let command = parsed
         .get("command")
         .and_then(|value| value.as_str())
@@ -1048,8 +1063,9 @@ pub(crate) fn format_bash_call(parsed: &serde_json::Value) -> String {
     if command.is_empty() {
         String::new()
     } else {
+        let code_bg = t.code_bg_seq();
         format!(
-            "\x1b[48;5;236;38;5;255m $ {} \x1b[0m",
+            "{code_bg}\x1b[38;5;255m $ {} {RESET}",
             truncate_for_summary(command, 160)
         )
     }
@@ -1064,6 +1080,8 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
 pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
     use std::fmt::Write as _;
 
+    let muted = theme().muted_fg();
+
     // Extract command from input for the header.
     let command = parsed
         .get("command")
@@ -1071,10 +1089,10 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .unwrap_or_default();
 
     let mut header = if command.is_empty() {
-        format!("{icon} \x1b[38;5;245mBash\x1b[0m")
+        format!("{icon} {muted}Bash{RESET}")
     } else {
         format!(
-            "{icon} \x1b[38;5;245mBash\x1b[0m({})",
+            "{icon} {muted}Bash{RESET}({})",
             truncate_for_summary(command, 120)
         )
     };
@@ -1114,15 +1132,17 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 pub(crate) fn format_repl_result(icon: &str, parsed: &serde_json::Value) -> String {
     use std::fmt::Write as _;
 
+    let muted = theme().muted_fg();
+
     let language = parsed
         .get("language")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
 
     let mut header = if language.is_empty() {
-        format!("{icon} \x1b[38;5;245mREPL\x1b[0m")
+        format!("{icon} {muted}REPL{RESET}")
     } else {
-        format!("{icon} \x1b[38;5;245mREPL\x1b[0m({language})")
+        format!("{icon} {muted}REPL{RESET}({language})")
     };
 
     if let Some(exit_code) = parsed
@@ -1185,7 +1205,7 @@ fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> Str
         let line_or_lines = if remaining == 1 { "line" } else { "lines" };
         write!(
             &mut result,
-            "\n  \x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m"
+            "\n  {DIM}… +{remaining} more {line_or_lines} · full output preserved in session{RESET}"
         )
         .expect("write to string");
     }
@@ -1230,7 +1250,7 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .get("totalLines")
         .or_else(|| file.get("total_lines"))
         .and_then(serde_json::Value::as_u64);
-    let header = format!("{icon} \x1b[2mRead {path}\x1b[0m");
+    let header = format!("{icon} {DIM}Read {path}{RESET}");
     if content.is_empty() {
         return header;
     }
@@ -1288,7 +1308,7 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         };
         let _ = write!(
             indented,
-            "\n  \x1b[2m… +{remaining_lines} more {line_or_lines} · full output preserved in session\x1b[0m"
+            "\n  {DIM}… +{remaining_lines} more {line_or_lines} · full output preserved in session{RESET}"
         );
     } else if char_truncated {
         let _ = write!(indented, "\n  {DISPLAY_TRUNCATION_NOTICE}");
@@ -1297,7 +1317,7 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
     let mut out = String::with_capacity(header.len() + indented.len() + 8);
     out.push_str(&header);
     if let Some(total) = total_lines {
-        let _ = write!(out, " \x1b[2m({total} lines)\x1b[0m");
+        let _ = write!(out, " {DIM}({total} lines){RESET}");
     }
     out.push('\n');
     out.push_str(&indented);
@@ -1321,6 +1341,8 @@ pub(crate) const DIFF_PREVIEW_MAX_BODY_LINES: usize = 8;
 pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
 
 pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
+    let t = theme();
+    let success = ansi_bold_fg(t.success);
     let path = extract_tool_path(parsed);
     let kind = parsed
         .get("type")
@@ -1343,12 +1365,12 @@ pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> Str
                 std::cmp::Ordering::Equal => String::new(),
             };
             format!(
-                "{icon} \x1b[1;32m✏️ {verb} {path}\x1b[0m \x1b[2m({new_line_count} lines, was {prev_lines}{delta_str})\x1b[0m",
+                "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
             )
         }
-        _ => format!(
-            "{icon} \x1b[1;32m✏️ {verb} {path}\x1b[0m \x1b[2m({new_line_count} lines)\x1b[0m",
-        ),
+        _ => {
+            format!("{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
+        }
     };
     match original {
         Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)
@@ -1400,6 +1422,7 @@ pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) ->
 }
 
 pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
+    let t = theme();
     let path = extract_tool_path(parsed);
     let replace_all = parsed
         .get("replaceAll")
@@ -1436,12 +1459,13 @@ pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> Stri
     let preview = format_edit_diff_preview(original, old_value, new_value)
         .or_else(|| format_patch_preview(old_value, new_value));
 
+    let warning = ansi_bold_fg(t.warning);
     match preview {
         Some(preview) => {
             let indented = preview.replace('\n', "\n  ");
-            format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m\n  {indented}")
+            format!("{icon} {warning}📝 Edited {path}{suffix}{RESET}\n  {indented}")
         }
-        None => format!("{icon} \x1b[1;33m📝 Edited {path}{suffix}\x1b[0m"),
+        None => format!("{icon} {warning}📝 Edited {path}{suffix}{RESET}"),
     }
 }
 
@@ -1505,6 +1529,10 @@ fn render_diff_window(
     pre_context_start: usize,
     edit_start_line_1based: usize,
 ) -> String {
+    let t = theme();
+    let muted = t.muted_fg();
+    let removed = ansi_fg(t.diff_removed);
+    let added = ansi_fg(t.diff_added);
     let mut out: Vec<String> = Vec::new();
     let pre_context = &original_lines
         [pre_context_start..pre_context_start + (edit_start_line_1based - 1 - pre_context_start)];
@@ -1519,19 +1547,19 @@ fn render_diff_window(
     };
 
     out.push(format!(
-        "\x1b[38;5;245m@@ -{},{} +{},{} @@\x1b[0m",
+        "{muted}@@ -{},{} +{},{} @@{RESET}",
         edit_start_line_1based,
         old_body.len(),
         edit_start_line_1based,
         new_body.len(),
     ));
     for line in pre_context {
-        out.push(format!("\x1b[2m  {line}\x1b[0m"));
+        out.push(format!("{DIM}  {line}{RESET}"));
     }
-    push_body_lines(&mut out, old_body, '-', "\x1b[38;5;203m");
-    push_body_lines(&mut out, new_body, '+', "\x1b[38;5;70m");
+    push_body_lines(&mut out, old_body, '-', &removed);
+    push_body_lines(&mut out, new_body, '+', &added);
     for line in post_context {
-        out.push(format!("\x1b[2m  {line}\x1b[0m"));
+        out.push(format!("{DIM}  {line}{RESET}"));
     }
     out.join("\n")
 }
@@ -1540,15 +1568,15 @@ fn push_body_lines(out: &mut Vec<String>, body: &[&str], sign: char, color: &str
     let limit = DIFF_PREVIEW_MAX_BODY_LINES;
     if body.len() <= limit {
         for line in body {
-            out.push(format!("{color}{sign} {line}\x1b[0m"));
+            out.push(format!("{color}{sign} {line}{RESET}"));
         }
     } else {
         let head = limit.saturating_sub(1);
         for line in &body[..head] {
-            out.push(format!("{color}{sign} {line}\x1b[0m"));
+            out.push(format!("{color}{sign} {line}{RESET}"));
         }
         out.push(format!(
-            "\x1b[2m{sign} … +{} more lines\x1b[0m",
+            "{DIM}{sign} … +{} more lines{RESET}",
             body.len() - head,
         ));
     }
@@ -1573,7 +1601,7 @@ pub(crate) fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    format!("{icon} \x1b[2mFound {num_files} files\x1b[0m")
+    format!("{icon} {DIM}Found {num_files} files{RESET}")
 }
 
 pub(crate) fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
@@ -1586,7 +1614,7 @@ pub(crate) fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    format!("{icon} \x1b[2m{num_matches} matches across {num_files} files\x1b[0m")
+    format!("{icon} {DIM}{num_matches} matches across {num_files} files{RESET}")
 }
 
 pub(crate) fn format_generic_tool_result(
@@ -1594,6 +1622,7 @@ pub(crate) fn format_generic_tool_result(
     name: &str,
     parsed: &serde_json::Value,
 ) -> String {
+    let muted = theme().muted_fg();
     let rendered_output = match parsed {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => String::new(),
@@ -1609,12 +1638,12 @@ pub(crate) fn format_generic_tool_result(
     );
 
     if preview.is_empty() {
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
+        format!("{icon} {muted}{name}{RESET}")
     } else if preview.contains('\n') {
         let indented = preview.replace('\n', "\n  ");
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n  {indented}")
+        format!("{icon} {muted}{name}{RESET}\n  {indented}")
     } else {
-        format!("{icon} \x1b[38;5;245m{name}:\x1b[0m {preview}")
+        format!("{icon} {muted}{name}:{RESET} {preview}")
     }
 }
 
@@ -1708,7 +1737,7 @@ pub(crate) fn format_turn_status_line_with_branch(
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
         segments.push(branch.to_string());
     }
-    format!("\x1b[2m{}\x1b[0m", segments.join(" · "))
+    format!("{DIM}{}{RESET}", segments.join(" · "))
 }
 
 /// Render the box that frames an interactive permission-approval prompt.
@@ -1755,11 +1784,12 @@ pub(crate) fn format_permission_prompt_box(
         .max(title.chars().count() + 4);
     let border = "─".repeat(inner_width + 2);
 
-    let grey = "\x1b[38;5;245m";
-    let reset = "\x1b[0m";
-    let bold_yellow = "\x1b[1;33m";
-    let bold_cyan = "\x1b[1;36m";
-    let dim = "\x1b[2m";
+    let t = theme();
+    let grey = t.border_fg();
+    let reset = RESET;
+    let bold_yellow = ansi_bold_fg(t.warning);
+    let bold_cyan = ansi_bold_fg(t.primary);
+    let dim = DIM;
 
     let mut out = String::new();
     let title_dashes = "─".repeat(inner_width.saturating_sub(title.chars().count() + 2));
@@ -1815,23 +1845,26 @@ pub(crate) fn format_tool_timeline(
         return None;
     }
     let count = entries.len();
+    let t = theme();
+    let success_fg = ansi_fg(t.success);
+    let error_fg = ansi_fg(t.error);
     let parts: Vec<String> = entries
         .into_iter()
         .map(|(name, ok)| {
             // Bold tool name; green check or red cross.
             let glyph = if ok {
-                "\x1b[32m✓\x1b[0m"
+                format!("{success_fg}✓{RESET}")
             } else {
-                "\x1b[31m✗\x1b[0m"
+                format!("{error_fg}✗{RESET}")
             };
-            format!("\x1b[1m{name}\x1b[0m {glyph}")
+            format!("{BOLD}{name}{RESET} {glyph}")
         })
         .collect();
     let body = parts.join("  ");
     let plural = if count == 1 { "tool" } else { "tools" };
     let secs = elapsed.as_secs_f64();
     Some(format!(
-        "🔧 {body} \x1b[2m({count} {plural}, {secs:.1}s)\x1b[0m"
+        "🔧 {body} {DIM}({count} {plural}, {secs:.1}s){RESET}"
     ))
 }
 
@@ -1887,7 +1920,7 @@ pub(crate) fn truncate_output_for_display(
             let remaining = total_lines - shown_lines;
             let _ = write!(
                 preview,
-                "\x1b[2m… +{remaining} more {line_or_lines} · full output preserved in session\x1b[0m",
+                "{DIM}… +{remaining} more {line_or_lines} · full output preserved in session{RESET}",
                 line_or_lines = if remaining == 1 { "line" } else { "lines" },
             );
         } else {

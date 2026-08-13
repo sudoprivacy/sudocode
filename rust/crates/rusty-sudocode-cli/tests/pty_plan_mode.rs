@@ -59,14 +59,17 @@ fn plan_mode_state(env: &TestEnv) -> PathBuf {
 }
 
 fn read_json_or_empty(path: &std::path::Path) -> Value {
-    if !path.exists() {
-        return Value::Object(Default::default());
+    // Use retry to handle the race where the child process has exited
+    // but the OS file cache hasn't flushed yet (common on CI VMs).
+    let text = common::read_file_with_retry(
+        path,
+        10,
+        std::time::Duration::from_millis(100),
+    );
+    match text {
+        Some(t) => serde_json::from_str::<Value>(&t).unwrap_or(Value::Object(Default::default())),
+        None => Value::Object(Default::default()),
     }
-    let text = fs::read_to_string(path).unwrap_or_default();
-    if text.trim().is_empty() {
-        return Value::Object(Default::default());
-    }
-    serde_json::from_str::<Value>(&text).unwrap_or(Value::Object(Default::default()))
 }
 
 fn default_mode_of(settings: &Value) -> Option<&str> {
@@ -136,8 +139,16 @@ fn enter_plan_mode_writes_settings_and_state_from_fresh_workspace() {
         "settings.local.json must have permissions.defaultMode = \"plan\" after EnterPlanMode; got: {settings}"
     );
 
+    // Retry: the child may have exited before the OS flushed the file.
+    let state_exists = (0..10).any(|_| {
+        if plan_mode_state(&env).exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        false
+    }) || plan_mode_state(&env).exists();
     assert!(
-        plan_mode_state(&env).exists(),
+        state_exists,
         "tool-state/plan-mode.json must be created so ExitPlanMode can restore"
     );
     let state = read_json_or_empty(&plan_mode_state(&env));

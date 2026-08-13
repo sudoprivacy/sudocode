@@ -1628,10 +1628,12 @@ mod tests {
         );
 
         for _ in 0..5 {
-            // Sleep 2ms between iterations so each rotated_log_path()
-            // gets a distinct timestamp. Without this, fast machines
-            // produce duplicate paths and the test becomes flaky.
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // Sleep 10ms between iterations so each rotated_log_path()
+            // gets a distinct timestamp and modification time. CI VMs
+            // may have coarse timers where 2ms is not enough to produce
+            // distinct filesystem timestamps, causing cleanup to
+            // non-deterministically skip files during dedup/sort.
+            std::thread::sleep(std::time::Duration::from_millis(10));
             let rotated = super::rotated_log_path(&path);
             fs::write(&rotated, "old").expect("rotated file should write");
         }

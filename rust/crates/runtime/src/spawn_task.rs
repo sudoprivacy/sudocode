@@ -70,6 +70,54 @@ pub enum AgentLoopState {
     Busy,
 }
 
+/// Where the co-hosted agent's chat mailbox lives — determines the path the
+/// loop reads for inbound messages and where each reply is written.
+#[derive(Debug, Clone)]
+pub enum Mailbox {
+    /// Node-local single stream (the managed-agent `/proc/{pid}/chat-with-me`
+    /// model): the loop reads AND replies on the SAME path; both parties
+    /// filter `from != self`. NOT raft-replicated — same-node only.
+    LocalStream { path: String, self_id: String },
+    /// A2A per-recipient inboxes under `base` (e.g. `/agents`): the loop
+    /// reads its OWN inbox `{base}/{self_name}/chat-with-me` and writes each
+    /// reply to the SENDER's inbox `{base}/{sender}/chat-with-me`. These
+    /// paths are raft-replicated, so two co-hosted agents on different nodes
+    /// converse over A2A with no bridge/relay.
+    A2aInbox { base: String, self_name: String },
+}
+
+impl Mailbox {
+    /// Path the loop reads + `sys_watch`es for inbound messages.
+    fn inbox_path(&self) -> String {
+        match self {
+            Mailbox::LocalStream { path, .. } => path.clone(),
+            Mailbox::A2aInbox { base, self_name } => {
+                format!("{}/{}/chat-with-me", base.trim_end_matches('/'), self_name)
+            }
+        }
+    }
+
+    /// This agent's own id — filters its own writes out of the inbox and is
+    /// stamped as `from` on replies + as the operation actor.
+    fn self_id(&self) -> &str {
+        match self {
+            Mailbox::LocalStream { self_id, .. } => self_id,
+            Mailbox::A2aInbox { self_name, .. } => self_name,
+        }
+    }
+
+    /// Where a reply addressed to `sender` is written. LocalStream replies on
+    /// the shared stream; A2aInbox writes to the sender's own inbox.
+    fn reply_path(&self, sender: &str) -> String {
+        match self {
+            Mailbox::LocalStream { path, .. } => path.clone(),
+            Mailbox::A2aInbox { base, .. } => {
+                format!("{}/{}/chat-with-me", base.trim_end_matches('/'), sender)
+            }
+        }
+    }
+}
+
 /// Handle returned by [`spawn_task`].
 pub struct SpawnHandle {
     /// Shared abort signal — wired into the [`ConversationRuntime`] via
@@ -89,9 +137,11 @@ pub struct SpawnHandle {
 /// `state_callback` is invoked on every state transition so the caller
 /// can forward to `AgentRegistry::update_state`.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_task<K, C, T, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
+    mailbox: Mailbox,
     api_client: C,
     tool_executor: T,
     system_prompt: SystemPrompt,
@@ -113,6 +163,7 @@ where
             run_loop(
                 kernel,
                 desc,
+                mailbox,
                 api_client,
                 tool_executor,
                 system_prompt,
@@ -150,9 +201,11 @@ pub fn spawn_task_echo<K: KernelSyscall + Send + Sync + 'static>(
 // v2 loop — ConversationRuntime integration
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_loop<K, C, T, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
+    mailbox: Mailbox,
     api_client: C,
     tool_executor: T,
     system_prompt: SystemPrompt,
@@ -193,17 +246,20 @@ fn run_loop<K, C, T, F>(
     // -- READY --
     state_cb(AgentLoopState::Ready);
 
-    let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
-    let agent_id = desc.name.as_str();
-    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
+    // Inbox the loop reads/watches, and the id it filters its own writes by.
+    // For A2A this is the replicated `/agents/<self>/chat-with-me`; replies
+    // go to the SENDER's inbox (raft-replicated → cross-machine, no bridge).
+    let inbox_path = mailbox.inbox_path();
+    let self_id = mailbox.self_id().to_string();
+    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&self_id), true);
 
     let mut next_offset: u64 = 0;
     while !abort.is_aborted() {
-        match kernel.sys_read(&cwm_path, &ctx, READ_TIMEOUT_MS, next_offset) {
+        match kernel.sys_read(&inbox_path, &ctx, READ_TIMEOUT_MS, next_offset) {
             Ok(result) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
-                        if let Some((sender, prompt)) = parse_inbound(bytes, agent_id) {
+                        if let Some((sender, prompt)) = parse_inbound(bytes, &self_id) {
                             // -- BUSY --
                             state_cb(AgentLoopState::Busy);
 
@@ -226,14 +282,14 @@ fn run_loop<K, C, T, F>(
                                         .join("\n");
                                     serde_json::json!({
                                         "to": sender,
-                                        "from": agent_id,
+                                        "from": self_id,
                                         "body": text,
                                     })
                                 }
                                 Err(e) => {
                                     serde_json::json!({
                                         "to": sender,
-                                        "from": agent_id,
+                                        "from": self_id,
                                         "body": format!("error: {e}"),
                                         "error": true,
                                     })
@@ -241,7 +297,10 @@ fn run_loop<K, C, T, F>(
                             };
 
                             if let Ok(bytes) = serde_json::to_vec(&response) {
-                                let _ = kernel.sys_write(&cwm_path, &ctx, &bytes, 0);
+                                // Reply to the SENDER's inbox (A2A) or the
+                                // shared stream (LocalStream).
+                                let reply_path = mailbox.reply_path(&sender);
+                                let _ = kernel.sys_write(&reply_path, &ctx, &bytes, 0);
                             }
 
                             // -- READY --
@@ -260,11 +319,11 @@ fn run_loop<K, C, T, F>(
                 break;
             }
         }
-        // Block until a FileWrite event fires on the mailbox path, or
+        // Block until a FileWrite event fires on the inbox path, or
         // timeout. Replaces the old `thread::sleep(50ms)` busy-poll
         // with a condvar wait — near-zero idle CPU, sub-millisecond
         // wake latency on new data.
-        kernel.sys_watch(&cwm_path, WATCH_TIMEOUT_MS);
+        kernel.sys_watch(&inbox_path, WATCH_TIMEOUT_MS);
     }
 }
 
@@ -340,6 +399,43 @@ fn build_echo_reply(inbound: &[u8], self_agent_id: &str) -> Option<Vec<u8>> {
     serde_json::to_vec(&reply).ok()
 }
 
-// Tests live under `runtime/tests/spawn_task.rs` as an integration
-// test binary so they can compile without bringing in the rest of
-// the lib's test target.
+// Loop tests live under `runtime/tests/spawn_task.rs` as an integration
+// test binary so they can compile without bringing in the rest of the
+// lib's test target. The pure `Mailbox` routing is unit-tested inline.
+
+#[cfg(test)]
+mod tests {
+    use super::Mailbox;
+
+    #[test]
+    fn a2a_inbox_reads_self_replies_to_sender() {
+        let mb = Mailbox::A2aInbox {
+            base: "/agents".into(),
+            self_name: "win-ai".into(),
+        };
+        // Reads its OWN inbox …
+        assert_eq!(mb.inbox_path(), "/agents/win-ai/chat-with-me");
+        assert_eq!(mb.self_id(), "win-ai");
+        // … and replies to the SENDER's inbox (raft-replicated → the peer's
+        // node sees it), NOT its own.
+        assert_eq!(mb.reply_path("mac-ai"), "/agents/mac-ai/chat-with-me");
+        // A trailing slash on the base is tolerated.
+        let mb2 = Mailbox::A2aInbox {
+            base: "/agents/".into(),
+            self_name: "a".into(),
+        };
+        assert_eq!(mb2.inbox_path(), "/agents/a/chat-with-me");
+    }
+
+    #[test]
+    fn local_stream_reads_and_replies_on_the_same_path() {
+        let mb = Mailbox::LocalStream {
+            path: "/proc/7/chat-with-me".into(),
+            self_id: "scode".into(),
+        };
+        assert_eq!(mb.inbox_path(), "/proc/7/chat-with-me");
+        assert_eq!(mb.self_id(), "scode");
+        // LocalStream replies on the shared stream regardless of sender.
+        assert_eq!(mb.reply_path("anyone"), "/proc/7/chat-with-me");
+    }
+}

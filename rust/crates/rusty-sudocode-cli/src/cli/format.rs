@@ -123,9 +123,10 @@ pub(crate) fn format_box(title: &str, content: &str) -> String {
     let border_chars = header_min.max(content_max + 2).min(max_border);
     let inner = border_chars.saturating_sub(2);
 
-    let g = "\x1b[38;5;245m";
-    let r = "\x1b[0m";
-    let ct = "\x1b[1;36m";
+    let t = crate::render::theme();
+    let g = t.border_fg();
+    let ct = crate::render::ansi_bold_fg(t.primary);
+    let r = crate::render::RESET;
 
     let header_fill = border_chars.saturating_sub(title_width + 3);
     let header = format!("  {g}╭─ {ct}{title}{r}{g} {}╮{r}", "─".repeat(header_fill));

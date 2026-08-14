@@ -1908,7 +1908,12 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
 /// Callback type for interactive slash commands that need user selection
 /// via iocraft's InputSlot (replaces dialoguer FuzzySelect/Select in the
 /// iocraft REPL path).
-type SlashSelectionHandler = Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender)>;
+///
+/// Returns `Option<SlashSelectionHandler>` to support chained interactions
+/// (tree navigation). A struct wrapper breaks the recursive type alias cycle.
+struct SlashSelectionHandler(
+    Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) -> Option<SlashSelectionHandler>>,
+);
 
 /// Show an interactive selection question via iocraft's InputSlot and
 /// register a callback to handle the answer. The coordinator loop routes
@@ -1921,17 +1926,18 @@ fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
     items: Vec<String>,
-    on_selected: impl FnOnce(String, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) + 'static,
+    on_selected: impl FnOnce(String, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) -> Option<SlashSelectionHandler>
+        + 'static,
 ) -> SlashSelectionHandler {
     ui.show_question(question);
-    Box::new(move |answer: &str, cli, out| {
+    SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
         let resolved = answer
             .parse::<usize>()
             .ok()
             .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
             .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out);
-    })
+        on_selected(resolved, cli, out)
+    }))
 }
 
 struct IocraftQuestionPrompter {
@@ -2188,87 +2194,18 @@ fn run_repl_iocraft_dispatch(
                 let trimmed = text.trim();
                 let is_slash = match SlashCommand::parse(trimmed) {
                     Ok(Some(SlashCommand::Config { section: None })) => {
-                        // Interactive config picker via iocraft InputSlot.
+                        // Interactive config tree browser via FieldSchema SSOT.
                         let cwd = env::current_dir().unwrap_or_default();
                         let loader = runtime::ConfigLoader::default_for(&cwd);
-                        let user_settings_path = loader.config_home().join("settings.json");
-                        let config = match loader.load() {
-                            Ok(c) => c,
-                            Err(e) => {
-                                repl.output.println(&format!(
-                                    "{}{e}{}",
-                                    ansi_fg(theme().error),
-                                    RESET
-                                ));
-                                continue;
-                            }
-                        };
-                        let merged = config.merged();
-                        let keys: Vec<String> = merged.keys().cloned().collect();
-                        let options: Vec<repl_ui::QuestionOptionView> = keys
-                            .iter()
-                            .map(|k| {
-                                let val = merged.get(k).map_or("null".to_string(), |v| {
-                                    let s = v.render();
-                                    if s.len() > 40 {
-                                        format!("{}…", &s[..40])
-                                    } else {
-                                        s
-                                    }
-                                });
-                                repl_ui::QuestionOptionView {
-                                    label: format!("{k} = {val}"),
-                                    value: k.clone(),
-                                    description: None,
-                                    recommended: false,
-                                }
-                            })
-                            .collect();
-                        let settings_path = user_settings_path.clone();
-                        pending_slash_selection = Some(show_slash_selection(
-                            &repl.ui,
-                            repl_ui::QuestionPromptView {
-                                title: Some("Config".to_string()),
-                                description: Some(format!(
-                                    "Settings: {}",
-                                    user_settings_path.display()
-                                )),
-                                index: 0,
-                                total: 1,
-                                prompt: "Select setting to edit".to_string(),
-                                options,
-                                allow_custom_input: false,
-                                custom_input_hint: None,
-                                force_fuzzy_select: false,
-                            },
-                            keys,
-                            move |key, cli, out| {
-                                // Read current value, show it, and open editor for new value.
-                                let current = std::fs::read_to_string(&settings_path)
-                                    .unwrap_or_else(|_| "{}".to_string());
-                                let mut json: serde_json::Value =
-                                    serde_json::from_str(&current).unwrap_or(serde_json::json!({}));
-                                let current_val = json
-                                    .get(&key)
-                                    .map_or("null".to_string(), |v| {
-                                        serde_json::to_string_pretty(v)
-                                            .unwrap_or_else(|_| v.to_string())
-                                    });
-                                out.println(&format!(
-                                    "{DIM}Current {key} = {current_val}{RESET}\n\
-                                     {DIM}Type new value (JSON), or press Enter to keep current:{RESET}"
-                                ));
-                                // For now, print the current value. Interactive value
-                                // editing requires a second FuzzySelect/TextInput round
-                                // which is complex. The user can use `/config set <key> <value>`
-                                // or edit the file directly.
-                                out.println(&format!(
-                                    "{DIM}Edit: {}{RESET}",
-                                    settings_path.display()
-                                ));
-                                let _ = cli;
-                            },
-                        ));
+                        let settings_path = loader.config_home().join("settings.json");
+                        let sudocode_path = loader.config_home().join("sudocode.json");
+                        pending_slash_selection = Some(
+                            cli::config_ui::build_config_tree_handler(
+                                &repl.ui,
+                                settings_path,
+                                sudocode_path,
+                            ),
+                        );
                         true
                     }
                     Ok(Some(SlashCommand::Model { model: None })) => {
@@ -2323,6 +2260,7 @@ fn run_repl_iocraft_dispatch(
                                         RESET
                                     )),
                                 }
+                                None
                             },
                         ));
                         true
@@ -2393,7 +2331,7 @@ fn run_repl_iocraft_dispatch(
             }
             repl_ui::InputEvent::QuestionAnswer(text) => {
                 if let Some(handler) = pending_slash_selection.take() {
-                    handler(&text, &cli_shared, &repl.output);
+                    pending_slash_selection = (handler.0)(&text, &cli_shared, &repl.output);
                 } else if !consume_pending_question_answer(&pending_question_answer, text) {
                     repl.output.println(&format!(
                         "{DIM}(no question is waiting for an answer){RESET}"

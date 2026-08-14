@@ -985,25 +985,10 @@ pub(crate) async fn run_acp_on_transport(
                             let question_bridge = AcpQuestionBridge { tx: question_tx };
                             let mut delegate =
                                 d.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let set_result = delegate.set_question_prompter(
+                            let _ = delegate.set_question_prompter(
                                 &sid_for_blocking,
                                 Box::new(question_bridge),
                             );
-                            {
-                                use std::io::Write as _;
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/scode-acp-diag.log")
-                                {
-                                    let _ = writeln!(
-                                        f,
-                                        "[ACP-DIAG] set_question_prompter sid={} ok={}",
-                                        sid_for_blocking,
-                                        set_result.is_ok()
-                                    );
-                                }
-                            }
 
                             // Push image content blocks into the session before
                             // running the prompt so the API client includes them.
@@ -1105,23 +1090,8 @@ pub(crate) async fn run_acp_on_transport(
                                                 .collect(),
                                         };
 
-                                        {
-                                            use std::io::Write as _;
-                                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                .create(true)
-                                                .append(true)
-                                                .open("/tmp/scode-acp-diag.log")
-                                            {
-                                                let _ = writeln!(
-                                                    f,
-                                                    "[ACP-DIAG] sending {} request",
-                                                    ACP_ASK_USER_QUESTION_METHOD
-                                                );
-                                            }
-                                        }
                                         let outcome = match serde_json::value::to_raw_value(&payload) {
                                             Ok(raw) => {
-                                                let raw_for_diag = raw.clone();
                                                 match cx_perm
                                                     .send_request(ClientRequest::ExtMethodRequest(
                                                         ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
@@ -1130,20 +1100,6 @@ pub(crate) async fn run_acp_on_transport(
                                                     .await
                                                 {
                                                     Ok(resp) => {
-                                                        {
-                                                            use std::io::Write;
-                                                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                                .create(true)
-                                                                .append(true)
-                                                                .open("/tmp/scode-acp-diag.log")
-                                                            {
-                                                                let _ = writeln!(
-                                                                    f,
-                                                                    "[ACP-DIAG] question raw_resp: {}",
-                                                                    resp,
-                                                                );
-                                                            }
-                                                        }
                                                         serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
                                                             .map_err(|error| format!("deserialize: {}", error))
                                                             .map(|payload| {
@@ -1158,46 +1114,11 @@ pub(crate) async fn run_acp_on_transport(
                                                                     .collect::<Vec<_>>()
                                                             })
                                                     }
-                                                    Err(error) => {
-                                                        {
-                                                            use std::io::Write;
-                                                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                                .create(true)
-                                                                .append(true)
-                                                                .open("/tmp/scode-acp-diag.log")
-                                                            {
-                                                                let _ = writeln!(
-                                                                    f,
-                                                                    "[ACP-DIAG] question send_request Err debug: {:?} payload_size={}",
-                                                                    error,
-                                                                    raw_for_diag.get().len(),
-                                                                );
-                                                            }
-                                                        }
-                                                        Err(error.to_string())
-                                                    }
+                                                    Err(error) => Err(error.to_string()),
                                                 }
                                             }
                                             Err(error) => Err(error.to_string()),
                                         };
-                                        {
-                                            use std::io::Write;
-                                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                                .create(true)
-                                                .append(true)
-                                                .open("/tmp/scode-acp-diag.log")
-                                            {
-                                                let summary = match &outcome {
-                                                    Ok(answers) => format!("Ok n_answers={}", answers.len()),
-                                                    Err(e) => format!("Err {}", e),
-                                                };
-                                                let _ = writeln!(
-                                                    f,
-                                                    "[ACP-DIAG] question outcome: {}",
-                                                    summary
-                                                );
-                                            }
-                                        }
                                         let _ = response_tx.send(outcome);
                                     } else {
                                         break blocking_handle.await

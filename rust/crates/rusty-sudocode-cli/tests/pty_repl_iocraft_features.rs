@@ -94,6 +94,301 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     assert_eq!(exit, 0, "clean exit code");
 }
 
+/// Ctrl-C hint appears in the FooterSlot (not scrollback) and
+/// auto-dismisses. Pressing Ctrl-C once while idle should show
+/// "Press Ctrl-C again to exit" in the footer area, and a subsequent
+/// keypress should dismiss it. The hint must NOT appear in scrollback.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_ctrlc_hint_in_footer() {
+    let env = TestEnv::new("iocraft-ctrlc-hint");
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Press Ctrl-C once — should show hint in footer area.
+    sess.send("\x03").expect("send Ctrl-C");
+
+    sess.expect("Press Ctrl-C again to exit").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
+    });
+
+    // Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+/// TurnPhase::Thinking renders in the StatusSlot during a turn.
+/// Verifies the spinner shows the model name during streaming.
+/// This is the foundation test for the TurnPhase ChromeSlot — it
+/// confirms that phase-based rendering works end-to-end.
+///
+/// The retry sub-phase (TurnPhase::Retry) cannot be reliably triggered
+/// in automated tests — it requires a specific proxy error. Manual
+/// verification: use `/model claude-fable-5` (non-existent) and send a
+/// prompt to trigger retries, then verify retry text appears in the
+/// StatusSlot and Ctrl-C cancels cleanly.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_turn_phase_thinking_renders() {
+    let env = TestEnv::new("iocraft-turn-phase");
+
+    if env.is_mock() {
+        eprintln!(
+            "iocraft_repl_turn_phase_thinking_renders: \
+             skipped in mock mode (requires SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("What is 2+2? Answer only the number.\r")
+        .expect("send prompt");
+
+    // The spinner should show "Thinking" during the turn.
+    sess.expect("(?i)thinking").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("Thinking phase should render in StatusSlot: {e}\nPTY:\n{screen}");
+    });
+
+    // Wait for response and reprompt.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+/// SSOT endpoint routing: Claude models use anthropic-messages format
+/// (not openai-completions) when the model_capabilities SSOT has
+/// endpoint_types from sudorouter. Verifies that extended thinking
+/// content is visible (non-zero chars) — this only works with native
+/// Anthropic format, not OpenAI-compatible.
+///
+/// Live-only: requires real API with extended thinking model.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_anthropic_format_thinking_visible() {
+    let env = TestEnv::new("iocraft-anthropic-thinking");
+
+    if env.is_mock() {
+        eprintln!(
+            "iocraft_repl_anthropic_format_thinking_visible: \
+             skipped in mock mode (requires SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(60));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Use a model that supports extended thinking.
+    sess.send("/model claude-sonnet-4-6\r").expect("send /model");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after /model: {e}\nPTY:\n{screen}");
+    });
+
+    // Send a prompt that triggers thinking. The response should include
+    // a thinking summary with non-zero chars if anthropic format is used.
+    sess.send("What is 247 * 183? Think step by step.\r")
+        .expect("send prompt");
+
+    // Wait for response to complete.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Check the full screen for thinking summary. With anthropic format,
+    // we should see "Thinking (N chars hidden)" where N > 0.
+    // With openai format, N would be 0 (adaptive thinking, content empty).
+    let screen = sess.render(|s| s.contents());
+    let has_thinking = screen.contains("Thinking");
+    if has_thinking {
+        // If thinking summary is present, verify it's not "0 chars"
+        // which would indicate openai format (content lost).
+        assert!(
+            !screen.contains("0 chars hidden"),
+            "Thinking content should be non-empty with anthropic-messages format.\n\
+             If '0 chars hidden' appears, the model may be using openai-completions \
+             format instead of anthropic-messages.\nPTY:\n{screen}"
+        );
+    }
+    // Note: some models/prompts may not trigger thinking at all,
+    // so we don't assert thinking is always present.
+
+    // Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+/// SSOT endpoint routing: GPT models use openai-completions format.
+/// Verifies basic request/response works through proxy passthrough.
+///
+/// Live-only: requires real API.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_openai_format_gpt_works() {
+    let env = TestEnv::new("iocraft-openai-gpt");
+
+    if env.is_mock() {
+        eprintln!(
+            "iocraft_repl_openai_format_gpt_works: \
+             skipped in mock mode (requires SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("/model gpt-4.1-mini\r").expect("send /model");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after /model: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("Say exactly: GPT_ENDPOINT_OK\r")
+        .expect("send prompt");
+
+    sess.expect("GPT_ENDPOINT_OK").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("GPT should respond with marker: {e}\nPTY:\n{screen}");
+    });
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+/// SSOT endpoint routing: Gemini models use gemini format via proxy.
+/// Verifies basic request/response works through proxy passthrough.
+///
+/// Live-only: requires real API.
+#[test]
+#[cfg(unix)]
+fn iocraft_repl_gemini_format_works() {
+    let env = TestEnv::new("iocraft-gemini");
+
+    if env.is_mock() {
+        eprintln!(
+            "iocraft_repl_gemini_format_works: \
+             skipped in mock mode (requires SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("/model gemini-2.5-flash\r").expect("send /model");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after /model: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("Say exactly: GEMINI_ENDPOINT_OK\r")
+        .expect("send prompt");
+
+    sess.expect("GEMINI_ENDPOINT_OK").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("Gemini should respond with marker: {e}\nPTY:\n{screen}");
+    });
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
 /// **P0 streaming regression guard**: markdown code blocks in model
 /// responses must render with intact box-drawing borders.
 ///

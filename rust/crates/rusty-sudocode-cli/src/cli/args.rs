@@ -1066,8 +1066,8 @@ pub(crate) fn try_resolve_bare_skill_prompt_with_plugins(
 
 pub(crate) fn resolve_model_alias(model: &str) -> &str {
     match model {
+        "auto" | "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
         "claude-opus" | "opus" => "claude-opus-4-6",
-        "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
         "claude-haiku" | "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
     }

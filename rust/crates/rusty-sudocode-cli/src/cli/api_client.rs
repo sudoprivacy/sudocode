@@ -25,6 +25,23 @@ use crate::{
     AllowedToolSet, InternalPromptProgressReporter, RuntimeConfig, POST_TOOL_STALL_TIMEOUT,
 };
 
+/// Bridges HTTP retry notifications from the transport layer to the
+/// spinner's `set_retry` / resume methods, so the iocraft TurnRenderer
+/// can display retry status in the spinner overlay.
+struct SpinnerRetryNotifier {
+    spinner: SpinnerRef,
+}
+
+impl api::RetryNotifier for SpinnerRetryNotifier {
+    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
+        self.spinner.set_retry(attempt, max_retries, reason.to_string());
+    }
+
+    fn on_retry_end(&self) {
+        self.spinner.resume();
+    }
+}
+
 // NOTE: Despite the historical name `AnthropicRuntimeClient`, this struct
 // now holds an `ApiProviderClient` which dispatches to Anthropic, xAI,
 // OpenAI, or DashScope at construction time based on
@@ -89,6 +106,10 @@ impl AnthropicRuntimeClient {
     }
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
+        let notifier = Arc::new(SpinnerRetryNotifier {
+            spinner: ref_.clone(),
+        });
+        self.client.set_retry_notifier(notifier);
         self.spinner = Some(ref_);
     }
 
@@ -719,11 +740,11 @@ pub(crate) fn render_thinking_block_summary(
     redacted: bool,
 ) -> Result<(), RuntimeError> {
     let summary = if redacted {
-        "\n  ▶ Thinking block hidden by provider\n".to_string()
+        "\n  ▼ Thinking block hidden by provider\n".to_string()
     } else if let Some(char_count) = char_count {
-        format!("\n  ▶ Thinking ({char_count} chars hidden)\n")
+        format!("\n  ▼ Thinking ({char_count} chars hidden)\n")
     } else {
-        "\n  ▶ Thinking hidden\n".to_string()
+        "\n  ▼ Thinking hidden\n".to_string()
     };
     write!(out, "{summary}")
         .and_then(|()| out.flush())

@@ -375,18 +375,48 @@ fn try_proxy_passthrough(
     let proxy_providers = config.auth_modes.get("proxy")?;
     let (provider_name, connection) = proxy_providers.iter().next()?;
 
-    // Proxy providers default to openai-completions API format.
-    let api_format = ApiFormat::OpenAiCompletions;
+    // Pick API format from model_capabilities SSOT (preferred endpoint
+    // type from sudorouter), falling back to openai-completions.
+    let api_format = runtime::model_capabilities::preferred_endpoint_type(model_id)
+        .as_deref()
+        .map(endpoint_type_to_api_format)
+        .unwrap_or(ApiFormat::OpenAiCompletions);
     let credential = resolve_credential("proxy", provider_name, connection).ok()?;
     let kind = infer_provider_kind(provider_name, api_format);
+
+    // Adjust base_url for the chosen format. Proxy configs typically use
+    // OpenAI convention (base_url ends with `/v1`), but AnthropicClient
+    // appends its own `/v1/messages`. Strip the trailing `/v1` for
+    // Anthropic format to avoid `/v1/v1/messages`.
+    let base_url = match api_format {
+        ApiFormat::AnthropicMessages => connection
+            .base_url
+            .trim_end_matches('/')
+            .strip_suffix("/v1")
+            .unwrap_or(&connection.base_url)
+            .to_string(),
+        _ => connection.base_url.clone(),
+    };
 
     Some(ResolvedProvider {
         kind,
         api_format,
-        base_url: connection.base_url.clone(),
+        base_url,
         credential,
         model_id: model_id.to_string(),
     })
+}
+
+/// Map sudorouter endpoint type string to `ApiFormat`.
+/// This is the single source of truth for the mapping — matches
+/// nova-gateway's `constant/endpoint_type.go` values.
+fn endpoint_type_to_api_format(endpoint_type: &str) -> ApiFormat {
+    match endpoint_type {
+        "anthropic" => ApiFormat::AnthropicMessages,
+        "gemini" => ApiFormat::GeminiGenerateContent,
+        "openai-response" => ApiFormat::OpenAiResponses,
+        _ => ApiFormat::OpenAiCompletions,
+    }
 }
 
 /// Resolve the wire API format.

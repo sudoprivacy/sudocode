@@ -1,8 +1,86 @@
+use std::time::Duration;
+
 use crate::error::ApiError;
 
 const HTTP_PROXY_KEYS: [&str; 2] = ["HTTP_PROXY", "http_proxy"];
 const HTTPS_PROXY_KEYS: [&str; 2] = ["HTTPS_PROXY", "https_proxy"];
 const NO_PROXY_KEYS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+
+const CONNECT_TIMEOUT_ENV: &str = "SUDOCODE_API_CONNECT_TIMEOUT";
+const READ_TIMEOUT_ENV: &str = "SUDOCODE_API_READ_TIMEOUT";
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Timeout configuration for the outbound HTTP client.
+///
+/// Deliberately *not* a whole-request timeout: streaming responses may
+/// legitimately run for many minutes while tokens arrive, so an overall
+/// deadline would kill long answers. Instead we bound the two ways a dead
+/// connection can hang forever: establishing the TCP connection, and
+/// waiting for the next byte to arrive.
+///
+/// A `None` field disables that timeout entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutConfig {
+    /// Maximum time to establish a TCP connection. Defaults to 30 seconds.
+    pub connect_timeout: Option<Duration>,
+    /// Maximum time between successive reads from the socket (an idle
+    /// timeout, reset every time a byte arrives — safe for long streaming
+    /// responses). Defaults to 300 seconds, which comfortably exceeds the
+    /// keep-alive ping cadence of streaming providers while still unblocking
+    /// a session stuck on a dead connection.
+    pub read_timeout: Option<Duration>,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
+            read_timeout: Some(DEFAULT_READ_TIMEOUT),
+        }
+    }
+}
+
+impl TimeoutConfig {
+    /// Read timeout settings from the process environment.
+    /// - `SUDOCODE_API_CONNECT_TIMEOUT` — connect timeout in whole seconds
+    /// - `SUDOCODE_API_READ_TIMEOUT` — idle read timeout in whole seconds
+    ///
+    /// A value of `0` disables that timeout. Unset or unparseable values
+    /// fall back to the defaults.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup<F>(mut lookup: F) -> Self
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let mut parse = |key: &str, default: Duration| -> Option<Duration> {
+            match lookup(key).and_then(|value| value.trim().parse::<u64>().ok()) {
+                Some(0) => None,
+                Some(seconds) => Some(Duration::from_secs(seconds)),
+                None => Some(default),
+            }
+        };
+        Self {
+            connect_timeout: parse(CONNECT_TIMEOUT_ENV, DEFAULT_CONNECT_TIMEOUT),
+            read_timeout: parse(READ_TIMEOUT_ENV, DEFAULT_READ_TIMEOUT),
+        }
+    }
+
+    /// Create from explicit second values. `0` disables that timeout.
+    #[must_use]
+    pub fn from_seconds(connect_secs: u64, read_secs: u64) -> Self {
+        let to_timeout = |seconds: u64| (seconds > 0).then(|| Duration::from_secs(seconds));
+        Self {
+            connect_timeout: to_timeout(connect_secs),
+            read_timeout: to_timeout(read_secs),
+        }
+    }
+}
 
 /// Snapshot of the proxy-related environment variables that influence the
 /// outbound HTTP client. Captured up front so callers can inspect, log, and
@@ -64,24 +142,21 @@ pub fn build_http_client() -> Result<reqwest::Client, ApiError> {
     build_http_client_with(&ProxyConfig::from_env())
 }
 
-/// Infallible counterpart to [`build_http_client`] for constructors that
-/// historically returned `Self` rather than `Result<Self, _>`. When the proxy
-/// configuration is malformed we fall back to a default client so that
-/// callers retain the previous behaviour and the failure surfaces on the
-/// first outbound request instead of at construction time.
-#[must_use]
-pub fn build_http_client_or_default() -> reqwest::Client {
-    build_http_client().unwrap_or_else(|_| reqwest::Client::new())
-}
-
-/// Build a `reqwest::Client` from an explicit [`ProxyConfig`]. Used by tests
-/// and by callers that want to override process-level environment lookups.
-///
-/// When `config.proxy_url` is set it overrides the per-scheme `http_proxy`
-/// and `https_proxy` fields and is registered as both an HTTP and HTTPS
-/// proxy so a single value can route every outbound request.
-pub fn build_http_client_with(config: &ProxyConfig) -> Result<reqwest::Client, ApiError> {
+/// Build a `reqwest::Client` from explicit [`ProxyConfig`] and
+/// [`TimeoutConfig`]. Used by callers (and tests) that need to control both
+/// proxy routing and timeout behaviour.
+pub fn build_http_client_with_opts(
+    config: &ProxyConfig,
+    timeout: &TimeoutConfig,
+) -> Result<reqwest::Client, ApiError> {
     let mut builder = reqwest::Client::builder().no_proxy();
+
+    if let Some(connect_timeout) = timeout.connect_timeout {
+        builder = builder.connect_timeout(connect_timeout);
+    }
+    if let Some(read_timeout) = timeout.read_timeout {
+        builder = builder.read_timeout(read_timeout);
+    }
 
     let no_proxy = config
         .no_proxy
@@ -110,6 +185,32 @@ pub fn build_http_client_with(config: &ProxyConfig) -> Result<reqwest::Client, A
     }
 
     Ok(builder.build()?)
+}
+
+/// Infallible counterpart to [`build_http_client`] for constructors that
+/// historically returned `Self` rather than `Result<Self, _>`. When the proxy
+/// configuration is malformed we fall back to a default client so that
+/// callers retain the previous behaviour and the failure surfaces on the
+/// first outbound request instead of at construction time.
+#[must_use]
+pub fn build_http_client_or_default() -> reqwest::Client {
+    build_http_client().unwrap_or_else(|_| {
+        // Proxy config was malformed — drop the proxy but keep the timeout
+        // protection so a dead connection still cannot hang the session.
+        build_http_client_with_opts(&ProxyConfig::default(), &TimeoutConfig::from_env())
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// Build a `reqwest::Client` from an explicit [`ProxyConfig`]. Used by tests
+/// and by callers that want to override process-level environment lookups.
+/// Timeouts come from the environment ([`TimeoutConfig::from_env`]).
+///
+/// When `config.proxy_url` is set it overrides the per-scheme `http_proxy`
+/// and `https_proxy` fields and is registered as both an HTTP and HTTPS
+/// proxy so a single value can route every outbound request.
+pub fn build_http_client_with(config: &ProxyConfig) -> Result<reqwest::Client, ApiError> {
+    build_http_client_with_opts(config, &TimeoutConfig::from_env())
 }
 
 fn first_non_empty<F>(keys: &[&str], lookup: &mut F) -> Option<String>

@@ -14,7 +14,8 @@ pub use client::{
 };
 pub use error::ApiError;
 pub use http_client::{
-    build_http_client, build_http_client_or_default, build_http_client_with, ProxyConfig,
+    build_http_client, build_http_client_or_default, build_http_client_with,
+    build_http_client_with_opts, ProxyConfig, TimeoutConfig,
 };
 pub use http_transport::{
     parse_retry_after, request_id_from_headers, HttpRequestResult, HttpTransport, RetryNotifier,

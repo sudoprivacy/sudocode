@@ -17,7 +17,8 @@ pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with, ProxyConfig,
 };
 pub use http_transport::{
-    parse_retry_after, request_id_from_headers, HttpRequestResult, HttpTransport, RetryPolicy,
+    parse_retry_after, request_id_from_headers, HttpRequestResult, HttpTransport, RetryNotifier,
+    RetryPolicy,
 };
 pub use prompt_cache::{
     CacheBreakEvent, PromptCache, PromptCacheConfig, PromptCachePaths, PromptCacheRecord,

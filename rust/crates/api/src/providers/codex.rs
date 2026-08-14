@@ -116,6 +116,13 @@ impl CodexClient {
         self.http.session_tracer()
     }
 
+    pub fn set_retry_notifier(
+        &mut self,
+        notifier: std::sync::Arc<dyn crate::http_transport::RetryNotifier>,
+    ) {
+        self.http.set_retry_notifier(notifier);
+    }
+
     /// Build from `~/.codex/auth.json`.
     pub fn from_auth_file() -> Result<Self, ApiError> {
         let (access_token, account_id) = read_auth_file()?;

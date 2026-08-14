@@ -176,6 +176,18 @@ impl ProviderClient {
         }
     }
 
+    pub fn set_retry_notifier(
+        &mut self,
+        notifier: std::sync::Arc<dyn crate::http_transport::RetryNotifier>,
+    ) {
+        match self {
+            Self::Anthropic(client) => client.set_retry_notifier(notifier),
+            Self::Xai(client) | Self::OpenAi(client) => client.set_retry_notifier(notifier),
+            Self::Codex(client) => client.set_retry_notifier(notifier),
+            Self::Gemini(client) => client.set_retry_notifier(notifier),
+        }
+    }
+
     #[must_use]
     pub fn with_prompt_cache(self, prompt_cache: PromptCache) -> Self {
         match self {

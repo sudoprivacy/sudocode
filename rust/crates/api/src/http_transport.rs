@@ -14,6 +14,24 @@ use telemetry::{AnalyticsEvent, SessionTracer};
 use crate::error::ApiError;
 use crate::http_client::build_http_client_or_default;
 
+/// Callback interface for surfacing HTTP retry attempts to the UI layer.
+/// Implementors bridge the transport retry loop to spinners, progress bars,
+/// or other visual indicators.
+pub trait RetryNotifier: Send + Sync {
+    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str);
+    fn on_retry_end(&self);
+}
+
+/// Default notifier that writes to stderr (matches legacy behavior).
+pub struct StderrRetryNotifier;
+
+impl RetryNotifier for StderrRetryNotifier {
+    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
+        eprintln!("  \u{27f3} retry {attempt}/{max_retries} — {reason}");
+    }
+    fn on_retry_end(&self) {}
+}
+
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const ONEAPI_REQUEST_ID_HEADER: &str = "x-oneapi-request-id";
@@ -89,10 +107,21 @@ impl RetryPolicy {
 // HttpTransport
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpTransport {
     inner: reqwest::Client,
     session_tracer: Option<SessionTracer>,
+    retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
+}
+
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("inner", &self.inner)
+            .field("session_tracer", &self.session_tracer)
+            .field("retry_notifier", &self.retry_notifier.is_some())
+            .finish()
+    }
 }
 
 impl Default for HttpTransport {
@@ -107,7 +136,12 @@ impl HttpTransport {
         Self {
             inner: build_http_client_or_default(),
             session_tracer: None,
+            retry_notifier: None,
         }
+    }
+
+    pub fn set_retry_notifier(&mut self, notifier: std::sync::Arc<dyn RetryNotifier>) {
+        self.retry_notifier = Some(notifier);
     }
 
     #[must_use]
@@ -318,15 +352,22 @@ impl HttpTransport {
                     }
                     other => format!("{other}"),
                 };
-                eprintln!(
-                    "  ⟳ retry {}/{} in {:.0}s — {}",
-                    attempts,
-                    retry_policy.max_retries,
-                    delay.as_secs_f64(),
-                    reason,
-                );
+                if let Some(ref notifier) = self.retry_notifier {
+                    notifier.on_retry(attempts, retry_policy.max_retries, &reason);
+                } else {
+                    eprintln!(
+                        "  \u{27f3} retry {}/{} in {:.0}s \u{2014} {}",
+                        attempts,
+                        retry_policy.max_retries,
+                        delay.as_secs_f64(),
+                        reason,
+                    );
+                }
             }
             tokio::time::sleep(delay).await;
+            if let Some(ref notifier) = self.retry_notifier {
+                notifier.on_retry_end();
+            }
         }
 
         Err(ApiError::RetriesExhausted {

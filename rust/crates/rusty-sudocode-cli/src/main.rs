@@ -1916,7 +1916,18 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
 /// Callback type for interactive slash commands that need user selection
 /// via iocraft's InputSlot (replaces dialoguer FuzzySelect/Select in the
 /// iocraft REPL path).
-type SlashSelectionHandler = Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender)>;
+///
+/// Returns `Option<SlashSelectionHandler>` to support chained interactions
+/// (tree navigation). A struct wrapper breaks the recursive type alias cycle.
+struct SlashSelectionHandler(
+    Box<
+        dyn FnOnce(
+            &str,
+            &Arc<Mutex<LiveCli>>,
+            &repl_ui::OutputSender,
+        ) -> Option<SlashSelectionHandler>,
+    >,
+);
 
 /// Show an interactive selection question via iocraft's InputSlot and
 /// register a callback to handle the answer. The coordinator loop routes
@@ -1929,17 +1940,22 @@ fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
     items: Vec<String>,
-    on_selected: impl FnOnce(String, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) + 'static,
+    on_selected: impl FnOnce(
+            String,
+            &Arc<Mutex<LiveCli>>,
+            &repl_ui::OutputSender,
+        ) -> Option<SlashSelectionHandler>
+        + 'static,
 ) -> SlashSelectionHandler {
     ui.show_question(question);
-    Box::new(move |answer: &str, cli, out| {
+    SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
         let resolved = answer
             .parse::<usize>()
             .ok()
             .and_then(|idx| items.get(idx.wrapping_sub(1)).cloned())
             .unwrap_or_else(|| answer.to_string());
-        on_selected(resolved, cli, out);
-    })
+        on_selected(resolved, cli, out)
+    }))
 }
 
 struct IocraftQuestionPrompter {
@@ -1972,6 +1988,7 @@ impl IocraftQuestionPrompter {
                 .collect(),
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
+            force_fuzzy_select: false,
         });
     }
 
@@ -2194,6 +2211,19 @@ fn run_repl_iocraft_dispatch(
                 // Try slash command dispatch.
                 let trimmed = text.trim();
                 let is_slash = match SlashCommand::parse(trimmed) {
+                    Ok(Some(SlashCommand::Config { section: None })) => {
+                        // Interactive config tree browser via FieldSchema SSOT.
+                        let cwd = env::current_dir().unwrap_or_default();
+                        let loader = runtime::ConfigLoader::default_for(&cwd);
+                        let settings_path = loader.config_home().join("settings.json");
+                        let sudocode_path = loader.config_home().join("sudocode.json");
+                        pending_slash_selection = Some(cli::config_ui::build_config_tree_handler(
+                            &repl.ui,
+                            settings_path,
+                            sudocode_path,
+                        ));
+                        true
+                    }
                     Ok(Some(SlashCommand::Model { model: None })) => {
                         // Interactive model picker via iocraft InputSlot.
                         let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
@@ -2224,6 +2254,7 @@ fn run_repl_iocraft_dispatch(
                                 options,
                                 allow_custom_input: true,
                                 custom_input_hint: Some("or type a model name".to_string()),
+                                force_fuzzy_select: false,
                             },
                             models,
                             |model_name, cli, out| {
@@ -2245,6 +2276,7 @@ fn run_repl_iocraft_dispatch(
                                         RESET
                                     )),
                                 }
+                                None
                             },
                         ));
                         true
@@ -2315,7 +2347,7 @@ fn run_repl_iocraft_dispatch(
             }
             repl_ui::InputEvent::QuestionAnswer(text) => {
                 if let Some(handler) = pending_slash_selection.take() {
-                    handler(&text, &cli_shared, &repl.output);
+                    pending_slash_selection = (handler.0)(&text, &cli_shared, &repl.output);
                 } else if !consume_pending_question_answer(&pending_question_answer, text) {
                     repl.output.println(&format!(
                         "{DIM}(no question is waiting for an answer){RESET}"
@@ -4540,7 +4572,8 @@ impl LiveCli {
                 resumed
             }
             SlashCommand::Config { section } => {
-                self.out_suspend(|| Self::print_config(section.as_deref()))?;
+                let report = render_config_report(section.as_deref())?;
+                self.out_println(report);
                 false
             }
             SlashCommand::ConfigSet { key, value } => {
@@ -6561,12 +6594,17 @@ fn resolve_model_switch_auth_mode(
     config: &api::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
     let Some(entry) = api::resolve_model(config, model) else {
-        return explicit.ok_or_else(|| {
-            format!(
-                "model '{model}' not found in config. Run /model to configure it, \
-                 or pass --auth=<subscription|proxy|api-key> explicitly."
-            )
-        });
+        if let Some(mode) = explicit {
+            return Ok(mode);
+        }
+        // Proxy passthrough fallback — same logic as resolve_configured_auth_mode.
+        if config.auth_modes.contains_key("proxy") {
+            return AuthMode::parse("proxy");
+        }
+        return Err(format!(
+            "model '{model}' not found in config. Run /model to configure it, \
+             or pass --auth=<subscription|proxy|api-key> explicitly."
+        ));
     };
 
     if let Some(mode) = explicit {
@@ -6582,13 +6620,20 @@ fn resolve_configured_auth_mode(
     model: &str,
     config: &api::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    let entry = api::resolve_model(config, model).ok_or_else(|| {
-        format!(
-            "model '{model}' not found in config. Run /model to configure it, \
-             or pass --auth=<subscription|proxy|api-key> explicitly."
-        )
-    })?;
-    resolve_configured_auth_mode_for_entry(model, entry)
+    if let Some(entry) = api::resolve_model(config, model) {
+        return resolve_configured_auth_mode_for_entry(model, entry);
+    }
+    // Model not in sudocode.json — if a proxy provider is configured,
+    // default to proxy auth mode and let proxy passthrough route it.
+    // This avoids requiring every model to be registered in sudocode.json
+    // when sudorouter already knows how to route it.
+    if config.auth_modes.contains_key("proxy") {
+        return AuthMode::parse("proxy");
+    }
+    Err(format!(
+        "model '{model}' not found in config. Run /model to configure it, \
+         or pass --auth=<subscription|proxy|api-key> explicitly."
+    ))
 }
 
 fn resolve_configured_auth_mode_for_entry(

@@ -32,7 +32,7 @@ const TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// 2026-07-01) — until a model's entry lands in the SSOT table, callers use
 /// [`vision_capable`] / [`per_model_image_cap`] which fall back to
 /// optimistic defaults; see those fns' docs.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCapability {
     pub context_window: u32,
     pub max_output_tokens: u32,
@@ -48,6 +48,11 @@ pub struct ModelCapability {
     /// [`Self::image_max_bytes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_max_dimension: Option<u32>,
+    /// Supported API endpoint types from sudorouter (e.g. `["anthropic", "openai"]`).
+    /// First item is preferred. Used by proxy passthrough to pick the optimal
+    /// wire format. `None` when sudorouter hasn't populated this field yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_types: Option<Vec<String>>,
 }
 
 /// The on-disk SSOT file schema.
@@ -94,7 +99,7 @@ pub fn lookup(model_id: &str) -> Option<ModelCapability> {
     caps.models
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
-        .map(|(_, cap)| *cap)
+        .map(|(_, cap)| cap.clone())
 }
 
 /// Returns `true` if the model is known to accept image input. Used by the
@@ -138,6 +143,16 @@ pub fn per_model_image_cap(model_id: &str) -> (Option<u32>, Option<u32>) {
         ),
         None => (None, None),
     }
+}
+
+/// Preferred API endpoint type for a model from the SSOT.
+/// Returns the first entry in `endpoint_types` (preferred by sudorouter).
+/// Returns `None` if the model is unknown or has no endpoint type data.
+#[must_use]
+pub fn preferred_endpoint_type(model_id: &str) -> Option<String> {
+    lookup(model_id)
+        .and_then(|cap| cap.endpoint_types)
+        .and_then(|types| types.into_iter().next())
 }
 
 /// All known model IDs from the capabilities SSOT.
@@ -254,6 +269,7 @@ pub fn merge_and_write(
 
     let mut count = 0usize;
     for entry in api_models {
+        // Models with capability metadata get full entries.
         if let (Some(cw), Some(mo)) = (entry.context_window, entry.max_output_tokens) {
             file.models.insert(
                 entry.id.clone(),
@@ -263,8 +279,17 @@ pub fn merge_and_write(
                     vision_supported: entry.vision_supported,
                     image_max_bytes: entry.image_max_bytes,
                     image_max_dimension: entry.image_max_dimension,
+                    endpoint_types: entry.supported_endpoint_types.clone(),
                 },
             );
+            count += 1;
+        } else if entry.supported_endpoint_types.is_some() {
+            // Models without token metadata but with endpoint types:
+            // merge endpoint_types into existing entry or create with defaults.
+            let existing = file.models.get(&entry.id).cloned();
+            let mut cap = existing.unwrap_or_else(|| file.default.clone());
+            cap.endpoint_types = entry.supported_endpoint_types.clone();
+            file.models.insert(entry.id.clone(), cap);
             count += 1;
         }
     }
@@ -286,6 +311,8 @@ pub struct ApiModelEntry {
     pub image_max_bytes: Option<u32>,
     #[serde(default)]
     pub image_max_dimension: Option<u32>,
+    #[serde(default)]
+    pub supported_endpoint_types: Option<Vec<String>>,
 }
 
 /// Parse the `/v1/models` API response JSON into a vec of model entries.
@@ -319,6 +346,14 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 .get("image_max_dimension")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
+            let supported_endpoint_types = entry
+                .get("supported_endpoint_types")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
             Some(ApiModelEntry {
                 id,
                 context_window,
@@ -326,6 +361,7 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 vision_supported,
                 image_max_bytes,
                 image_max_dimension,
+                supported_endpoint_types,
             })
         })
         .collect()

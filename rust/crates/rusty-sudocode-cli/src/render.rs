@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossterm::style::{Color, Stylize};
@@ -313,6 +313,7 @@ pub struct SpinnerRef {
     response_bytes: Arc<AtomicU32>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    phase: Option<Arc<Mutex<crate::repl_ui::TurnPhase>>>,
     /// When true, a TurnRenderer manages the spinner display — pause/resume
     /// only set the atomic flag without writing to stdout.
     managed: bool,
@@ -332,6 +333,7 @@ impl SpinnerRef {
             response_bytes: Arc::clone(response_bytes),
             is_thinking: Arc::clone(is_thinking),
             is_paused: Arc::clone(is_paused),
+            phase: None,
             managed: true,
         }
     }
@@ -339,7 +341,14 @@ impl SpinnerRef {
     /// Create a `SpinnerRef` from a `SpinnerState`. Convenience wrapper
     /// around `from_state` for the iocraft REPL path.
     pub fn from_spinner_state(state: &crate::repl_ui::SpinnerState) -> Self {
-        Self::from_state(&state.response_bytes, &state.is_thinking, &state.is_paused)
+        Self {
+            pb: ProgressBar::hidden(),
+            response_bytes: Arc::clone(&state.response_bytes),
+            is_thinking: Arc::new(AtomicBool::new(false)),
+            is_paused: Arc::new(AtomicBool::new(false)),
+            phase: Some(state.phase_arc()),
+            managed: true,
+        }
     }
 
     /// Pause the spinner, run the closure, resume the spinner.
@@ -354,6 +363,9 @@ impl SpinnerRef {
     /// ticking while paused. When managed by a TurnRenderer, only the
     /// atomic flag is set — the render thread handles clearing.
     pub fn pause(&self) {
+        if let Some(ref phase) = self.phase {
+            *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Paused;
+        }
         self.is_paused.store(true, Ordering::SeqCst);
         if self.managed {
             // TurnRenderer sees is_paused and clears the spinner line
@@ -367,11 +379,31 @@ impl SpinnerRef {
 
     /// Resume the spinner after a pause.
     pub fn resume(&self) {
+        if let Some(ref phase) = self.phase {
+            *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Thinking;
+        }
         self.is_paused.store(false, Ordering::SeqCst);
     }
 
     pub fn set_thinking(&self, on: bool) {
+        if let Some(ref phase) = self.phase {
+            *phase.lock().unwrap() = if on {
+                crate::repl_ui::TurnPhase::Reasoning
+            } else {
+                crate::repl_ui::TurnPhase::Thinking
+            };
+        }
         self.is_thinking.store(on, Ordering::SeqCst);
+    }
+
+    pub fn set_retry(&self, attempt: u32, max_retries: u32, reason: String) {
+        if let Some(ref phase) = self.phase {
+            *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Retry {
+                attempt,
+                max_retries,
+                reason,
+            };
+        }
     }
 
     pub fn add_response_bytes(&self, n: u32) {
@@ -442,6 +474,7 @@ impl SpinnerHandle {
             response_bytes: Arc::clone(&self.response_bytes),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
+            phase: None,
             managed: false,
         }
     }

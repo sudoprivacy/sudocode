@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::config::ConfigError;
+use crate::config_schema::{self, FieldSchema};
 use crate::json::JsonValue;
 
 /// Diagnostic emitted when a config file contains a suspect field.
@@ -83,41 +84,7 @@ impl ValidationResult {
     }
 }
 
-// ---- known-key schema ----
-
-/// Expected type for a config field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FieldType {
-    String,
-    Bool,
-    Object,
-    StringArray,
-    Number,
-}
-
-impl FieldType {
-    fn label(self) -> &'static str {
-        match self {
-            Self::String => "a string",
-            Self::Bool => "a boolean",
-            Self::Object => "an object",
-            Self::StringArray => "an array of strings",
-            Self::Number => "a number",
-        }
-    }
-
-    fn matches(self, value: &JsonValue) -> bool {
-        match self {
-            Self::String => value.as_str().is_some(),
-            Self::Bool => value.as_bool().is_some(),
-            Self::Object => value.as_object().is_some(),
-            Self::StringArray => value
-                .as_array()
-                .is_some_and(|arr| arr.iter().all(|v| v.as_str().is_some())),
-            Self::Number => value.as_i64().is_some(),
-        }
-    }
-}
+// ---- known-key schema (imported from config_schema SSOT) ----
 
 fn json_type_label(value: &JsonValue) -> &'static str {
     match value {
@@ -129,197 +96,6 @@ fn json_type_label(value: &JsonValue) -> &'static str {
         JsonValue::Object(_) => "an object",
     }
 }
-
-struct FieldSpec {
-    name: &'static str,
-    expected: FieldType,
-}
-
-struct DeprecatedField {
-    name: &'static str,
-    replacement: &'static str,
-}
-
-const TOP_LEVEL_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "$schema",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "model",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "hooks",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "permissions",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "permissionMode",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "mcpServers",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "oauth",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "enabledPlugins",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "plugins",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "sandbox",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "env",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "aliases",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "providerFallbacks",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "trustedRoots",
-        expected: FieldType::StringArray,
-    },
-];
-
-const HOOKS_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "PreToolUse",
-        expected: FieldType::StringArray,
-    },
-    FieldSpec {
-        name: "PostToolUse",
-        expected: FieldType::StringArray,
-    },
-    FieldSpec {
-        name: "PostToolUseFailure",
-        expected: FieldType::StringArray,
-    },
-];
-
-const PERMISSIONS_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "defaultMode",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "allow",
-        expected: FieldType::StringArray,
-    },
-    FieldSpec {
-        name: "deny",
-        expected: FieldType::StringArray,
-    },
-    FieldSpec {
-        name: "ask",
-        expected: FieldType::StringArray,
-    },
-];
-
-const PLUGINS_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "enabled",
-        expected: FieldType::Object,
-    },
-    FieldSpec {
-        name: "externalDirectories",
-        expected: FieldType::StringArray,
-    },
-    FieldSpec {
-        name: "installRoot",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "registryPath",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "bundledRoot",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "maxOutputTokens",
-        expected: FieldType::Number,
-    },
-];
-
-const SANDBOX_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "enabled",
-        expected: FieldType::Bool,
-    },
-    FieldSpec {
-        name: "namespaceRestrictions",
-        expected: FieldType::Bool,
-    },
-    FieldSpec {
-        name: "networkIsolation",
-        expected: FieldType::Bool,
-    },
-    FieldSpec {
-        name: "filesystemMode",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "allowedMounts",
-        expected: FieldType::StringArray,
-    },
-];
-
-const OAUTH_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "clientId",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "authorizeUrl",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "tokenUrl",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "callbackPort",
-        expected: FieldType::Number,
-    },
-    FieldSpec {
-        name: "manualRedirectUrl",
-        expected: FieldType::String,
-    },
-    FieldSpec {
-        name: "scopes",
-        expected: FieldType::StringArray,
-    },
-];
-
-const DEPRECATED_FIELDS: &[DeprecatedField] = &[
-    DeprecatedField {
-        name: "permissionMode",
-        replacement: "permissions.defaultMode",
-    },
-    DeprecatedField {
-        name: "enabledPlugins",
-        replacement: "plugins.enabled",
-    },
-];
 
 // ---- line-number resolution ----
 
@@ -344,7 +120,7 @@ fn find_key_line(source: &str, key: &str) -> Option<usize> {
 
 fn validate_object_keys(
     object: &BTreeMap<String, JsonValue>,
-    known_fields: &[FieldSpec],
+    known_fields: &[FieldSchema],
     prefix: &str,
     source: &str,
     path_display: &str,
@@ -354,7 +130,8 @@ fn validate_object_keys(
         warnings: Vec::new(),
     };
 
-    let known_names: Vec<&str> = known_fields.iter().map(|f| f.name).collect();
+    let known_names: Vec<&str> = known_fields.iter().map(|f| f.key).collect();
+    let deprecated = config_schema::deprecated_fields(known_fields);
 
     for (key, value) in object {
         let field_path = if prefix.is_empty() {
@@ -363,21 +140,25 @@ fn validate_object_keys(
             format!("{prefix}.{key}")
         };
 
-        if let Some(spec) = known_fields.iter().find(|f| f.name == key) {
+        if let Some(spec) = known_fields.iter().find(|f| f.key == key.as_str()) {
+            if spec.is_deprecated {
+                // Deprecated key — handled separately, not an unknown-key error.
+                continue;
+            }
             // Type check.
-            if !spec.expected.matches(value) {
+            if !spec.field_type.matches(value) {
                 result.errors.push(ConfigDiagnostic {
                     path: path_display.to_string(),
                     field: field_path,
                     line: find_key_line(source, key),
                     kind: DiagnosticKind::WrongType {
-                        expected: spec.expected.label(),
+                        expected: spec.field_type.label(),
                         got: json_type_label(value),
                     },
                 });
             }
-        } else if DEPRECATED_FIELDS.iter().any(|d| d.name == key) {
-            // Deprecated key — handled separately, not an unknown-key error.
+        } else if deprecated.iter().any(|d| d.key == key.as_str()) {
+            // Deprecated key — handled separately.
         } else {
             // Unknown key.
             let suggestion = suggest_field(key, &known_names);
@@ -438,68 +219,40 @@ pub fn validate_config_file(
     source: &str,
     file_path: &Path,
 ) -> ValidationResult {
+    let schema = config_schema::SETTINGS_SCHEMA;
     let path_display = file_path.display().to_string();
-    let mut result = validate_object_keys(object, TOP_LEVEL_FIELDS, "", source, &path_display);
+    let mut result = validate_object_keys(object, schema, "", source, &path_display);
 
     // Check deprecated fields.
-    for deprecated in DEPRECATED_FIELDS {
-        if object.contains_key(deprecated.name) {
+    for deprecated in config_schema::deprecated_fields(schema) {
+        if object.contains_key(deprecated.key) {
             result.warnings.push(ConfigDiagnostic {
                 path: path_display.clone(),
-                field: deprecated.name.to_string(),
-                line: find_key_line(source, deprecated.name),
+                field: deprecated.key.to_string(),
+                line: find_key_line(source, deprecated.key),
                 kind: DiagnosticKind::Deprecated {
-                    replacement: deprecated.replacement,
+                    replacement: deprecated.deprecated_replacement,
                 },
             });
         }
     }
 
-    // Validate known nested objects.
-    if let Some(hooks) = object.get("hooks").and_then(JsonValue::as_object) {
-        result.merge(validate_object_keys(
-            hooks,
-            HOOKS_FIELDS,
-            "hooks",
-            source,
-            &path_display,
-        ));
-    }
-    if let Some(permissions) = object.get("permissions").and_then(JsonValue::as_object) {
-        result.merge(validate_object_keys(
-            permissions,
-            PERMISSIONS_FIELDS,
-            "permissions",
-            source,
-            &path_display,
-        ));
-    }
-    if let Some(plugins) = object.get("plugins").and_then(JsonValue::as_object) {
-        result.merge(validate_object_keys(
-            plugins,
-            PLUGINS_FIELDS,
-            "plugins",
-            source,
-            &path_display,
-        ));
-    }
-    if let Some(sandbox) = object.get("sandbox").and_then(JsonValue::as_object) {
-        result.merge(validate_object_keys(
-            sandbox,
-            SANDBOX_FIELDS,
-            "sandbox",
-            source,
-            &path_display,
-        ));
-    }
-    if let Some(oauth) = object.get("oauth").and_then(JsonValue::as_object) {
-        result.merge(validate_object_keys(
-            oauth,
-            OAUTH_FIELDS,
-            "oauth",
-            source,
-            &path_display,
-        ));
+    // Validate known nested objects using children from the SSOT.
+    for field in schema {
+        if let Some(children) = field.children {
+            if children.is_empty() {
+                continue;
+            }
+            if let Some(nested) = object.get(field.key).and_then(JsonValue::as_object) {
+                result.merge(validate_object_keys(
+                    nested,
+                    children,
+                    field.key,
+                    source,
+                    &path_display,
+                ));
+            }
+        }
     }
 
     result

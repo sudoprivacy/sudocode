@@ -12,11 +12,11 @@
 //! + match makes the contract visible to any reader:
 //!
 //! ```text
-//! [StatusSlot]    ← spinner | turn_result (auto-dismiss) | tips (first-run) | empty
+//! [StatusSlot]    ← spinner | turn_result | tips | empty
 //! ──── separator ────
-//! [InputSlot]     ← text_input | question_panel   (Option<QuestionPromptView>)
+//! [InputSlot]     ← hint | text_input | question_panel
 //! ──── separator ────
-//! [FooterSlot]    ← full | minimal | turn_active
+//! [FooterSlot]    ← hint (3s) > turn_active > minimal > full
 //! ```
 
 use std::fmt::Write as FmtWrite;
@@ -29,16 +29,101 @@ use std::time::{Duration, Instant};
 use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
-// ── SpinnerState ───────────────────────────────────────────────────────
+// ── stderr redirect ───────────────────────────────────────────────────
+
+/// Windows stub — stderr redirect is a no-op on non-Unix platforms.
+#[cfg(not(unix))]
+mod stderr_redirect {
+    pub struct StderrRedirect;
+    impl StderrRedirect {
+        pub fn activate() -> Option<Self> {
+            None
+        }
+        pub fn drain(&self) -> Option<String> {
+            None
+        }
+    }
+}
+
+/// Unix pipe-based stderr redirect: replaces fd 2 with a pipe so that
+/// any library writing to stderr (e.g. tracing, nix, openssl) does not
+/// corrupt the iocraft canvas.  Captured bytes are drained each tick and
+/// routed through the iocraft stdout handle.
+///
+/// All syscalls go through `nix`'s safe wrappers — no `unsafe` blocks.
+#[cfg(unix)]
+mod stderr_redirect {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, OwnedFd};
+
+    pub struct StderrRedirect {
+        read_file: std::fs::File,
+    }
+
+    impl StderrRedirect {
+        /// Replace fd 2 with the write end of a pipe.  Returns `Some` on
+        /// success.  The read end is kept for `drain()`.
+        pub fn activate() -> Option<Self> {
+            let (read_fd, write_fd): (OwnedFd, OwnedFd) = nix::unistd::pipe().ok()?;
+
+            // Point fd 2 at the write end of the pipe.
+            nix::unistd::dup2(write_fd.as_raw_fd(), 2).ok()?;
+            // `write_fd` is dropped here — fd 2 keeps the write end alive.
+
+            // Make the read end non-blocking so drain() never stalls.
+            let flags =
+                nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).ok()?;
+            let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
+            oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
+            nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(oflags)).ok()?;
+
+            let read_file = std::fs::File::from(read_fd);
+            Some(Self { read_file })
+        }
+
+        /// Non-blocking drain: returns captured text or `None`.
+        pub fn drain(&self) -> Option<String> {
+            let mut buf = [0u8; 4096];
+            let mut collected = String::new();
+            let mut file = &self.read_file;
+            loop {
+                match file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => collected.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+            if collected.is_empty() {
+                None
+            } else {
+                Some(collected)
+            }
+        }
+    }
+}
+
+// ── TurnPhase + SpinnerState ───────────────────────────────────────────
+
+/// Phase of the current agent turn — drives spinner icon/label selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnPhase {
+    Thinking,
+    Reasoning,
+    Retry {
+        attempt: u32,
+        max_retries: u32,
+        reason: String,
+    },
+    Paused,
+}
 
 /// Shared state for the spinner, read by the render thread and written
-/// by the runner thread. All fields are atomic for lock-free cross-thread
-/// access.
+/// by the runner thread.
 #[derive(Clone)]
 pub struct SpinnerState {
     pub response_bytes: Arc<AtomicU32>,
-    pub is_thinking: Arc<AtomicBool>,
-    pub is_paused: Arc<AtomicBool>,
+    phase: Arc<Mutex<TurnPhase>>,
     active: Arc<AtomicBool>,
     start_time: Arc<Mutex<Instant>>,
     label: Arc<Mutex<String>>,
@@ -52,8 +137,7 @@ impl SpinnerState {
     pub fn new_inactive() -> Self {
         Self {
             response_bytes: Arc::new(AtomicU32::new(0)),
-            is_thinking: Arc::new(AtomicBool::new(false)),
-            is_paused: Arc::new(AtomicBool::new(false)),
+            phase: Arc::new(Mutex::new(TurnPhase::Thinking)),
             active: Arc::new(AtomicBool::new(false)),
             start_time: Arc::new(Mutex::new(Instant::now())),
             label: Arc::new(Mutex::new(String::new())),
@@ -65,8 +149,7 @@ impl SpinnerState {
     /// Reset and activate for a new turn.
     pub fn start_turn(&self, label: &str, model: Option<&str>, token_budget: Option<u32>) {
         self.response_bytes.store(0, Ordering::SeqCst);
-        self.is_thinking.store(false, Ordering::SeqCst);
-        self.is_paused.store(false, Ordering::SeqCst);
+        *self.phase.lock().unwrap() = TurnPhase::Thinking;
         *self.start_time.lock().unwrap() = Instant::now();
         *self.label.lock().unwrap() = label.to_string();
         *self.model.lock().unwrap() = model.map(ToString::to_string);
@@ -79,33 +162,73 @@ impl SpinnerState {
         self.active.store(false, Ordering::SeqCst);
     }
 
+    /// Set the current turn phase.
+    pub fn set_phase(&self, phase: TurnPhase) {
+        *self.phase.lock().unwrap() = phase;
+    }
+
+    /// Read the current turn phase.
+    pub fn phase(&self) -> TurnPhase {
+        self.phase.lock().unwrap().clone()
+    }
+
+    /// Convenience: check whether the current phase is `Paused`.
+    pub fn is_paused(&self) -> bool {
+        *self.phase.lock().unwrap() == TurnPhase::Paused
+    }
+
+    /// Return a clone of the phase `Arc` for sharing with other threads.
+    pub fn phase_arc(&self) -> Arc<Mutex<TurnPhase>> {
+        Arc::clone(&self.phase)
+    }
+
     /// Render the current spinner frame as a colored ANSI string.
     /// Returns empty string when inactive or paused.
     pub fn render_frame(&self, frame_index: usize) -> String {
         if !self.active.load(Ordering::SeqCst) {
             return String::new();
         }
-        if self.is_paused.load(Ordering::SeqCst) {
+
+        let current_phase = self.phase.lock().unwrap().clone();
+        if current_phase == TurnPhase::Paused {
             return String::new();
         }
 
-        let thinking = self.is_thinking.load(Ordering::SeqCst);
-        let frames: &[&str] = if thinking {
-            &["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"]
+        let is_reasoning = current_phase == TurnPhase::Reasoning;
+        let is_retry = matches!(current_phase, TurnPhase::Retry { .. });
+
+        let (frame, current_label): (String, String) = if is_retry {
+            if let TurnPhase::Retry {
+                attempt,
+                max_retries,
+                ref reason,
+            } = current_phase
+            {
+                (
+                    "\u{27f3}".to_string(),
+                    format!("Retry {attempt}/{max_retries}: {reason}"),
+                )
+            } else {
+                unreachable!()
+            }
+        } else if is_reasoning {
+            let reasoning_frames: &[&str] = &["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"];
+            (
+                reasoning_frames[frame_index % reasoning_frames.len()].to_string(),
+                "\u{1f9e0} Reasoning...".to_string(),
+            )
         } else {
-            &[
+            let thinking_frames: &[&str] = &[
                 "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
                 "\u{2827}", "\u{2807}", "\u{280f}",
-            ]
-        };
-        let label = self.label.lock().unwrap();
-        let current_label = if thinking {
-            "\u{1f9e0} Reasoning..."
-        } else {
-            &label
+            ];
+            let label = self.label.lock().unwrap();
+            (
+                thinking_frames[frame_index % thinking_frames.len()].to_string(),
+                label.clone(),
+            )
         };
 
-        let frame = frames[frame_index % frames.len()];
         let elapsed = self.start_time.lock().unwrap().elapsed().as_secs_f64();
 
         let mut line = format!("{frame} {current_label}");
@@ -146,13 +269,17 @@ impl SpinnerState {
             }
         }
 
-        // Stall detection: yellow when no new bytes for 3+ seconds.
         let t = crate::render::theme();
-        let is_stalled = bytes > 0 && !thinking && elapsed > 3.0;
-        let color = if is_stalled {
+        let color = if is_retry {
             crate::render::ansi_fg(t.warning)
         } else {
-            crate::render::ansi_fg(t.info)
+            // Stall detection: yellow when no new bytes for 3+ seconds.
+            let is_stalled = bytes > 0 && !is_reasoning && elapsed > 3.0;
+            if is_stalled {
+                crate::render::ansi_fg(t.warning)
+            } else {
+                crate::render::ansi_fg(t.info)
+            }
         };
         format!("{color}{line}{}", crate::render::RESET)
     }
@@ -186,8 +313,12 @@ enum StatusSlot {
 }
 
 /// ChromeSlot: bottom hint line. Content varies by lifecycle phase.
+///
+/// Priority (highest first): Hint > TurnActive > Minimal > Full.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FooterSlot {
+    /// Transient hint — highest priority, auto-dismissed after 3 seconds.
+    Hint(String),
     /// Before first submit — full hints.
     Full,
     /// After first submit — just permission mode + essentials.
@@ -198,6 +329,7 @@ enum FooterSlot {
 
 fn format_footer_text(slot: &FooterSlot, perm: &str) -> String {
     match slot {
+        FooterSlot::Hint(msg) => format!("  {msg}"),
         FooterSlot::Full => format!(
             "  \u{23f5}\u{23f5} {perm} \u{00b7} /help for commands \u{00b7} /exit to quit \u{00b7} Tab for /commands"
         ),
@@ -237,12 +369,17 @@ pub struct QuestionPromptView {
     pub options: Vec<QuestionOptionView>,
     pub allow_custom_input: bool,
     pub custom_input_hint: Option<String>,
+    /// When true, always use FuzzySelect regardless of option count.
+    /// Used for config picker and other lists that benefit from search.
+    pub force_fuzzy_select: bool,
 }
 
 /// ChromeSlot: primary interaction area between the two separators.
 /// Exactly one variant renders at a time.
 #[derive(Clone, Debug)]
 enum InputSlot {
+    /// Transient hint — dismissed on any keypress.
+    Hint(String),
     /// Normal text input with ❯ prompt.
     TextInput,
     /// ≤9 options, digit-key shortcut per item (tool approval, init).
@@ -367,6 +504,7 @@ pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
     SetTurnResult(String),
+    ShowInputHint(String),
 }
 
 #[derive(Clone)]
@@ -386,6 +524,21 @@ impl UiCommandSender {
     pub fn set_turn_result(&self, text: &str) {
         let _ = self.tx.send(UiCommand::SetTurnResult(text.to_string()));
     }
+
+    pub fn show_input_hint(&self, text: &str) {
+        let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
+    }
+}
+
+/// Submit the currently selected DialPad option. Shared by Enter key
+/// and digit-key shortcut paths (DRY).
+fn submit_dialpad_selection(
+    question: &QuestionPromptView,
+    selected_index: usize,
+    input_tx: &SyncSender<InputEvent>,
+) {
+    let answer = (selected_index + 1).to_string();
+    let _ = input_tx.send(InputEvent::QuestionAnswer(answer));
 }
 
 fn enter_key_event_for_value(
@@ -448,13 +601,19 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
             .filter(|description| !description.is_empty())
             .map_or(String::new(), |description| format!(" - {description}"));
         lines.push(format!(
-            "{selector} {}. {}{}{}",
+            "{selector} [{}] {}{}{}",
             index + 1,
             option.label,
             marker,
             description
         ));
     }
+    let max_digit = question.options.len().min(9);
+    lines.push(format!(
+        "{}  \u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select \u{00b7} Enter confirm{}",
+        crate::render::DIM,
+        crate::render::RESET,
+    ));
     lines.join("\n")
 }
 
@@ -626,6 +785,7 @@ struct ReplContext {
     spinner: SpinnerState,
     permission_mode: String,
     tips_line: String,
+    stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
 }
 
 #[component]
@@ -637,6 +797,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let spinner = ctx.spinner.clone();
     let permission_mode = ctx.permission_mode.clone();
     let tips_text = ctx.tips_line.clone();
+    let stderr_redir = Arc::clone(&ctx.stderr_redir);
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -658,17 +819,33 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut saved_input = hooks.use_state(String::new);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
     let mut tab_index = hooks.use_state(|| 0usize);
+    let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
+    let mut dialpad_cursor = hooks.use_state(|| 0usize);
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
     let spinner_for_future = spinner.clone();
     let output_rx_for_future = Arc::clone(&output_rx);
     let ui_rx_for_future = Arc::clone(&ui_rx);
+    let stderr_redir_for_future = Arc::clone(&stderr_redir);
 
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
+
+            // Drain stderr redirect — route captured text through stdout
+            // so it appears in the iocraft scrollback instead of corrupting
+            // the canvas.
+            if let Ok(guard) = stderr_redir_for_future.lock() {
+                if let Some(ref redir) = *guard {
+                    if let Some(captured) = redir.drain() {
+                        for line in captured.lines() {
+                            stdout_for_future.println(line);
+                        }
+                    }
+                }
+            }
 
             // Drain output channel.
             if let Ok(rx) = output_rx_for_future.lock() {
@@ -689,9 +866,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     match rx.try_recv() {
                         Ok(UiCommand::ShowQuestion(question)) => {
-                            let slot = if question.options.len() > DIALPAD_MAX_OPTIONS {
+                            let slot = if question.force_fuzzy_select
+                                || question.options.len() > DIALPAD_MAX_OPTIONS
+                            {
                                 InputSlot::FuzzySelect(FuzzySelectState::new(question))
                             } else {
+                                let initial = question
+                                    .options
+                                    .iter()
+                                    .position(|o| o.recommended)
+                                    .unwrap_or(0);
+                                dialpad_cursor.set(initial);
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -704,10 +889,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
                         }
+                        Ok(UiCommand::ShowInputHint(text)) => {
+                            input_slot.set(InputSlot::Hint(text));
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
                 }
+            }
+
+            // Auto-dismiss footer_hint after deadline.
+            let hint_expired = footer_hint
+                .read()
+                .as_ref()
+                .is_some_and(|(_, deadline)| Instant::now() >= *deadline);
+            if hint_expired {
+                footer_hint.set(None);
             }
 
             // Update spinner.  When a new turn starts (spinner becomes
@@ -736,25 +933,24 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ..
             }) if kind != KeyEventKind::Release => {
                 let current_slot = input_slot.read().clone();
+                // Dismiss InputSlot::Hint on any keypress.
+                if matches!(current_slot, InputSlot::Hint(_)) {
+                    input_slot.set(InputSlot::TextInput);
+                    return;
+                }
                 match code {
                     // ── Enter ──────────────────────────────────────────
                     KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
                         match &current_slot {
+                            InputSlot::Hint(_) => {
+                                input_slot.set(InputSlot::TextInput);
+                            }
                             InputSlot::DialPad(question) => {
-                                let val = input_value.read().clone();
-                                let selected_index = match &*input_slot.read() {
-                                    InputSlot::DialPad(q) => q.options.iter().position(|o| o.recommended).unwrap_or(0),
-                                    _ => 0,
-                                };
-                                if let Some(event) = enter_key_event_for_value(Some(question), selected_index, &val) {
-                                    if !*has_submitted.read() { has_submitted.set(true); }
-                                    let _ = input_tx_for_events.send(match event {
-                                        InputEvent::QuestionAnswer(_) => InputEvent::QuestionAnswer(val.clone()),
-                                        other => other,
-                                    });
-                                    input_value.set(String::new());
-                                    input_slot.set(InputSlot::TextInput);
-                                }
+                                let selected = dialpad_cursor.get();
+                                submit_dialpad_selection(question, selected, &input_tx_for_events);
+                                if !*has_submitted.read() { has_submitted.set(true); }
+                                input_value.set(String::new());
+                                input_slot.set(InputSlot::TextInput);
                             }
                             InputSlot::FuzzySelect(_) => {
                                 let answer = {
@@ -805,11 +1001,17 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     // ── Up/Down — DialPad option selection ─────────────
                     KeyCode::Up if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {
-                        // DialPad doesn't track cursor separately — uses
-                        // the question's recommended field for initial highlight.
-                        // Up/Down not needed for ≤9 digit-key items.
+                        let cur = dialpad_cursor.get();
+                        dialpad_cursor.set(cur.saturating_sub(1));
                     }
-                    KeyCode::Down if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {}
+                    KeyCode::Down if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {
+                        let cur = dialpad_cursor.get();
+                        let max = match &current_slot {
+                            InputSlot::DialPad(q) => q.options.len().saturating_sub(1),
+                            _ => 0,
+                        };
+                        dialpad_cursor.set((cur + 1).min(max));
+                    }
                     // ── Up/Down — FuzzySelect cursor ───────────────────
                     KeyCode::Up if matches!(current_slot, InputSlot::FuzzySelect(_)) => {
                         let mut slot = input_slot.write();
@@ -866,9 +1068,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             _ => 0,
                         };
                         if digit >= 1 && digit <= option_count {
-                            let _ = input_tx_for_events
-                                .send(InputEvent::QuestionAnswer(digit.to_string()));
-                            input_value.set(String::new());
+                            dialpad_cursor.set(digit - 1);
+                            if let InputSlot::DialPad(ref question) = current_slot {
+                                submit_dialpad_selection(question, digit - 1, &input_tx_for_events);
+                                if !*has_submitted.read() { has_submitted.set(true); }
+                                input_value.set(String::new());
+                                input_slot.set(InputSlot::TextInput);
+                            }
                         }
                     }
                     // ── Typing in FuzzySelect updates filter ──────────
@@ -910,13 +1116,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         } else {
                             last_ctrlc.set(Some(now));
                             let _ = input_tx_for_events.send(InputEvent::Abort);
-                            stdout_for_events.println(format!("  {}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET));
+                            let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
+                            footer_hint.set(Some((hint_msg, Instant::now() + Duration::from_secs(3))));
                             input_value.set(String::new());
                         }
                     }
                     KeyCode::Esc => {
-                        // In FuzzySelect/DialPad, ESC cancels the selection.
-                        if !matches!(current_slot, InputSlot::TextInput) {
+                        // In FuzzySelect/DialPad/Hint, ESC cancels.
+                        if !matches!(current_slot, InputSlot::TextInput | InputSlot::Hint(_)) {
                             input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
                             let _ = input_tx_for_events.send(InputEvent::Abort);
@@ -981,8 +1188,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         StatusSlot::Empty
     };
 
-    // FooterSlot
-    let footer_slot = if matches!(status_slot, StatusSlot::Spinner(_)) {
+    // FooterSlot: Hint > TurnActive > Minimal > Full
+    let footer_slot = if let Some((ref msg, _)) = *footer_hint.read() {
+        FooterSlot::Hint(msg.clone())
+    } else if matches!(status_slot, StatusSlot::Spinner(_)) {
         FooterSlot::TurnActive
     } else if submitted {
         FooterSlot::Minimal
@@ -992,11 +1201,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
-        InputSlot::TextInput => (None, "\u{276f} "),
-        InputSlot::DialPad(q) => {
-            let selected = q.options.iter().position(|o| o.recommended).unwrap_or(0);
-            (Some(format_question_panel(q, selected)), "\u{2753} ")
-        }
+        InputSlot::Hint(_) | InputSlot::TextInput => (None, "\u{276f} "),
+        InputSlot::DialPad(q) => (
+            Some(format_question_panel(q, dialpad_cursor.get())),
+            "\u{2753} ",
+        ),
         InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
     };
 
@@ -1020,7 +1229,19 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(panel_text.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
             }))
-            #(if matches!(current_input_slot, InputSlot::FuzzySelect(_)) {
+            #(if let InputSlot::Hint(ref hint_text) = current_input_slot {
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: hint_text.clone(), color: Color::DarkGrey)
+                    }
+                }
+            } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
+                // DialPad: no input row — all interaction is via
+                // arrow keys and digit shortcuts shown in the panel.
+                element! {
+                    View(flex_direction: FlexDirection::Row) {}
+                }
+            } else if matches!(current_input_slot, InputSlot::FuzzySelect(_)) {
                 // FuzzySelect owns keyboard input — render filter as
                 // static text so TextInput's on_change doesn't compete.
                 let filter_display = match &current_input_slot {
@@ -1069,6 +1290,9 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
     let spinner = SpinnerState::new_inactive();
 
+    let stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>> =
+        Arc::new(Mutex::new(None));
+
     let ctx = ReplContext {
         output_rx: Arc::new(Mutex::new(output_rx)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),
@@ -1076,6 +1300,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         spinner: spinner.clone(),
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
+        stderr_redir: Arc::clone(&stderr_redir),
     };
 
     let banner = startup_banner.to_string();
@@ -1086,6 +1311,14 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
             // session info in the scrollback. iocraft's render_loop enters
             // raw mode immediately, so we print first.
             println!("{banner}");
+
+            // Activate stderr redirect before entering raw mode so that
+            // any library writing to fd 2 is captured and routed through
+            // the iocraft stdout handle by the tick loop.
+            if let Ok(mut guard) = stderr_redir.lock() {
+                *guard = stderr_redirect::StderrRedirect::activate();
+            }
+
             smol::block_on(
                 element! {
                     ContextProvider(value: Context::owned(ctx)) {
@@ -1138,6 +1371,7 @@ mod tests {
             ],
             allow_custom_input: false,
             custom_input_hint: None,
+            force_fuzzy_select: false,
         }
     }
 
@@ -1152,6 +1386,7 @@ mod tests {
             options: vec![],
             allow_custom_input: true,
             custom_input_hint: None,
+            force_fuzzy_select: false,
         };
 
         assert_eq!(
@@ -1183,8 +1418,8 @@ mod tests {
         let panel = format_question_panel(&question_with_options(), 1);
 
         assert!(panel.contains("[Setup]"));
-        assert!(panel.contains("  1. Project recommended"));
-        assert!(panel.contains("> 2. User"));
+        assert!(panel.contains(" [1] Project recommended"));
+        assert!(panel.contains("> [2] User"));
     }
 
     #[test]

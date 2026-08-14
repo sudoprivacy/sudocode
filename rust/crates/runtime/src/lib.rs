@@ -15,6 +15,7 @@ mod bootstrap;
 pub mod branch_lock;
 mod compact;
 pub mod config;
+pub mod config_schema;
 pub mod config_validate;
 mod conversation;
 pub mod coordinator_mode;
@@ -99,6 +100,9 @@ pub use config::{
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     ScopedMcpServerConfig, SudoCodeConfig, WebSearchConfig, SAMPLE_SUDOCODE_JSON,
     SUDOCODE_SETTINGS_SCHEMA_NAME,
+};
+pub use config_schema::{
+    resolve_input_kind, ConfigInputKind, FieldSchema, FieldType, SETTINGS_SCHEMA, SUDOCODE_SCHEMA,
 };
 pub use config_validate::{
     check_unsupported_format, format_diagnostics, validate_config_file, ConfigDiagnostic,

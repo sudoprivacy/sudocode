@@ -398,7 +398,11 @@ impl SpinnerRef {
 
     pub fn set_retry(&self, attempt: u32, max_retries: u32, reason: String) {
         if let Some(ref phase) = self.phase {
-            *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Retry { attempt, max_retries, reason };
+            *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Retry {
+                attempt,
+                max_retries,
+                reason,
+            };
         }
     }
 

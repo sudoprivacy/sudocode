@@ -34,7 +34,8 @@ struct SpinnerRetryNotifier {
 
 impl api::RetryNotifier for SpinnerRetryNotifier {
     fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
-        self.spinner.set_retry(attempt, max_retries, reason.to_string());
+        self.spinner
+            .set_retry(attempt, max_retries, reason.to_string());
     }
 
     fn on_retry_end(&self) {

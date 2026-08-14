@@ -12,8 +12,8 @@ use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
 use runtime::model_capabilities;
 
 use crate::cli::args::load_sudocode_config_for_current_dir;
-use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::render::{ansi_fg, theme, DIM, RESET};
+use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
 
 // ── public entry point ──────────────────────────────────────────────
@@ -102,10 +102,7 @@ fn show_schema_level(
         .map(|f| {
             let val_summary = current_obj
                 .and_then(|obj| obj.get(f.key))
-                .map_or_else(
-                    || "(not set)".to_string(),
-                    |v| truncate_json_value(v),
-                );
+                .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
             let hint = if f.children.is_some() && f.field_type == FieldType::Object {
                 " \u{25b8}"
             } else {
@@ -204,8 +201,7 @@ fn handle_leaf_edit(
         ConfigInputKind::BoolToggle => {
             let current_bool = current_val.and_then(|v| v.as_bool()).unwrap_or(false);
             let new_val = !current_bool;
-            match write_config_value(file_path, breadcrumb, field.key, serde_json::json!(new_val))
-            {
+            match write_config_value(file_path, breadcrumb, field.key, serde_json::json!(new_val)) {
                 Ok(()) => out.println(&format!(
                     "{DIM}{}{} = {new_val}{RESET}",
                     breadcrumb_display(breadcrumb),

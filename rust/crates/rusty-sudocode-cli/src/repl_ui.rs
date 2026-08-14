@@ -36,8 +36,12 @@ use iocraft::prelude::*;
 mod stderr_redirect {
     pub struct StderrRedirect;
     impl StderrRedirect {
-        pub fn activate() -> Option<Self> { None }
-        pub fn drain(&self) -> Option<String> { None }
+        pub fn activate() -> Option<Self> {
+            None
+        }
+        pub fn drain(&self) -> Option<String> {
+            None
+        }
     }
 }
 
@@ -67,7 +71,8 @@ mod stderr_redirect {
             // `write_fd` is dropped here — fd 2 keeps the write end alive.
 
             // Make the read end non-blocking so drain() never stalls.
-            let flags = nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).ok()?;
+            let flags =
+                nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).ok()?;
             let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
             oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
             nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(oflags)).ok()?;
@@ -89,7 +94,11 @@ mod stderr_redirect {
                     Err(_) => break,
                 }
             }
-            if collected.is_empty() { None } else { Some(collected) }
+            if collected.is_empty() {
+                None
+            } else {
+                Some(collected)
+            }
         }
     }
 }
@@ -101,7 +110,11 @@ mod stderr_redirect {
 pub enum TurnPhase {
     Thinking,
     Reasoning,
-    Retry { attempt: u32, max_retries: u32, reason: String },
+    Retry {
+        attempt: u32,
+        max_retries: u32,
+        reason: String,
+    },
     Paused,
 }
 
@@ -185,23 +198,35 @@ impl SpinnerState {
         let is_retry = matches!(current_phase, TurnPhase::Retry { .. });
 
         let (frame, current_label): (String, String) = if is_retry {
-            if let TurnPhase::Retry { attempt, max_retries, ref reason } = current_phase {
-                ("\u{27f3}".to_string(), format!("Retry {attempt}/{max_retries}: {reason}"))
+            if let TurnPhase::Retry {
+                attempt,
+                max_retries,
+                ref reason,
+            } = current_phase
+            {
+                (
+                    "\u{27f3}".to_string(),
+                    format!("Retry {attempt}/{max_retries}: {reason}"),
+                )
             } else {
                 unreachable!()
             }
         } else if is_reasoning {
             let reasoning_frames: &[&str] = &["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"];
-            (reasoning_frames[frame_index % reasoning_frames.len()].to_string(),
-             "\u{1f9e0} Reasoning...".to_string())
+            (
+                reasoning_frames[frame_index % reasoning_frames.len()].to_string(),
+                "\u{1f9e0} Reasoning...".to_string(),
+            )
         } else {
             let thinking_frames: &[&str] = &[
                 "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
                 "\u{2827}", "\u{2807}", "\u{280f}",
             ];
             let label = self.label.lock().unwrap();
-            (thinking_frames[frame_index % thinking_frames.len()].to_string(),
-             label.clone())
+            (
+                thinking_frames[frame_index % thinking_frames.len()].to_string(),
+                label.clone(),
+            )
         };
 
         let elapsed = self.start_time.lock().unwrap().elapsed().as_secs_f64();
@@ -1177,9 +1202,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
         InputSlot::Hint(_) | InputSlot::TextInput => (None, "\u{276f} "),
-        InputSlot::DialPad(q) => {
-            (Some(format_question_panel(q, dialpad_cursor.get())), "\u{2753} ")
-        }
+        InputSlot::DialPad(q) => (
+            Some(format_question_panel(q, dialpad_cursor.get())),
+            "\u{2753} ",
+        ),
         InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
     };
 

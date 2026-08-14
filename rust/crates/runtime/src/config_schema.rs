@@ -116,7 +116,11 @@ impl FieldSchema {
     }
 
     /// Convenience constructor for a deprecated field.
-    const fn deprecated(key: &'static str, field_type: FieldType, replacement: &'static str) -> Self {
+    const fn deprecated(
+        key: &'static str,
+        field_type: FieldType,
+        replacement: &'static str,
+    ) -> Self {
         Self {
             key,
             field_type,
@@ -133,8 +137,16 @@ impl FieldSchema {
 // ── settings.json child schemas ──────────────────────────────────────
 
 const HOOKS_CHILDREN: &[FieldSchema] = &[
-    FieldSchema::leaf("PreToolUse", FieldType::StringArray, "Commands run before a tool call"),
-    FieldSchema::leaf("PostToolUse", FieldType::StringArray, "Commands run after a tool call"),
+    FieldSchema::leaf(
+        "PreToolUse",
+        FieldType::StringArray,
+        "Commands run before a tool call",
+    ),
+    FieldSchema::leaf(
+        "PostToolUse",
+        FieldType::StringArray,
+        "Commands run after a tool call",
+    ),
     FieldSchema::leaf(
         "PostToolUseFailure",
         FieldType::StringArray,
@@ -142,10 +154,15 @@ const HOOKS_CHILDREN: &[FieldSchema] = &[
     ),
 ];
 
-const PERMISSION_MODE_OPTIONS: &[&str] = &["plan", "read-only", "workspace-write", "danger-full-access"];
+const PERMISSION_MODE_OPTIONS: &[&str] =
+    &["plan", "read-only", "workspace-write", "danger-full-access"];
 
 const PERMISSIONS_CHILDREN: &[FieldSchema] = &[
-    FieldSchema::enumerated("defaultMode", PERMISSION_MODE_OPTIONS, "Default permission mode"),
+    FieldSchema::enumerated(
+        "defaultMode",
+        PERMISSION_MODE_OPTIONS,
+        "Default permission mode",
+    ),
     FieldSchema::leaf("allow", FieldType::StringArray, "Allowed tool patterns"),
     FieldSchema::leaf("deny", FieldType::StringArray, "Denied tool patterns"),
     FieldSchema::leaf("ask", FieldType::StringArray, "Tools that always prompt"),
@@ -153,21 +170,49 @@ const PERMISSIONS_CHILDREN: &[FieldSchema] = &[
 
 const PLUGINS_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf("enabled", FieldType::Object, "Plugin enable/disable map"),
-    FieldSchema::leaf("externalDirectories", FieldType::StringArray, "External plugin directories"),
-    FieldSchema::leaf("installRoot", FieldType::String, "Plugin install root directory"),
+    FieldSchema::leaf(
+        "externalDirectories",
+        FieldType::StringArray,
+        "External plugin directories",
+    ),
+    FieldSchema::leaf(
+        "installRoot",
+        FieldType::String,
+        "Plugin install root directory",
+    ),
     FieldSchema::leaf("registryPath", FieldType::String, "Plugin registry path"),
     FieldSchema::leaf("bundledRoot", FieldType::String, "Bundled plugins root"),
-    FieldSchema::leaf("maxOutputTokens", FieldType::Number, "Max output tokens for plugins"),
+    FieldSchema::leaf(
+        "maxOutputTokens",
+        FieldType::Number,
+        "Max output tokens for plugins",
+    ),
 ];
 
 const FILESYSTEM_MODE_OPTIONS: &[&str] = &["readonly", "readwrite"];
 
 const SANDBOX_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf("enabled", FieldType::Bool, "Enable sandbox isolation"),
-    FieldSchema::leaf("namespaceRestrictions", FieldType::Bool, "Enable namespace restrictions"),
-    FieldSchema::leaf("networkIsolation", FieldType::Bool, "Isolate network access"),
-    FieldSchema::enumerated("filesystemMode", FILESYSTEM_MODE_OPTIONS, "Filesystem isolation mode"),
-    FieldSchema::leaf("allowedMounts", FieldType::StringArray, "Allowed filesystem mounts"),
+    FieldSchema::leaf(
+        "namespaceRestrictions",
+        FieldType::Bool,
+        "Enable namespace restrictions",
+    ),
+    FieldSchema::leaf(
+        "networkIsolation",
+        FieldType::Bool,
+        "Isolate network access",
+    ),
+    FieldSchema::enumerated(
+        "filesystemMode",
+        FILESYSTEM_MODE_OPTIONS,
+        "Filesystem isolation mode",
+    ),
+    FieldSchema::leaf(
+        "allowedMounts",
+        FieldType::StringArray,
+        "Allowed filesystem mounts",
+    ),
 ];
 
 const OAUTH_CHILDREN: &[FieldSchema] = &[
@@ -175,7 +220,11 @@ const OAUTH_CHILDREN: &[FieldSchema] = &[
     FieldSchema::leaf("authorizeUrl", FieldType::String, "OAuth authorization URL"),
     FieldSchema::leaf("tokenUrl", FieldType::String, "OAuth token endpoint URL"),
     FieldSchema::leaf("callbackPort", FieldType::Number, "OAuth callback port"),
-    FieldSchema::leaf("manualRedirectUrl", FieldType::String, "Manual redirect URL for headless auth"),
+    FieldSchema::leaf(
+        "manualRedirectUrl",
+        FieldType::String,
+        "Manual redirect URL for headless auth",
+    ),
     FieldSchema::leaf("scopes", FieldType::StringArray, "OAuth scopes"),
 ];
 
@@ -191,7 +240,11 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     },
     FieldSchema::object("hooks", HOOKS_CHILDREN, "Lifecycle hook commands"),
     FieldSchema::object("permissions", PERMISSIONS_CHILDREN, "Permission rules"),
-    FieldSchema::deprecated("permissionMode", FieldType::String, "permissions.defaultMode"),
+    FieldSchema::deprecated(
+        "permissionMode",
+        FieldType::String,
+        "permissions.defaultMode",
+    ),
     FieldSchema::object("mcpServers", &[], "MCP server configurations"),
     FieldSchema::object("oauth", OAUTH_CHILDREN, "OAuth configuration"),
     FieldSchema::deprecated("enabledPlugins", FieldType::Object, "plugins.enabled"),
@@ -199,15 +252,27 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     FieldSchema::object("sandbox", SANDBOX_CHILDREN, "Sandbox isolation settings"),
     FieldSchema::leaf("env", FieldType::Object, "Environment variable overrides"),
     FieldSchema::leaf("aliases", FieldType::Object, "Command aliases"),
-    FieldSchema::leaf("providerFallbacks", FieldType::Object, "Provider fallback chain"),
-    FieldSchema::leaf("trustedRoots", FieldType::StringArray, "Trusted project root paths"),
+    FieldSchema::leaf(
+        "providerFallbacks",
+        FieldType::Object,
+        "Provider fallback chain",
+    ),
+    FieldSchema::leaf(
+        "trustedRoots",
+        FieldType::StringArray,
+        "Trusted project root paths",
+    ),
 ];
 
 // ── sudocode.json schema ────────────────────────────────────────────
 
 /// All known fields in `sudocode.json`.
 pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
-    FieldSchema::leaf("auth_modes", FieldType::Object, "Authentication mode configurations"),
+    FieldSchema::leaf(
+        "auth_modes",
+        FieldType::Object,
+        "Authentication mode configurations",
+    ),
     FieldSchema::leaf("models", FieldType::Object, "Model alias definitions"),
     FieldSchema::object(
         "web_search",
@@ -229,7 +294,11 @@ pub fn find_field<'a>(schema: &'a [FieldSchema], key: &str) -> Option<&'a FieldS
 
 /// Collect all non-deprecated key names from a schema slice.
 pub fn known_keys(schema: &[FieldSchema]) -> Vec<&'static str> {
-    schema.iter().filter(|f| !f.is_deprecated).map(|f| f.key).collect()
+    schema
+        .iter()
+        .filter(|f| !f.is_deprecated)
+        .map(|f| f.key)
+        .collect()
 }
 
 /// Collect deprecated field entries from a schema slice.
@@ -318,7 +387,11 @@ mod tests {
     fn settings_schema_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for field in SETTINGS_SCHEMA {
-            assert!(seen.insert(field.key), "duplicate key in SETTINGS_SCHEMA: {}", field.key);
+            assert!(
+                seen.insert(field.key),
+                "duplicate key in SETTINGS_SCHEMA: {}",
+                field.key
+            );
         }
     }
 
@@ -418,7 +491,9 @@ mod tests {
     #[test]
     fn resolve_input_kind_enum() {
         let schema = FieldSchema::enumerated("mode", &["a", "b"], "test");
-        assert!(matches!(resolve_input_kind(&schema), ConfigInputKind::Enum(opts) if opts == vec!["a", "b"]));
+        assert!(
+            matches!(resolve_input_kind(&schema), ConfigInputKind::Enum(opts) if opts == vec!["a", "b"])
+        );
     }
 
     #[test]
@@ -448,7 +523,10 @@ mod tests {
 
     #[test]
     fn find_field_returns_match() {
-        assert_eq!(find_field(SETTINGS_SCHEMA, "model").map(|f| f.key), Some("model"));
+        assert_eq!(
+            find_field(SETTINGS_SCHEMA, "model").map(|f| f.key),
+            Some("model")
+        );
         assert!(find_field(SETTINGS_SCHEMA, "nonexistent").is_none());
     }
 

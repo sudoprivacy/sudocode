@@ -157,7 +157,10 @@ impl OpenAiCompatClient {
         self.http.session_tracer()
     }
 
-    pub fn set_retry_notifier(&mut self, notifier: std::sync::Arc<dyn crate::http_transport::RetryNotifier>) {
+    pub fn set_retry_notifier(
+        &mut self,
+        notifier: std::sync::Arc<dyn crate::http_transport::RetryNotifier>,
+    ) {
         self.http.set_retry_notifier(notifier);
     }
 

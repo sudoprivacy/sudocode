@@ -1912,7 +1912,13 @@ fn cancel_pending_question_answer(pending: &PendingQuestionAnswer) {
 /// Returns `Option<SlashSelectionHandler>` to support chained interactions
 /// (tree navigation). A struct wrapper breaks the recursive type alias cycle.
 struct SlashSelectionHandler(
-    Box<dyn FnOnce(&str, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) -> Option<SlashSelectionHandler>>,
+    Box<
+        dyn FnOnce(
+            &str,
+            &Arc<Mutex<LiveCli>>,
+            &repl_ui::OutputSender,
+        ) -> Option<SlashSelectionHandler>,
+    >,
 );
 
 /// Show an interactive selection question via iocraft's InputSlot and
@@ -1926,7 +1932,11 @@ fn show_slash_selection(
     ui: &repl_ui::UiCommandSender,
     question: repl_ui::QuestionPromptView,
     items: Vec<String>,
-    on_selected: impl FnOnce(String, &Arc<Mutex<LiveCli>>, &repl_ui::OutputSender) -> Option<SlashSelectionHandler>
+    on_selected: impl FnOnce(
+            String,
+            &Arc<Mutex<LiveCli>>,
+            &repl_ui::OutputSender,
+        ) -> Option<SlashSelectionHandler>
         + 'static,
 ) -> SlashSelectionHandler {
     ui.show_question(question);
@@ -2199,13 +2209,11 @@ fn run_repl_iocraft_dispatch(
                         let loader = runtime::ConfigLoader::default_for(&cwd);
                         let settings_path = loader.config_home().join("settings.json");
                         let sudocode_path = loader.config_home().join("sudocode.json");
-                        pending_slash_selection = Some(
-                            cli::config_ui::build_config_tree_handler(
-                                &repl.ui,
-                                settings_path,
-                                sudocode_path,
-                            ),
-                        );
+                        pending_slash_selection = Some(cli::config_ui::build_config_tree_handler(
+                            &repl.ui,
+                            settings_path,
+                            sudocode_path,
+                        ));
                         true
                     }
                     Ok(Some(SlashCommand::Model { model: None })) => {

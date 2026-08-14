@@ -119,10 +119,11 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
     // Press Ctrl-C once — should show hint in footer area.
     sess.send("\x03").expect("send Ctrl-C");
 
-    sess.expect("Press Ctrl-C again to exit").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
-    });
+    sess.expect("Press Ctrl-C again to exit")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
+        });
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
@@ -229,7 +230,8 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
     });
 
     // Use a model that supports extended thinking.
-    sess.send("/model claude-sonnet-4-6\r").expect("send /model");
+    sess.send("/model claude-sonnet-4-6\r")
+        .expect("send /model");
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("prompt after /model: {e}\nPTY:\n{screen}");

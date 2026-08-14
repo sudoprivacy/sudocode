@@ -50,6 +50,17 @@ const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
 The previous model response was empty after a tool completed. The user requested a file deliverable, but the current turn has not produced a matching final file yet. Continue the same task now: create or execute whatever is needed to produce the requested file, then verify it exists before ending the turn.
 </system-reminder>";
 
+/// Prefix of the user-side date announcement injected on the first turn.
+/// The current date deliberately lives in a content block instead of the
+/// system prompt so the system blocks stay byte-stable across days (the
+/// dynamic system block would otherwise miss its prompt cache every new
+/// day). Also used as the marker when scanning the session for an existing
+/// announcement.
+const DATE_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>Today's date is ";
+/// Marker present in the date-rollover reminder text; a rollover reminder
+/// also counts as a valid date announcement when scanning the session.
+const DATE_ROLLOVER_REMINDER_MARKER: &str = "The local calendar date has changed";
+
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -299,12 +310,12 @@ pub struct ConversationRuntime<C, T> {
     tool_executor: T,
     permission_policy: PermissionPolicy,
     system_prompt: SystemPrompt,
-    /// Date (`YYYY-MM-DD`) baked into the cacheable system prompt at session
-    /// start. When `Some`, [`ConversationRuntime::run_turn_with_blocks`]
-    /// compares it against today's local date at turn time and prepends a
-    /// `<system-reminder>` content block when the date has rolled over,
-    /// instead of mutating the system prompt itself (which would invalidate
-    /// the prompt-cache prefix).
+    /// Date (`YYYY-MM-DD`) the session currently treats as "today". The
+    /// system prompt itself carries no date (a per-day field there would
+    /// break the prompt-cache prefix every new day); instead, when `Some`,
+    /// [`ConversationRuntime::run_turn_with_blocks`] announces the date via
+    /// a `<system-reminder>` content block on the first user turn and
+    /// prepends a rollover reminder when the local date changes mid-session.
     prompt_known_date: Option<String>,
     /// Override for "today" used in tests. Always `None` outside tests.
     #[cfg(test)]
@@ -391,11 +402,12 @@ where
         }
     }
 
-    /// Records the date (`YYYY-MM-DD`) that was frozen into the cacheable
-    /// system prompt at session start. Each turn compares this against the
-    /// local date and emits a `<system-reminder>` content block when the
-    /// date has rolled over, leaving the system prompt itself untouched so
-    /// the prompt cache prefix stays warm.
+    /// Records the date (`YYYY-MM-DD`) the session should treat as "today".
+    /// The runtime announces it to the model via a `<system-reminder>`
+    /// content block on the first user turn, and each later turn compares it
+    /// against the local date, emitting a rollover reminder when the date
+    /// has changed — the system prompt itself never carries the date, so its
+    /// prompt-cache prefix stays warm across days.
     #[must_use]
     pub fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
         self.prompt_known_date = Some(date.into());
@@ -538,31 +550,64 @@ where
         crate::time::today_local()
     }
 
-    /// If the session-start date frozen into the cacheable system prompt no
-    /// longer matches today's local date, prepend a `<system-reminder>`
-    /// content block so the assistant learns about the rollover without
-    /// invalidating the prompt-cache prefix. The known date is then advanced
-    /// so the reminder fires only once per rollover.
-    fn inject_date_change_reminder(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    /// Keep the model informed of the current date WITHOUT ever putting the
+    /// date into the (cache-prefix) system prompt:
+    ///
+    /// - When the session does not yet carry a date announcement (first turn,
+    ///   or after compaction dropped the message that carried it), a
+    ///   `<system-reminder>` content block stating today's date is appended
+    ///   AFTER the user's content, so the turn label (derived from the first
+    ///   Text block) still reflects what the user typed.
+    /// - When the local date no longer matches the session's known date, a
+    ///   rollover reminder is prepended and the known date advanced so the
+    ///   reminder fires only once per rollover.
+    ///
+    /// Both shapes live in user-side content blocks, leaving the system
+    /// prompt byte-stable across days so its prompt-cache prefix stays warm.
+    fn inject_date_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
         let Some(known) = self.prompt_known_date.clone() else {
             return blocks;
         };
         let today = self.current_local_date();
-        if today == known {
+        if today != known {
+            let reminder = ContentBlock::Text {
+                text: format!(
+                    "<system-reminder>The local calendar date has changed since this session started. \
+                     The previously announced date was {known}; today is now {today}. \
+                     Treat {today} as the current date for any reasoning that depends on it.</system-reminder>"
+                ),
+            };
+            self.prompt_known_date = Some(today);
+            let mut combined = Vec::with_capacity(blocks.len() + 1);
+            combined.push(reminder);
+            combined.extend(blocks);
+            return combined;
+        }
+        if self.session_has_date_context() {
             return blocks;
         }
-        let reminder = ContentBlock::Text {
-            text: format!(
-                "<system-reminder>The local calendar date has changed since this session started. \
-                 The system prompt was cached on {known}; today is now {today}. \
-                 Treat {today} as the current date for any reasoning that depends on it.</system-reminder>"
-            ),
-        };
-        self.prompt_known_date = Some(today);
-        let mut combined = Vec::with_capacity(blocks.len() + 1);
-        combined.push(reminder);
-        combined.extend(blocks);
+        let mut combined = blocks;
+        combined.push(ContentBlock::Text {
+            text: format!("{DATE_CONTEXT_REMINDER_PREFIX}{today}.</system-reminder>"),
+        });
         combined
+    }
+
+    /// `true` when some message already announced the current date to the
+    /// model — either the first-turn announcement or a rollover reminder.
+    /// Scanning the session (rather than tracking a flag) self-heals after
+    /// compaction removes the message that carried the announcement.
+    fn session_has_date_context(&self) -> bool {
+        self.session.messages.iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains(DATE_CONTEXT_REMINDER_PREFIX)
+                            || text.contains(DATE_ROLLOVER_REMINDER_MARKER)
+                )
+            })
+        })
     }
 
     /// Drain any coordinator-mode `<task-notification>` XML blocks
@@ -796,7 +841,7 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
         mut observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<TurnSummary, RuntimeError> {
-        let blocks = self.inject_date_change_reminder(blocks);
+        let blocks = self.inject_date_context(blocks);
         // Coordinator-mode push: drain any `<task-notification>` XML
         // blocks that background sub-agents deposited into the
         // coordinator's inbox since the previous turn, and prepend
@@ -3634,7 +3679,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_date_change_reminder_when_known_date_unchanged() {
+    async fn first_turn_announces_current_date_after_user_content() {
+        // The system prompt carries no date, so the first turn must announce
+        // it via a user-side system-reminder block — appended AFTER the
+        // user's content so the turn label still reflects what the user
+        // typed.
         let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
         let mut runtime = ConversationRuntime::new(
             Session::new(),
@@ -3655,10 +3704,107 @@ mod tests {
 
         let requests = captured.lock().expect("captured mutex");
         let user_blocks = &requests[0].messages[0].blocks;
-        assert_eq!(user_blocks.len(), 1, "no reminder should be prepended");
+        assert_eq!(
+            user_blocks.len(),
+            2,
+            "first turn should carry user text + date announcement"
+        );
         assert!(matches!(
             &user_blocks[0],
             ContentBlock::Text { text } if text == "hello"
+        ));
+        let ContentBlock::Text { text: announcement } = &user_blocks[1] else {
+            panic!("second block should be the date announcement");
+        };
+        assert!(
+            announcement.contains("<system-reminder>")
+                && announcement.contains("Today's date is 2026-05-15"),
+            "date announcement malformed: {announcement}"
+        );
+    }
+
+    #[tokio::test]
+    async fn date_announcement_is_not_repeated_on_later_turns() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        runtime.today_override = Some("2026-05-15".to_string());
+
+        runtime.run_turn("first", None, None).await.expect("turn 1");
+        runtime
+            .run_turn("second", None, None)
+            .await
+            .expect("turn 2");
+
+        let requests = captured.lock().expect("captured mutex");
+        let second_turn_user_blocks = requests[1]
+            .messages
+            .iter()
+            .rfind(|m| m.role == MessageRole::User)
+            .expect("user message")
+            .blocks
+            .clone();
+        assert_eq!(
+            second_turn_user_blocks.len(),
+            1,
+            "date announcement must not repeat while the session carries it"
+        );
+        assert!(matches!(
+            &second_turn_user_blocks[0],
+            ContentBlock::Text { text } if text == "second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn date_announcement_reinjected_when_session_lost_it() {
+        // Compaction can drop the message that carried the announcement; the
+        // runtime re-injects by scanning the session rather than tracking a
+        // one-shot flag. Simulated here with a pre-seeded session that has
+        // messages but no date announcement.
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut session = Session::new();
+        session
+            .push_user_blocks(vec![ContentBlock::Text {
+                text: "summary of earlier work".to_string(),
+            }])
+            .expect("seed message");
+        let mut runtime = ConversationRuntime::new(
+            session,
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_date("2026-05-15");
+        runtime.today_override = Some("2026-05-15".to_string());
+
+        runtime
+            .run_turn("hello", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        let user_blocks = &requests[0]
+            .messages
+            .iter()
+            .rfind(|m| m.role == MessageRole::User)
+            .expect("user message")
+            .blocks
+            .clone();
+        assert_eq!(user_blocks.len(), 2, "announcement should be re-injected");
+        assert!(matches!(
+            &user_blocks[1],
+            ContentBlock::Text { text } if text.contains("Today's date is 2026-05-15")
         ));
     }
 

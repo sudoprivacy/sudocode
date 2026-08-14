@@ -1627,14 +1627,22 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         if !rendered.is_empty() {
             println!("{rendered}");
         }
-        // Seed rustyline history so ↑ recalls previous prompts.
+        // Seed rustyline history so ↑ recalls previous prompts. Skip
+        // runtime-injected `<system-reminder>` blocks (date announcements,
+        // rollover reminders) — they ride inside user messages for the
+        // model but were never typed by the user, and a multi-line history
+        // entry would auto-submit its first line when recalled.
         for msg in messages {
             if msg.role == runtime::MessageRole::User {
                 let text = msg
                     .blocks
                     .iter()
                     .filter_map(|b| match b {
-                        runtime::ContentBlock::Text { text } => Some(text.as_str()),
+                        runtime::ContentBlock::Text { text }
+                            if !cli::format::is_system_reminder_text(text) =>
+                        {
+                            Some(text.as_str())
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>()

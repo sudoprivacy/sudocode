@@ -845,7 +845,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5#0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5"
 dependencies = [
  "parking_lot",
  "serde",
@@ -2210,7 +2210,7 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5#0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2278,7 +2278,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5#0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5"
 dependencies = [
  "ahash",
  "base64",
@@ -2476,7 +2476,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5#0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5"
 
 [[package]]
 name = "nexus-vfs-client"

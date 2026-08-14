@@ -37,7 +37,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Pinned to the SAME nexus-vfs rev the nexus daemon (rust/nexusd) uses, so
 # `SpawnTask<Kernel>` monomorphises to one type when nexusd links both
 # sudocode_runtime and the nexus service crates (co-host binary edge).
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "c9ecc9da2b755039a1028bbb619ee7cbb86f5dad", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "0bdb6f64f9f1e81536f3bc7b68c216a0db089cd5", default-features = false }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

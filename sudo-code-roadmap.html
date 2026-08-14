@@ -1162,7 +1162,7 @@ opus-4-8 by CC → Lean; that remap is CC's, not scode's concern.)</p>
     <tr><td><code>get_using_tools_section</code> — <code># Using your tools</code> + git-commit + PR procedure (<code>:676</code>)</td><td><strong>3,657</strong></td><td>746 (scode is 5× larger)</td><td>removed</td><td>removed</td><td data-status="gap">Drop procedure; keep one "prefer dedicated tools / batch independent calls" line in Harness; move git/PR steps to a <code>/commit</code> skill / dynamic injection</td></tr>
     <tr><td><code>get_tone_style_section</code> — <code># Tone and style</code> (<code>:715</code>)</td><td>564</td><td>541</td><td>≈ <code># Communicating</code> ✦</td><td>removed</td><td data-status="gap">Drop for lean; <strong>mid keeps a comms block</strong> — scode's tone/output already fill that role, so a Mid-tier scode model should retain them</td></tr>
     <tr><td><code>get_output_efficiency_section</code> — <code># Output efficiency</code> (<code>:724</code>)</td><td>749</td><td>≈ <code># Text output</code> 1,657</td><td>≈ <code># Communicating</code> ✦</td><td>removed</td><td data-status="gap">Drop for lean; keep for mid (see above)</td></tr>
-    <tr><td><code># auto memory</code> (<code>memory/mod.rs:180</code>) — 6 subsections + <code>&lt;examples&gt;</code></td><td><strong>12,525</strong></td><td><code># auto memory</code> 12,833</td><td><code># Memory</code> 2,092</td><td><code># Memory</code> 2,092</td><td data-status="gap">Collapse to lean <code># Memory</code> for lean + mid — drop all <code>&lt;examples&gt;</code> + spelled-out 2-step walkthroughs; keep frontmatter format + 4 type one-liners + condensed what-not / access rules</td></tr>
+    <tr><td>memory instructions (<code>memory/mod.rs</code>) — was one 12,525 <code># auto memory</code></td><td><strong>2,984</strong> compact / 12,489 full</td><td><code># auto memory</code> 12,833</td><td><code># Memory</code> 2,092</td><td><code># Memory</code> 2,092</td><td data-status="covered"><strong>Done by #406</strong> — split into a 2,984 compact digest (main loop + built-in sub-agents) + 12,489 full (custom <code>memory:</code> agents). <em>Per-agent-type, not per-tier</em> — see the 3-way table below.</td></tr>
     <tr><td><code># Environment context</code> (dynamic, <code>:278</code>)</td><td>dynamic</td><td><code># Environment</code></td><td><code># Environment</code></td><td><code># Environment</code></td><td data-status="covered">Keep — aligned with CC, not bloat</td></tr>
     <tr><td><code># Project context</code> — AGENTS.md injection (dynamic, <code>:387</code>)</td><td>dynamic</td><td>CC: CLAUDE.md injection</td><td>same</td><td>same</td><td data-status="covered">Keep — scode-specific, same concept as CC, not bloat</td></tr>
     <tr><td><code># Project instructions</code> (dynamic, <code>:408</code>)</td><td>dynamic</td><td>—</td><td>—</td><td>—</td><td data-status="covered">Keep — runtime-injected, not a static-mirror surface</td></tr>
@@ -1187,11 +1187,12 @@ and share the collapsed <code># Memory</code>. scode's <code># Tone and style</c
 model retains them rather than cutting them — and see Table&nbsp;C ① for the new
 CC sections worth adopting outright.</p>
 
-<p><strong>Net for lean models:</strong> main prompt 10,890 → ~2,120 (−80.5%)
-+ memory 12,525 → ~2,100 (−83%) ⇒ root prompt ~23,400 → ~4,220 (−82%), landing
-near CC's lean ~6,273 (2.1.229). Because every sub-agent reuses <code>build()</code>
-via <code>load_system_prompt_for_agent</code>, the saving multiplies across each
-spawn.</p>
+<p><strong>Net for lean models:</strong> memory is <em>already</em> compact
+(2,984) for all main-loop via #406, so the remaining tiering work is the main
+prompt: 10,890 → ~2,120 (−80.5%) for lean models. Combined with #406's memory, a
+lean model's root prompt lands near CC's lean ~6,273 (2.1.229). Because every
+sub-agent reuses <code>build()</code> via <code>load_system_prompt_for_agent</code>,
+the saving multiplies across each spawn.</p>
 
 <p class="table-title"><strong>Table C — lean-CC ↔ scode content-level two-way diff.</strong></p>
 
@@ -1211,7 +1212,7 @@ spawn.</p>
     <tr><td><code># Using your tools</code> + git-commit + PR procedure (3,657)</td><td>dropped; kept only "prefer dedicated tools" one-liner</td><td>Cut procedure</td></tr>
     <tr><td><code># Tone and style</code> (564)</td><td>dropped; kept only <code>file_path:line_number</code></td><td>Cut emoji / short / no-colon rules</td></tr>
     <tr><td><code># Output efficiency</code> (749)</td><td>dropped; brevity folded into <code># Context management</code></td><td>Cut</td></tr>
-    <tr><td><code># auto memory</code> verbose delta (~10,400 over lean)</td><td>collapsed to <code># Memory</code> (2,099)</td><td>Collapse</td></tr>
+    <tr><td><code># auto memory</code> verbose delta (~9,500)</td><td>collapsed to <code># Memory</code> (2,092)</td><td data-status="covered"><strong>Done by #406</strong> — compact 2,984 for all main-loop; see 3-way table</td></tr>
     <tr><td><code>IMPORTANT: never generate/guess URLs</code> (intro)</td><td>dropped</td><td>Drop for lean models</td></tr>
   </tbody>
 </table>
@@ -1227,6 +1228,31 @@ trade-offs, so they are <strong>not tier-gated — adopt for all tiers</strong>
 (they help full/mid models too). Group-② is the size trade-off that <em>is</em>
 tier-gated.</p>
 
+<p class="table-title"><strong>Table D — memory prompt: 3-way (CC vs #406 vs scode).</strong> The one dimension already implemented on scode, so it needs a third column.</p>
+
+<table>
+  <thead><tr><th>Aspect</th><th>CC (2.1.229)</th><th>#406 (merged, scode)</th><th>Us — open decision</th></tr></thead>
+  <tbody>
+    <tr><td>Selection axis</td><td>per-model tier</td><td>per-agent-type (opt-in-full)</td><td data-status="gap-l2">?</td></tr>
+    <tr><td>Compact memory</td><td><code># Memory</code> 2,092 → lean/mid (opus-4-8 / opus-5 / fable-5)</td><td>compact <strong>2,984</strong> → main loop + built-in sub-agents + custom-without-<code>memory:</code> (<strong>all models</strong>)</td><td data-status="gap-l2">keep #406's (verified 2,984)</td></tr>
+    <tr><td>Full memory</td><td><code># auto memory</code> 12,833 → Full-tier</td><td>full <strong>12,489</strong> → only custom <code>.md</code> agents declaring <code>memory:</code></td><td data-status="gap-l2">keep #406's</td></tr>
+    <tr><td>Default <code>opus-4-6</code> gets</td><td><strong>Full 12,833</strong></td><td><strong>Compact 2,984</strong> ← divergence</td><td data-status="gap">⟵ <strong>the call</strong></td></tr>
+    <tr><td>What compact cuts</td><td>n/a</td><td>12 examples, <code>&lt;types&gt;</code> XML, Why/How prose, Plan/Task section</td><td data-status="covered">agree</td></tr>
+  </tbody>
+</table>
+
+<p class="table-caption">Everything else in Tables&nbsp;A–C is a <em>2-way</em>
+compare (CC vs scode) because #406 didn't touch it — only memory has a third
+position. <strong>The one call:</strong> CC gives the default <em>full</em>
+memory; #406 gives it <em>compact</em>. <strong>Recommendation: keep #406's
+compact-for-all</strong> — the 12-example block is bloat regardless of model
+capability, and #406's compact keeps the operational core <em>and</em> teaches
+scode's parser contract (which CC's <code># Memory</code> doesn't need to);
+mirroring CC's full-for-default would just re-add bloat. Independently verified:
+compact 2,984 / full 12,489 (raw literals), selector wired at 5 call sites,
+stale "200-line" claim removed, format round-trip test present, #406 merged CI
+all-green.</p>
+
 <p><strong>Approach (all models).</strong> Two rules, because scode runs models
 CC never does:</p>
 <ul>
@@ -1234,13 +1260,15 @@ CC never does:</p>
   <li><strong>Non-Anthropic models</strong> (GPT / qwen / DeepSeek / local) — no CC reference exists, so scode picks the tier: <strong>Lean by default</strong> (no CC baggage to shed; capable models do better lean).</li>
   <li><strong>Group-① additions</strong> — adopt on <em>all</em> tiers; small, high-value, not size trade-offs. As of 2.1.229 this now includes CC's new <code># Delivering work</code> / <code># Corrections</code> / <code># Communicating</code> sections.</li>
 </ul>
-<p><strong>Open decision (2.1.229):</strong> CC now serves <em>four</em> variants —
-true-Lean (opus-4-8), two <em>different</em> Mids (opus-5 vs fable-5), and Full.
-Does scode mirror all four exactly (opus-5 → Delivering&nbsp;work + Corrections;
-fable-5 → Communicating), or collapse the two Mids into one scode Mid? This is
-the main thing to settle in audit.</p>
-<p>The one hook needed is per-model gating in <code>build()</code> (today
-unconditional): a model→tier resolver + tier-specific section composition.
+<p><strong>Open decisions:</strong></p>
+<ul>
+  <li><strong>Four variants (2.1.229):</strong> CC serves true-Lean (opus-4-8), two <em>different</em> Mids (opus-5 vs fable-5), and Full. Mirror all four exactly (opus-5 → Delivering&nbsp;work + Corrections; fable-5 → Communicating), or collapse the two Mids into one scode Mid?</li>
+  <li><strong>Memory axis (post-#406):</strong> keep #406's compact-for-all (per-agent-type), or make memory per-tier to mirror CC (full for the default opus-4-6)? See Table&nbsp;D — recommendation is to keep #406.</li>
+</ul>
+<p><strong>Memory is out of the tiering hook</strong> — #406 already handles it
+(per-agent-type). The remaining hook is per-model gating in <code>build()</code>
+for the <em>main-prompt</em> sections only (today unconditional): a model→tier
+resolver + tier-specific section composition.
 Full-tier models keep today's prompt verbatim — <strong>including the current
 default <code>opus-4-6</code></strong> — so the change is zero-risk for default
 users; only opus-4-8 (and non-Anthropic) shift to Lean, opus-5/fable-5 to Mid.

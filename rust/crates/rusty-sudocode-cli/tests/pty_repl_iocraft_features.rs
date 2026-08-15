@@ -8,6 +8,7 @@
 mod common;
 
 use common::TestEnv;
+use std::fs;
 use std::time::Duration;
 
 /// **P0 regression guard**: typing in the iocraft REPL must produce
@@ -469,6 +470,193 @@ fn iocraft_repl_streaming_code_block_not_corrupted() {
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("clean exit after code-block test: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// /config tree browser: navigate, drill in, Back, bool toggle, write-back
+// ──────────────────────────────────────────────────────────────────────
+
+/// End-to-end test for the interactive `/config` tree browser.
+///
+/// Journey (covers FieldSchema SSOT → DialPad/FuzzySelect dispatch →
+/// ← Back navigation → bool toggle write-back):
+///
+///   /config → file picker (DialPad)
+///   → [1] settings.json → field list (FuzzySelect, 13 items)
+///   → type "sand" + Enter → sandbox children (DialPad, 6 items)
+///   → [1] ← Back → back to settings level
+///   → type "sand" + Enter → sandbox again
+///   → [2] enabled → bool toggle (instant) → see "enabled = true"
+///   → verify settings.json updated on disk
+///   → /exit
+#[test]
+#[cfg(unix)]
+fn config_tree_navigate_back_and_toggle() {
+    let env = TestEnv::new("config-tree");
+    let root = env.workspace_root().to_path_buf();
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    // Seed settings.json with sandbox.enabled = false for toggle test.
+    let config_home = env.config_home().to_path_buf();
+    let settings_path = config_home.join("settings.json");
+    fs::write(
+        &settings_path,
+        r#"{"model": "sonnet", "sandbox": {"enabled": false}}"#,
+    )
+    .expect("seed settings.json");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    // Wait for REPL prompt.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // 1. Type /config → file picker (DialPad: settings.json, sudocode.json).
+    sess.send("/config\r").expect("send /config");
+    sess.expect("(?i)config file").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("file picker prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // 2. Select [1] settings.json → field list (FuzzySelect: >9 items).
+    sess.send("1").expect("select settings.json");
+    // Wait for FuzzySelect to fully render (the 🔍 filter icon appears).
+    sess.expect("Select field").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("settings field list: {e}\nPTY:\n{screen}");
+    });
+
+    // 3. Type "sand" to filter FuzzySelect → Enter selects sandbox ▸.
+    //    Brief pause lets the render loop process the input-slot switch.
+    std::thread::sleep(Duration::from_millis(300));
+    sess.send("sand").expect("filter sandbox");
+    sess.expect("sandbox").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("sandbox should appear in filtered list: {e}\nPTY:\n{screen}");
+    });
+    sess.send("\r").expect("select sandbox");
+    sess.expect("Back").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("sandbox children with Back: {e}\nPTY:\n{screen}");
+    });
+
+    // 4. Select [1] ← Back → back to settings level.
+    sess.send("1").expect("select Back");
+    sess.expect("Select field").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("back to settings level: {e}\nPTY:\n{screen}");
+    });
+
+    // 5. Type "sand" + Enter again → drill back into sandbox.
+    std::thread::sleep(Duration::from_millis(300));
+    sess.send("sand").expect("filter sandbox again");
+    sess.expect("sandbox").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("sandbox filter: {e}\nPTY:\n{screen}");
+    });
+    sess.send("\r").expect("select sandbox again");
+    sess.expect("enabled").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("sandbox children showing enabled: {e}\nPTY:\n{screen}");
+    });
+
+    // 6. Select [2] enabled → instant bool toggle (BoolToggle).
+    // DialPad layout: [1] ← Back, [2] enabled, [3] namespaceRestrictions, ...
+    sess.send("2").expect("select enabled");
+    sess.expect("enabled = true").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("bool toggle output: {e}\nPTY:\n{screen}");
+    });
+
+    // 7. Verify settings.json on disk has sandbox.enabled = true.
+    let updated = fs::read_to_string(&settings_path).expect("read settings.json");
+    let json: serde_json::Value = serde_json::from_str(&updated).expect("parse settings.json");
+    assert_eq!(
+        json["sandbox"]["enabled"], true,
+        "settings.json should have sandbox.enabled = true after toggle\nFile contents:\n{updated}"
+    );
+
+    // ── Enum field: permissions.defaultMode ──
+
+    // 8. /config again → settings → permissions → defaultMode (Enum DialPad).
+    sess.send("/config\r").expect("send /config again");
+    sess.expect("(?i)config file").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("file picker (2nd time): {e}\nPTY:\n{screen}");
+    });
+    sess.send("1").expect("select settings.json");
+    sess.expect("Select field").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("settings field list (2nd): {e}\nPTY:\n{screen}");
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    sess.send("perm").expect("filter permissions");
+    sess.expect("permissions").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("permissions filter: {e}\nPTY:\n{screen}");
+    });
+    sess.send("\r").expect("select permissions");
+    sess.expect("defaultMode").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("permissions children: {e}\nPTY:\n{screen}");
+    });
+
+    // 9. Select [2] defaultMode → Enum DialPad (plan, read-only, ...).
+    sess.send("2").expect("select defaultMode");
+    sess.expect("(?i)select value").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("enum picker for defaultMode: {e}\nPTY:\n{screen}");
+    });
+
+    // 10. Select [1] plan → writes to settings.json.
+    sess.send("1").expect("select plan");
+    sess.expect("= \"plan\"").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("enum write confirmation: {e}\nPTY:\n{screen}");
+    });
+
+    // 11. Verify on disk.
+    let updated2 = fs::read_to_string(&settings_path).expect("read settings.json (2)");
+    let json2: serde_json::Value = serde_json::from_str(&updated2).expect("parse (2)");
+    assert_eq!(
+        json2["permissions"]["defaultMode"], "plan",
+        "settings.json should have permissions.defaultMode = plan\nFile contents:\n{updated2}"
+    );
+
+    // ── sudocode.json browsing ──
+
+    // 12. /config → [2] sudocode.json → verify web_search ▸ visible.
+    sess.send("/config\r").expect("send /config (3rd)");
+    sess.expect("(?i)config file").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("file picker (3rd): {e}\nPTY:\n{screen}");
+    });
+    sess.send("2").expect("select sudocode.json");
+    sess.expect("web_search").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("sudocode.json fields: {e}\nPTY:\n{screen}");
+    });
+
+    // 13. ESC cancels out of tree entirely.
+    sess.send("\x1b").expect("ESC to cancel");
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("back to prompt after ESC: {e}\nPTY:\n{screen}");
+    });
+
+    // 14. Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "clean exit code");
 }

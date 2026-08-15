@@ -188,6 +188,50 @@ impl AcpTestClient {
         }
     }
 
+    /// Send a JSON-RPC request WITHOUT waiting for its response. Returns the
+    /// request id so the caller can pick the response out of the stream later
+    /// with [`AcpTestClient::recv_until`]. Used by the cross-session
+    /// concurrency scenarios where one request is deliberately left pending.
+    async fn send_request_no_wait(&mut self, method: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.send_raw(&request).await;
+        id
+    }
+
+    /// Read messages until `pred` matches one, returning it together with
+    /// every message that arrived before it. Returns `Err(seen)` if `limit`
+    /// elapses first (the messages seen so far are returned for diagnostics).
+    async fn recv_until(
+        &mut self,
+        limit: Duration,
+        pred: impl Fn(&Value) -> bool,
+    ) -> Result<(Vec<Value>, Value), Vec<Value>> {
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(seen);
+            }
+            match timeout(remaining, self.recv_inner()).await {
+                Ok(msg) => {
+                    if pred(&msg) {
+                        return Ok((seen, msg));
+                    }
+                    seen.push(msg);
+                }
+                Err(_) => return Err(seen),
+            }
+        }
+    }
+
     async fn send_raw(&mut self, value: &Value) {
         match &mut self.transport {
             Transport::Stdio { stdin, .. } => {
@@ -937,6 +981,362 @@ async fn acp_stdio_resume_restores_history_across_reconnect() {
          a fresh/empty session would omit it. body: {}",
         last.raw_body
     );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// Cross-session concurrency
+// ---------------------------------------------------------------------------
+
+/// True when `msg` is the JSON-RPC *response* to client request `id` (a
+/// server-originated request such as `session/request_permission` also
+/// carries an `id`, so the absence of `method` is what distinguishes them).
+fn is_response_to(msg: &Value, id: u64) -> bool {
+    msg.get("id").and_then(Value::as_u64) == Some(id) && msg.get("method").is_none()
+}
+
+fn is_server_request(msg: &Value, method: &str) -> bool {
+    msg.get("method").and_then(Value::as_str) == Some(method) && msg.get("id").is_some()
+}
+
+/// Send a `session/prompt` on `session_id` that makes the mock model call
+/// `bash`, and — because the session runs in `workspace-write` — parks the
+/// turn on a `session/request_permission` round-trip that we deliberately do
+/// NOT answer. Returns `(prompt request id, permission request id)`.
+async fn park_session_on_permission_prompt(
+    client: &mut AcpTestClient,
+    session_id: &str,
+) -> (u64, Value) {
+    let (_, resp) = client
+        .send_request(
+            "session/setPermissionMode",
+            json!({ "sessionId": session_id, "permissionMode": "workspace-write" }),
+        )
+        .await;
+    assert!(
+        resp.get("error").is_none(),
+        "session/setPermissionMode should succeed: {resp}"
+    );
+
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_permission_prompt_approved")
+                }]
+            }),
+        )
+        .await;
+
+    let (_, perm_req) = client
+        .recv_until(Duration::from_secs(30), |m| {
+            is_server_request(m, "session/request_permission")
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("expected session/request_permission from the agent; saw: {seen:?}")
+        });
+    assert_eq!(
+        perm_req["params"]["sessionId"].as_str(),
+        Some(session_id),
+        "permission request must be attributed to the parked session"
+    );
+    (prompt_id, perm_req["id"].clone())
+}
+
+/// Answer a pending `session/request_permission` with `allow_once`.
+async fn allow_permission(client: &mut AcpTestClient, perm_req_id: &Value) {
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "id": perm_req_id,
+            "result": { "outcome": { "outcome": "selected", "optionId": "allow_once" } }
+        }))
+        .await;
+}
+
+/// Regression guard for the multi-session P0: while session A is parked on
+/// a permission prompt (waiting for the user), a `session/prompt` on an
+/// unrelated session B must still be answered. Before the fix every prompt
+/// took one process-wide delegate mutex for the whole turn, so A's pause
+/// blocked B (and every other session) indefinitely.
+///
+/// `other_cwd` picks whether B lives in the same working directory as A or
+/// in a sibling directory; both must work.
+async fn scenario_paused_session_does_not_block_other_session(label: &str, other_cwd: bool) {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new(label);
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let cwd_b = if other_cwd {
+        let dir = workspace.root.join("project-b");
+        fs::create_dir_all(&dir).expect("create sibling cwd");
+        dir
+    } else {
+        workspace.root.clone()
+    };
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_a = scenario_session_new(&mut client, &workspace.root).await;
+
+    let (prompt_a, perm_req_id) = park_session_on_permission_prompt(&mut client, &session_a).await;
+
+    // Mirrors the reported flow: the user opens a NEW conversation while the
+    // first one is waiting on them. session/new itself must not block either.
+    let new_b = client
+        .send_request_no_wait(
+            "session/new",
+            json!({ "cwd": cwd_b.to_string_lossy().to_string(), "mcpServers": [] }),
+        )
+        .await;
+    let (_, new_b_resp) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, new_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "session/new got no response within 20s while session A was parked on a \
+                 permission prompt (cross-session blocking); messages seen: {seen:?}"
+            )
+        });
+    let session_b = new_b_resp["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new should succeed: {new_b_resp}"))
+        .to_string();
+
+    // Session B must make progress while A is parked.
+    let prompt_b = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_b,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }]
+            }),
+        )
+        .await;
+    let (before_b, resp_b) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, prompt_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "session B's prompt got no response within 20s while session A was parked on a \
+                 permission prompt (cross-session blocking); messages seen: {seen:?}"
+            )
+        });
+    assert!(
+        resp_b["result"].get("stopReason").is_some(),
+        "session B's turn should complete normally: {resp_b}"
+    );
+    assert!(
+        !before_b.iter().any(|m| is_response_to(m, prompt_a)),
+        "session A must still be parked (its prompt must not have completed yet)"
+    );
+    // B's streamed updates must be attributed to B only.
+    for m in &before_b {
+        if m.get("method").and_then(Value::as_str) == Some("session/update") {
+            assert_eq!(
+                m["params"]["sessionId"].as_str(),
+                Some(session_b.as_str()),
+                "unexpected session/update for another session while B ran: {m}"
+            );
+        }
+    }
+
+    // Now release A: it must finish its turn normally (the parked session is
+    // not lost or corrupted by B having run in the meantime).
+    allow_permission(&mut client, &perm_req_id).await;
+    let (notifs_a, resp_a) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, prompt_a))
+        .await
+        .unwrap_or_else(|seen| panic!("session A never completed after approval; saw: {seen:?}"));
+    assert!(
+        resp_a["result"].get("stopReason").is_some(),
+        "session A's turn should complete after the permission is granted: {resp_a}"
+    );
+    let blob = serde_json::to_string(&notifs_a).unwrap_or_default();
+    assert!(
+        blob.contains("bash approved and executed"),
+        "session A should have run the approved bash call and streamed the mock's final text; \
+         got: {blob}"
+    );
+
+    // Both sessions must still be usable afterwards.
+    scenario_session_prompt_streaming(&mut client, &session_a).await;
+    scenario_session_prompt_streaming(&mut client, &session_b).await;
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+#[tokio::test]
+async fn acp_stdio_paused_session_does_not_block_other_session_same_cwd() {
+    scenario_paused_session_does_not_block_other_session("stdio-concurrency-same-cwd", false).await;
+}
+
+#[tokio::test]
+async fn acp_stdio_paused_session_does_not_block_other_session_other_cwd() {
+    scenario_paused_session_does_not_block_other_session("stdio-concurrency-other-cwd", true).await;
+}
+
+/// Same P0, other wait path: session A parked inside the `AskUserQuestion`
+/// tool (`_scode/ask_user_question` extension request to the client, left
+/// unanswered — "waiting for the user to answer a question" is exactly the
+/// reported symptom), session B must still be served.
+#[tokio::test]
+async fn acp_stdio_session_parked_on_ask_user_question_does_not_block_other_session() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-concurrency-ask-user");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_a = scenario_session_new(&mut client, &workspace.root).await;
+
+    let prompt_a = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_a,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let (_, question_req) = client
+        .recv_until(Duration::from_secs(30), |m| {
+            is_server_request(m, "_scode/ask_user_question")
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("expected _scode/ask_user_question from the agent; saw: {seen:?}")
+        });
+    assert_eq!(
+        question_req["params"]["sessionId"].as_str(),
+        Some(session_a.as_str())
+    );
+
+    // New conversation while A waits on the user: must be served.
+    let new_b = client
+        .send_request_no_wait(
+            "session/new",
+            json!({ "cwd": workspace.root.to_string_lossy().to_string(), "mcpServers": [] }),
+        )
+        .await;
+    let (_, new_b_resp) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, new_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("session/new blocked behind an unanswered AskUserQuestion; saw: {seen:?}")
+        });
+    let session_b = new_b_resp["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new should succeed: {new_b_resp}"))
+        .to_string();
+    let prompt_b = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_b,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }]
+            }),
+        )
+        .await;
+    let (_, resp_b) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, prompt_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("session B blocked behind an unanswered AskUserQuestion; saw: {seen:?}")
+        });
+    assert!(resp_b["result"].get("stopReason").is_some(), "{resp_b}");
+
+    // Answer A's question; A must complete with the answer visible to the model.
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "id": question_req["id"],
+            "result": { "answers": [{ "id": "q1", "value": "blue", "label": "blue" }] }
+        }))
+        .await;
+    let (notifs_a, resp_a) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, prompt_a))
+        .await
+        .unwrap_or_else(|seen| panic!("session A never completed after the answer; saw: {seen:?}"));
+    assert!(resp_a["result"].get("stopReason").is_some(), "{resp_a}");
+    let blob = serde_json::to_string(&notifs_a).unwrap_or_default();
+    assert!(
+        blob.contains("ask_user_question answered") && blob.contains("blue"),
+        "session A should have resumed with the user's answer; got: {blob}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// The flip side of cross-session concurrency: prompts on the SAME session
+/// must stay strictly serial. A second `session/prompt` sent while the first
+/// is parked on a permission prompt must not start (no response, no
+/// `session/update`) until the first turn has finished.
+#[tokio::test]
+async fn acp_stdio_same_session_prompts_stay_serial() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-same-session-serial");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_a = scenario_session_new(&mut client, &workspace.root).await;
+
+    let (prompt_1, perm_req_id) = park_session_on_permission_prompt(&mut client, &session_a).await;
+
+    let prompt_2 = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_a,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }]
+            }),
+        )
+        .await;
+
+    // While turn 1 is parked, turn 2 must produce nothing at all.
+    let leaked = client
+        .recv_until(Duration::from_secs(3), |m| {
+            is_response_to(m, prompt_2)
+                || m.get("method").and_then(Value::as_str) == Some("session/update")
+        })
+        .await;
+    assert!(
+        leaked.is_err(),
+        "second prompt on the same session must not run while the first is parked; got: {:?}",
+        leaked.ok().map(|(_, m)| m)
+    );
+
+    allow_permission(&mut client, &perm_req_id).await;
+    let (_, resp_1) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, prompt_1))
+        .await
+        .unwrap_or_else(|seen| panic!("first turn never completed; saw: {seen:?}"));
+    assert!(resp_1["result"].get("stopReason").is_some(), "{resp_1}");
+    let (_, resp_2) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, prompt_2))
+        .await
+        .unwrap_or_else(|seen| panic!("second turn never completed; saw: {seen:?}"));
+    assert!(resp_2["result"].get("stopReason").is_some(), "{resp_2}");
 
     client.shutdown().await;
     workspace.cleanup();

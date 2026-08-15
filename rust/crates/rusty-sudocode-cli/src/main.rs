@@ -2616,14 +2616,36 @@ struct AcpCliSession {
     session_mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 }
 
+/// One live ACP session as held by [`AcpCliAgent`].
+///
+/// The session proper sits behind its **own** mutex so that turns of
+/// different sessions run concurrently; the ACP server additionally
+/// serializes requests within one session, so this lock is uncontended in
+/// practice and exists for memory safety. `cwd` is duplicated here so
+/// `session/list` can answer without touching a session that is mid-turn.
+struct AcpCliSessionSlot {
+    cwd: PathBuf,
+    session: Arc<Mutex<AcpCliSession>>,
+}
+
+/// Locked view of a session; deref gives `&mut AcpCliSession`.
+type AcpCliSessionGuard<'a> = std::sync::MutexGuard<'a, AcpCliSession>;
+
 struct AcpCliAgent {
-    model: String,
+    /// Process-wide "current model" (`/model`, `session/setModel` move it).
+    /// Read at the start of every turn as the fallback for sessions that
+    /// carry no model of their own, hence its own short-held lock rather
+    /// than living under any session's lock.
+    model: Mutex<String>,
     model_flag_raw: Option<String>,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode_override: Option<PermissionMode>,
     reasoning_effort: Option<String>,
     auth_mode: Option<AuthMode>,
-    sessions: HashMap<String, AcpCliSession>,
+    /// Session registry. Only ever locked briefly to look a slot up or to
+    /// insert / remove one — never while a session lock is held, and never
+    /// across a turn.
+    sessions: Mutex<HashMap<String, AcpCliSessionSlot>>,
     tokio_runtime: tokio::runtime::Runtime,
 }
 
@@ -2637,16 +2659,47 @@ impl AcpCliAgent {
         auth_mode: Option<AuthMode>,
     ) -> Self {
         Self {
-            model,
+            model: Mutex::new(model),
             model_flag_raw,
             allowed_tools,
             permission_mode_override,
             reasoning_effort,
             auth_mode,
-            sessions: HashMap::new(),
+            sessions: Mutex::new(HashMap::new()),
             tokio_runtime: tokio::runtime::Runtime::new()
                 .expect("failed to create tokio runtime for ACP agent"),
         }
+    }
+
+    /// Snapshot of the process-wide current model.
+    fn current_model(&self) -> String {
+        self.model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, AcpCliSessionSlot>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Fetch the shared handle of a session (the registry lock is released
+    /// before the caller locks the session itself).
+    fn session_handle(&self, session_id: &str) -> Result<Arc<Mutex<AcpCliSession>>, AcpError> {
+        self.lock_sessions()
+            .get(session_id)
+            .map(|slot| Arc::clone(&slot.session))
+            .ok_or_else(|| AcpError::invalid_params(format!("unknown sessionId: {session_id}")))
+    }
+
+    fn insert_session(&self, session_id: String, session: AcpCliSession) {
+        let slot = AcpCliSessionSlot {
+            cwd: session.cwd.clone(),
+            session: Arc::new(Mutex::new(session)),
+        };
+        self.lock_sessions().insert(session_id, slot);
     }
 
     fn build_session(
@@ -2722,12 +2775,13 @@ impl AcpCliAgent {
     }
 
     fn resolve_model_for_cwd(&self, cwd: &Path) -> Result<String, AcpError> {
+        let model = self.current_model();
         if self.model_flag_raw.is_some() {
-            return Ok(self.model.clone());
+            return Ok(model);
         }
         let _guard = ScopedCurrentDir::change_to(cwd)
             .map_err(|error| AcpError::internal(format!("failed to enter cwd: {error}")))?;
-        Ok(resolve_repl_model(self.model.clone()))
+        Ok(resolve_repl_model(model))
     }
 
     fn resolve_permission_mode_for_cwd(&self, cwd: &Path) -> Result<PermissionMode, AcpError> {
@@ -2741,36 +2795,33 @@ impl AcpCliAgent {
 }
 
 impl AcpCliAgent {
+    /// Switch the process-wide model and rebuild `session`'s runtime for it.
+    /// The caller holds the session lock (`session` is the locked session).
     fn handle_acp_model_switch(
-        &mut self,
-        session_id: &str,
+        &self,
+        session: &mut AcpCliSession,
         model: Option<String>,
     ) -> Result<String, AcpError> {
-        let session = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| AcpError::invalid_params(format!("unknown sessionId: {session_id}")))?;
+        let current = self.current_model();
 
         let Some(new_model) = model else {
             return Ok(format_model_report(
-                &self.model,
+                &current,
                 session.runtime.session().messages.len(),
                 UsageTracker::from_session(session.runtime.session()).turns(),
             ));
         };
 
         let resolved = resolve_model_alias_with_config(&new_model);
-        if resolved == self.model {
-            let session = self.sessions.get(session_id).unwrap();
+        if resolved == current {
             return Ok(format_model_report(
-                &self.model,
+                &current,
                 session.runtime.session().messages.len(),
                 UsageTracker::from_session(session.runtime.session()).turns(),
             ));
         }
 
-        let previous = self.model.clone();
-        let session = self.sessions.get(session_id).unwrap();
+        let previous = current;
         let message_count = session.runtime.session().messages.len();
         let mut cloned_session = session.runtime.session().clone();
         // Keep the session's own model in sync with the switch. `build_runtime_with_plugin_state`
@@ -2811,9 +2862,11 @@ impl AcpCliAgent {
                 .set_reasoning_effort(self.reasoning_effort.clone());
         }
 
-        let session = self.sessions.get_mut(session_id).unwrap();
         session.runtime = runtime;
-        self.model.clone_from(&resolved);
+        self.model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&resolved);
 
         Ok(format_model_switch_report(
             &previous,
@@ -3020,9 +3073,34 @@ impl AcpSdkDelegate {
     }
 }
 
+impl AcpSdkDelegate {
+    /// Lock one session for the duration of a delegate call. Different
+    /// sessions lock independently, so a session parked on user input never
+    /// holds up another one; the ACP server serializes calls on the same
+    /// session, so this normally never waits.
+    fn lock_session(&self, session_id: &str) -> Result<LockedAcpSession, runtime::AcpError> {
+        let handle = self.inner.session_handle(session_id)?;
+        Ok(LockedAcpSession { handle })
+    }
+}
+
+/// Owner of a session handle that hands out the locked session. Kept as a
+/// separate value so the `Arc` outlives the guard borrowed from it.
+struct LockedAcpSession {
+    handle: Arc<Mutex<AcpCliSession>>,
+}
+
+impl LockedAcpSession {
+    fn get(&self) -> AcpCliSessionGuard<'_> {
+        self.handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     fn new_session(
-        &mut self,
+        &self,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
@@ -3030,12 +3108,12 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let session_id = session.handle.id.clone();
         let session_cwd = session.cwd.clone();
         let abort_signal = session.abort_signal.clone();
-        self.inner.sessions.insert(session_id.clone(), session);
+        self.inner.insert_session(session_id.clone(), session);
         Ok((session_id, session_cwd, abort_signal))
     }
 
     fn run_prompt(
-        &mut self,
+        &self,
         session_id: &str,
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
@@ -3047,11 +3125,13 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         ),
         runtime::AcpError,
     > {
-        self.run_prompt_impl(session_id, prompt, observer, None, trace_id)
+        let locked = self.lock_session(session_id)?;
+        let mut session = locked.get();
+        self.run_prompt_impl(&mut session, prompt, observer, None, trace_id)
     }
 
     fn run_prompt_with_prompter(
-        &mut self,
+        &self,
         session_id: &str,
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
@@ -3064,18 +3144,19 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         ),
         runtime::AcpError,
     > {
-        self.run_prompt_impl(session_id, prompt, observer, Some(prompter), trace_id)
+        let locked = self.lock_session(session_id)?;
+        let mut session = locked.get();
+        self.run_prompt_impl(&mut session, prompt, observer, Some(prompter), trace_id)
     }
 
     fn set_question_prompter(
-        &mut self,
+        &self,
         session_id: &str,
         prompter: Box<dyn runtime::QuestionPrompter>,
     ) -> Result<(), runtime::AcpError> {
-        let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
-            runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
-        })?;
-        session
+        let locked = self.lock_session(session_id)?;
+        locked
+            .get()
             .runtime
             .tool_executor_mut()
             .set_question_prompter(prompter);
@@ -3083,7 +3164,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     }
 
     fn handle_slash_command(
-        &mut self,
+        &self,
         session_id: &str,
         input: &str,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
@@ -3098,20 +3179,20 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let response = match &command {
             SlashCommand::Model { model } => {
-                self.inner.handle_acp_model_switch(session_id, model.clone())?
+                let locked = self.lock_session(session_id)?;
+                let mut session = locked.get();
+                self.inner
+                    .handle_acp_model_switch(&mut session, model.clone())?
             }
             SlashCommand::Help => render_repl_help(),
             SlashCommand::Status => {
-                let session = self.inner.sessions.get(session_id).ok_or_else(|| {
-                    runtime::AcpError::invalid_params(format!(
-                        "unknown sessionId: {session_id}"
-                    ))
-                })?;
+                let locked = self.lock_session(session_id)?;
+                let session = locked.get();
                 let _guard = ScopedCurrentDir::change_to(&session.cwd)
                     .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
                 let tracker = UsageTracker::from_session(session.runtime.session());
                 format_status_report(
-                    &self.inner.model,
+                    &self.inner.current_model(),
                     StatusUsage {
                         message_count: session.runtime.session().messages.len(),
                         turns: tracker.turns(),
@@ -3126,11 +3207,8 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 )
             }
             SlashCommand::Cost => {
-                let session = self.inner.sessions.get(session_id).ok_or_else(|| {
-                    runtime::AcpError::invalid_params(format!(
-                        "unknown sessionId: {session_id}"
-                    ))
-                })?;
+                let locked = self.lock_session(session_id)?;
+                let session = locked.get();
                 let usage = UsageTracker::from_session(session.runtime.session())
                     .cumulative_usage();
                 format!(
@@ -3190,14 +3268,24 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
     fn list_sessions(&self) -> Vec<(String, PathBuf)> {
         self.inner
-            .sessions
+            .lock_sessions()
             .iter()
-            .map(|(id, s)| (id.clone(), s.cwd.clone()))
+            .map(|(id, slot)| (id.clone(), slot.cwd.clone()))
             .collect()
     }
 
-    fn close_session(&mut self, session_id: &str) -> bool {
-        if let Some(session) = self.inner.sessions.remove(session_id) {
+    fn close_session(&self, session_id: &str) -> bool {
+        // Unregister first (new requests see `unknown sessionId` right away),
+        // then wait for the session itself: a turn still running on it keeps
+        // the session alive through its `Arc` until it returns.
+        let Some(slot) = self.inner.lock_sessions().remove(session_id) else {
+            return false;
+        };
+        {
+            let session = slot
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Record token usage and session ended event
             let duration_ms = session.started_at.elapsed().as_millis() as u64;
             let usage = session.runtime.usage().cumulative_usage();
@@ -3217,39 +3305,37 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     duration_ms,
                 );
             }
-            true
-        } else {
-            false
         }
+        drop(slot);
+        true
     }
 
-    fn set_model(&mut self, session_id: &str, model_id: &str) -> Result<String, runtime::AcpError> {
+    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, runtime::AcpError> {
+        let locked = self.lock_session(session_id)?;
+        let mut session = locked.get();
         self.inner
-            .handle_acp_model_switch(session_id, Some(model_id.to_string()))
+            .handle_acp_model_switch(&mut session, Some(model_id.to_string()))
     }
 
     fn get_model_info(&self) -> (String, Vec<String>) {
+        let current = self.inner.current_model();
         let config = load_sudocode_config_for_current_dir();
         let config_keys: Vec<String> = config.models.keys().cloned().collect();
         let mut models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
         // Ensure the current model is always present.
-        if !models
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(&self.inner.model))
-        {
-            models.insert(0, self.inner.model.clone());
+        if !models.iter().any(|m| m.eq_ignore_ascii_case(&current)) {
+            models.insert(0, current.clone());
         }
-        (self.inner.model.clone(), models)
+        (current, models)
     }
 
     fn set_permission_mode(
-        &mut self,
+        &self,
         session_id: &str,
         mode: PermissionMode,
     ) -> Result<(), runtime::AcpError> {
-        let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
-            runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
-        })?;
+        let locked = self.lock_session(session_id)?;
+        let mut session = locked.get();
         if let Some(rt) = session.runtime.runtime.as_mut() {
             rt.permission_policy_mut().set_active_mode(mode);
         }
@@ -3257,7 +3343,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     }
 
     fn push_images(
-        &mut self,
+        &self,
         session_id: &str,
         images: &[(String, String)],
     ) -> Result<(), runtime::AcpError> {
@@ -3266,8 +3352,8 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             images.len()
         );
         // Resolve everything that needs runtime-level state BEFORE taking the
-        // mutable session borrow: the active model + sudorouter creds.
-        let active_model = self.inner.model.clone();
+        // session lock: the active model + sudorouter creds.
+        let active_model = self.inner.current_model();
         let active_model_is_vision_capable =
             runtime::model_capabilities::vision_capable(&active_model);
         eprintln!(
@@ -3322,10 +3408,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             blocks.push(block);
         }
 
-        // Single critical section: take the session mut and push all messages.
-        let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
-            runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
-        })?;
+        // Single critical section: lock the session and push all messages.
+        let locked = self.lock_session(session_id)?;
+        let mut session = locked.get();
         for block in blocks {
             let msg = runtime::ConversationMessage {
                 role: runtime::MessageRole::User,
@@ -3343,7 +3428,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     }
 
     fn load_session(
-        &mut self,
+        &self,
         session_id: &str,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
@@ -3395,7 +3480,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let loaded_session_id = handle.id.clone();
         let signal = abort_signal.clone();
-        self.inner.sessions.insert(
+        self.inner.insert_session(
             loaded_session_id.clone(),
             AcpCliSession {
                 cwd: cwd.clone(),
@@ -3411,9 +3496,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 }
 
 impl AcpSdkDelegate {
+    /// Run one turn on an already-locked session.
     fn run_prompt_impl(
-        &mut self,
-        session_id: &str,
+        &self,
+        session: &mut AcpCliSession,
         prompt: String,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
         prompter: Option<&mut dyn runtime::PermissionPrompter>,
@@ -3425,9 +3511,6 @@ impl AcpSdkDelegate {
         ),
         runtime::AcpError,
     > {
-        let session = self.inner.sessions.get_mut(session_id).ok_or_else(|| {
-            runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
-        })?;
         // Reset abort signal for this new turn.
         session.abort_signal.reset();
         let _guard = ScopedCurrentDir::change_to(&session.cwd).map_err(|e| {
@@ -3440,12 +3523,13 @@ impl AcpSdkDelegate {
         }
 
         // Pre-send token estimation and auto-compact logic
+        let fallback_model = self.inner.current_model();
         let model = session
             .runtime
             .session()
             .model
             .as_ref()
-            .unwrap_or(&self.inner.model);
+            .unwrap_or(&fallback_model);
         // Context window comes from the model-capabilities SSOT file (per-model
         // entry, else the file's `default`). No hardcoded fallback here.
         let context_limit = runtime::model_capabilities::context_window_or_default(model) as usize;

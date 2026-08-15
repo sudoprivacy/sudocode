@@ -2,12 +2,12 @@
 //!
 //! Thin wrapper that runs the shared ACP handler chain over stdin/stdout.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_client_protocol_tokio::Stdio;
 
 use crate::acp_sdk_server::{
-    new_abort_registry, run_acp_on_transport, SdkAcpConfig, SdkAcpDelegate, SharedDelegate,
+    new_session_registry, run_acp_on_transport, SdkAcpConfig, SdkAcpDelegate, SharedDelegate,
 };
 
 /// Run the ACP server on stdin/stdout.
@@ -30,8 +30,8 @@ pub async fn run_acp_stdio_server(
     spawn_stdin_eof_watchdog();
     spawn_parent_exit_watchdog();
 
-    let delegate: SharedDelegate = Arc::new(Mutex::new(delegate));
-    run_acp_on_transport(&config, delegate, new_abort_registry(), Stdio::new()).await
+    let delegate: SharedDelegate = Arc::from(delegate);
+    run_acp_on_transport(&config, delegate, new_session_registry(), Stdio::new()).await
 }
 
 /// Watch for stdin's writer end closing and exit when it does.

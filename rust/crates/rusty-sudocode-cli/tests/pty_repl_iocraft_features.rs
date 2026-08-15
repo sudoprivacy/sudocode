@@ -543,13 +543,13 @@ fn config_tree_navigate_back_and_toggle() {
         panic!("sandbox should appear in filtered list: {e}\nPTY:\n{screen}");
     });
     sess.send("\r").expect("select sandbox");
-    sess.expect("Back").unwrap_or_else(|e| {
+    sess.expect("enabled").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("sandbox children with Back: {e}\nPTY:\n{screen}");
+        panic!("sandbox children: {e}\nPTY:\n{screen}");
     });
 
-    // 4. Select [1] ← Back → back to settings level.
-    sess.send("1").expect("select Back");
+    // 4. ← arrow → back to settings level.
+    sess.send("\x1b[D").expect("left arrow");
     sess.expect("Select field").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("back to settings level: {e}\nPTY:\n{screen}");
@@ -568,9 +568,9 @@ fn config_tree_navigate_back_and_toggle() {
         panic!("sandbox children showing enabled: {e}\nPTY:\n{screen}");
     });
 
-    // 6. Select [2] enabled → instant bool toggle (BoolToggle).
-    // DialPad layout: [1] ← Back, [2] enabled, [3] namespaceRestrictions, ...
-    sess.send("2").expect("select enabled");
+    // 6. Select [1] enabled → instant bool toggle (BoolToggle).
+    // DialPad layout: [1] enabled, [2] namespaceRestrictions, ...
+    sess.send("1").expect("select enabled");
     sess.expect("enabled = true").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("bool toggle output: {e}\nPTY:\n{screen}");
@@ -609,8 +609,8 @@ fn config_tree_navigate_back_and_toggle() {
         panic!("permissions children: {e}\nPTY:\n{screen}");
     });
 
-    // 9. Select [2] defaultMode → Enum DialPad (plan, read-only, ...).
-    sess.send("2").expect("select defaultMode");
+    // 9. Select [1] defaultMode → Enum DialPad (plan, read-only, ...).
+    sess.send("1").expect("select defaultMode");
     sess.expect("(?i)select value").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("enum picker for defaultMode: {e}\nPTY:\n{screen}");

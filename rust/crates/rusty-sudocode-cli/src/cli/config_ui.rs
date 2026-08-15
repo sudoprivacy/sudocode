@@ -114,15 +114,8 @@ fn show_schema_level(
 
     let visible: Vec<&FieldSchema> = schema.iter().filter(|f| !f.is_deprecated).collect();
 
-    // Build options — prepend "← Back".
-    let mut keys: Vec<String> = vec![BACK_VALUE.to_string()];
-    let mut options: Vec<QuestionOptionView> = vec![QuestionOptionView {
-        label: "\u{2190} Back".to_string(),
-        value: BACK_VALUE.to_string(),
-        description: None,
-        recommended: false,
-        is_navigable: false,
-    }];
+    let mut keys: Vec<String> = Vec::new();
+    let mut options: Vec<QuestionOptionView> = Vec::new();
 
     for f in &visible {
         let val_summary = current_obj
@@ -155,8 +148,7 @@ fn show_schema_level(
         options,
         allow_custom_input: false,
         custom_input_hint: None,
-        // +1 for the Back option.
-        force_fuzzy_select: visible.len() + 1 > 9,
+        force_fuzzy_select: visible.len() > 9,
         back_value: Some(BACK_VALUE.to_string()),
     };
     ui.show_question(question);

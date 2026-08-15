@@ -282,7 +282,16 @@ impl PermissionPolicy {
         }
 
         let current_mode = self.active_mode();
-        let required_mode = self.required_mode_for(tool_name);
+        // A file tool targeting a path outside the workspace requires
+        // danger-full-access, regardless of its static requirement — otherwise
+        // read-only could read /etc/passwd and workspace-write could write any
+        // absolute path. This is the CLI's only enforcement gate (it has no
+        // dispatch-time enforcer), so it must run here where the input is known.
+        let required_mode = escalate_required_mode_for_path_scope(
+            tool_name,
+            input,
+            self.required_mode_for(tool_name),
+        );
         let ask_rule = Self::find_matching_rule(&self.ask_rules, tool_name, input);
         let allow_rule = Self::find_matching_rule(&self.allow_rules, tool_name, input);
 
@@ -468,7 +477,10 @@ impl PermissionRule {
     }
 
     fn matches(&self, tool_name: &str, input: &str) -> bool {
-        if self.tool_name != tool_name {
+        // Case-insensitive so a `Bash(rm:*)` deny rule matches the runtime
+        // `bash`. Not lower-cased at parse time: several tools are
+        // PascalCase-native (`WebFetch`, `NotebookEdit`, …).
+        if !self.tool_name.eq_ignore_ascii_case(tool_name) {
             return false;
         }
 
@@ -535,6 +547,143 @@ fn find_last_unescaped(value: &str, needle: char) -> Option<usize> {
         }
     }
     None
+}
+
+/// Escalate a file tool's required mode to danger-full-access when its target
+/// resolves outside the workspace. The root is the process CWD, correct for the
+/// standalone CLI (`StdFsBackend`); VFS backends always run at `Allow` /
+/// `DangerFullAccess`, where the escalation is a no-op.
+fn escalate_required_mode_for_path_scope(
+    tool_name: &str,
+    input: &str,
+    base: PermissionMode,
+) -> PermissionMode {
+    if !is_path_scoped_tool(tool_name) {
+        return base;
+    }
+    let Some(path) = extract_path_subject(input) else {
+        return base;
+    };
+    if path_resolves_outside_workspace(&path) {
+        PermissionMode::DangerFullAccess
+    } else {
+        base
+    }
+}
+
+/// Canonical names plus the CC-style aliases the model may emit (`Read`, …).
+fn is_path_scoped_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().replace('-', "_").as_str(),
+        "read_file"
+            | "read"
+            | "write_file"
+            | "write"
+            | "edit_file"
+            | "edit"
+            | "glob_search"
+            | "glob"
+            | "grep_search"
+            | "grep"
+    )
+}
+
+/// Pull the path field from a file tool's input. Only genuine path fields, and
+/// no raw-input fallback, so a non-path argument yields `None` (no escalation).
+fn extract_path_subject(input: &str) -> Option<String> {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(input) else {
+        return None;
+    };
+    for key in [
+        "path",
+        "file_path",
+        "filePath",
+        "notebook_path",
+        "notebookPath",
+        "pattern", // glob_search, when no explicit base path
+    ] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// True when `path` resolves outside the workspace (process CWD), resolving
+/// symlinks and `..`. Fails closed (reports "outside") when the CWD is unknown.
+fn path_resolves_outside_workspace(path: &str) -> bool {
+    use std::path::{Component, Path};
+
+    // Strip shell-ish wrapping punctuation a model might include.
+    let trimmed = path.trim().trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+        )
+    });
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let Ok(cwd_raw) = std::env::current_dir() else {
+        return true; // fail closed
+    };
+    let cwd = cwd_raw.canonicalize().unwrap_or(cwd_raw);
+
+    let candidate = Path::new(trimmed);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        cwd.join(candidate)
+    };
+
+    let resolved = canonicalize_best_effort(&absolute);
+
+    // If canonicalization fell back to a literal path (missing leaf), a lexical
+    // `..` climbing above the workspace still escapes it.
+    let has_parent_escape = {
+        let mut depth: i32 = 0;
+        let mut escapes = false;
+        for comp in resolved.components() {
+            match comp {
+                Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        escapes = true;
+                    }
+                }
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+                Component::Normal(_) => depth += 1,
+            }
+        }
+        escapes
+    };
+
+    has_parent_escape || !resolved.starts_with(&cwd)
+}
+
+/// Canonicalize `path` if it exists; otherwise canonicalize its deepest
+/// existing ancestor and re-attach the trailing (not-yet-created) components.
+fn canonicalize_best_effort(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    let mut tail = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            tail.push(name.to_owned());
+        }
+        if let Ok(resolved_parent) = parent.canonicalize() {
+            let mut out = resolved_parent;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        current = parent;
+    }
+    path.to_path_buf()
 }
 
 fn extract_permission_subject(input: &str) -> Option<String> {
@@ -748,6 +897,173 @@ mod tests {
             PermissionOutcome::Deny {
                 reason: "blocked by hook".to_string(),
             }
+        );
+    }
+
+    // --- Case-insensitive deny/allow rule matching ---
+
+    #[test]
+    fn deny_rule_matches_pascalcase_tool_name() {
+        // `Bash(rm -rf:*)` deny rule must fire against the runtime `bash`.
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["Bash(rm -rf:*)".to_string()],
+            Vec::new(),
+        );
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_permission_rules(&rules);
+
+        assert!(matches!(
+            policy.authorize("bash", r#"{"command":"rm -rf /tmp/x"}"#, None),
+            PermissionOutcome::Deny { reason } if reason.contains("denied by rule")
+        ));
+    }
+
+    #[test]
+    fn deny_rule_lowercase_matches_pascalcase_call() {
+        // Symmetric: lowercase rule, PascalCase incoming tool name.
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["read_file(/etc/passwd)".to_string()],
+            Vec::new(),
+        );
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+            .with_permission_rules(&rules);
+
+        assert!(matches!(
+            policy.authorize("Read_File", r#"{"path":"/etc/passwd"}"#, None),
+            PermissionOutcome::Deny { reason } if reason.contains("denied by rule")
+        ));
+    }
+
+    #[test]
+    fn deny_rule_still_rejects_unrelated_tool() {
+        // Case-insensitivity must not make a `Bash` rule match `write_file`.
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["Bash(rm:*)".to_string()],
+            Vec::new(),
+        );
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite)
+            .with_permission_rules(&rules);
+
+        assert_eq!(
+            policy.authorize("write_file", r#"{"path":"a.txt","content":"x"}"#, None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    // --- File path-scope escalation ---
+
+    fn in_workspace_path(leaf: &str) -> String {
+        std::env::current_dir()
+            .expect("cwd")
+            .join(leaf)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn path_scope_classifies_outside_and_inside() {
+        assert!(super::path_resolves_outside_workspace("/etc/passwd"));
+        assert!(super::path_resolves_outside_workspace("/tmp"));
+        assert!(!super::path_resolves_outside_workspace(&in_workspace_path(
+            "src/lib.rs"
+        )));
+        assert!(!super::path_resolves_outside_workspace("src/lib.rs"));
+        // Relative traversal that climbs above the workspace escapes it.
+        assert!(super::path_resolves_outside_workspace("../../etc/passwd"));
+    }
+
+    #[test]
+    fn read_only_denies_out_of_workspace_read() {
+        let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly);
+
+        assert!(matches!(
+            policy.authorize("read_file", r#"{"path":"/etc/passwd"}"#, None),
+            PermissionOutcome::Deny { reason } if reason.contains("danger-full-access")
+        ));
+    }
+
+    #[test]
+    fn read_only_allows_in_workspace_read() {
+        let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly);
+        let input = format!(r#"{{"path":"{}"}}"#, in_workspace_path("Cargo.toml"));
+
+        assert_eq!(
+            policy.authorize("read_file", &input, None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn workspace_write_denies_out_of_workspace_write() {
+        // workspace-write must not write absolute paths outside the workspace.
+        let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+
+        assert!(matches!(
+            policy.authorize(
+                "write_file",
+                r#"{"path":"/etc/cron.d/evil","content":"x"}"#,
+                None
+            ),
+            PermissionOutcome::Deny { reason } if reason.contains("danger-full-access")
+        ));
+    }
+
+    #[test]
+    fn workspace_write_allows_in_workspace_write() {
+        let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        let input = format!(
+            r#"{{"path":"{}","content":"x"}}"#,
+            in_workspace_path("scratch_out.txt")
+        );
+
+        assert_eq!(
+            policy.authorize("write_file", &input, None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn danger_full_access_reads_anything() {
+        // Default CLI mode: escalation must be a no-op.
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly);
+
+        assert_eq!(
+            policy.authorize("read_file", r#"{"path":"/etc/passwd"}"#, None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn out_of_workspace_write_prompts_when_prompter_present() {
+        let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        let mut prompter = RecordingPrompter {
+            seen: Vec::new(),
+            allow: true,
+        };
+
+        let outcome = policy.authorize(
+            "write_file",
+            r#"{"path":"/etc/cron.d/evil","content":"x"}"#,
+            Some(&mut prompter),
+        );
+
+        assert_eq!(outcome, PermissionOutcome::Allow);
+        assert_eq!(prompter.seen.len(), 1);
+        assert_eq!(
+            prompter.seen[0].required_mode,
+            PermissionMode::DangerFullAccess
         );
     }
 

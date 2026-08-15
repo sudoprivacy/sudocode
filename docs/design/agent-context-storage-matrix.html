@@ -42,6 +42,12 @@
   td.item{font-weight:600;color:#f1f5f9;background:rgba(23,32,51,.35)}
   td.cc{color:#cbd5e1}
   .path{color:#a5b4fc;overflow-wrap:anywhere}
+  /* per-element sub-blocks inside a cell */
+  .el{display:block;margin:4px 0;padding-left:9px;border-left:2px solid var(--line);line-height:1.45}
+  .el:first-child{margin-top:0}
+  .was{color:var(--muted)}
+  .to{color:#7dd3fc}
+  .arw{color:var(--accent);font-weight:700;margin:0 3px}
   /* hover tooltip for uncertain / notes */
   .tip{position:relative;border-bottom:1px dotted var(--q);cursor:help;color:var(--q)}
   .tip .tipbox{visibility:hidden;opacity:0;transition:.12s;position:absolute;left:0;top:1.6em;z-index:9;
@@ -105,9 +111,24 @@
   <td class="mega" rowspan="2">Identity</td>
   <td class="item">Primary key</td>
   <td class="cc">Sanitized <b>cwd</b> → <span class="path">~/.claude/projects/&lt;C--Users-…&gt;/</span> (Win) / <span class="path">-Users-…</span> (POSIX). One implicit agent per project.</td>
-  <td>cwd <b>fingerprint</b> (FNV-1a 64-bit, 16-hex) → <span class="path">&lt;cwd&gt;/.scode/sessions/&lt;fp&gt;/</span>. cwd-primary, local FS. <span class="b partial">partial</span><br><small><b>mirror →</b> (Q1 resolved) sudocode's <code>session-id</code> → the flat <span class="path">/sessions/&lt;session-id&gt;</span>; the cwd/repo tie → a <b>session→repo DT_LINK</b>, <i>not</i> a hash sub-partition (the fingerprint's per-repo role retires); <code>agent-name</code> is new (today implicit = one profile); <code>pid</code> = ephemeral runtime handle. <b>session-id ≠ pid.</b></small></td>
-  <td>conversation-id (SQLite row) + <code>extra.workspace</code> / <code>extra.backend</code>. <span class="b partial">partial</span><br><small>Q1: map conversation-id → <b>session-id</b> (durable), <i>not</i> pid; pid is registered at runtime by MAS keyed by session-id.</small></td>
-  <td><b>Three IDs</b> (nexus Q1): <b>agent-name</b> (durable principal) · <b>session-id</b> (durable UUID, <code>--resume</code> key, spans N pids) · <b>pid</b> (ephemeral, one boot, runtime handle). <b>session-id ≠ pid.</b> <span class="path">/agents/{name}/</span> · <span class="path">/sessions/&lt;sid&gt;</span> · <span class="path">/proc/{pid}/</span>. <span class="b ok">given</span></td>
+  <td>
+    <div class="el"><span class="was">cwd <b>fingerprint</b> (FNV-16hex) <span class="path">.scode/sessions/&lt;fp&gt;/</span></span> <span class="arw">→</span> <span class="to">retires — the per-repo tie becomes a <b>session→repo DT_LINK</b></span></div>
+    <div class="el"><span class="was">local <code>session-id</code></span> <span class="arw">→</span> <span class="to">flat <span class="path">/sessions/&lt;session-id&gt;/</span></span></div>
+    <div class="el"><span class="was">no agent-name (implicit single profile)</span> <span class="arw">→</span> <span class="to">new durable principal</span></div>
+    <div class="el"><span class="was">no explicit pid</span> <span class="arw">→</span> <span class="to">ephemeral run handle</span></div>
+    <span class="b partial">partial</span></td>
+  <td>
+    <div class="el"><span class="was">conversation-id (SQLite row)</span> <span class="arw">→</span> <span class="to">session-id (durable), <i>not</i> pid</span></div>
+    <div class="el"><span class="was"><code>extra.workspace</code> / <code>extra.backend</code></span> <span class="arw">→</span> <span class="to">repo DT_LINK + <code>owner</code> attr</span></div>
+    <div class="el"><span class="was">no agent-name</span> <span class="arw">→</span> <span class="to">new durable principal</span></div>
+    <div class="el"><span class="was">pid</span> <span class="arw">→</span> <span class="to">runtime-registered by MAS, keyed by session-id</span></div>
+    <span class="b partial">partial</span></td>
+  <td>
+    <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>
+    <div class="el"><b>session-id</b> — durable UUID, the <code>--resume</code> key; spans N pids. <span class="path">/sessions/&lt;sid&gt;/</span></div>
+    <div class="el"><b>pid</b> — ephemeral run handle, one boot; reaped on exit. <span class="path">/proc/{pid}/</span></div>
+    <div class="el" style="border-left-color:var(--q)"><b>session-id ≠ pid</b> (§2.3 name-collision fixed — nexus #4564)</div>
+    <span class="b ok">given</span></td>
 </tr>
 <tr>
   <td class="item">Image vs runtime split</td>

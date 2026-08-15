@@ -1984,11 +1984,13 @@ impl IocraftQuestionPrompter {
                     value: option.value.clone(),
                     description: option.description.clone(),
                     recommended: option.recommended,
+                    is_navigable: false,
                 })
                 .collect(),
             allow_custom_input: field.allow_custom_input,
             custom_input_hint: field.custom_input_hint.clone(),
             force_fuzzy_select: false,
+            back_value: None,
         });
     }
 
@@ -2241,6 +2243,7 @@ fn run_repl_iocraft_dispatch(
                                 value: m.clone(),
                                 description: None,
                                 recommended: *m == current,
+                                is_navigable: false,
                             })
                             .collect();
                         pending_slash_selection = Some(show_slash_selection(
@@ -2255,6 +2258,7 @@ fn run_repl_iocraft_dispatch(
                                 allow_custom_input: true,
                                 custom_input_hint: Some("or type a model name".to_string()),
                                 force_fuzzy_select: false,
+                                back_value: None,
                             },
                             models,
                             |model_name, cli, out| {

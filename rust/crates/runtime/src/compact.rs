@@ -641,12 +641,49 @@ fn summarize_messages_local(messages: &[ConversationMessage]) -> String {
     lines.join("\n")
 }
 
+/// Section headers emitted by [`merge_compact_summaries`]. Also recognized on
+/// re-compaction so prior merge scaffolding can be unwrapped instead of
+/// re-nested (see [`flatten_merged_highlights`]).
+const MERGED_PREVIOUS_CONTEXT_HEADER: &str = "- Previously compacted context:";
+const MERGED_NEW_CONTEXT_HEADER: &str = "- Newly compacted context:";
+
+/// Unwrap highlights that were produced by an earlier
+/// [`merge_compact_summaries`] pass: drop its section headers and the one
+/// indentation level they added, keeping the content lines verbatim.
+///
+/// Without this, every re-compaction wraps the prior summary in another
+/// "- Previously compacted context:" layer, so the summary gains a header
+/// plus two spaces of indent on every line per compaction cycle — nesting
+/// that compounds for the lifetime of a long session. Highlights that did
+/// not come from a merged summary (no section header present) are returned
+/// unchanged. The loop collapses summaries that already carry multiple
+/// nesting layers (persisted by older builds) down to a single level.
+fn flatten_merged_highlights(mut highlights: Vec<String>) -> Vec<String> {
+    while highlights
+        .iter()
+        .any(|line| line == MERGED_PREVIOUS_CONTEXT_HEADER || line == MERGED_NEW_CONTEXT_HEADER)
+    {
+        highlights = highlights
+            .into_iter()
+            .filter(|line| {
+                line != MERGED_PREVIOUS_CONTEXT_HEADER && line != MERGED_NEW_CONTEXT_HEADER
+            })
+            .map(|line| line.strip_prefix("  ").map_or(line.clone(), str::to_string))
+            .collect();
+    }
+    highlights
+}
+
 fn merge_compact_summaries(existing_summary: Option<&str>, new_summary: &str) -> String {
     let Some(existing_summary) = existing_summary else {
         return new_summary.to_string();
     };
 
-    let previous_highlights = extract_summary_highlights(existing_summary);
+    // Flatten prior merge scaffolding before re-wrapping, so repeated
+    // compaction keeps exactly one "Previously compacted context" section
+    // instead of nesting a new layer per cycle.
+    let previous_highlights =
+        flatten_merged_highlights(extract_summary_highlights(existing_summary));
     let new_formatted_summary = format_compact_summary(new_summary);
     let new_highlights = extract_summary_highlights(&new_formatted_summary);
     let new_timeline = extract_summary_timeline(&new_formatted_summary);
@@ -654,7 +691,7 @@ fn merge_compact_summaries(existing_summary: Option<&str>, new_summary: &str) ->
     let mut lines = vec!["<summary>".to_string(), "Conversation summary:".to_string()];
 
     if !previous_highlights.is_empty() {
-        lines.push("- Previously compacted context:".to_string());
+        lines.push(MERGED_PREVIOUS_CONTEXT_HEADER.to_string());
         lines.extend(
             previous_highlights
                 .into_iter()
@@ -663,7 +700,7 @@ fn merge_compact_summaries(existing_summary: Option<&str>, new_summary: &str) ->
     }
 
     if !new_highlights.is_empty() {
-        lines.push("- Newly compacted context:".to_string());
+        lines.push(MERGED_NEW_CONTEXT_HEADER.to_string());
         lines.extend(new_highlights.into_iter().map(|line| format!("  {line}")));
     }
 
@@ -1018,6 +1055,176 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens, 4);
         assert_eq!(usage.cache_read_input_tokens, 7);
         assert_eq!(usage.cost_units, Some(350));
+    }
+
+    /// Regression: repeated re-compaction must not nest the summary one
+    /// level deeper per cycle. Before the fix, every merge re-wrapped the
+    /// prior merged summary (headers included) under a fresh
+    /// "- Previously compacted context:" line with two more spaces of
+    /// indent, so the summary gained a nesting layer per compaction.
+    #[test]
+    fn repeated_merges_flatten_prior_context_instead_of_nesting() {
+        let mut summary =
+            "<summary>\nConversation summary:\n- Fact from round 0.\n</summary>".to_string();
+        for round in 1..=5 {
+            summary = super::merge_compact_summaries(
+                Some(&summary),
+                &format!(
+                    "<summary>\nConversation summary:\n- Fact from round {round}.\n</summary>"
+                ),
+            );
+        }
+
+        assert_eq!(
+            summary.matches("- Previously compacted context:").count(),
+            1,
+            "prior context must stay in exactly one flat section: {summary}"
+        );
+        assert_eq!(
+            summary.matches("- Newly compacted context:").count(),
+            1,
+            "only the latest round is 'newly' compacted: {summary}"
+        );
+        assert!(
+            !summary.contains("  - Previously compacted context:")
+                && !summary.contains("  - Newly compacted context:"),
+            "no indented (nested) section headers may remain: {summary}"
+        );
+        // Flattening must not drop information: every round's fact survives.
+        for round in 0..=5 {
+            assert!(
+                summary.contains(&format!("Fact from round {round}.")),
+                "fact from round {round} must survive re-compaction: {summary}"
+            );
+        }
+        // Content lines sit at exactly one indent level under their section.
+        assert!(
+            summary.contains("  - Fact from round 0.") && !summary.contains("    - Fact"),
+            "indentation must stay at one level: {summary}"
+        );
+    }
+
+    /// Summaries persisted by builds that had the nesting bug collapse to a
+    /// single flat level on the next compaction instead of nesting further.
+    #[test]
+    fn merge_flattens_legacy_nested_summaries() {
+        let legacy = [
+            "<summary>",
+            "Conversation summary:",
+            "- Previously compacted context:",
+            "  - Previously compacted context:",
+            "    - Old fact A.",
+            "  - Newly compacted context:",
+            "    - Mid fact B.",
+            "- Newly compacted context:",
+            "  - Recent fact C.",
+            "</summary>",
+        ]
+        .join("\n");
+
+        let merged = super::merge_compact_summaries(
+            Some(&legacy),
+            "<summary>\nConversation summary:\n- Fresh fact D.\n</summary>",
+        );
+
+        assert_eq!(
+            merged.matches("- Previously compacted context:").count(),
+            1,
+            "legacy nesting must collapse to one section: {merged}"
+        );
+        assert_eq!(
+            merged.matches("- Newly compacted context:").count(),
+            1,
+            "legacy nesting must collapse to one section: {merged}"
+        );
+        for fact in [
+            "- Old fact A.",
+            "- Mid fact B.",
+            "- Recent fact C.",
+            "- Fresh fact D.",
+        ] {
+            assert!(
+                merged.contains(fact),
+                "flattening must not drop {fact:?}: {merged}"
+            );
+        }
+        assert!(
+            !merged.contains("    -"),
+            "no content may remain nested deeper than one level: {merged}"
+        );
+    }
+
+    /// End-to-end regression through the real compaction pipeline: compact a
+    /// session five times in a row and assert the stored summary stays flat
+    /// (one "Previously compacted context" section) while context from the
+    /// very first round is still present.
+    #[test]
+    fn repeated_sync_compaction_keeps_summary_flat_and_preserves_early_context() {
+        let config = CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("start ".repeat(200)),
+            // Distinctive tool name: the local summarizer records tool names
+            // verbatim, so this marker proves round-0 context survives.
+            ConversationMessage::tool_result("t0", "round-zero-tool", "x".repeat(800), false),
+            ConversationMessage::user_text("recent 0"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept 0".to_string(),
+            }]),
+        ];
+
+        let mut result = compact_session_sync(&session, config);
+        assert!(result.removed_message_count > 0, "round 0 must compact");
+
+        for round in 1..=4 {
+            let mut next = result.compacted_session.clone();
+            next.messages.extend([
+                ConversationMessage::user_text(format!("bulk {round} ").repeat(200)),
+                ConversationMessage::tool_result(
+                    format!("t{round}"),
+                    format!("round-{round}-tool"),
+                    "y".repeat(800),
+                    false,
+                ),
+                ConversationMessage::user_text(format!("recent {round}")),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: format!("kept {round}"),
+                }]),
+            ]);
+            result = compact_session_sync(&next, config);
+            assert!(
+                result.removed_message_count > 0,
+                "round {round} must compact"
+            );
+        }
+
+        let ContentBlock::Text { text: summary } = &result.compacted_session.messages[0].blocks[0]
+        else {
+            panic!("first message must be the text summary");
+        };
+
+        assert_eq!(
+            summary.matches("Previously compacted context:").count(),
+            1,
+            "summary must keep exactly one flat prior-context section: {summary}"
+        );
+        assert_eq!(
+            summary.matches("Newly compacted context:").count(),
+            1,
+            "summary must keep exactly one newly-compacted section: {summary}"
+        );
+        assert!(
+            summary.contains("round-zero-tool"),
+            "round-0 context must survive five compaction cycles: {summary}"
+        );
+        assert!(
+            summary.contains("round-4-tool"),
+            "latest round context must be present: {summary}"
+        );
     }
 
     #[test]

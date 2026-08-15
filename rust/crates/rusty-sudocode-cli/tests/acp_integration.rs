@@ -441,9 +441,16 @@ async fn scenario_initialize(client: &mut AcpTestClient) {
         agent_info.get("version").is_some(),
         "agentInfo should include version"
     );
-    assert!(
-        result.get("agentCapabilities").is_some(),
-        "response should include agentCapabilities"
+    let caps = result
+        .get("agentCapabilities")
+        .expect("response should include agentCapabilities");
+    // `session/load` is implemented (see the resume-across-processes test
+    // below); clients such as sudowork / apeiron gate reconnect-after-restart
+    // on this flag, so it must be advertised.
+    assert_eq!(
+        caps["loadSession"].as_bool(),
+        Some(true),
+        "agentCapabilities.loadSession must be advertised: {caps}"
     );
 
     // Image-handling SSOT: assert the `_meta.sudocode.imageCapability` extension
@@ -589,7 +596,9 @@ async fn scenario_session_list(client: &mut AcpTestClient, expected_session_id: 
     );
 }
 
-async fn scenario_session_load_not_supported(client: &mut AcpTestClient) {
+/// `session/load` of an id that was never persisted must fail cleanly (it
+/// must not mint a fresh session under that id).
+async fn scenario_session_load_unknown_session_errors(client: &mut AcpTestClient) {
     let (notifs, resp) = client
         .send_request("session/load", json!({ "sessionId": "nonexistent" }))
         .await;
@@ -815,7 +824,7 @@ async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace
     scenario_session_prompt_streaming(client, &session_id).await;
     scenario_session_prompt_with_image_attachment(client, &session_id).await;
     scenario_session_list(client, &session_id).await;
-    scenario_session_load_not_supported(client).await;
+    scenario_session_load_unknown_session_errors(client).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
     // Run per-turn usage test last with a fresh session
@@ -981,9 +990,48 @@ async fn acp_stdio_resume_restores_history_across_reconnect() {
          a fresh/empty session would omit it. body: {}",
         last.raw_body
     );
+    // The full transcript is restored, not just the last user turn: the
+    // assistant reply from process A must be in the request as well.
+    assert!(
+        last.raw_body.contains("\"role\":\"assistant\""),
+        "resumed model request must carry process A's assistant turn; body: {}",
+        last.raw_body
+    );
+
+    // The loaded session is a first-class live session again.
+    scenario_session_list(&mut client, &session_id).await;
+    scenario_session_load_rejects_other_cwd(&mut client, &workspace, &session_id).await;
 
     client.shutdown().await;
     workspace.cleanup();
+}
+
+/// Boundary of `session/load`: sessions are stored per workspace
+/// (`<cwd>/.scode/sessions/<fingerprint(cwd)>/<id>.jsonl`) and a load
+/// validates the persisted `workspace_root`, so loading the same id from a
+/// *different* cwd is rejected rather than silently re-homed. Cross-cwd
+/// continuation is a fork, not a load.
+async fn scenario_session_load_rejects_other_cwd(
+    client: &mut AcpTestClient,
+    workspace: &TestWorkspace,
+    session_id: &str,
+) {
+    let other_cwd = workspace.root.join("elsewhere");
+    fs::create_dir_all(&other_cwd).expect("create other cwd");
+    let (_, cross_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id,
+                "cwd": other_cwd.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        cross_resp.get("error").is_some(),
+        "session/load from another cwd must be rejected, got: {cross_resp}"
+    );
 }
 
 // ---------------------------------------------------------------------------

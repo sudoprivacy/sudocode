@@ -1141,6 +1141,12 @@ pub(crate) async fn run_acp_on_transport(
                         .agent_info(Implementation::new("scode", &version))
                         .agent_capabilities(
                             AgentCapabilities::new()
+                                // `session/load` re-opens a persisted session
+                                // (same cwd) in a fresh process; the handler
+                                // below has always existed, the flag had just
+                                // never been advertised, so spec-conformant
+                                // clients never tried it.
+                                .load_session(true)
                                 .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(
                                     SessionCapabilities::new()

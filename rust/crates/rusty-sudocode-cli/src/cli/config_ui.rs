@@ -40,17 +40,20 @@ pub(crate) fn build_config_tree_handler(
                 value: "settings.json".to_string(),
                 description: None,
                 recommended: false,
+                is_navigable: true,
             },
             QuestionOptionView {
                 label: format!("sudocode.json  {DIM}{}{RESET}", sudocode_path.display()),
                 value: "sudocode.json".to_string(),
                 description: None,
                 recommended: false,
+                is_navigable: true,
             },
         ],
         allow_custom_input: false,
         custom_input_hint: None,
         force_fuzzy_select: false,
+        back_value: None,
     };
     ui.show_question(question);
 
@@ -118,23 +121,22 @@ fn show_schema_level(
         value: BACK_VALUE.to_string(),
         description: None,
         recommended: false,
+        is_navigable: false,
     }];
 
     for f in &visible {
         let val_summary = current_obj
             .and_then(|obj| obj.get(f.key))
             .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
-        let hint = if f.children.is_some() && f.field_type == FieldType::Object {
-            " \u{25b8}"
-        } else {
-            ""
-        };
+        let is_object = f.children.is_some() && f.field_type == FieldType::Object;
+        let hint = if is_object { " \u{25b8}" } else { "" };
         keys.push(f.key.to_string());
         options.push(QuestionOptionView {
             label: format!("{}{hint}  {DIM}{val_summary}{RESET}", f.key),
             value: f.key.to_string(),
             description: Some(f.description.to_string()),
             recommended: false,
+            is_navigable: is_object,
         });
     }
 
@@ -155,6 +157,7 @@ fn show_schema_level(
         custom_input_hint: None,
         // +1 for the Back option.
         force_fuzzy_select: visible.len() + 1 > 9,
+        back_value: Some(BACK_VALUE.to_string()),
     };
     ui.show_question(question);
 
@@ -274,6 +277,7 @@ fn handle_leaf_edit(
                     value: o.clone(),
                     description: None,
                     recommended: o == current_str,
+                    is_navigable: false,
                 })
                 .collect();
             let question = QuestionPromptView {
@@ -290,6 +294,7 @@ fn handle_leaf_edit(
                 allow_custom_input: false,
                 custom_input_hint: None,
                 force_fuzzy_select: false,
+                back_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();
@@ -330,6 +335,7 @@ fn handle_leaf_edit(
                     value: m.clone(),
                     description: None,
                     recommended: m == current_str,
+                    is_navigable: false,
                 })
                 .collect();
             let question = QuestionPromptView {
@@ -346,6 +352,7 @@ fn handle_leaf_edit(
                 allow_custom_input: true,
                 custom_input_hint: Some("or type a model name".to_string()),
                 force_fuzzy_select: true,
+                back_value: None,
             };
             ui.show_question(question);
             let file_path = file_path.to_path_buf();

@@ -357,6 +357,8 @@ pub struct QuestionOptionView {
     pub value: String,
     pub description: Option<String>,
     pub recommended: bool,
+    /// When true, Right arrow drills into this option (tree navigation).
+    pub is_navigable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,6 +374,9 @@ pub struct QuestionPromptView {
     /// When true, always use FuzzySelect regardless of option count.
     /// Used for config picker and other lists that benefit from search.
     pub force_fuzzy_select: bool,
+    /// When set, Left arrow submits this value as the answer (← Back).
+    /// Right arrow always submits the current selection (same as Enter).
+    pub back_value: Option<String>,
 }
 
 /// ChromeSlot: primary interaction area between the two separators.
@@ -452,6 +457,12 @@ impl FuzzySelectState {
 
     fn selected_value(&self) -> Option<String> {
         self.filtered.get(self.cursor).map(|&i| (i + 1).to_string())
+    }
+
+    fn selected_option(&self) -> Option<&QuestionOptionView> {
+        self.filtered
+            .get(self.cursor)
+            .and_then(|&i| self.question.options.get(i))
     }
 
     fn format_panel(&self) -> String {
@@ -609,8 +620,13 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
         ));
     }
     let max_digit = question.options.len().min(9);
+    let arrow_hint = if question.back_value.is_some() {
+        "\u{2190}\u{2192} back/open \u{00b7} "
+    } else {
+        ""
+    };
     lines.push(format!(
-        "{}  \u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select \u{00b7} Enter confirm{}",
+        "{}  {arrow_hint}\u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select \u{00b7} Enter confirm{}",
         crate::render::DIM,
         crate::render::RESET,
     ));
@@ -1025,6 +1041,53 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             fs.move_down();
                         }
                     }
+                    // ── Left — submit back_value (tree navigation) ────
+                    KeyCode::Left if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) => {
+                        let back = match &current_slot {
+                            InputSlot::DialPad(q) | InputSlot::FuzzySelect(FuzzySelectState { question: q, .. }) => {
+                                q.back_value.clone()
+                            }
+                            _ => None,
+                        };
+                        if let Some(val) = back {
+                            let _ = input_tx_for_events.send(InputEvent::QuestionAnswer(val));
+                            input_slot.set(InputSlot::TextInput);
+                            input_value.set(String::new());
+                        }
+                    }
+                    // ── Right — drill into navigable option ───────────
+                    KeyCode::Right if matches!(current_slot, InputSlot::DialPad(_)) => {
+                        if let InputSlot::DialPad(ref q) = current_slot {
+                            let selected = dialpad_cursor.get();
+                            if q.options.get(selected).is_some_and(|o| o.is_navigable) {
+                                submit_dialpad_selection(q, selected, &input_tx_for_events);
+                                input_slot.set(InputSlot::TextInput);
+                                input_value.set(String::new());
+                            }
+                        }
+                    }
+                    KeyCode::Right if matches!(current_slot, InputSlot::FuzzySelect(_)) => {
+                        let should_submit = {
+                            let slot = input_slot.read();
+                            if let InputSlot::FuzzySelect(ref fs) = *slot {
+                                fs.selected_option().is_some_and(|o| o.is_navigable)
+                            } else {
+                                false
+                            }
+                        };
+                        if should_submit {
+                            let slot = input_slot.read();
+                            if let InputSlot::FuzzySelect(ref fs) = *slot {
+                                if let Some(option) = fs.selected_option() {
+                                    let _ = input_tx_for_events
+                                        .send(InputEvent::QuestionAnswer(option.value.clone()));
+                                }
+                            }
+                            drop(slot);
+                            input_slot.set(InputSlot::TextInput);
+                            input_value.set(String::new());
+                        }
+                    }
                     // ── Up/Down — TextInput history ────────────────────
                     KeyCode::Up if matches!(current_slot, InputSlot::TextInput) => {
                         let h = history.read();
@@ -1361,17 +1424,20 @@ mod tests {
                     value: "project".to_string(),
                     description: None,
                     recommended: true,
+                    is_navigable: false,
                 },
                 QuestionOptionView {
                     label: "User".to_string(),
                     value: "user".to_string(),
                     description: None,
                     recommended: false,
+                    is_navigable: false,
                 },
             ],
             allow_custom_input: false,
             custom_input_hint: None,
             force_fuzzy_select: false,
+            back_value: None,
         }
     }
 
@@ -1387,6 +1453,7 @@ mod tests {
             allow_custom_input: true,
             custom_input_hint: None,
             force_fuzzy_select: false,
+            back_value: None,
         };
 
         assert_eq!(

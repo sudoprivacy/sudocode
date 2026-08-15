@@ -237,6 +237,14 @@ impl TestEnv {
         }
     }
 
+    /// Config home directory for the test environment (where settings.json / sudocode.json live).
+    pub fn config_home(&self) -> &std::path::Path {
+        match &self.backend {
+            Backend::Mock { workspace, .. } => &workspace.config_home,
+            Backend::Live { config_home, .. } => config_home,
+        }
+    }
+
     /// How many `/v1/messages` requests the mock server captured.
     /// Panics in live mode — request counting is mock-only.
     pub fn captured_message_count(&self) -> usize {

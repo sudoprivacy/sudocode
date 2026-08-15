@@ -55,6 +55,7 @@ pub(crate) fn build_config_tree_handler(
     ui.show_question(question);
 
     let ui2 = ui.clone();
+    let picker_paths = (settings_path.clone(), sudocode_path.clone());
     SlashSelectionHandler(Box::new(move |answer: &str, _cli, _out| {
         let resolved = resolve_answer(answer, &items);
         match resolved.as_str() {
@@ -64,6 +65,8 @@ pub(crate) fn build_config_tree_handler(
                 &settings_path,
                 "settings.json",
                 Vec::new(),
+                None,
+                picker_paths.clone(),
             )),
             "sudocode.json" => Some(show_schema_level(
                 &ui2,
@@ -71,6 +74,8 @@ pub(crate) fn build_config_tree_handler(
                 &sudocode_path,
                 "sudocode.json",
                 Vec::new(),
+                None,
+                picker_paths.clone(),
             )),
             _ => None,
         }
@@ -79,13 +84,23 @@ pub(crate) fn build_config_tree_handler(
 
 // ── schema level navigation ─────────────────────────────────────────
 
+/// Sentinel value used as the DialPad option for "← Back".
+const BACK_VALUE: &str = "\x00__back__";
+
 /// Show a DialPad/FuzzySelect for one level of the schema tree.
+///
+/// `parent_schema` + parent breadcrumb (one level shorter) are used to
+/// build the "← Back" option. At the top file-level `parent_schema` is
+/// `None` and Back returns to the file picker.
 fn show_schema_level(
     ui: &UiCommandSender,
     schema: &'static [FieldSchema],
     file_path: &Path,
     file_label: &str,
     breadcrumb: Vec<String>,
+    parent_schema: Option<&'static [FieldSchema]>,
+    // Paths needed to rebuild the file picker on "Back" from top level.
+    file_picker_paths: (PathBuf, PathBuf),
 ) -> SlashSelectionHandler {
     let json_content = std::fs::read_to_string(file_path).unwrap_or_else(|_| "{}".to_string());
     let json_root: serde_json::Value =
@@ -95,27 +110,33 @@ fn show_schema_level(
     let current_obj = navigate_json(&json_root, &breadcrumb);
 
     let visible: Vec<&FieldSchema> = schema.iter().filter(|f| !f.is_deprecated).collect();
-    let keys: Vec<String> = visible.iter().map(|f| f.key.to_string()).collect();
 
-    let options: Vec<QuestionOptionView> = visible
-        .iter()
-        .map(|f| {
-            let val_summary = current_obj
-                .and_then(|obj| obj.get(f.key))
-                .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
-            let hint = if f.children.is_some() && f.field_type == FieldType::Object {
-                " \u{25b8}"
-            } else {
-                ""
-            };
-            QuestionOptionView {
-                label: format!("{}{hint}  {DIM}{val_summary}{RESET}", f.key),
-                value: f.key.to_string(),
-                description: Some(f.description.to_string()),
-                recommended: false,
-            }
-        })
-        .collect();
+    // Build options — prepend "← Back".
+    let mut keys: Vec<String> = vec![BACK_VALUE.to_string()];
+    let mut options: Vec<QuestionOptionView> = vec![QuestionOptionView {
+        label: "\u{2190} Back".to_string(),
+        value: BACK_VALUE.to_string(),
+        description: None,
+        recommended: false,
+    }];
+
+    for f in &visible {
+        let val_summary = current_obj
+            .and_then(|obj| obj.get(f.key))
+            .map_or_else(|| "(not set)".to_string(), |v| truncate_json_value(v));
+        let hint = if f.children.is_some() && f.field_type == FieldType::Object {
+            " \u{25b8}"
+        } else {
+            ""
+        };
+        keys.push(f.key.to_string());
+        options.push(QuestionOptionView {
+            label: format!("{}{hint}  {DIM}{val_summary}{RESET}", f.key),
+            value: f.key.to_string(),
+            description: Some(f.description.to_string()),
+            recommended: false,
+        });
+    }
 
     let title_path = if breadcrumb.is_empty() {
         file_label.to_string()
@@ -132,7 +153,8 @@ fn show_schema_level(
         options,
         allow_custom_input: false,
         custom_input_hint: None,
-        force_fuzzy_select: visible.len() > 9,
+        // +1 for the Back option.
+        force_fuzzy_select: visible.len() + 1 > 9,
     };
     ui.show_question(question);
 
@@ -143,6 +165,31 @@ fn show_schema_level(
 
     SlashSelectionHandler(Box::new(move |answer: &str, cli, out| {
         let selected = resolve_answer(answer, &keys);
+
+        // ← Back
+        if selected == BACK_VALUE {
+            return if let Some(parent) = parent_schema {
+                // Go up one level.
+                let mut parent_bc = breadcrumb2.clone();
+                parent_bc.pop();
+                Some(show_schema_level(
+                    &ui2,
+                    parent,
+                    &file_path,
+                    &file_label,
+                    parent_bc,
+                    None, // grandparent unknown — will go to file picker
+                    file_picker_paths.clone(),
+                ))
+            } else {
+                // At top file-level → back to file picker.
+                Some(build_config_tree_handler(
+                    &ui2,
+                    file_picker_paths.0.clone(),
+                    file_picker_paths.1.clone(),
+                ))
+            };
+        }
 
         let Some(field) = schema.iter().find(|f| f.key == selected) else {
             out.println(&format!("{DIM}Unknown field: {selected}{RESET}"));
@@ -160,6 +207,8 @@ fn show_schema_level(
                     &file_path,
                     &file_label,
                     next_bc,
+                    Some(schema),
+                    file_picker_paths.clone(),
                 ));
             }
         }

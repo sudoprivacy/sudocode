@@ -862,7 +862,7 @@ fn print_system_prompt(
         date,
         env::consts::OS,
         "unknown",
-        model_family_identity_for(model),
+        resolve_model_identity(model),
     )?;
     // Mirror what build_runtime_with_plugin_state does for live sessions:
     // append active SudoCode plugin capabilities so system-prompt output
@@ -5849,7 +5849,7 @@ fn build_system_prompt_for(
         runtime::today_local(),
         env::consts::OS,
         "unknown",
-        model_family_identity_for(model),
+        resolve_model_identity(model),
     )?;
     // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
     // set, prepend the ported CC-fork coordinator role prompt so it
@@ -5857,6 +5857,27 @@ fn build_system_prompt_for(
     // runtime::coordinator_mode for the full port.
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     Ok(prompt)
+}
+
+/// Resolve model identity for the system prompt from sudocode.json SSOT.
+///
+/// Looks up `models.<id>.name` in the loaded config; falls back to the
+/// provider-based enum identity if no entry exists.
+fn resolve_model_identity(model: &str) -> runtime::ModelFamilyIdentity {
+    let config = load_sudocode_config_for_current_dir();
+    // Try exact match by alias key.
+    if let Some(entry) = config.models.get(model) {
+        return runtime::ModelFamilyIdentity::Named(entry.name.clone());
+    }
+    // Case-insensitive alias search.
+    let lower = model.to_ascii_lowercase();
+    for entry in config.models.values() {
+        if entry.alias.eq_ignore_ascii_case(model) || entry.name.to_ascii_lowercase() == lower {
+            return runtime::ModelFamilyIdentity::Named(entry.name.clone());
+        }
+    }
+    // Fallback: use model ID as display name (better than a generic label).
+    runtime::ModelFamilyIdentity::Named(model.to_string())
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {

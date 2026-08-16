@@ -881,20 +881,29 @@ fn format_hook_start_error(
 
 fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(windows)]
-    let command_builder = {
+    let mut command_builder = {
         let mut command_builder = Command::new("cmd");
         command_builder.arg("/C").arg(command);
-        CommandWithStdin::new(command_builder)
+        command_builder
     };
 
     #[cfg(not(windows))]
-    let command_builder = {
+    let mut command_builder = {
         let mut command_builder = Command::new("sh");
         command_builder.arg("-lc").arg(command);
-        CommandWithStdin::new(command_builder)
+        command_builder
     };
 
-    command_builder
+    // Hooks run in the session's workspace root, not the process cwd: under
+    // ACP several sessions in different directories run turns at once and
+    // the process cwd belongs to none of them (see `crate::workspace_root`).
+    // Outside a scope this is the process cwd, i.e. what `sh` inherited
+    // before.
+    if let Ok(root) = crate::workspace_root::current_workspace_root() {
+        command_builder.current_dir(root);
+    }
+
+    CommandWithStdin::new(command_builder)
 }
 
 struct CommandWithStdin {

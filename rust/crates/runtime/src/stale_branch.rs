@@ -50,8 +50,12 @@ pub enum StaleBranchAction {
     MergeForward,
 }
 
+/// Check `branch` against `main_ref` in the current workspace root (the
+/// turn's scoped root, else the process cwd).
 pub fn check_freshness(branch: &str, main_ref: &str) -> BranchFreshness {
-    check_freshness_in(branch, main_ref, Path::new("."))
+    let root = crate::workspace_root::current_workspace_root()
+        .unwrap_or_else(|_| Path::new(".").to_path_buf());
+    check_freshness_in(branch, main_ref, &root)
 }
 
 pub fn apply_policy(freshness: &BranchFreshness, policy: StaleBranchPolicy) -> StaleBranchAction {

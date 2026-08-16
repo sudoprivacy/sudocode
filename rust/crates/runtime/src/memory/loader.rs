@@ -40,11 +40,12 @@ pub fn default_memory_dir_for(cwd: &Path) -> PathBuf {
         .join("memory")
 }
 
-/// Resolve the default memory directory using the process's current
-/// working directory. Convenience wrapper around [`default_memory_dir_for`].
+/// Resolve the default memory directory using the current workspace root
+/// (the turn's scoped root, else the process cwd). Convenience wrapper
+/// around [`default_memory_dir_for`].
 #[must_use]
 pub fn default_memory_dir() -> PathBuf {
-    default_memory_dir_for(&std::env::current_dir().unwrap_or_default())
+    default_memory_dir_for(&crate::workspace_root::current_workspace_root_or_default())
 }
 
 /// Resolve the per-agent-type memory directory for a given working

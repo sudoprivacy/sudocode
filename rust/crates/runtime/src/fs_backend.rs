@@ -11,6 +11,7 @@
 use std::io;
 use std::sync::Arc;
 
+use crate::workspace_root::current_workspace_root;
 use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
@@ -285,15 +286,19 @@ impl FsBackend for StdFsBackend {
         std::fs::rename(&temp, path)
     }
 
+    /// The turn's workspace root (see [`crate::workspace_root`]), which is
+    /// the process cwd outside an ACP turn. Relative tool paths resolve
+    /// against it, so concurrent sessions in different directories never
+    /// see each other's files.
     fn working_root(&self) -> io::Result<String> {
-        Ok(std::env::current_dir()?.to_string_lossy().into_owned())
+        Ok(current_workspace_root()?.to_string_lossy().into_owned())
     }
 
     fn normalize(&self, path: &str) -> io::Result<String> {
         let candidate = if std::path::Path::new(path).is_absolute() {
             std::path::PathBuf::from(path)
         } else {
-            std::env::current_dir()?.join(path)
+            current_workspace_root()?.join(path)
         };
         Ok(candidate.canonicalize()?.to_string_lossy().into_owned())
     }
@@ -302,7 +307,7 @@ impl FsBackend for StdFsBackend {
         let candidate = if std::path::Path::new(path).is_absolute() {
             std::path::PathBuf::from(path)
         } else {
-            std::env::current_dir()?.join(path)
+            current_workspace_root()?.join(path)
         };
         if let Ok(canonical) = candidate.canonicalize() {
             return Ok(canonical.to_string_lossy().into_owned());

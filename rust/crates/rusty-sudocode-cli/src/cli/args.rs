@@ -559,7 +559,8 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 output_format,
             }),
             Cmd::SystemPrompt { cwd, date } => {
-                let resolved_cwd = cwd.unwrap_or(env::current_dir().map_err(|e| e.to_string())?);
+                let resolved_cwd =
+                    cwd.unwrap_or(runtime::current_workspace_root().map_err(|e| e.to_string())?);
                 let resolved_date = date.unwrap_or_else(runtime::today_local);
                 Ok(CliAction::PrintSystemPrompt {
                     cwd: resolved_cwd,
@@ -1152,14 +1153,14 @@ fn config_alias_for_current_dir(alias: &str) -> Option<String> {
     if alias.is_empty() {
         return None;
     }
-    let cwd = env::current_dir().ok()?;
+    let cwd = runtime::current_workspace_root().ok()?;
     let loader = ConfigLoader::default_for(&cwd);
     let config = loader.load().ok()?;
     config.aliases().get(alias).cloned()
 }
 
 pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
-    let Ok(cwd) = env::current_dir() else {
+    let Ok(cwd) = runtime::current_workspace_root() else {
         return api::SudoCodeConfig::default();
     };
     load_sudocode_config_for_cwd(&cwd)
@@ -1187,7 +1188,7 @@ pub(crate) fn normalize_allowed_tools(values: &[String]) -> Result<Option<Allowe
 }
 
 fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
-    let cwd = env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = runtime::current_workspace_root().map_err(|e| e.to_string())?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
     let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
@@ -1242,7 +1243,7 @@ pub(crate) fn default_permission_mode() -> PermissionMode {
 }
 
 fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
-    let cwd = env::current_dir().ok()?;
+    let cwd = runtime::current_workspace_root().ok()?;
     let loader = ConfigLoader::default_for(&cwd);
     loader
         .load()
@@ -1252,7 +1253,7 @@ fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
 }
 
 pub(crate) fn config_model_for_current_dir() -> Option<String> {
-    let cwd = env::current_dir().ok()?;
+    let cwd = runtime::current_workspace_root().ok()?;
     let loader = ConfigLoader::default_for(&cwd);
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }

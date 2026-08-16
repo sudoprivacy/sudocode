@@ -1233,6 +1233,351 @@ async fn acp_stdio_paused_session_does_not_block_other_session_other_cwd() {
     scenario_paused_session_does_not_block_other_session("stdio-concurrency-other-cwd", true).await;
 }
 
+/// A session running a LONG TOOL (not parked on the user) must not starve a
+/// sibling session in a different cwd. This is the half of the P0 that the
+/// cwd lease does not cover: the process cwd is a shared resource, so an
+/// active turn in /a holds it for the whole turn — including a 30s bash —
+/// and a turn in /b waits. Reported symptom: one conversation writes a long
+/// report / installs deps, every other conversation of that user goes quiet.
+#[tokio::test]
+async fn acp_stdio_long_tool_does_not_block_other_cwd_session() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-long-tool-other-cwd");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let cwd_b = workspace.root.join("project-b");
+    fs::create_dir_all(&cwd_b).expect("create sibling cwd");
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_a = scenario_session_new(&mut client, &workspace.root).await;
+
+    // `allow` so the bash tool executes instead of prompting — A must be BUSY,
+    // not parked (a parked turn yields the cwd lease, which is the half that
+    // is already fixed).
+    let (_, mode_resp) = client
+        .send_request(
+            "session/setPermissionMode",
+            json!({ "sessionId": session_a, "permissionMode": "allow" }),
+        )
+        .await;
+    assert!(
+        mode_resp.get("error").is_none(),
+        "session/setPermissionMode allow should succeed: {mode_resp}"
+    );
+
+    // A: a turn whose tool call runs `sleep 30` — busy, never parked.
+    let _prompt_a = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_a,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_interrupt_long_running")
+                }]
+            }),
+        )
+        .await;
+
+    // Give A time to reach the tool call and take the cwd lease.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // B, in a different cwd, must still be served while A is busy.
+    let new_b = client
+        .send_request_no_wait(
+            "session/new",
+            json!({ "cwd": cwd_b.to_string_lossy().to_string(), "mcpServers": [] }),
+        )
+        .await;
+    let (_, new_b_resp) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, new_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "session/new got no response within 20s while session A was running a long \
+                 tool in another cwd (cwd lease held for the whole turn); seen: {seen:?}"
+            )
+        });
+    let session_b = new_b_resp["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new should succeed: {new_b_resp}"))
+        .to_string();
+
+    let prompt_b = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_b,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}single_turn_text") }]
+            }),
+        )
+        .await;
+    client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, prompt_b))
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "session B starved while session A ran a long tool in another cwd; seen: {seen:?}"
+            )
+        });
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Set a session's permission mode, asserting success.
+async fn set_permission_mode(client: &mut AcpTestClient, session_id: &str, mode: &str) {
+    let (_, resp) = client
+        .send_request(
+            "session/setPermissionMode",
+            json!({ "sessionId": session_id, "permissionMode": mode }),
+        )
+        .await;
+    assert!(
+        resp.get("error").is_none(),
+        "session/setPermissionMode {mode} should succeed: {resp}"
+    );
+}
+
+/// Run `scenario` on `session_id`, wait up to `limit` for the turn to
+/// complete, and return the concatenated `agent_message_chunk` text the
+/// agent streamed for it plus every `tool_call_update` raw output (for
+/// diagnostics: the mock's final text does not distinguish a failed tool
+/// call from a successful one).
+async fn run_scenario_collect_text(
+    client: &mut AcpTestClient,
+    session_id: &str,
+    scenario: &str,
+    limit: Duration,
+    what: &str,
+) -> (String, Vec<Value>) {
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}{scenario}") }]
+            }),
+        )
+        .await;
+    let (notifs, resp) = client
+        .recv_until(limit, |m| is_response_to(m, prompt_id))
+        .await
+        .unwrap_or_else(|seen| panic!("{what}: no response within {limit:?}; seen: {seen:?}"));
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "{what}: turn should complete normally: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+        })
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    let tool_outputs = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call_update")
+        })
+        .map(|m| m["params"]["update"]["rawOutput"].clone())
+        .collect::<Vec<_>>();
+    (text, tool_outputs)
+}
+
+/// The invariant that makes concurrent cross-cwd turns safe: once the process
+/// cwd is no longer the single source of truth, a session's file operations
+/// must resolve against *its own* directory — never against the directory
+/// of whichever session happened to touch the process cwd last, and never
+/// against a sibling that is mid-turn.
+///
+/// Layout: session A in `project-a`, sessions in `project-b`, plus a decoy
+/// session created LAST in `decoy` (so the process cwd, which runtime
+/// construction still sets, points at the decoy). Each directory carries a
+/// differently worded `fixture.txt`; the scode process itself was started in
+/// the workspace root, which carries yet another one. While A is busy in a
+/// 30 s `bash`, sessions in `project-b` read and write relative paths and
+/// must see only `project-b`; then A is cancelled and sessions in
+/// `project-a` do the same there. (One session per file scenario: the mock
+/// model answers from the latest tool result in the history, so a second
+/// tool scenario on the same session would never issue its tool call.)
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn acp_stdio_concurrent_sessions_keep_file_ops_in_their_own_cwd() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-cwd-isolation");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let cwd_a = workspace.root.join("project-a");
+    let cwd_b = workspace.root.join("project-b");
+    let cwd_decoy = workspace.root.join("decoy");
+    for (dir, marker) in [
+        (&workspace.root, "root-fixture"),
+        (&cwd_a, "alpha-fixture"),
+        (&cwd_b, "bravo-fixture"),
+        (&cwd_decoy, "decoy-fixture"),
+    ] {
+        fs::create_dir_all(dir).expect("create cwd");
+        fs::write(dir.join("fixture.txt"), format!("{marker}\n")).expect("write fixture");
+    }
+    let generated = |dir: &std::path::Path| dir.join("generated").join("output.txt");
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_a = scenario_session_new(&mut client, &cwd_a).await;
+    let reader_b = scenario_session_new(&mut client, &cwd_b).await;
+    let writer_b = scenario_session_new(&mut client, &cwd_b).await;
+    // Created last: whatever still keys off the process cwd now sees `decoy`.
+    let _session_decoy = scenario_session_new(&mut client, &cwd_decoy).await;
+    for sid in [&session_a, &reader_b, &writer_b] {
+        set_permission_mode(&mut client, sid, "allow").await;
+    }
+
+    // A: busy in `sleep 30` for the rest of the B phase.
+    let prompt_a = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_a,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_interrupt_long_running")
+                }]
+            }),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // B reads a relative path while A is busy: must be B's own fixture.
+    let (text_b, tools_b) = run_scenario_collect_text(
+        &mut client,
+        &reader_b,
+        "read_file_roundtrip",
+        Duration::from_secs(20),
+        "project-b read_file while A busy in another cwd",
+    )
+    .await;
+    assert!(
+        text_b.contains("bravo-fixture"),
+        "project-b session must read its own fixture.txt (bravo-fixture); got: {text_b:?} \
+         (tool outputs: {tools_b:?})"
+    );
+    for leaked in ["alpha-fixture", "decoy-fixture", "root-fixture"] {
+        assert!(
+            !text_b.contains(leaked),
+            "project-b session read another directory's fixture ({leaked}); got: {text_b:?}"
+        );
+    }
+
+    // B writes a relative path while A is busy: must land in project-b only.
+    let (text_b, tools_b) = run_scenario_collect_text(
+        &mut client,
+        &writer_b,
+        "write_file_allowed",
+        Duration::from_secs(20),
+        "project-b write_file while A busy in another cwd",
+    )
+    .await;
+    assert!(
+        text_b.contains("write_file succeeded"),
+        "project-b write should succeed: {text_b:?} (tool outputs: {tools_b:?})"
+    );
+    assert!(
+        generated(&cwd_b).is_file(),
+        "project-b relative write must land in project-b (tool outputs: {tools_b:?})"
+    );
+    for (name, dir) in [
+        ("project-a", &cwd_a),
+        ("decoy", &cwd_decoy),
+        ("workspace root", &workspace.root),
+    ] {
+        assert!(
+            !generated(dir).exists(),
+            "project-b relative write leaked into {name}"
+        );
+    }
+    // A must still be busy — the project-b turns ran concurrently, not after A.
+    let a_done_early = client
+        .recv_until(Duration::from_millis(200), |m| is_response_to(m, prompt_a))
+        .await;
+    assert!(
+        a_done_early.is_err(),
+        "session A should still be running its long tool while project-b did file ops"
+    );
+
+    // Cancel A: the turn must end promptly (its `sleep 30` is interrupted).
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_a }
+        }))
+        .await;
+    let (_, resp_a) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, prompt_a))
+        .await
+        .unwrap_or_else(|seen| panic!("session A never finished after cancel; seen: {seen:?}"));
+    assert!(
+        resp_a.get("result").is_some() || resp_a.get("error").is_some(),
+        "session A's cancelled prompt should get a response: {resp_a}"
+    );
+
+    // Now project-a: its sessions must see project-a, even though project-b
+    // turns ran in between and the process cwd points at the decoy.
+    let reader_a = scenario_session_new(&mut client, &cwd_a).await;
+    let writer_a = scenario_session_new(&mut client, &cwd_a).await;
+    for sid in [&reader_a, &writer_a] {
+        set_permission_mode(&mut client, sid, "allow").await;
+    }
+    let (text_a, tools_a) = run_scenario_collect_text(
+        &mut client,
+        &reader_a,
+        "read_file_roundtrip",
+        Duration::from_secs(20),
+        "project-a read_file",
+    )
+    .await;
+    assert!(
+        text_a.contains("alpha-fixture"),
+        "project-a session must read its own fixture.txt (alpha-fixture); got: {text_a:?} \
+         (tool outputs: {tools_a:?})"
+    );
+    let (text_a, tools_a) = run_scenario_collect_text(
+        &mut client,
+        &writer_a,
+        "write_file_allowed",
+        Duration::from_secs(20),
+        "project-a write_file",
+    )
+    .await;
+    assert!(
+        text_a.contains("write_file succeeded"),
+        "project-a write should succeed: {text_a:?} (tool outputs: {tools_a:?})"
+    );
+    assert!(
+        generated(&cwd_a).is_file(),
+        "project-a relative write must land in project-a (tool outputs: {tools_a:?})"
+    );
+    assert!(
+        !generated(&cwd_decoy).exists() && !generated(&workspace.root).exists(),
+        "project-a relative write leaked outside project-a"
+    );
+
+    // The cancelled session and a project-b session must still be usable.
+    scenario_session_prompt_streaming(&mut client, &session_a).await;
+    scenario_session_prompt_streaming(&mut client, &reader_b).await;
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// Same P0, other wait path: session A parked inside the `AskUserQuestion`
 /// tool (`_scode/ask_user_question` extension request to the client, left
 /// unanswered — "waiting for the user to answer a question" is exactly the

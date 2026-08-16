@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::env;
 use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -15,6 +14,7 @@ use crate::sandbox::{
     build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
 };
+use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
 
 /// Default foreground subprocess timeout for tool-backed command execution.
@@ -139,7 +139,10 @@ pub fn execute_bash_with_progress(
     abort_signal: Option<&HookAbortSignal>,
     on_progress: Option<BashProgressCallback>,
 ) -> io::Result<BashCommandOutput> {
-    let cwd = env::current_dir()?;
+    // The session's workspace root, not the process cwd: concurrent turns of
+    // sessions in different directories each spawn their shell in their own
+    // root (see `crate::workspace_root`).
+    let cwd = current_workspace_root()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
     if input.run_in_background.unwrap_or(false) {
@@ -230,7 +233,7 @@ impl AsyncRunner {
 }
 
 /// Detect git push to main and emit ship provenance event
-fn detect_and_emit_ship_prepared(command: &str) {
+fn detect_and_emit_ship_prepared(command: &str, cwd: &std::path::Path) {
     let trimmed = command.trim();
     // Simple detection: git push with main/master
     if trimmed.contains("git push") && (trimmed.contains("main") || trimmed.contains("master")) {
@@ -240,12 +243,12 @@ fn detect_and_emit_ship_prepared(command: &str) {
             .unwrap_or_default()
             .as_millis();
         let provenance = ShipProvenance {
-            source_branch: get_current_branch().unwrap_or_else(|| "unknown".to_string()),
-            base_commit: get_head_commit().unwrap_or_default(),
+            source_branch: get_current_branch(cwd).unwrap_or_else(|| "unknown".to_string()),
+            base_commit: get_head_commit(cwd).unwrap_or_default(),
             commit_count: 0, // Would need to calculate from range
             commit_range: "unknown..HEAD".to_string(),
             merge_method: ShipMergeMethod::DirectPush,
-            actor: get_git_actor().unwrap_or_else(|| "unknown".to_string()),
+            actor: get_git_actor(cwd).unwrap_or_else(|| "unknown".to_string()),
             pr_number: None,
         };
         let _event = LaneEvent::ship_prepared(format!("{now}"), &provenance);
@@ -257,9 +260,10 @@ fn detect_and_emit_ship_prepared(command: &str) {
     }
 }
 
-fn get_current_branch() -> Option<String> {
+fn get_current_branch(cwd: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
+        .current_dir(cwd)
         .output()
         .ok()?;
     if output.status.success() {
@@ -269,9 +273,10 @@ fn get_current_branch() -> Option<String> {
     }
 }
 
-fn get_head_commit() -> Option<String> {
+fn get_head_commit(cwd: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(cwd)
         .output()
         .ok()?;
     if output.status.success() {
@@ -281,9 +286,10 @@ fn get_head_commit() -> Option<String> {
     }
 }
 
-fn get_git_actor() -> Option<String> {
+fn get_git_actor(cwd: &std::path::Path) -> Option<String> {
     let name = Command::new("git")
         .args(["config", "user.name"])
+        .current_dir(cwd)
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -298,7 +304,7 @@ async fn execute_bash_async(
     abort_signal: Option<HookAbortSignal>,
 ) -> io::Result<BashCommandOutput> {
     // Detect and emit ship provenance for git push operations
-    detect_and_emit_ship_prepared(&input.command);
+    detect_and_emit_ship_prepared(&input.command, &cwd);
 
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     command.stdin(Stdio::null());
@@ -382,7 +388,7 @@ async fn execute_bash_streaming(
     abort_signal: Option<HookAbortSignal>,
     on_progress: Option<BashProgressCallback>,
 ) -> io::Result<BashCommandOutput> {
-    detect_and_emit_ship_prepared(&input.command);
+    detect_and_emit_ship_prepared(&input.command, &cwd);
 
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
     command.stdout(Stdio::piped());
@@ -659,7 +665,7 @@ pub fn execute_bash_with_tracking(
 ) -> io::Result<BashWithTrackingResult> {
     let cwd = workspace_root
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| env::current_dir().unwrap_or_default());
+        .unwrap_or_else(|| current_workspace_root().unwrap_or_default());
 
     // Capture before snapshot
     let mut snapshot = FileChangeSnapshotWithMtime::capture_before(&cwd);

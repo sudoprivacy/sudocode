@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -34,12 +33,12 @@ pub(crate) fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 pub(crate) fn current_session_store() -> Result<SessionStore, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     SessionStore::from_cwd(&cwd).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 pub(crate) fn new_cli_session() -> Result<Session, Box<dyn std::error::Error>> {
-    new_cli_session_for(&env::current_dir()?)
+    new_cli_session_for(&runtime::current_workspace_root()?)
 }
 
 pub(crate) fn new_cli_session_for(cwd: &Path) -> Result<Session, Box<dyn std::error::Error>> {
@@ -49,7 +48,7 @@ pub(crate) fn new_cli_session_for(cwd: &Path) -> Result<Session, Box<dyn std::er
 pub(crate) fn create_managed_session_handle(
     session_id: &str,
 ) -> Result<SessionHandle, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     create_managed_session_handle_for(&cwd, session_id)
 }
 

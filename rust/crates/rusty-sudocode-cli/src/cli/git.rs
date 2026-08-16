@@ -47,7 +47,7 @@ impl GitWorkspaceSummary {
 
 pub(crate) fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
     parse_git_status_metadata_for(
-        &env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        &runtime::current_workspace_root().unwrap_or_else(|_| PathBuf::from(".")),
         status,
     )
 }
@@ -162,7 +162,7 @@ pub(crate) fn parse_git_status_metadata_for(
 pub(crate) fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
         .args(args)
-        .current_dir(env::current_dir()?)
+        .current_dir(runtime::current_workspace_root()?)
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -174,7 +174,7 @@ pub(crate) fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Er
 pub(crate) fn git_status_ok(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
         .args(args)
-        .current_dir(env::current_dir()?)
+        .current_dir(runtime::current_workspace_root()?)
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -186,7 +186,7 @@ pub(crate) fn git_status_ok(args: &[&str]) -> Result<(), Box<dyn std::error::Err
 /// Detect if the current working directory is "broad" (home directory or
 /// filesystem root). Returns the cwd path if broad, None otherwise.
 pub(crate) fn detect_broad_cwd() -> Option<PathBuf> {
-    let Ok(cwd) = env::current_dir() else {
+    let Ok(cwd) = runtime::current_workspace_root() else {
         return None;
     };
     let is_home = env::var_os("HOME")

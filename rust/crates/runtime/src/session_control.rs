@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-use std::env;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::session::{Session, SessionError};
+use crate::workspace_root::current_workspace_root;
 
 /// Per-worktree session store that namespaces on-disk session files by
 /// workspace fingerprint so that parallel `scode serve` instances never
@@ -403,7 +403,7 @@ impl From<SessionError> for SessionControlError {
 }
 
 pub fn sessions_dir() -> Result<PathBuf, SessionControlError> {
-    managed_sessions_dir_for(env::current_dir()?)
+    managed_sessions_dir_for(current_workspace_root()?)
 }
 
 pub fn managed_sessions_dir_for(
@@ -416,7 +416,7 @@ pub fn managed_sessions_dir_for(
 pub fn create_managed_session_handle(
     session_id: &str,
 ) -> Result<SessionHandle, SessionControlError> {
-    create_managed_session_handle_for(env::current_dir()?, session_id)
+    create_managed_session_handle_for(current_workspace_root()?, session_id)
 }
 
 pub fn create_managed_session_handle_for(
@@ -428,7 +428,7 @@ pub fn create_managed_session_handle_for(
 }
 
 pub fn resolve_session_reference(reference: &str) -> Result<SessionHandle, SessionControlError> {
-    resolve_session_reference_for(env::current_dir()?, reference)
+    resolve_session_reference_for(current_workspace_root()?, reference)
 }
 
 pub fn resolve_session_reference_for(
@@ -440,7 +440,7 @@ pub fn resolve_session_reference_for(
 }
 
 pub fn resolve_managed_session_path(session_id: &str) -> Result<PathBuf, SessionControlError> {
-    resolve_managed_session_path_for(env::current_dir()?, session_id)
+    resolve_managed_session_path_for(current_workspace_root()?, session_id)
 }
 
 pub fn resolve_managed_session_path_for(
@@ -461,7 +461,7 @@ pub fn is_managed_session_file(path: &Path) -> bool {
 }
 
 pub fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, SessionControlError> {
-    list_managed_sessions_for(env::current_dir()?)
+    list_managed_sessions_for(current_workspace_root()?)
 }
 
 pub fn list_managed_sessions_for(
@@ -472,7 +472,7 @@ pub fn list_managed_sessions_for(
 }
 
 pub fn latest_managed_session() -> Result<ManagedSessionSummary, SessionControlError> {
-    latest_managed_session_for(env::current_dir()?)
+    latest_managed_session_for(current_workspace_root()?)
 }
 
 pub fn latest_managed_session_for(
@@ -483,7 +483,7 @@ pub fn latest_managed_session_for(
 }
 
 pub fn load_managed_session(reference: &str) -> Result<LoadedManagedSession, SessionControlError> {
-    load_managed_session_for(env::current_dir()?, reference)
+    load_managed_session_for(current_workspace_root()?, reference)
 }
 
 pub fn load_managed_session_for(
@@ -498,7 +498,7 @@ pub fn fork_managed_session(
     session: &Session,
     branch_name: Option<String>,
 ) -> Result<ForkedManagedSession, SessionControlError> {
-    fork_managed_session_for(env::current_dir()?, session, branch_name)
+    fork_managed_session_for(current_workspace_root()?, session, branch_name)
 }
 
 pub fn fork_managed_session_for(

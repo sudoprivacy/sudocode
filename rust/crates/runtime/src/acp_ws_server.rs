@@ -4,7 +4,7 @@
 //! handler chain used for stdio serves WebSocket connections. This gives WS
 //! full feature parity (including elicitation/permission prompting) for free.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
@@ -15,8 +15,8 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 
 use crate::acp_sdk_server::{
-    new_abort_registry, run_acp_on_transport, AbortRegistry, SdkAcpConfig, SdkAcpDelegate,
-    SharedDelegate,
+    new_session_registry, run_acp_on_transport, SdkAcpConfig, SdkAcpDelegate, SharedDelegate,
+    SharedSessionRegistry,
 };
 
 static WEB_UI_HTML: &str = include_str!("acp_web_ui.html");
@@ -25,7 +25,7 @@ static WEB_UI_HTML: &str = include_str!("acp_web_ui.html");
 struct AppState {
     config: SdkAcpConfig,
     delegate: SharedDelegate,
-    abort_registry: AbortRegistry,
+    registry: SharedSessionRegistry,
 }
 
 /// Run an ACP server over WebSocket + serve the embedded web UI.
@@ -40,8 +40,8 @@ pub async fn run_acp_ws_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         config,
-        delegate: Arc::new(Mutex::new(delegate)),
-        abort_registry: new_abort_registry(),
+        delegate: Arc::from(delegate),
+        registry: new_session_registry(),
     };
     let app = Router::new()
         .route("/", get(serve_html))
@@ -91,7 +91,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     if let Err(e) = run_acp_on_transport(
         &state.config,
         Arc::clone(&state.delegate),
-        Arc::clone(&state.abort_registry),
+        Arc::clone(&state.registry),
         transport,
     )
     .await

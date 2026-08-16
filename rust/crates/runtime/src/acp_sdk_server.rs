@@ -206,11 +206,22 @@ fn acp_mcp_servers_to_scoped(
 /// Callback trait that the CLI crate implements to provide session
 /// construction and prompt execution, keeping runtime/provider deps out of
 /// this crate.
-pub trait SdkAcpDelegate: Send + 'static {
+///
+/// Every method takes `&self`: the delegate is shared across all in-flight
+/// ACP requests (see [`SharedDelegate`]) and is responsible for its own
+/// interior locking. The contract the ACP server relies on is
+///
+/// * calls on **different** sessions may run concurrently and must not
+///   block each other — a session that is parked on a permission prompt or
+///   an `AskUserQuestion` must not stall the others;
+/// * calls on the **same** session are already serialized by the server
+///   (see [`SessionRegistry`]), so the delegate only needs per-session
+///   locking for memory safety, not for ordering.
+pub trait SdkAcpDelegate: Send + Sync + 'static {
     /// Create a new session for the given working directory, returning
     /// `(session_id, cwd, abort_signal)` on success.
     fn new_session(
-        &mut self,
+        &self,
         cwd: PathBuf,
         mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
@@ -218,7 +229,7 @@ pub trait SdkAcpDelegate: Send + 'static {
     /// Run a prompt turn. The implementation should call observer methods
     /// to stream session updates.
     fn run_prompt(
-        &mut self,
+        &self,
         session_id: &str,
         prompt: String,
         observer: &mut SdkSessionObserver,
@@ -227,7 +238,7 @@ pub trait SdkAcpDelegate: Send + 'static {
 
     /// Run a prompt with permission prompting bridged to the ACP client.
     fn run_prompt_with_prompter(
-        &mut self,
+        &self,
         session_id: &str,
         prompt: String,
         observer: &mut SdkSessionObserver,
@@ -237,14 +248,14 @@ pub trait SdkAcpDelegate: Send + 'static {
 
     /// Install a question prompter for AskUserQuestion tool execution within a session.
     fn set_question_prompter(
-        &mut self,
+        &self,
         session_id: &str,
         prompter: Box<dyn QuestionPrompter>,
     ) -> Result<(), AcpError>;
 
     /// Handle a slash command, returning text output.
     fn handle_slash_command(
-        &mut self,
+        &self,
         session_id: &str,
         input: &str,
         observer: &mut SdkSessionObserver,
@@ -254,32 +265,24 @@ pub trait SdkAcpDelegate: Send + 'static {
     fn list_sessions(&self) -> Vec<(String, PathBuf)>;
 
     /// Close (drop) a session by ID. Returns true if it existed.
-    fn close_session(&mut self, session_id: &str) -> bool;
+    fn close_session(&self, session_id: &str) -> bool;
 
     /// Switch the model for a session. Returns a human-readable report.
-    fn set_model(&mut self, session_id: &str, model_id: &str) -> Result<String, AcpError>;
+    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, AcpError>;
 
     /// Return the current model ID and available models.
     fn get_model_info(&self) -> (String, Vec<String>);
 
     /// Change the permission mode for a session.
-    fn set_permission_mode(
-        &mut self,
-        session_id: &str,
-        mode: PermissionMode,
-    ) -> Result<(), AcpError>;
+    fn set_permission_mode(&self, session_id: &str, mode: PermissionMode) -> Result<(), AcpError>;
 
     /// Push image content blocks into a session before running a prompt.
-    fn push_images(
-        &mut self,
-        session_id: &str,
-        images: &[(String, String)],
-    ) -> Result<(), AcpError>;
+    fn push_images(&self, session_id: &str, images: &[(String, String)]) -> Result<(), AcpError>;
 
     /// Load an existing persisted session by its ID and working directory,
     /// returning `(session_id, cwd, abort_signal)` on success.
     fn load_session(
-        &mut self,
+        &self,
         session_id: &str,
         cwd: PathBuf,
         mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
@@ -634,18 +637,262 @@ mod tests {
 }
 
 /// Thread-safe handle to a delegate, shared across async handlers.
-pub type SharedDelegate = Arc<Mutex<Box<dyn SdkAcpDelegate>>>;
+///
+/// There is deliberately **no** server-side mutex around the delegate: a
+/// process-wide lock held for the duration of `session/prompt` is exactly
+/// what made one parked session block every other session. Cross-session
+/// concurrency is the delegate's responsibility ([`SdkAcpDelegate`]);
+/// same-session ordering is the server's ([`SessionRegistry`] lanes).
+pub type SharedDelegate = Arc<dyn SdkAcpDelegate>;
 
-/// Separate registry of abort signals so that `session/cancel` can fire
-/// without contending on the main delegate mutex.
-pub type AbortRegistry = Arc<Mutex<HashMap<String, HookAbortSignal>>>;
+/// Shared handle to the [`SessionRegistry`].
+pub type SharedSessionRegistry = Arc<SessionRegistry>;
 
-/// Create a new empty abort registry. Share this across connections so that
-/// cancel notifications on a reconnected transport can still reach sessions
-/// created on a previous connection.
+/// Create a new empty session registry. Share this across connections so
+/// that cancel notifications on a reconnected transport can still reach
+/// sessions created on a previous connection, and so that per-session
+/// ordering holds across connections too.
 #[must_use]
-pub fn new_abort_registry() -> AbortRegistry {
-    Arc::new(Mutex::new(HashMap::new()))
+pub fn new_session_registry() -> SharedSessionRegistry {
+    Arc::new(SessionRegistry::default())
+}
+
+/// Per-process registry of live ACP sessions.
+///
+/// It carries three things the server needs *outside* the delegate:
+///
+/// * the [`HookAbortSignal`] so `session/cancel` fires without touching any
+///   session lock (a running turn must be cancellable);
+/// * a per-session **lane** (an async mutex) that serializes every
+///   session-scoped request — `session/prompt`, `session/setPermissionMode`,
+///   `session/setModel`, `session/close` — for that session while leaving
+///   other sessions free to run. Two prompts on one session interleaving
+///   their JSON-RPC traffic would corrupt the protocol, so this ordering is a
+///   hard invariant, not a performance choice;
+/// * the working directory of each session, which feeds the
+///   [`WorkspaceCwdLease`] (see there for why that is needed).
+#[derive(Default)]
+pub struct SessionRegistry {
+    sessions: Mutex<HashMap<String, SessionEntry>>,
+    cwd_lease: Arc<WorkspaceCwdLease>,
+}
+
+struct SessionEntry {
+    abort: HookAbortSignal,
+    lane: Arc<tokio::sync::Mutex<()>>,
+    cwd: PathBuf,
+}
+
+/// Async guard for a session lane; drop it to let the next request on the
+/// same session proceed.
+pub type SessionLaneGuard = tokio::sync::OwnedMutexGuard<()>;
+
+impl SessionRegistry {
+    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Register (or re-register) a session after `session/new` / `session/load`.
+    pub fn register(&self, session_id: String, abort: HookAbortSignal, cwd: PathBuf) {
+        let mut sessions = self.lock_sessions();
+        // A reload of a session that is already live keeps its lane so that
+        // requests already queued behind it stay ordered.
+        let lane = sessions.get(&session_id).map_or_else(
+            || Arc::new(tokio::sync::Mutex::new(())),
+            |e| Arc::clone(&e.lane),
+        );
+        sessions.insert(session_id, SessionEntry { abort, lane, cwd });
+    }
+
+    /// Forget a session after `session/close`.
+    pub fn remove(&self, session_id: &str) {
+        self.lock_sessions().remove(session_id);
+    }
+
+    /// Abort signal for `session/cancel`; `None` for unknown sessions.
+    #[must_use]
+    pub fn abort_signal(&self, session_id: &str) -> Option<HookAbortSignal> {
+        self.lock_sessions()
+            .get(session_id)
+            .map(|e| e.abort.clone())
+    }
+
+    /// Working directory a session was created / loaded with.
+    #[must_use]
+    pub fn cwd(&self, session_id: &str) -> Option<PathBuf> {
+        self.lock_sessions().get(session_id).map(|e| e.cwd.clone())
+    }
+
+    /// Wait for the session's lane. Requests on the same session are served
+    /// in arrival order (tokio's mutex is FIFO-fair); requests on other
+    /// sessions are unaffected. Unknown sessions get no lane — the delegate
+    /// will reject them with `unknown sessionId` — so the caller does not
+    /// have to special-case them.
+    pub async fn enter_lane(&self, session_id: &str) -> Option<SessionLaneGuard> {
+        let lane = self
+            .lock_sessions()
+            .get(session_id)
+            .map(|e| Arc::clone(&e.lane))?;
+        Some(lane.lock_owned().await)
+    }
+
+    /// The process-wide working-directory lease.
+    #[must_use]
+    pub fn cwd_lease(&self) -> Arc<WorkspaceCwdLease> {
+        Arc::clone(&self.cwd_lease)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process working-directory lease
+// ---------------------------------------------------------------------------
+
+/// Arbiter for the *process* working directory.
+///
+/// The conversation runtime resolves relative paths, spawns `bash`, runs
+/// hooks and reads project config against `std::env::current_dir()`; a
+/// session's turn therefore has to run with the process cwd set to that
+/// session's cwd. That is a process-wide resource, so once turns of
+/// different sessions run concurrently something has to keep them from
+/// flipping the cwd under each other:
+///
+/// * turns whose sessions share a cwd hold the lease **together** (it is
+///   reference-counted) and run fully concurrently;
+/// * a turn in a *different* cwd waits until the current holders are gone;
+/// * a turn that parks on user input (permission prompt / `AskUserQuestion`)
+///   **releases** the lease while it waits ([`CwdLeaseHandle::parked`]) and
+///   re-acquires it before continuing, so a parked session never keeps
+///   another cwd's session from running — the P0 this exists to fix.
+///
+/// The lease only ever *sets* the cwd on acquisition; when the last holder
+/// leaves, the cwd is left as is (nothing outside a lease may depend on it).
+#[derive(Default)]
+pub struct WorkspaceCwdLease {
+    state: Mutex<CwdLeaseState>,
+    released: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct CwdLeaseState {
+    holder: Option<PathBuf>,
+    holders: usize,
+}
+
+impl WorkspaceCwdLease {
+    /// Block until the process cwd can be `cwd`, set it, and return a guard
+    /// that gives the lease back on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `set_current_dir` error if `cwd` cannot be entered; the
+    /// lease is left untouched in that case.
+    pub fn acquire(self: &Arc<Self>, cwd: PathBuf) -> std::io::Result<CwdLeaseGuard> {
+        self.enter(&cwd)?;
+        Ok(CwdLeaseGuard {
+            handle: CwdLeaseHandle(Arc::new(CwdLeaseHandleInner {
+                lease: Arc::clone(self),
+                cwd,
+                held: std::sync::atomic::AtomicBool::new(true),
+            })),
+        })
+    }
+
+    fn enter(&self, cwd: &std::path::Path) -> std::io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.holder.as_deref().is_some_and(|held| held != cwd) {
+            state = self
+                .released
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if state.holder.is_none() {
+            std::env::set_current_dir(cwd)?;
+            state.holder = Some(cwd.to_path_buf());
+        }
+        state.holders += 1;
+        Ok(())
+    }
+
+    fn leave(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.holders = state.holders.saturating_sub(1);
+        if state.holders == 0 {
+            state.holder = None;
+            self.released.notify_all();
+        }
+    }
+}
+
+struct CwdLeaseHandleInner {
+    lease: Arc<WorkspaceCwdLease>,
+    cwd: PathBuf,
+    /// Whether this handle currently counts as a holder. Only the turn's
+    /// own thread flips it (acquire → park → unpark → drop), the atomic is
+    /// for `Sync`, not for contention.
+    held: std::sync::atomic::AtomicBool,
+}
+
+/// Cheap, cloneable reference to a held lease that lets the code parked
+/// deep inside a turn temporarily give the lease back.
+#[derive(Clone)]
+pub struct CwdLeaseHandle(Arc<CwdLeaseHandleInner>);
+
+impl CwdLeaseHandle {
+    /// Run `wait` with the lease released, then re-acquire the lease before
+    /// returning. If this handle is not currently holding the lease the
+    /// closure simply runs (a stale handle can never re-acquire on its own).
+    /// If the cwd cannot be re-entered afterwards, the failure is reported on
+    /// stderr and the turn continues without the lease — the directory has
+    /// vanished underneath the session, and its tools will report that
+    /// themselves.
+    pub fn parked<R>(&self, wait: impl FnOnce() -> R) -> R {
+        use std::sync::atomic::Ordering;
+        let released = self.0.held.swap(false, Ordering::AcqRel);
+        if released {
+            self.0.lease.leave();
+        }
+        let result = wait();
+        if released {
+            match self.0.lease.enter(&self.0.cwd) {
+                Ok(()) => self.0.held.store(true, Ordering::Release),
+                Err(error) => eprintln!(
+                    "[acp] failed to re-enter session cwd {} after user input: {error}",
+                    self.0.cwd.display()
+                ),
+            }
+        }
+        result
+    }
+}
+
+/// RAII holder of a [`WorkspaceCwdLease`] acquisition.
+pub struct CwdLeaseGuard {
+    handle: CwdLeaseHandle,
+}
+
+impl CwdLeaseGuard {
+    /// Handle to hand to code that may need to park while this guard lives.
+    #[must_use]
+    pub fn handle(&self) -> CwdLeaseHandle {
+        self.handle.clone()
+    }
+}
+
+impl Drop for CwdLeaseGuard {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.handle.0.held.swap(false, Ordering::AcqRel) {
+            self.handle.0.lease.leave();
+        }
+    }
 }
 
 /// A permission prompter that bridges to the ACP client over channels.
@@ -658,6 +905,21 @@ struct AcpPermissionBridge {
         PermissionRequest,
         tokio::sync::oneshot::Sender<PermissionPromptDecision>,
     )>,
+    /// Lease on the process cwd held by the turn this bridge serves; given
+    /// back while we wait on the user so other sessions can run.
+    cwd_lease: Option<CwdLeaseHandle>,
+}
+
+/// Block on `wait` with the turn's cwd lease (if any) parked for the
+/// duration: the turn is idle until the user answers, and nothing in it
+/// touches the process cwd meanwhile (tool calls run strictly one at a time),
+/// so holding the lease would only keep sessions in other directories from
+/// making progress.
+fn wait_parked<R>(cwd_lease: Option<&CwdLeaseHandle>, wait: impl FnOnce() -> R) -> R {
+    match cwd_lease {
+        Some(lease) => lease.parked(wait),
+        None => wait(),
+    }
 }
 
 impl PermissionPrompter for AcpPermissionBridge {
@@ -677,12 +939,14 @@ impl PermissionPrompter for AcpPermissionBridge {
         // tells the multi-thread scheduler this thread is about to block,
         // allowing the recv to complete safely (same pattern as
         // `AcpQuestionBridge::ask` below).
-        tokio::task::block_in_place(|| {
-            response_rx
-                .blocking_recv()
-                .unwrap_or(PermissionPromptDecision::Deny {
-                    reason: "permission response channel closed".to_string(),
-                })
+        wait_parked(self.cwd_lease.as_ref(), || {
+            tokio::task::block_in_place(|| {
+                response_rx
+                    .blocking_recv()
+                    .unwrap_or(PermissionPromptDecision::Deny {
+                        reason: "permission response channel closed".to_string(),
+                    })
+            })
         })
     }
 }
@@ -709,10 +973,12 @@ impl QuestionPrompter for AcpQuestionBridge {
         // the client as a generic "blocking task failed" / Internal error.
         // `block_in_place` informs the multi-thread scheduler that this worker
         // is about to block, allowing the recv to complete safely.
-        tokio::task::block_in_place(|| {
-            response_rx
-                .blocking_recv()
-                .unwrap_or_else(|_| Err("question response channel closed".to_string()))
+        wait_parked(self.cwd_lease.as_ref(), || {
+            tokio::task::block_in_place(|| {
+                response_rx
+                    .blocking_recv()
+                    .unwrap_or_else(|_| Err("question response channel closed".to_string()))
+            })
         })
     }
 }
@@ -723,6 +989,8 @@ struct AcpQuestionBridge {
         QuestionPromptRequest,
         tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
     )>,
+    /// See [`AcpPermissionBridge::cwd_lease`].
+    cwd_lease: Option<CwdLeaseHandle>,
 }
 
 const ACP_ASK_USER_QUESTION_METHOD: &str = "_scode/ask_user_question";
@@ -854,7 +1122,7 @@ fn uuid_v4() -> String {
 pub(crate) async fn run_acp_on_transport(
     config: &SdkAcpConfig,
     delegate: SharedDelegate,
-    abort_registry: AbortRegistry,
+    registry: SharedSessionRegistry,
     transport: impl ConnectTo<Agent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let agent_version = config.agent_version.clone();
@@ -873,6 +1141,12 @@ pub(crate) async fn run_acp_on_transport(
                         .agent_info(Implementation::new("scode", &version))
                         .agent_capabilities(
                             AgentCapabilities::new()
+                                // `session/load` re-opens a persisted session
+                                // (same cwd) in a fresh process; the handler
+                                // below has always existed, the flag had just
+                                // never been advertised, so spec-conformant
+                                // clients never tried it.
+                                .load_session(true)
                                 .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(
                                     SessionCapabilities::new()
@@ -890,28 +1164,30 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
-                let abort_registry = Arc::clone(&abort_registry);
+                let registry = Arc::clone(&registry);
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
                     let d = Arc::clone(&delegate);
-                    let registry = Arc::clone(&abort_registry);
+                    let registry = Arc::clone(&registry);
                     cx.spawn(async move {
+                        let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
+                            // Session construction resolves config / model /
+                            // permission mode against the process cwd, so it
+                            // runs under the cwd lease like a turn does.
+                            let _cwd = lease
+                                .acquire(session_lease_cwd(&req.cwd))
+                                .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
-                            d.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .new_session(req.cwd, mcp_servers)
+                            d.new_session(req.cwd, mcp_servers)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
 
                         match result {
-                            Ok((session_id, _cwd, signal)) => {
-                                registry
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .insert(session_id.clone(), signal);
+                            Ok((session_id, cwd, signal)) => {
+                                registry.register(session_id.clone(), signal, cwd);
                                 responder.respond(NewSessionResponse::new(session_id))?;
                             }
                             Err(e) => {
@@ -929,6 +1205,7 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
+                let registry = Arc::clone(&registry);
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
@@ -955,10 +1232,18 @@ pub(crate) async fn run_acp_on_transport(
                     });
 
                     let d = Arc::clone(&delegate);
+                    let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     let cx_inner = cx.clone();
                     let cx_perm = cx.clone();
                     cx.spawn(async move {
+                        // Same-session ordering: wait (asynchronously — no
+                        // thread is tied up) for this session's lane. Other
+                        // sessions have their own lanes and are unaffected.
+                        let _lane = registry.enter_lane(&sid).await;
+                        let session_cwd = registry.cwd(&sid);
+                        let cwd_lease = registry.cwd_lease();
+
                         // Set up permission-prompt bridge channels.
                         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
                             PermissionRequest,
@@ -980,12 +1265,30 @@ pub(crate) async fn run_acp_on_transport(
                         let prompt_text_for_blocking = prompt_text.clone();
                         let trace_id_for_blocking = trace_id.clone();
                         let blocking_handle = tokio::task::spawn_blocking(move || {
+                            // Hold the process cwd for this session's directory
+                            // for the whole turn (shared with concurrent turns
+                            // in the same directory; parked while waiting on
+                            // the user — see `WorkspaceCwdLease`). Unknown
+                            // sessions have no cwd and fall through to the
+                            // delegate's `unknown sessionId` error.
+                            let cwd_guard = match session_cwd {
+                                Some(cwd) => Some(cwd_lease.acquire(cwd).map_err(|e| {
+                                    AcpError::internal(format!("failed to enter session cwd: {e}"))
+                                })?),
+                                None => None,
+                            };
+                            let lease_handle = cwd_guard.as_ref().map(CwdLeaseGuard::handle);
+
                             let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
-                            let mut bridge = AcpPermissionBridge { tx: bridge_tx };
-                            let question_bridge = AcpQuestionBridge { tx: question_tx };
-                            let mut delegate =
-                                d.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let _ = delegate.set_question_prompter(
+                            let mut bridge = AcpPermissionBridge {
+                                tx: bridge_tx,
+                                cwd_lease: lease_handle.clone(),
+                            };
+                            let question_bridge = AcpQuestionBridge {
+                                tx: question_tx,
+                                cwd_lease: lease_handle,
+                            };
+                            let _ = d.set_question_prompter(
                                 &sid_for_blocking,
                                 Box::new(question_bridge),
                             );
@@ -993,19 +1296,18 @@ pub(crate) async fn run_acp_on_transport(
                             // Push image content blocks into the session before
                             // running the prompt so the API client includes them.
                             if !images_for_blocking.is_empty() {
-                                let _ = delegate.push_images(&sid_for_blocking, &images_for_blocking);
+                                let _ = d.push_images(&sid_for_blocking, &images_for_blocking);
                             }
 
                             let stop = if prompt_text_for_blocking.starts_with('/') {
-                                delegate
-                                    .handle_slash_command(
-                                        &sid_for_blocking,
-                                        &prompt_text_for_blocking,
-                                        &mut observer,
-                                    )
-                                    .map(|()| (StopReason::EndTurn, None))
+                                d.handle_slash_command(
+                                    &sid_for_blocking,
+                                    &prompt_text_for_blocking,
+                                    &mut observer,
+                                )
+                                .map(|()| (StopReason::EndTurn, None))
                             } else {
-                                delegate.run_prompt_with_prompter(
+                                d.run_prompt_with_prompter(
                                     &sid_for_blocking,
                                     prompt_text_for_blocking,
                                     &mut observer,
@@ -1013,6 +1315,7 @@ pub(crate) async fn run_acp_on_transport(
                                     trace_id_for_blocking.as_deref(),
                                 )
                             };
+                            drop(cwd_guard);
                             // Return the Result instead of unwrapping, so we can handle errors
                             stop
                         });
@@ -1178,15 +1481,12 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/cancel (notification) ---
         .on_receive_notification(
             {
-                let abort_registry = Arc::clone(&abort_registry);
+                let registry = Arc::clone(&registry);
                 async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
-                    let sid = notif.session_id.to_string();
-                    let signal = abort_registry
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .get(&sid)
-                        .cloned();
-                    if let Some(signal) = signal {
+                    // Deliberately lock-free w.r.t. sessions: cancel must reach
+                    // a session whose lane is busy running the very turn being
+                    // cancelled.
+                    if let Some(signal) = registry.abort_signal(&notif.session_id.to_string()) {
                         signal.abort();
                     }
                     Ok(())
@@ -1198,26 +1498,24 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
-                let abort_registry = Arc::clone(&abort_registry);
+                let registry = Arc::clone(&registry);
                 async move |req: CloseSessionRequest,
                             responder: Responder<CloseSessionResponse>,
                             cx: ConnectionTo<Client>| {
                     let d = Arc::clone(&delegate);
-                    let registry = Arc::clone(&abort_registry);
+                    let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     cx.spawn(async move {
+                        // Queue behind any in-flight turn on this session (as
+                        // before: close waits for the turn to finish).
+                        let _lane = registry.enter_lane(&sid).await;
                         let sid_clone = sid.clone();
                         tokio::task::spawn_blocking(move || {
-                            d.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .close_session(&sid_clone);
+                            d.close_session(&sid_clone);
                         })
                         .await
                         .ok();
-                        registry
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(&sid);
+                        registry.remove(&sid);
                         responder.respond(CloseSessionResponse::new())?;
                         Ok(())
                     })?;
@@ -1236,9 +1534,7 @@ pub(crate) async fn run_acp_on_transport(
                     let d = Arc::clone(&delegate);
                     cx.spawn(async move {
                         let infos = tokio::task::spawn_blocking(move || {
-                            d.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .list_sessions()
+                            d.list_sessions()
                                 .into_iter()
                                 .map(|(id, cwd)| SessionInfo::new(id, cwd))
                                 .collect::<Vec<_>>()
@@ -1258,17 +1554,28 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
+                let registry = Arc::clone(&registry);
                 async move |req: SetSessionModelRequest,
                             responder: Responder<SetSessionModelResponse>,
                             cx: ConnectionTo<Client>| {
                     let d = Arc::clone(&delegate);
+                    let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     let model_id: String = req.model_id.0.to_string();
                     cx.spawn(async move {
+                        let _lane = registry.enter_lane(&sid).await;
+                        let session_cwd = registry.cwd(&sid);
+                        let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
-                            d.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .set_model(&sid, &model_id)
+                            // The model switch rebuilds the session runtime,
+                            // resolving config against the process cwd.
+                            let _cwd = match session_cwd {
+                                Some(cwd) => Some(lease.acquire(cwd).map_err(|e| {
+                                    AcpError::internal(format!("failed to enter session cwd: {e}"))
+                                })?),
+                                None => None,
+                            };
+                            d.set_model(&sid, &model_id)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
@@ -1292,30 +1599,32 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
-                let abort_registry = Arc::clone(&abort_registry);
+                let registry = Arc::clone(&registry);
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
                     let d = Arc::clone(&delegate);
-                    let registry = Arc::clone(&abort_registry);
+                    let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
                     cx.spawn(async move {
+                        // If the session is already live in this process, a
+                        // reload must not race a turn on it.
+                        let _lane = registry.enter_lane(&sid).await;
+                        let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
+                            let _cwd = lease
+                                .acquire(session_lease_cwd(&cwd))
+                                .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
-                            d.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .load_session(&sid, cwd, mcp_servers)
+                            d.load_session(&sid, cwd, mcp_servers)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
 
                         match result {
-                            Ok((session_id, _cwd, signal)) => {
-                                registry
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .insert(session_id, signal);
+                            Ok((session_id, cwd, signal)) => {
+                                registry.register(session_id, signal, cwd);
                                 responder.respond(LoadSessionResponse::new())?;
                             }
                             Err(e) => {
@@ -1333,11 +1642,14 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let delegate = Arc::clone(&delegate);
+                let registry = Arc::clone(&registry);
                 async move |req: SetPermissionModeRequest,
                             responder: Responder<SetPermissionModeResponse>,
                             cx: ConnectionTo<Client>| {
                     let d = Arc::clone(&delegate);
+                    let registry = Arc::clone(&registry);
                     cx.spawn(async move {
+                        let _lane = registry.enter_lane(&req.session_id).await;
                         let result = tokio::task::spawn_blocking(move || {
                             let mode = match req.permission_mode.as_str() {
                                 "read-only" => Ok(PermissionMode::ReadOnly),
@@ -1350,10 +1662,7 @@ pub(crate) async fn run_acp_on_transport(
                                 ))),
                             };
                             match mode {
-                                Ok(m) => d
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .set_permission_mode(&req.session_id, m),
+                                Ok(m) => d.set_permission_mode(&req.session_id, m),
                                 Err(e) => Err(e),
                             }
                         })
@@ -1400,6 +1709,15 @@ pub(crate) async fn run_acp_on_transport(
         .await?;
 
     Ok(())
+}
+
+/// Key the cwd lease by the canonical directory so that two sessions
+/// naming the same directory differently (`./x` vs `/abs/x`, symlinks) share
+/// one lease instead of serializing against each other. Falls back to the
+/// path as given when it cannot be canonicalized (the delegate then rejects
+/// the request with a proper `params.cwd` error).
+fn session_lease_cwd(cwd: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
 /// Map our `AcpError` to the SDK's `Error` type.

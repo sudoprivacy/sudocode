@@ -160,6 +160,7 @@ enum Scenario {
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
+    AskUserQuestionRoundtrip,
 }
 
 impl Scenario {
@@ -197,6 +198,7 @@ impl Scenario {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
             }
             "llm_compaction_roundtrip" => Some(Self::LlmCompactionRoundtrip),
+            "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             _ => None,
         }
     }
@@ -233,6 +235,7 @@ impl Scenario {
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
+            Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
         }
     }
 }
@@ -738,6 +741,16 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
             None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
         },
+        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("ask_user_question answered: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_ask_user_question",
+                "AskUserQuestion",
+                &[r#"{"question":"Which colour?","options":["red","blue"]}"#],
+            ),
+        },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
             Some((tool_output, is_error)) => final_text_sse(&format!(
                 "sleep over-max roundtrip complete (is_error={is_error}): {tool_output}"
@@ -1140,6 +1153,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 600}),
             ),
         },
+        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_ask_user_question_final",
+                &format!("ask_user_question answered: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_ask_user_question_tool",
+                "toolu_ask_user_question",
+                "AskUserQuestion",
+                json!({"question": "Which colour?", "options": ["red", "blue"]}),
+            ),
+        },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
             Some((tool_output, is_error)) => text_message_response(
                 "msg_sleep_over_max_final",
@@ -1210,6 +1235,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
             "req_fork_subagent_recursion_guard_roundtrip"
         }
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
+        Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
     }
 }
 

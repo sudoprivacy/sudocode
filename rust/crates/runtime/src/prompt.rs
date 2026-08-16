@@ -280,14 +280,17 @@ impl SystemPromptBuilder {
             |context| context.cwd.display().to_string(),
         );
         let mut lines = vec!["# Environment context".to_string()];
-        lines.extend(prepend_bullets(vec![
-            format!("Working directory: {cwd}"),
-            format!(
-                "Platform: {} {}",
-                self.os_name.as_deref().unwrap_or("unknown"),
-                self.os_version.as_deref().unwrap_or("unknown")
-            ),
-        ]));
+        let mut env_bullets = Vec::new();
+        if let Some(identity) = self.model_family.as_ref() {
+            env_bullets.push(format!("Model: {}", identity.family_label()));
+        }
+        env_bullets.push(format!("Working directory: {cwd}"));
+        env_bullets.push(format!(
+            "Platform: {} {}",
+            self.os_name.as_deref().unwrap_or("unknown"),
+            self.os_version.as_deref().unwrap_or("unknown")
+        ));
+        lines.extend(prepend_bullets(env_bullets));
         lines.join("\n")
     }
 }

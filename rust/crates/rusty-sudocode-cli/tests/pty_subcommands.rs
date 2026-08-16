@@ -167,21 +167,29 @@ fn system_prompt_renders() {
     assert_eq!(exit, 0, "scode system-prompt should exit 0; got {exit}");
 }
 
-/// System prompt must NOT contain a hardcoded "Model family" line.
-/// The model knows its own identity via training data; injecting a
-/// static label causes misidentification after `/model` switch.
+/// System prompt must use dynamic "Model:" (not hardcoded "Model family: Claude Opus 4.6").
+/// The identity is resolved from sudocode.json at runtime and rebuilt on /model switch.
 #[test]
-fn system_prompt_no_hardcoded_model_family() {
-    let mut sess = spawn_scode(&["system-prompt"]).expect("spawn scode system-prompt");
-    let exit = sess.expect_eof().expect("should exit");
-    assert_eq!(exit, 0);
+fn system_prompt_dynamic_model_identity() {
+    let bin = common::scode_bin();
+    let output = std::process::Command::new(&bin)
+        .args(["system-prompt"])
+        .output()
+        .expect("spawn scode system-prompt");
+    assert!(output.status.success(), "scode system-prompt should exit 0");
 
-    let output = sess.render(|s| s.contents());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !output.contains("Model family:"),
-        "system prompt must not contain 'Model family:' — \
-         the model knows its own identity via training data.\n\
-         Found in output:\n{output}"
+        !stdout.contains("Model family:"),
+        "system prompt must not use legacy 'Model family:' label.\n\
+         First 500 chars:\n{}",
+        &stdout[..stdout.len().min(500)]
+    );
+    assert!(
+        stdout.contains("Model:"),
+        "system prompt should contain dynamic 'Model:' line.\n\
+         First 500 chars:\n{}",
+        &stdout[..stdout.len().min(500)]
     );
 }
 

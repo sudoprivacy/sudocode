@@ -76,7 +76,7 @@
 
 <div class="lead">
 <b>The frame (read first).</b> Nexus's two namespaces are the <i>given</i> end-state, not an open question — same split an OS makes between an <i>executable on disk</i> and a <i>running process</i> (<code>nexus-integration-architecture</code> §2):
-<b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> · <code>sessions/</code> — persistent, Metastore, the addressable identity) vs
+<b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> — persistent, Metastore, the addressable identity; its <code>sessions/</code> is a DT_LINK index into the flat <code>/sessions/</code> store, <i>not</i> the bytes) vs
 <b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)).
 <br><br>
 <b>Three IDs</b> (nexus Q1, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, spans many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Sessions are a flat byte-SSOT at <span class="path">/sessions/&lt;session-id&gt;</span> (no <code>workspace_hash</code>, no agent nesting); per-repo &amp; per-agent ties are DT_LINKs + an <code>owner</code> field, isolation by policy not path. This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
@@ -126,16 +126,13 @@
     <div class="el"><span class="was">no explicit pid</span> <span class="arw">→</span> <span class="to">ephemeral run handle</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><span class="was">conversation-id (SQLite row)</span> <span class="arw">→</span> <span class="to">session-id (durable), <i>not</i> pid</span></div>
-    <div class="el"><span class="was"><code>extra.workspace</code> / <code>extra.backend</code></span> <span class="arw">→</span> <span class="to">repo DT_LINK + <code>owner</code> attr</span></div>
-    <div class="el"><span class="was">no agent-name</span> <span class="arw">→</span> <span class="to">new durable principal</span></div>
-    <div class="el"><span class="was">pid</span> <span class="arw">→</span> <span class="to">runtime-registered by MAS, keyed by session-id</span></div>
+    <div class="el"><span class="was">conversation-id + <code>messages</code>/<code>extra</code> = its own copy of the engine's session identity &amp; transcript</span> <span class="arw">→</span> <span class="to"><b>delegate to the engine</b> — key by the engine's <code>session-id</code>, read its store</span> <span class="b dup">dup</span></div>
+    <div class="el"><b>keep (UI-unique):</b> conversation-list index · position/status/pin/cron/channel/user_id</div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>
     <div class="el"><b>session-id</b> — durable UUID, the <code>--resume</code> key; spans N pids. <span class="path">/sessions/&lt;sid&gt;/</span></div>
-    <div class="el"><b>pid</b> — ephemeral run handle, one boot; reaped on exit. <span class="path">/proc/{pid}/</span></div>
-    <div class="el"><b>session-id ≠ pid</b> (§2.3 name-collision fixed — nexus #4564)</div>
+    <div class="el"><b>pid</b> — ephemeral run handle, one boot; reaped on exit. <span class="path">/proc/{pid}/</span> holds <code>status</code> · <code>chat-with-me</code> · <code>workspace/</code> (see those rows)</div>
     <span class="b ok">given</span></td>
 </tr>
 <tr>

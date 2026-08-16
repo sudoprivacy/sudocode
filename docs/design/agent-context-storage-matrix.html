@@ -126,8 +126,9 @@
     <div class="el"><span class="was">no explicit pid</span> <span class="arw">→</span> <span class="to">ephemeral run handle</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><span class="was">conversation-id + <code>messages</code>/<code>extra</code> = its own copy of the engine's session identity &amp; transcript</span> <span class="arw">→</span> <span class="to"><b>delegate to the engine</b> — key by the engine's <code>session-id</code>, read its store</span> <span class="b dup">dup</span></div>
-    <div class="el"><b>keep (UI-unique):</b> conversation-list index · position/status/pin/cron/channel/user_id</div>
+    <div class="el"><b>stays (SQLite):</b> conversation-list index · position/status/pin/cron/channel/user_id — UI-unique, sudowork's own</div>
+    <div class="el"><b>→ sudocode:</b> session identity + transcript copy (<code>conversation-id</code> / <code>messages</code> / <code>acpSessionId</code>) — key by the engine's durable <code>session-id</code>, read its store <span class="b dup">dup</span></div>
+    <div class="el"><b>→ nexus:</b> sudowork itself as a first-class principal (<code>agent-name</code> / zones) <span class="tbd">? Q9</span></div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>

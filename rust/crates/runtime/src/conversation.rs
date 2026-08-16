@@ -621,11 +621,11 @@ where
     /// fast-path) — zero disk I/O and zero allocation for the
     /// overwhelmingly common case.
     ///
-    /// Workspace root defaults to the process cwd, matching the
-    /// per-workspace `.sudocode-inbox/coordinator.jsonl` convention
-    /// that every emit site uses (also cwd-derived).
+    /// Workspace root is the turn's scoped root (the process cwd outside
+    /// ACP), matching the per-workspace `.sudocode-inbox/coordinator.jsonl`
+    /// convention that every emit site uses (same root).
     fn prepend_pending_task_notifications(&self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let workspace_root = crate::workspace_root::current_workspace_root_or_default();
         let notifications =
             crate::coordinator_notification::drain(&workspace_root).unwrap_or_default();
         if notifications.is_empty() {

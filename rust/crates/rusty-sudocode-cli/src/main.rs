@@ -2708,6 +2708,9 @@ impl AcpCliAgent {
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<AcpCliSession, AcpError> {
         let cwd = canonical_session_cwd(cwd)?;
+        // Config, plugin/MCP state and the API client's `.env` lookup all
+        // resolve against the workspace root (see `runtime::workspace_root`).
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
         let system_prompt = build_system_prompt_for(&cwd, &model).map_err(|error| {
@@ -2779,8 +2782,9 @@ impl AcpCliAgent {
         if self.model_flag_raw.is_some() {
             return Ok(model);
         }
-        let _guard = ScopedCurrentDir::change_to(cwd)
-            .map_err(|error| AcpError::internal(format!("failed to enter cwd: {error}")))?;
+        // `resolve_repl_model` reads project config from the workspace root
+        // (see `runtime::workspace_root`), so scope it to this session's cwd.
+        let _scope = runtime::WorkspaceRootScope::enter(cwd);
         Ok(resolve_repl_model(model))
     }
 
@@ -2788,8 +2792,7 @@ impl AcpCliAgent {
         if let Some(mode) = self.permission_mode_override {
             return Ok(mode);
         }
-        let _guard = ScopedCurrentDir::change_to(cwd)
-            .map_err(|error| AcpError::internal(format!("failed to enter cwd: {error}")))?;
+        let _scope = runtime::WorkspaceRootScope::enter(cwd);
         Ok(default_permission_mode())
     }
 }
@@ -2802,6 +2805,10 @@ impl AcpCliAgent {
         session: &mut AcpCliSession,
         model: Option<String>,
     ) -> Result<String, AcpError> {
+        // Everything below (model report, alias lookup, config, plugin/MCP
+        // state, the API client's `.env` lookup) resolves against the
+        // workspace root.
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let current = self.current_model();
 
         let Some(new_model) = model else {
@@ -2873,24 +2880,6 @@ impl AcpCliAgent {
             &resolved,
             message_count,
         ))
-    }
-}
-
-struct ScopedCurrentDir {
-    previous: PathBuf,
-}
-
-impl ScopedCurrentDir {
-    fn change_to(cwd: &Path) -> io::Result<Self> {
-        let previous = env::current_dir()?;
-        env::set_current_dir(cwd)?;
-        Ok(Self { previous })
-    }
-}
-
-impl Drop for ScopedCurrentDir {
-    fn drop(&mut self) {
-        let _ = env::set_current_dir(&self.previous);
     }
 }
 
@@ -3082,6 +3071,18 @@ impl AcpSdkDelegate {
         let handle = self.inner.session_handle(session_id)?;
         Ok(LockedAcpSession { handle })
     }
+
+    /// The working directory of a session, read from the registry slot so
+    /// it never waits on the session's own lock.
+    fn session_cwd(&self, session_id: &str) -> Result<PathBuf, runtime::AcpError> {
+        self.inner
+            .lock_sessions()
+            .get(session_id)
+            .map(|slot| slot.cwd.clone())
+            .ok_or_else(|| {
+                runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
+            })
+    }
 }
 
 /// Owner of a session handle that hands out the locked session. Kept as a
@@ -3188,8 +3189,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Status => {
                 let locked = self.lock_session(session_id)?;
                 let session = locked.get();
-                let _guard = ScopedCurrentDir::change_to(&session.cwd)
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
                 let tracker = UsageTracker::from_session(session.runtime.session());
                 format_status_report(
                     &self.inner.current_model(),
@@ -3219,19 +3219,25 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     usage.cache_read_input_tokens,
                 )
             }
-            SlashCommand::Config { section } => render_config_report(section.as_deref())
-                .map_err(|e| runtime::AcpError::internal(e.to_string()))?,
+            SlashCommand::Config { section } => {
+                let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
+                render_config_report(section.as_deref())
+                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+            }
             SlashCommand::ConfigSet { .. } => {
                 "/config set is only available in interactive REPL mode".to_string()
             }
             SlashCommand::Diff => {
+                let cwd = self.session_cwd(session_id)?;
                 let output = std::process::Command::new("git")
                     .args(["diff", "--cached", "--no-color"])
+                    .current_dir(&cwd)
                     .output()
                     .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
                 let cached = String::from_utf8_lossy(&output.stdout);
                 let output2 = std::process::Command::new("git")
                     .args(["diff", "--no-color"])
+                    .current_dir(&cwd)
                     .output()
                     .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
                 let unstaged = String::from_utf8_lossy(&output2.stdout);
@@ -3253,9 +3259,12 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     )
                 }
             }
-            SlashCommand::Doctor => render_doctor_report()
-                .map(|report| report.render())
-                .map_err(|e| runtime::AcpError::internal(e.to_string()))?,
+            SlashCommand::Doctor => {
+                let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
+                render_doctor_report()
+                    .map(|report| report.render())
+                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+            }
             _ => format!(
                 "`{}` is not supported in ACP mode. Available: /model, /status, /cost, /config, /diff, /doctor, /help",
                 input.split_whitespace().next().unwrap_or(input)
@@ -3359,7 +3368,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         eprintln!(
             "[push_images] active_model={active_model:?} vision_capable={active_model_is_vision_capable}"
         );
-        let sudocode_config = load_sudocode_config_for_current_dir();
+        let sudocode_config = load_sudocode_config_for_cwd(&self.session_cwd(session_id)?);
         let sudorouter_creds = extract_sudorouter_credentials(&sudocode_config);
         eprintln!(
             "[push_images] sudorouter_creds_present={}",
@@ -3434,8 +3443,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
         let cwd = canonical_session_cwd(&cwd)?;
-        let _guard = ScopedCurrentDir::change_to(&cwd)
-            .map_err(|e| runtime::AcpError::internal(format!("failed to enter cwd: {e}")))?;
+        // The session store, config and system prompt all resolve against
+        // the workspace root; scope this thread to the requested cwd.
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
 
         let (handle, session) = load_session_reference(session_id)
             .map_err(|e| runtime::AcpError::internal(format!("failed to load session: {e}")))?;
@@ -3513,9 +3523,14 @@ impl AcpSdkDelegate {
     > {
         // Reset abort signal for this new turn.
         session.abort_signal.reset();
-        let _guard = ScopedCurrentDir::change_to(&session.cwd).map_err(|e| {
-            runtime::AcpError::internal(format!("failed to enter session cwd: {e}"))
-        })?;
+        // The whole turn — tool loop, hooks, config, session store — resolves
+        // paths against this session's workspace root through
+        // `runtime::workspace_root`, never the process cwd. That is what lets
+        // turns of sessions in different directories run concurrently in
+        // one process (the ACP server also enters this scope around the
+        // blocking closure; nesting is harmless and keeps `run_prompt`
+        // correct for callers that do not).
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
 
         // Set trace_id on the runtime if provided
         if let Some(tid) = trace_id {

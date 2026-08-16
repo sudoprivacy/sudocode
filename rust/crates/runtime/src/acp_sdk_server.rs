@@ -21,6 +21,7 @@ use crate::permissions::{
     QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 use crate::usage::UsageCostCurrency;
+use crate::workspace_root::WorkspaceRootScope;
 use agent_client_protocol::{
     on_receive_dispatch, on_receive_notification, on_receive_request, ConnectTo, ConnectionTo,
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
@@ -32,9 +33,10 @@ use agent_client_protocol_schema::{
     LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
     PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionNotification, SessionUpdate,
-    SetSessionModelRequest, SetSessionModelResponse, StopReason, TextContent, ToolCall,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage,
+    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
+    SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
+    StopReason, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -216,7 +218,12 @@ fn acp_mcp_servers_to_scoped(
 ///   an `AskUserQuestion` must not stall the others;
 /// * calls on the **same** session are already serialized by the server
 ///   (see [`SessionRegistry`]), so the delegate only needs per-session
-///   locking for memory safety, not for ordering.
+///   locking for memory safety, not for ordering;
+/// * every session-scoped call is made with the calling thread's
+///   [`crate::workspace_root`] scope set to that session's working
+///   directory, and the delegate must resolve paths through it (never through
+///   the process cwd) — that is what keeps concurrent turns of sessions in
+///   different directories from seeing each other's files.
 pub trait SdkAcpDelegate: Send + Sync + 'static {
     /// Create a new session for the given working directory, returning
     /// `(session_id, cwd, abort_signal)` on success.
@@ -669,8 +676,9 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 ///   other sessions free to run. Two prompts on one session interleaving
 ///   their JSON-RPC traffic would corrupt the protocol, so this ordering is a
 ///   hard invariant, not a performance choice;
-/// * the working directory of each session, which feeds the
-///   [`WorkspaceCwdLease`] (see there for why that is needed).
+/// * the working directory of each session: every turn runs with it as the
+///   thread's [`crate::workspace_root`] scope, and the runtime-construction
+///   paths additionally take the [`WorkspaceCwdLease`] for it (see there).
 #[derive(Default)]
 pub struct SessionRegistry {
     sessions: Mutex<HashMap<String, SessionEntry>>,
@@ -751,23 +759,23 @@ impl SessionRegistry {
 
 /// Arbiter for the *process* working directory.
 ///
-/// The conversation runtime resolves relative paths, spawns `bash`, runs
-/// hooks and reads project config against `std::env::current_dir()`; a
-/// session's turn therefore has to run with the process cwd set to that
-/// session's cwd. That is a process-wide resource, so once turns of
-/// different sessions run concurrently something has to keep them from
-/// flipping the cwd under each other:
+/// Turns no longer touch the process cwd at all: everything a turn does —
+/// the tool loop, hooks, config, the session store — resolves paths against
+/// the session's [`crate::workspace_root`] scope, so turns of sessions in
+/// different directories run fully concurrently. What still resolves against
+/// the process cwd is *runtime construction*: `session/new`, `session/load`,
+/// `session/setModel` and the `/model` slash command rebuild a session's
+/// runtime, which spawns config-declared MCP servers and plugin processes
+/// that inherit the process cwd. Those paths are rare, short and never park
+/// on user input, so they simply run under this lease:
 ///
-/// * turns whose sessions share a cwd hold the lease **together** (it is
-///   reference-counted) and run fully concurrently;
-/// * a turn in a *different* cwd waits until the current holders are gone;
-/// * a turn that parks on user input (permission prompt / `AskUserQuestion`)
-///   **releases** the lease while it waits ([`CwdLeaseHandle::parked`]) and
-///   re-acquires it before continuing, so a parked session never keeps
-///   another cwd's session from running — the P0 this exists to fix.
+/// * holders whose sessions share a cwd hold the lease **together** (it is
+///   reference-counted) and run concurrently;
+/// * a holder for a *different* cwd waits until the current holders are gone.
 ///
 /// The lease only ever *sets* the cwd on acquisition; when the last holder
-/// leaves, the cwd is left as is (nothing outside a lease may depend on it).
+/// leaves, the cwd is left as is (nothing outside a lease may depend on it —
+/// in particular no turn does).
 #[derive(Default)]
 pub struct WorkspaceCwdLease {
     state: Mutex<CwdLeaseState>,
@@ -788,14 +796,10 @@ impl WorkspaceCwdLease {
     ///
     /// Returns the `set_current_dir` error if `cwd` cannot be entered; the
     /// lease is left untouched in that case.
-    pub fn acquire(self: &Arc<Self>, cwd: PathBuf) -> std::io::Result<CwdLeaseGuard> {
-        self.enter(&cwd)?;
+    pub fn acquire(self: &Arc<Self>, cwd: &std::path::Path) -> std::io::Result<CwdLeaseGuard> {
+        self.enter(cwd)?;
         Ok(CwdLeaseGuard {
-            handle: CwdLeaseHandle(Arc::new(CwdLeaseHandleInner {
-                lease: Arc::clone(self),
-                cwd,
-                held: std::sync::atomic::AtomicBool::new(true),
-            })),
+            lease: Arc::clone(self),
         })
     }
 
@@ -831,67 +835,14 @@ impl WorkspaceCwdLease {
     }
 }
 
-struct CwdLeaseHandleInner {
-    lease: Arc<WorkspaceCwdLease>,
-    cwd: PathBuf,
-    /// Whether this handle currently counts as a holder. Only the turn's
-    /// own thread flips it (acquire → park → unpark → drop), the atomic is
-    /// for `Sync`, not for contention.
-    held: std::sync::atomic::AtomicBool,
-}
-
-/// Cheap, cloneable reference to a held lease that lets the code parked
-/// deep inside a turn temporarily give the lease back.
-#[derive(Clone)]
-pub struct CwdLeaseHandle(Arc<CwdLeaseHandleInner>);
-
-impl CwdLeaseHandle {
-    /// Run `wait` with the lease released, then re-acquire the lease before
-    /// returning. If this handle is not currently holding the lease the
-    /// closure simply runs (a stale handle can never re-acquire on its own).
-    /// If the cwd cannot be re-entered afterwards, the failure is reported on
-    /// stderr and the turn continues without the lease — the directory has
-    /// vanished underneath the session, and its tools will report that
-    /// themselves.
-    pub fn parked<R>(&self, wait: impl FnOnce() -> R) -> R {
-        use std::sync::atomic::Ordering;
-        let released = self.0.held.swap(false, Ordering::AcqRel);
-        if released {
-            self.0.lease.leave();
-        }
-        let result = wait();
-        if released {
-            match self.0.lease.enter(&self.0.cwd) {
-                Ok(()) => self.0.held.store(true, Ordering::Release),
-                Err(error) => eprintln!(
-                    "[acp] failed to re-enter session cwd {} after user input: {error}",
-                    self.0.cwd.display()
-                ),
-            }
-        }
-        result
-    }
-}
-
 /// RAII holder of a [`WorkspaceCwdLease`] acquisition.
 pub struct CwdLeaseGuard {
-    handle: CwdLeaseHandle,
-}
-
-impl CwdLeaseGuard {
-    /// Handle to hand to code that may need to park while this guard lives.
-    #[must_use]
-    pub fn handle(&self) -> CwdLeaseHandle {
-        self.handle.clone()
-    }
+    lease: Arc<WorkspaceCwdLease>,
 }
 
 impl Drop for CwdLeaseGuard {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-        if self.handle.0.held.swap(false, Ordering::AcqRel) {
-            self.handle.0.lease.leave();
-        }
+        self.lease.leave();
     }
 }
 
@@ -905,21 +856,6 @@ struct AcpPermissionBridge {
         PermissionRequest,
         tokio::sync::oneshot::Sender<PermissionPromptDecision>,
     )>,
-    /// Lease on the process cwd held by the turn this bridge serves; given
-    /// back while we wait on the user so other sessions can run.
-    cwd_lease: Option<CwdLeaseHandle>,
-}
-
-/// Block on `wait` with the turn's cwd lease (if any) parked for the
-/// duration: the turn is idle until the user answers, and nothing in it
-/// touches the process cwd meanwhile (tool calls run strictly one at a time),
-/// so holding the lease would only keep sessions in other directories from
-/// making progress.
-fn wait_parked<R>(cwd_lease: Option<&CwdLeaseHandle>, wait: impl FnOnce() -> R) -> R {
-    match cwd_lease {
-        Some(lease) => lease.parked(wait),
-        None => wait(),
-    }
 }
 
 impl PermissionPrompter for AcpPermissionBridge {
@@ -939,14 +875,17 @@ impl PermissionPrompter for AcpPermissionBridge {
         // tells the multi-thread scheduler this thread is about to block,
         // allowing the recv to complete safely (same pattern as
         // `AcpQuestionBridge::ask` below).
-        wait_parked(self.cwd_lease.as_ref(), || {
-            tokio::task::block_in_place(|| {
-                response_rx
-                    .blocking_recv()
-                    .unwrap_or(PermissionPromptDecision::Deny {
-                        reason: "permission response channel closed".to_string(),
-                    })
-            })
+        //
+        // While this thread is parked the turn holds nothing shared: its
+        // workspace root is a thread-scoped value (see
+        // `crate::workspace_root`), so a parked session cannot hold up any
+        // other session.
+        tokio::task::block_in_place(|| {
+            response_rx
+                .blocking_recv()
+                .unwrap_or(PermissionPromptDecision::Deny {
+                    reason: "permission response channel closed".to_string(),
+                })
         })
     }
 }
@@ -973,12 +912,10 @@ impl QuestionPrompter for AcpQuestionBridge {
         // the client as a generic "blocking task failed" / Internal error.
         // `block_in_place` informs the multi-thread scheduler that this worker
         // is about to block, allowing the recv to complete safely.
-        wait_parked(self.cwd_lease.as_ref(), || {
-            tokio::task::block_in_place(|| {
-                response_rx
-                    .blocking_recv()
-                    .unwrap_or_else(|_| Err("question response channel closed".to_string()))
-            })
+        tokio::task::block_in_place(|| {
+            response_rx
+                .blocking_recv()
+                .unwrap_or_else(|_| Err("question response channel closed".to_string()))
         })
     }
 }
@@ -989,8 +926,6 @@ struct AcpQuestionBridge {
         QuestionPromptRequest,
         tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
     )>,
-    /// See [`AcpPermissionBridge::cwd_lease`].
-    cwd_lease: Option<CwdLeaseHandle>,
 }
 
 const ACP_ASK_USER_QUESTION_METHOD: &str = "_scode/ask_user_question";
@@ -1150,7 +1085,11 @@ pub(crate) async fn run_acp_on_transport(
                                 .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(
                                     SessionCapabilities::new()
-                                        .close(SessionCloseCapabilities::new()),
+                                        .close(SessionCloseCapabilities::new())
+                                        // `session/list` is handled below; like
+                                        // `loadSession` it had simply never been
+                                        // advertised.
+                                        .list(SessionListCapabilities::new()),
                                 ),
                         )
                         .meta(initialize_meta());
@@ -1173,12 +1112,16 @@ pub(crate) async fn run_acp_on_transport(
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
-                            // Session construction resolves config / model /
-                            // permission mode against the process cwd, so it
-                            // runs under the cwd lease like a turn does.
+                            // Runtime construction: the delegate resolves
+                            // config / model / permission mode against the
+                            // workspace-root scope, but the MCP servers and
+                            // plugins it spawns inherit the process cwd, so
+                            // it also runs under the cwd lease.
+                            let cwd = session_lease_cwd(&req.cwd);
                             let _cwd = lease
-                                .acquire(session_lease_cwd(&req.cwd))
+                                .acquire(&cwd)
                                 .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
+                            let _scope = WorkspaceRootScope::enter(cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
                             d.new_session(req.cwd, mcp_servers)
                         })
@@ -1243,6 +1186,7 @@ pub(crate) async fn run_acp_on_transport(
                         let _lane = registry.enter_lane(&sid).await;
                         let session_cwd = registry.cwd(&sid);
                         let cwd_lease = registry.cwd_lease();
+                        let is_slash_command = prompt_text.starts_with('/');
 
                         // Set up permission-prompt bridge channels.
                         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -1265,29 +1209,31 @@ pub(crate) async fn run_acp_on_transport(
                         let prompt_text_for_blocking = prompt_text.clone();
                         let trace_id_for_blocking = trace_id.clone();
                         let blocking_handle = tokio::task::spawn_blocking(move || {
-                            // Hold the process cwd for this session's directory
-                            // for the whole turn (shared with concurrent turns
-                            // in the same directory; parked while waiting on
-                            // the user — see `WorkspaceCwdLease`). Unknown
-                            // sessions have no cwd and fall through to the
-                            // delegate's `unknown sessionId` error.
-                            let cwd_guard = match session_cwd {
-                                Some(cwd) => Some(cwd_lease.acquire(cwd).map_err(|e| {
+                            // This thread works in the session's directory for
+                            // the whole turn through the workspace-root scope
+                            // (see `crate::workspace_root`): a thread-scoped
+                            // value, so turns of sessions in other directories
+                            // run at the same time on their own threads. The
+                            // process cwd is not touched. Unknown sessions have
+                            // no cwd and fall through to the delegate's
+                            // `unknown sessionId` error.
+                            let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
+                            // Slash commands are the exception: `/model`
+                            // rebuilds the session runtime, which is a
+                            // runtime-construction path (see
+                            // `WorkspaceCwdLease`), so they run under the
+                            // lease. They are short and never park on the
+                            // user.
+                            let _cwd_guard = match (is_slash_command, session_cwd) {
+                                (true, Some(cwd)) => Some(cwd_lease.acquire(&cwd).map_err(|e| {
                                     AcpError::internal(format!("failed to enter session cwd: {e}"))
                                 })?),
-                                None => None,
+                                _ => None,
                             };
-                            let lease_handle = cwd_guard.as_ref().map(CwdLeaseGuard::handle);
 
                             let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
-                            let mut bridge = AcpPermissionBridge {
-                                tx: bridge_tx,
-                                cwd_lease: lease_handle.clone(),
-                            };
-                            let question_bridge = AcpQuestionBridge {
-                                tx: question_tx,
-                                cwd_lease: lease_handle,
-                            };
+                            let mut bridge = AcpPermissionBridge { tx: bridge_tx };
+                            let question_bridge = AcpQuestionBridge { tx: question_tx };
                             let _ = d.set_question_prompter(
                                 &sid_for_blocking,
                                 Box::new(question_bridge),
@@ -1299,7 +1245,7 @@ pub(crate) async fn run_acp_on_transport(
                                 let _ = d.push_images(&sid_for_blocking, &images_for_blocking);
                             }
 
-                            let stop = if prompt_text_for_blocking.starts_with('/') {
+                            let stop = if is_slash_command {
                                 d.handle_slash_command(
                                     &sid_for_blocking,
                                     &prompt_text_for_blocking,
@@ -1315,7 +1261,6 @@ pub(crate) async fn run_acp_on_transport(
                                     trace_id_for_blocking.as_deref(),
                                 )
                             };
-                            drop(cwd_guard);
                             // Return the Result instead of unwrapping, so we can handle errors
                             stop
                         });
@@ -1567,10 +1512,11 @@ pub(crate) async fn run_acp_on_transport(
                         let session_cwd = registry.cwd(&sid);
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
-                            // The model switch rebuilds the session runtime,
-                            // resolving config against the process cwd.
+                            // The model switch rebuilds the session runtime
+                            // (runtime construction — see `WorkspaceCwdLease`).
+                            let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
                             let _cwd = match session_cwd {
-                                Some(cwd) => Some(lease.acquire(cwd).map_err(|e| {
+                                Some(cwd) => Some(lease.acquire(&cwd).map_err(|e| {
                                     AcpError::internal(format!("failed to enter session cwd: {e}"))
                                 })?),
                                 None => None,
@@ -1613,9 +1559,12 @@ pub(crate) async fn run_acp_on_transport(
                         let _lane = registry.enter_lane(&sid).await;
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
+                            // Runtime construction — see `session/new` above.
+                            let lease_cwd = session_lease_cwd(&cwd);
                             let _cwd = lease
-                                .acquire(session_lease_cwd(&cwd))
+                                .acquire(&lease_cwd)
                                 .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
+                            let _scope = WorkspaceRootScope::enter(lease_cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
                             d.load_session(&sid, cwd, mcp_servers)
                         })

@@ -76,6 +76,7 @@ mod time;
 mod trust_resolver;
 mod usage;
 pub mod worker_boot;
+pub mod workspace_root;
 
 pub use acp_sdk_server::AcpError;
 pub use bash::{
@@ -231,6 +232,10 @@ pub use usage::{
 pub use worker_boot::{
     Worker, WorkerEvent, WorkerEventKind, WorkerEventPayload, WorkerFailure, WorkerFailureKind,
     WorkerPromptTarget, WorkerReadySnapshot, WorkerRegistry, WorkerStatus, WorkerTrustResolution,
+};
+pub use workspace_root::{
+    current_workspace_root, current_workspace_root_or_default, scoped_workspace_root,
+    WorkspaceRootHandoff, WorkspaceRootScope,
 };
 
 #[cfg(test)]

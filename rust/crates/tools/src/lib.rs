@@ -224,7 +224,8 @@ use runtime::{
     agent_mailbox::{self, kinds as mailbox_kinds, MailboxEnvelope},
     check_freshness,
     cron_registry::CronRegistry,
-    dedupe_superseded_commit_events, edit_file, execute_bash_with_abort, glob_search, grep_search,
+    current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
+    glob_search, grep_search,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -237,7 +238,7 @@ use runtime::{
     LaneEvent, LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass,
     McpDegradedReport, MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent,
     ProviderFallbackConfig, RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext,
-    ToolError, ToolExecutor, FORK_BOILERPLATE_TAG,
+    ToolError, ToolExecutor, WorkspaceRootHandoff, FORK_BOILERPLATE_TAG,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2227,11 +2228,11 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
 
 // ── SendMessage ────────────────────────────────────────────────────
 
-/// Resolve the workspace root that receives inbox files. The current
-/// working directory is the canonical anchor — matches the way plan-mode,
-/// todos, and agent manifests use `env::current_dir()`.
+/// Resolve the workspace root that receives inbox files. The turn's
+/// workspace root is the canonical anchor — matches the way plan-mode,
+/// todos, and agent manifests use [`current_workspace_root`].
 fn send_message_workspace() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| format!("resolve workspace root: {e}"))
+    current_workspace_root().map_err(|e| format!("resolve workspace root: {e}"))
 }
 
 /// Best-effort sanitizer for a mailbox filename stem. Recipient
@@ -2733,7 +2734,7 @@ fn has_dangerous_paths(command: &str) -> bool {
             // Check if it's within CWD
             let path =
                 PathBuf::from(token.replace('~', &std::env::var("HOME").unwrap_or_default()));
-            if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(cwd) = current_workspace_root() {
                 if !path.starts_with(&cwd) {
                     return true; // Path outside workspace
                 }
@@ -2834,15 +2835,24 @@ fn resolve_main_ref(branch: &str) -> Option<String> {
 }
 
 fn git_ref_exists(reference: &str) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", reference])
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "--verify", "--quiet", reference]);
+    if let Ok(root) = current_workspace_root() {
+        command.current_dir(root);
+    }
+    command
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
 fn git_stdout(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Ok(root) = current_workspace_root() {
+        command.current_dir(root);
+    }
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2986,10 +2996,15 @@ fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
     // Run on a dedicated OS thread: execute_web_fetch drives the request with
     // block_on on the shared HTTP runtime, which panics if called from within
     // an ambient tokio runtime (e.g. ACP mode). The spawned thread is outside
-    // any such runtime.
-    std::thread::spawn(move || to_pretty_json(execute_web_fetch(&input)?))
-        .join()
-        .unwrap_or_else(|_| Err("web fetch thread panicked".into()))
+    // any such runtime. The helper thread inherits the turn's workspace root
+    // so config lookups resolve against the session's directory.
+    let workspace = WorkspaceRootHandoff::capture();
+    std::thread::spawn(move || {
+        let _workspace = workspace.enter();
+        to_pretty_json(execute_web_fetch(&input)?)
+    })
+    .join()
+    .unwrap_or_else(|_| Err("web fetch thread panicked".into()))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2997,10 +3012,15 @@ fn run_web_search(input: WebSearchInput) -> Result<String, String> {
     // Run on a dedicated OS thread: execute_web_search drives the request with
     // block_on on the shared HTTP runtime, which panics if called from within
     // an ambient tokio runtime (e.g. ACP mode). The spawned thread is outside
-    // any such runtime.
-    std::thread::spawn(move || to_pretty_json(execute_web_search(&input)?))
-        .join()
-        .unwrap_or_else(|_| Err("web search thread panicked".into()))
+    // any such runtime. The helper thread inherits the turn's workspace root
+    // so `load_sudocode_config()` resolves against the session's directory.
+    let workspace = WorkspaceRootHandoff::capture();
+    std::thread::spawn(move || {
+        let _workspace = workspace.enter();
+        to_pretty_json(execute_web_search(&input)?)
+    })
+    .join()
+    .unwrap_or_else(|_| Err("web search thread panicked".into()))
 }
 
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
@@ -3112,9 +3132,9 @@ fn extract_powershell_path(command: &str) -> Option<String> {
 fn is_within_workspace(path: &str) -> bool {
     let path = PathBuf::from(path);
 
-    // If path is absolute, check if it starts with CWD
+    // If path is absolute, check if it starts with the workspace root
     if path.is_absolute() {
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(cwd) = current_workspace_root() {
             return path.starts_with(&cwd);
         }
     }
@@ -3717,6 +3737,12 @@ struct AgentJob {
     /// `.abort()` for live delivery — mirrors CC-fork's
     /// `task.abortController.abort()`.
     abort_signal: HookAbortSignal,
+    /// The parent turn's workspace root, captured at spawn time. The worker
+    /// thread re-enters it before it does anything (see
+    /// [`runtime::WorkspaceRootHandoff`]) so a sub-agent of a session in
+    /// `/a` writes its manifests, inbox and files under `/a` even while a
+    /// sibling session's turn runs in `/b` on another thread.
+    workspace: WorkspaceRootHandoff,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -4488,12 +4514,12 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
     if let Ok(path) = std::env::var("SUDOCODE_TODO_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-todos.json"))
 }
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     let plugin_load_outcome = load_plugin_outcome_for_cwd(&cwd);
     commands::resolve_skill_path_with_plugins(&cwd, skill, plugin_load_outcome.as_ref())
         .map_err(|error| error.to_string())
@@ -4676,6 +4702,7 @@ fn prepare_agent_job(
         auth_mode,
         inherited_messages,
         abort_signal: HookAbortSignal::default(),
+        workspace: WorkspaceRootHandoff::capture(),
     };
     Ok(PreparedAgent { manifest, job })
 }
@@ -4807,7 +4834,10 @@ where
 
     let bg_manifest = manifest.clone();
     let bg_agent_id = agent_id.clone();
+    let workspace = job.workspace.clone();
     std::thread::spawn(move || {
+        // Worker threads carry the parent turn's workspace root with them.
+        let _workspace = workspace.enter();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work_fn(job)));
         match result {
             Ok(Ok(final_text)) => {
@@ -4880,6 +4910,8 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
 
 #[allow(clippy::needless_pass_by_value)] // ownership required for move into spawn_blocking
 fn run_spawned_agent_job(job: AgentJob) {
+    // Worker threads carry the parent turn's workspace root with them.
+    let _workspace = job.workspace.enter();
     let agent_id = job.manifest.agent_id.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_agent_job_returning_text(&job).and_then(|text| {
@@ -4949,7 +4981,7 @@ fn subagent_max_multi_turns() -> usize {
 fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
-    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let workspace_root = current_workspace_root().unwrap_or_default();
     // Accumulate telemetry across every multi-turn iteration so a
     // long coordinator-driven conversation reports one aggregated
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
@@ -5373,7 +5405,7 @@ fn build_agent_runtime(
 }
 
 fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     // Route sub-agents through the per-agent-type memory scope
     // (`<workspace>/agent-memory/<subagent_type>/`) so one agent's
     // remembered facts don't leak into another's memory index —
@@ -5694,7 +5726,7 @@ fn persist_agent_terminal_state_with_telemetry(
         // swallow. The `notified=true` flag persists regardless so
         // a retry doesn't double-emit.
         let xml = render_manifest_task_notification(&next_manifest);
-        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let workspace_root = current_workspace_root().unwrap_or_default();
         if let Err(err) =
             runtime::coordinator_notification::emit(&workspace_root, &next_manifest.agent_id, &xml)
         {
@@ -6308,7 +6340,7 @@ fn derive_agent_state(
 fn maybe_commit_provenance(result: Option<&str>) -> Option<LaneCommitProvenance> {
     let commit = extract_commit_sha(result?)?;
     let branch = current_git_branch().unwrap_or_else(|| "unknown".to_string());
-    let worktree = std::env::current_dir()
+    let worktree = current_workspace_root()
         .ok()
         .map(|path| path.display().to_string());
     Some(LaneCommitProvenance {
@@ -6329,10 +6361,12 @@ fn extract_commit_sha(result: &str) -> Option<String> {
 }
 
 fn current_git_branch() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+    if let Ok(root) = current_workspace_root() {
+        command.current_dir(root);
+    }
+    let output = command.output().ok()?;
     output
         .status
         .success()
@@ -6518,7 +6552,7 @@ fn build_provider_entry_with_config(
 }
 
 fn load_sudocode_config() -> SudoCodeConfig {
-    std::env::current_dir()
+    current_workspace_root()
         .ok()
         .and_then(|cwd| {
             runtime::config::ConfigLoader::default_for(cwd)
@@ -6529,7 +6563,7 @@ fn load_sudocode_config() -> SudoCodeConfig {
 }
 
 fn load_provider_fallback_config() -> ProviderFallbackConfig {
-    std::env::current_dir()
+    current_workspace_root()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
         .map_or_else(ProviderFallbackConfig::default, |config| {
@@ -7042,10 +7076,10 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         if path.is_absolute() {
             return Ok(path);
         }
-        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let cwd = current_workspace_root().map_err(|error| error.to_string())?;
         return Ok(cwd.join(path));
     }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-agents"))
 }
 
@@ -7109,7 +7143,7 @@ fn lookup_custom_agent(
     if is_builtin_subagent(subagent_type) {
         return None;
     }
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = current_workspace_root().ok()?;
     runtime::custom_agents::find_custom_agent(subagent_type, &cwd)
 }
 
@@ -7249,7 +7283,16 @@ fn iso8601_now() -> String {
 
 #[allow(clippy::too_many_lines)]
 fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput, String> {
-    let path = std::path::PathBuf::from(&input.notebook_path);
+    // Relative notebook paths resolve against the turn's workspace root,
+    // like every other file tool.
+    let requested = std::path::PathBuf::from(&input.notebook_path);
+    let path = if requested.is_absolute() {
+        requested
+    } else {
+        current_workspace_root()
+            .map_err(|error| error.to_string())?
+            .join(requested)
+    };
     if path.extension().and_then(|ext| ext.to_str()) != Some("ipynb") {
         return Err(String::from(
             "File must be a Jupyter notebook (.ipynb file).",
@@ -7471,7 +7514,16 @@ fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
 }
 
 fn resolve_attachment(path: &str) -> Result<ResolvedAttachment, String> {
-    let resolved = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+    // Relative attachment paths resolve against the turn's workspace root.
+    let requested = std::path::Path::new(path);
+    let anchored = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        current_workspace_root()
+            .map_err(|error| error.to_string())?
+            .join(requested)
+    };
+    let resolved = std::fs::canonicalize(&anchored).map_err(|error| error.to_string())?;
     let metadata = std::fs::metadata(&resolved).map_err(|error| error.to_string())?;
     Ok(ResolvedAttachment {
         path: resolved.display().to_string(),
@@ -7707,6 +7759,9 @@ fn execute_repl(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Ok(root) = current_workspace_root() {
+        process.current_dir(root);
+    }
 
     let timeout_ms = input
         .timeout_ms
@@ -7939,7 +7994,7 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
 }
 
 fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(match scope {
         ConfigScope::Global => config_home_dir()?.join("settings.json"),
         ConfigScope::Settings => cwd
@@ -8162,6 +8217,9 @@ fn execute_shell_command(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        if let Ok(root) = current_workspace_root() {
+            process.current_dir(root);
+        }
         let child = process.group_spawn()?;
         let pid = child.id();
         drop(child);
@@ -8190,6 +8248,9 @@ fn execute_shell_command(
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(command);
+    if let Ok(root) = current_workspace_root() {
+        process.current_dir(root);
+    }
 
     let timeout_ms = timeout.unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
     let result = run_in_process_group(&mut process, timeout_ms, abort_signal)?;

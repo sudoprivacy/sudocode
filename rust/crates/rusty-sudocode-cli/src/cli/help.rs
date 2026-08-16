@@ -1,4 +1,3 @@
-use std::env;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -212,7 +211,7 @@ pub(crate) fn print_help_topic(
 pub(crate) fn render_config_report(
     section: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered = loader.discover();
     let runtime_config = loader.load()?;
@@ -293,7 +292,7 @@ pub(crate) fn render_config_report(
 pub(crate) fn render_config_json(
     section: Option<&str>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered = loader.discover();
     let runtime_config = loader.load()?;
@@ -373,7 +372,7 @@ pub(crate) fn render_config_json(
 }
 
 pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
     let mut lines = vec![format!(
         "Memory
@@ -412,7 +411,7 @@ pub(crate) fn render_memory_report() -> Result<String, Box<dyn std::error::Error
 }
 
 pub(crate) fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let project_context = ProjectContext::discover(&cwd, runtime::today_local())?;
     let files: Vec<_> = project_context
         .instruction_files
@@ -434,7 +433,7 @@ pub(crate) fn render_memory_json() -> Result<serde_json::Value, Box<dyn std::err
 }
 
 pub(crate) fn render_diff_report() -> Result<String, Box<dyn std::error::Error>> {
-    render_diff_report_for(&env::current_dir()?)
+    render_diff_report_for(&runtime::current_workspace_root()?)
 }
 
 pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -563,7 +562,7 @@ pub(crate) fn run_git_diff_command_in(
 }
 
 pub(crate) fn render_teleport_report(target: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
 
     let file_list = Command::new("rg")
         .args(["--files"])

@@ -175,7 +175,7 @@ pub(crate) fn render_diagnostic_check(check: &DiagnosticCheck) -> String {
 }
 
 pub(crate) fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let config_loader = ConfigLoader::default_for(&cwd);
     let config = config_loader.load();
     let discovered_config = config_loader.discover();

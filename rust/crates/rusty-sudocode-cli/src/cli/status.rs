@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 
 use runtime::{self, resolve_sandbox_status, ConfigLoader, ProjectContext};
@@ -171,7 +170,7 @@ pub(crate) fn status_json_value(
 pub(crate) fn status_context(
     session_path: Option<&Path>,
 ) -> Result<StatusContext, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let loader = ConfigLoader::default_for(&cwd);
     let discovered_config_files = loader.discover().len();
     // #143: degrade gracefully on config parse failure rather than hard-fail.
@@ -315,7 +314,7 @@ pub(crate) fn format_status_report(
 pub(crate) fn print_sandbox_status_snapshot(
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
+    let cwd = runtime::current_workspace_root()?;
     let loader = ConfigLoader::default_for(&cwd);
     let runtime_config = loader
         .load()

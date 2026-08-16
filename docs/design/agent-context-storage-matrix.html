@@ -88,14 +88,15 @@
 
 <div class="legend">
   <span><span class="b ref">reference</span> CC — the model we map from</span>
-  <span><span class="b ok">done</span> built</span>
-  <span><span class="b partial">partial</span> partial / differs</span>
-  <span><span class="b miss">gap</span> not built</span>
-  <span><span class="b dup">dup</span> duplicated, merge long-term</span>
+  <span><span class="b ok">done</span> built &amp; matches target</span>
+  <span><span class="b partial">partial</span> built but differs / incomplete</span>
+  <span><span class="b miss">gap</span> not built here (CC has it)</span>
+  <span><span class="b dup">dup</span> redundant copy of the engine's data → collapse to a view</span>
   <span><span class="b q">open?</span> design question (hover)</span>
-  <span><span class="b na">n/a</span> not applicable</span>
+  <span><span class="b na">n/a</span> doesn't apply</span>
   <span><span class="tbd">?</span> migration undecided — a gap to fill</span>
 </div>
+<p class="note"><b>Badges compare each system to the target, per row.</b> <b>gap</b> — this system lacks a capability CC has / the end-state needs; on the burndown it advances <span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span> (what's missing is the <span class="was">left</span> side of that cell). <b>dup</b> — it keeps its <i>own</i> copy of data the <b>engine</b> (scode's session jsonl, ultimately the nexus <code>/sessions/</code> SSOT) already owns; <b>"merge long-term"</b> = that copy collapses into a <i>view</i> over the one SSOT — one store, not two. Example: sudowork's <code>messages</code> table is a full duplicate of the engine transcript → becomes a view (see the Migration row).</p>
 
 <h2>The matrix</h2>
 <table>

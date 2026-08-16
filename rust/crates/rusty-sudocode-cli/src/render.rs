@@ -156,31 +156,45 @@ pub struct ColorTheme {
 }
 
 impl ColorTheme {
+    // ── Sudoprivacy VI palette ─────────────────────────────────────
+    //
+    // Brand colors (from sudowork.sudoprivacy.com):
+    //   amber  #F59E0B  → ANSI 214  primary brand touch-point
+    //   teal   #0D9488  → ANSI 36   secondary brand touch-point
+    //
+    // Semantic colors (industry standard, not brand-specific):
+    //   success = green, error = red, diff = green/red
+    //
+    // Derived:
+    //   warning  = teal-bright #2DD4BF → ANSI 79  (avoids amber clash with primary)
+    //   muted    = VI grey #6b7280     → ANSI 243
+    //   border   = VI border #E5E7EB   → ANSI 248
+
     /// Dark terminal background (default).
     #[must_use]
     pub fn dark() -> Self {
         Self {
-            primary: Color::Cyan,
-            success: Color::Green,
-            error: Color::Red,
-            warning: Color::Yellow,
-            info: Color::Blue,
-            muted: Color::DarkGrey,
-            emphasis: Color::Magenta,
-            strong: Color::Yellow,
-            link: Color::Blue,
-            code: Color::Green,
-            code_bg: 236,
-            border: Color::AnsiValue(245),
-            diff_added: Color::AnsiValue(70),
-            diff_removed: Color::AnsiValue(203),
-            hook_feedback: Color::AnsiValue(214),
-            logo: Color::AnsiValue(117),
-            logo_accent: Color::AnsiValue(208),
-            quote: Color::DarkGrey,
+            primary: Color::AnsiValue(214),       // amber #F59E0B
+            success: Color::Green,                // semantic
+            error: Color::Red,                    // semantic
+            warning: Color::AnsiValue(79),        // teal-bright #2DD4BF
+            info: Color::AnsiValue(36),           // teal #0D9488
+            muted: Color::AnsiValue(243),         // grey #767676
+            emphasis: Color::AnsiValue(214),      // amber (italic text)
+            strong: Color::White,                 // bold text
+            link: Color::AnsiValue(36),           // teal
+            code: Color::AnsiValue(79),           // teal-bright
+            code_bg: 236,                         // dark grey bg
+            border: Color::AnsiValue(248),        // light grey
+            diff_added: Color::AnsiValue(70),     // semantic green
+            diff_removed: Color::AnsiValue(203),  // semantic red
+            hook_feedback: Color::AnsiValue(214), // amber
+            logo: Color::AnsiValue(214),          // amber
+            logo_accent: Color::AnsiValue(36),    // teal
+            quote: Color::AnsiValue(243),         // grey
             heading_h2: Color::White,
-            heading_h3: Color::Blue,
-            heading_h4: Color::Grey,
+            heading_h3: Color::AnsiValue(36),  // teal
+            heading_h4: Color::AnsiValue(243), // grey
         }
     }
 
@@ -188,27 +202,27 @@ impl ColorTheme {
     #[must_use]
     pub fn light() -> Self {
         Self {
-            primary: Color::DarkCyan,
-            success: Color::DarkGreen,
-            error: Color::DarkRed,
-            warning: Color::AnsiValue(130), // dark orange
-            info: Color::DarkBlue,
-            muted: Color::Grey,
-            emphasis: Color::DarkMagenta,
-            strong: Color::AnsiValue(130),
-            link: Color::DarkBlue,
-            code: Color::DarkGreen,
-            code_bg: 253, // light grey bg
-            border: Color::AnsiValue(240),
-            diff_added: Color::AnsiValue(22),    // dark green
-            diff_removed: Color::AnsiValue(124), // dark red
-            hook_feedback: Color::AnsiValue(130),
-            logo: Color::AnsiValue(25),         // dark blue
-            logo_accent: Color::AnsiValue(166), // dark orange
-            quote: Color::Grey,
+            primary: Color::AnsiValue(172),       // darker amber #D97706
+            success: Color::DarkGreen,            // semantic
+            error: Color::DarkRed,                // semantic
+            warning: Color::AnsiValue(30),        // dark teal #008787
+            info: Color::AnsiValue(30),           // dark teal
+            muted: Color::AnsiValue(245),         // medium grey
+            emphasis: Color::AnsiValue(172),      // darker amber
+            strong: Color::Black,                 // bold text
+            link: Color::AnsiValue(30),           // dark teal
+            code: Color::AnsiValue(30),           // dark teal
+            code_bg: 253,                         // light grey bg
+            border: Color::AnsiValue(250),        // light grey
+            diff_added: Color::AnsiValue(22),     // semantic dark green
+            diff_removed: Color::AnsiValue(124),  // semantic dark red
+            hook_feedback: Color::AnsiValue(172), // darker amber
+            logo: Color::AnsiValue(172),          // darker amber
+            logo_accent: Color::AnsiValue(30),    // dark teal
+            quote: Color::AnsiValue(245),         // grey
             heading_h2: Color::Black,
-            heading_h3: Color::DarkBlue,
-            heading_h4: Color::DarkGrey,
+            heading_h3: Color::AnsiValue(30),  // dark teal
+            heading_h4: Color::AnsiValue(245), // grey
         }
     }
 

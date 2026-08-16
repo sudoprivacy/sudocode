@@ -40,14 +40,22 @@ impl From<ConfigError> for PromptBuildError {
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 /// Human-readable label used for the "Model family" environment bullet
 /// when the provider is Anthropic.
-pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
+/// Fallback label when no model-specific display name is available.
+pub const FRONTIER_MODEL_NAME: &str = "Claude";
 
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 
-/// Neutral identity for the model family line in generated prompts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Identity for the "Model family" line in the system prompt environment section.
+///
+/// `Named(display_name)` is preferred — it carries the human-readable name
+/// from `sudocode.json` (e.g. "Claude Opus 4.8", "GPT 5.4").
+/// The legacy `Claude` / `Generic` variants are fallbacks when the caller
+/// cannot resolve a display name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ModelFamilyIdentity {
+    /// Model with a known display name (from sudocode.json SSOT).
+    Named(String),
     #[default]
     Claude,
     Generic,
@@ -55,8 +63,9 @@ pub enum ModelFamilyIdentity {
 
 impl ModelFamilyIdentity {
     #[must_use]
-    pub const fn family_label(self) -> &'static str {
+    pub fn family_label(&self) -> &str {
         match self {
+            Self::Named(name) => name.as_str(),
             Self::Claude => FRONTIER_MODEL_NAME,
             Self::Generic => "an AI assistant",
         }
@@ -270,7 +279,7 @@ impl SystemPromptBuilder {
             || "unknown".to_string(),
             |context| context.cwd.display().to_string(),
         );
-        let identity = self.model_family.unwrap_or_default();
+        let identity = self.model_family.as_ref().cloned().unwrap_or_default();
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
             format!("Model family: {}", identity.family_label()),

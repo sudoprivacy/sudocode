@@ -4973,11 +4973,15 @@ impl LiveCli {
         session.model = Some(model.clone());
         let session_id = self.session.id.clone();
         let message_count = session.messages.len();
+        // Rebuild system prompt so the model identity line reflects the new model.
+        let cwd = env::current_dir().unwrap_or_default();
+        let system_prompt = build_system_prompt_for(&cwd, &model)?;
         let runtime = self.build_replacement_runtime(
             session,
             session_id,
             RuntimeConfig {
                 model: model.clone(),
+                system_prompt,
                 ..self.config.clone()
             },
         )?;

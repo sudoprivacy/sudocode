@@ -167,6 +167,24 @@ fn system_prompt_renders() {
     assert_eq!(exit, 0, "scode system-prompt should exit 0; got {exit}");
 }
 
+/// System prompt must NOT contain a hardcoded "Model family" line.
+/// The model knows its own identity via training data; injecting a
+/// static label causes misidentification after `/model` switch.
+#[test]
+fn system_prompt_no_hardcoded_model_family() {
+    let mut sess = spawn_scode(&["system-prompt"]).expect("spawn scode system-prompt");
+    let exit = sess.expect_eof().expect("should exit");
+    assert_eq!(exit, 0);
+
+    let output = sess.render(|s| s.contents());
+    assert!(
+        !output.contains("Model family:"),
+        "system prompt must not contain 'Model family:' — \
+         the model knows its own identity via training data.\n\
+         Found in output:\n{output}"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 7. scode --help — usage info
 // ──────────────────────────────────────────────────────────────────────

@@ -279,10 +279,8 @@ impl SystemPromptBuilder {
             || "unknown".to_string(),
             |context| context.cwd.display().to_string(),
         );
-        let identity = self.model_family.as_ref().cloned().unwrap_or_default();
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
-            format!("Model family: {}", identity.family_label()),
             format!("Working directory: {cwd}"),
             format!(
                 "Platform: {} {}",

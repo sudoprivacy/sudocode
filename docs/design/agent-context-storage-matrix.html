@@ -99,7 +99,7 @@
   <span><span class="tbd">?</span> migration undecided — a gap to fill</span>
 </div>
 <p class="note"><b>Badges compare each system to the target, per row.</b> <b>gap</b> — this system lacks a capability CC has / the end-state needs; on the burndown it advances <span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span> (what's missing is the <span class="was">left</span> side of that cell). <b>dup</b> — it keeps its <i>own</i> copy of data the <b>engine</b> (scode's session jsonl, ultimately the nexus <code>/sessions/</code> SSOT) already owns; <b>"merge long-term"</b> = that copy collapses into a <i>view</i> over the one SSOT — one store, not two. Example: sudowork's <code>messages</code> table is a full duplicate of the engine transcript → becomes a view (see the Migration row).</p>
-<p class="note"><b>The sudowork column reads in 3 buckets.</b> <b>stays (SQLite)</b> = UI-unique, kept · <b>→ sudocode</b> = delegate to the engine — read its store; this is where the <i>agent</i> identity lives (<code>session-id</code> · <code>agent-name</code> · zones), since sudowork is a UI and sudocode is the agent · <b>→ nexus (direct)</b> = only what sudowork does <i>without</i> the engine (rare for a UI — e.g. multi-user ACL, Q9c). Chain: <code>sudowork → sudocode → nexus</code>, each hop written once. <b>Consistency check (read a row left-to-right):</b> whatever sudowork delegates <code>→ sudocode</code> must appear in the sudocode cell, and be provided by the Nexus end-state.</p>
+<p class="note"><b>The sudowork column reads in 3 buckets.</b> <b>stays (SQLite)</b> = UI-unique, kept · <b>→ sudocode</b> = delegate to the engine — read its store; this is where the <i>agent</i> identity lives (<code>session-id</code> · <code>agent-name</code> · zones), since sudowork is a UI and sudocode is the agent · <b>→ nexus (direct)</b> = only what sudowork does <i>without</i> the engine (rare for a UI — e.g. multi-user ACL, Q9c). Chain: <code>sudowork → sudocode → nexus</code>, each hop written once. <b>Consistency check (read a row left-to-right):</b> whatever sudowork delegates <code>→ sudocode</code> must appear in the sudocode cell, and be provided by the Nexus end-state. <small>(swept 2026-08 — all rows check out.)</small></p>
 
 <h2>The matrix</h2>
 <table>
@@ -108,7 +108,7 @@
   <th style="width:11%">item</th>
   <th style="width:21%">Claude Code <span class="h2">current — reference model</span></th>
   <th style="width:21%">sudocode <span class="h2">current → maps to</span></th>
-  <th style="width:18%">sudowork <span class="h2">current → maps to</span></th>
+  <th style="width:18%">sudowork <span class="h2">a UI — stays / → sudocode</span></th>
   <th style="width:23%">Nexus end-state <span class="h2">target — all converge here</span></th>
 </tr></thead>
 <tbody>
@@ -145,8 +145,9 @@
     <div class="el"><span class="was">no explicit split — sessions under cwd, config in <span class="path">~/.scode/</span>, <code>AGENTS.md</code> in repo</span> <span class="arw">→</span> <span class="to">fold into image <span class="path">/agents/{name}/</span> + runtime <span class="path">/proc/{pid}/</span></span></div>
     <span class="b miss">gap</span></td>
   <td>
-    <div class="el"><span class="was">all in SQLite <code>conversations.extra</code> (mixes static + runtime)</span> <span class="arw">→</span> <span class="to">split into image + runtime layers</span></div>
-    <span class="b dup">dup</span></td>
+    <div class="el"><b>stays (SQLite):</b> UI metadata in <code>conversations.extra</code></div>
+    <div class="el"><b>→ sudocode:</b> the agent's image vs runtime split is the engine's — sudowork points at it, doesn't own it <span class="b dup">dup</span></div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>image</b> <span class="path">/agents/{name}/</span></div>
     <div class="el"><b>runtime</b> <span class="path">/proc/{pid}/</span></div>
@@ -162,8 +163,8 @@
     <div class="el"><span class="was"><span class="path">.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span> — records <code>session_meta</code>/<code>compaction</code>/<code>prompt_history</code>/<code>message</code>; rotate 256 KiB × 3</span> <span class="arw">→</span> <span class="to"><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span> (KernelFsBackend; drop the fp dir)</span></div>
     <span class="b ok">done (local)</span></td>
   <td>
-    <div class="el"><span class="was"><code>messages</code> table = full UI copy (assistant + tool calls/results), joined by <code>acpSessionId</code></span> <span class="arw">→</span> <span class="to">a view over the engine <span class="path">/sessions/&lt;sid&gt;/transcript.jsonl</span></span></div>
-    <span class="b dup">dup — primary</span></td>
+    <div class="el"><b>→ sudocode:</b> <code>messages</code> table = full copy of the engine transcript → collapse to a <i>view</i> over <span class="path">/sessions/&lt;sid&gt;/transcript.jsonl</span> <span class="b dup">dup — primary</span></div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span></b> — flat; session-id is the <b>sole structural key</b> (no workspace_hash, no agent nesting)</div>
     <div class="el"><code>owner</code> attribute records ownership</div>
@@ -182,8 +183,9 @@
     <div class="el"><span class="was"><code>SessionStore</code> per workspace-fp; <code>--resume latest</code>/<code>list</code> (scan + mtime)</span> <span class="arw">→</span> <span class="to">scan flat <span class="path">/sessions/</span> (isolation by policy)</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><span class="was">own SQLite index (<code>getUserConversations</code>, <code>ORDER BY updated_at</code>); never enumerates engine files</span> <span class="arw">→</span> <span class="to">list over <span class="path">/sessions/</span> (or an agent DT_LINK index)</span></div>
-    <span class="b dup">dup</span></td>
+    <div class="el"><b>stays (SQLite):</b> the UI list view (order · filter by user/channel)</div>
+    <div class="el"><b>→ sudocode:</b> the set of sessions itself — enumerate the engine's <span class="path">/sessions/</span> (or its DT_LINK index) instead of a separate copy <span class="b dup">dup</span></div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el">all sessions flat under <span class="path">/sessions/</span></div>
     <div class="el">cross-agent access = scan <span class="path">/sessions/</span> or hold a DT_LINK</div>
@@ -199,7 +201,7 @@
   <td>
     <div class="el"><span class="was"><span class="path">.sudocode-agents/agent-&lt;id&gt;.md</span> + <span class="path">.json</span> (+ <span class="path">.full.md</span>); Session in-memory only — <b>no per-subagent jsonl</b></span> <span class="arw">→</span> <span class="tbd">? Q5 (persist jsonl?)</span></div>
     <span class="b partial">partial — differs</span></td>
-  <td><div class="el">— relies on engine</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> relies on the engine (subagents are the agent's)</div> <span class="b na">n/a</span></td>
   <td><div class="el">each subagent = its own <b>pid</b> sharing the profile; session under <span class="path">/sessions/&lt;sid&gt;/</span> (agent index links it)</div> <span class="b ok">given</span></td>
 </tr>
 <tr>
@@ -211,7 +213,7 @@
     <div class="el"><span class="was">session <code>--fork</code> = <b>FULL</b> transcript (<code>messages.clone()</code>)</span></div>
     <div class="el"><span class="was">subagent fork = last-assistant <b>cache-prefix only</b>; internal spawn (not MAS)</span> <span class="arw">→</span> <span class="tbd">? Q5 (full-transcript? MAS pid?)</span></div>
     <span class="b partial">partial</span></td>
-  <td><div class="el">— n/a</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> relies on the engine</div> <span class="b na">n/a</span></td>
   <td><div class="el">subagent = real pid via <b>sudocode → MAS::start_session</b></div> <span class="b q">open? (direction)</span></td>
 </tr>
 
@@ -225,7 +227,7 @@
   <td>
     <div class="el"><span class="was">fields <code>persistedOutputPath/Size</code> exist but always <code>None</code>; 16 KiB hard-truncate, no offload/replacement</span> <span class="arw">→</span> <span class="tbd">? Q4 (adopt CC offload → <span class="path">/sessions/&lt;sid&gt;/tool-results/</span>?)</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">— relies on engine; tool results inline in <code>messages.content</code> (<span class="b dup">dup</span>)</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> relies on the engine; tool results inline in <code>messages.content</code> = part of the transcript dup (<span class="b dup">dup</span>)</div> <span class="b na">n/a</span></td>
   <td><div class="el">proposed <span class="path">/sessions/&lt;sid&gt;/tool-results/</span></div> <span class="b q">open?</span></td>
 </tr>
 
@@ -237,7 +239,7 @@
   <td>
     <div class="el"><span class="was"><span class="path">~/.scode/projects/&lt;slug&gt;/memory/</span> + <code>MEMORY.md</code>, 4 types, prompt-driven Write</span> <span class="arw">→</span> <span class="to"><span class="path">/agents/{name}/memory/</span></span></div>
     <span class="b ok">done</span></td>
-  <td><div class="el">none of its own — relies on engine</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/agents/{name}/memory/</span> (agent-keyed)</div> <span class="b ok">design</span></td>
 </tr>
 <tr>
@@ -246,7 +248,7 @@
   <td>
     <div class="el"><span class="was"><span class="path">&lt;base&gt;/agent-memory/&lt;agent_type&gt;/</span>, routed per-subagent (no cross-leak)</span> <span class="arw">→</span> <span class="to"><span class="path">/agents/{name}/memory/</span> (already per-agent)</span></div>
     <span class="b ok">done</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/agents/{name}/memory/</span> is already per-agent</div> <span class="b ok">design</span></td>
 </tr>
 <tr>
@@ -255,7 +257,7 @@
   <td>
     <div class="el"><span class="was"><b>missing</b> — prompt-driven only, no turn-end auto-fork writer</span> <span class="arw">→</span> <span class="tbd">? Q2 (build? mechanism?)</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/proc/{pid}/</span> fork → <span class="path">/agents/{name}/memory/</span></div> <span class="b q">open?</span></td>
 </tr>
 <tr>
@@ -264,7 +266,7 @@
   <td>
     <div class="el"><span class="was"><b>missing</b> (needs forked-agent infra)</span> <span class="arw">→</span> <span class="tbd">? Q2</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/proc/{pid}/</span> or a sidecar under <span class="path">/sessions/&lt;sid&gt;/</span></div> <span class="b q">open?</span></td>
 </tr>
 <tr>
@@ -273,7 +275,7 @@
   <td>
     <div class="el"><span class="was"><b>missing</b> (enterprise)</span> <span class="arw">→</span> <span class="tbd">? Q2</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/agents/{name}/memory/team/</span> via <b>zone raft / federation</b> (native — no API)</div> <span class="b q">open?</span></td>
 </tr>
 <tr>
@@ -282,7 +284,7 @@
   <td>
     <div class="el"><span class="was"><b>missing</b></span> <span class="arw">→</span> <span class="tbd">? Q2</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el">background <span class="path">/proc/{pid}/</span> job over <span class="path">/sessions/</span> → <span class="path">memory/</span></div> <span class="b q">open?</span></td>
 </tr>
 <tr>
@@ -291,7 +293,7 @@
   <td>
     <div class="el"><span class="was"><b>missing</b></span> <span class="arw">→</span> <span class="tbd">? Q2</span></div>
     <span class="b miss">gap</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/agents/{name}/memory/logs/YYYY/MM/…</span> (append-only DT_FILE/DT_STREAM)</div> <span class="b q">open?</span></td>
 </tr>
 <tr>
@@ -300,7 +302,7 @@
   <td>
     <div class="el"><span class="was"><code>AGENTS.md</code> scan (repo cwd); <code>/remember</code>?</span> <span class="arw">→</span> <span class="to">repo-mounted under <span class="path">/proc/{pid}/workspace/{repo}/</span></span></div>
     <span class="b partial">partial</span></td>
-  <td><div class="el">none</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el">repo-mounted under <span class="path">/proc/{pid}/workspace/{repo}/</span></div> <span class="b ok">design</span></td>
 </tr>
 
@@ -316,8 +318,9 @@
     <div class="el"><span class="was">standalone/offline: no pointer</span> <span class="arw">→</span> <span class="tbd">? Q7 (adopt CC bridge-pointer?)</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><span class="was"><code>extra.acpSessionId</code> (acp) / <code>extra.mossSessionId</code> (remote) = resume pointer</span> <span class="arw">→</span> <span class="to">the durable <b>session-id</b></span></div>
-    <span class="b dup">dup</span></td>
+    <div class="el"><b>stays (SQLite):</b> which conversation the UI has open/active</div>
+    <div class="el"><b>→ sudocode:</b> <code>extra.acpSessionId</code> / <code>mossSessionId</code> = a copy of the engine's session-id → use the engine's durable <code>session-id</code> <span class="b dup">dup</span></div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>resume key = session-id</b> (durable UUID)</div>
     <div class="el"><b>AgentRegistry</b> pid FSM (kernel SSOT) = "which pid is live"; MAS registers pid keyed by session-id</div>
@@ -333,7 +336,10 @@
   <td>
     <div class="el"><span class="was"><span class="path">&lt;ws&gt;/.sudocode-inbox/&lt;recipient&gt;.jsonl</span> (append-only, <code>MailboxEnvelope</code>) — standalone</span> <span class="arw">→</span> <span class="to">chat-with-me DT_STREAM (nexus a2a)</span></div>
     <span class="b ok">done</span></td>
-  <td><div class="el">IM channels (Telegram / Lark / DingTalk) — separate surface</div> <span class="b na">n/a</span></td>
+  <td>
+    <div class="el"><b>stays:</b> IM channels (Telegram / Lark / DingTalk) — sudowork's own bridging surface</div>
+    <div class="el"><b>→ sudocode:</b> agent-to-agent messaging is the engine's (chat-with-me)</div>
+    <span class="b na">n/a</span></td>
   <td>
     <div class="el"><b>chat-with-me DT_STREAM</b> + kernel <code>a2a</code> crate</div>
     <div class="el"><code>MailboxStampingHook</code> stamps unforgeable <code>from</code>, armed at boot, universal for all writers</div>
@@ -352,8 +358,9 @@
     <div class="el"><span class="was">cwd = workspace (single); <code>workspace_fingerprint</code></span> <span class="arw">→</span> <span class="to"><span class="path">/proc/{pid}/workspace/{alias}</span> DT_LINKs to repo zones</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><span class="was"><code>extra.workspace</code> / <code>customWorkspace</code> / <code>mossWorkDir</code></span> <span class="arw">→</span> <span class="to">repo DT_LINKs (<span class="path">/repos/</span> zones)</span></div>
-    <span class="b dup">dup</span></td>
+    <div class="el"><b>stays (SQLite):</b> the user's chosen workspace path (a UI setting)</div>
+    <div class="el"><b>→ sudocode:</b> the workspace / repo zones are the agent's — sudowork passes the path, the engine mounts + DT_LINKs them (<span class="path">/repos/</span> zones) <span class="b dup">dup</span></div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>per-agent worktree, per-pid view</b> — not a mismatch</div>
     <div class="el">repo worktree persistent + <b>agent-name-owned</b> (<span class="path">/repos/{owner}/{repo}/</span>)</div>
@@ -370,7 +377,7 @@
   <td>
     <div class="el"><span class="was">inherits nexus VFS when embedded (<code>KernelFsBackend</code>); standalone = local FS only</span> <span class="arw">→</span> <span class="to">native distributed VFS</span></div>
     <span class="b partial">partial</span></td>
-  <td><div class="el">— n/a</div> <span class="b na">n/a</span></td>
+  <td><div class="el"><b>→ sudocode:</b> cross-machine sync is the VFS's (via the engine) — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><b>native</b> — distributed VFS: zone raft + federation mounts + FUSE over Tailscale (Mac↔Win byte-exact)</div> <span class="b ok">done</span></td>
 </tr>
 
@@ -384,9 +391,9 @@
     <div class="el"><b>caveat:</b> only <code>SessionStore</code>/<code>ConfigLoader</code>/<code>file_ops</code> route through <code>FsBackend</code>; <b>subagent · mailbox · memory bypass it</b> (direct <code>std::fs</code>) → separate work</div>
     <span class="b q">open? (priority — Q8)</span></td>
   <td>
-    <div class="el"><span class="was"><code>messages</code> table</span> <span class="arw">→</span> <span class="to">a view over the engine JSONL keyed by <code>acpSessionId</code>; keep only UI-unique fields (position/status/pin/cron/channel/user_id)</span></div>
-    <div class="el"><b>sudowork becomes a thin UI</b> over the engine transcript (à la Claude Desktop)</div>
-    <span class="b dup">dup → merge</span></td>
+    <div class="el"><b>stays (SQLite):</b> UI-unique fields (position/status/pin/cron/channel/user_id) + list index</div>
+    <div class="el"><b>→ sudocode:</b> everything agent (transcript · identity · workspace · memory) — read the engine's store; the <code>messages</code> copy collapses to a view <span class="b dup">dup → merge</span></div>
+    <div class="el"><b>net:</b> sudowork becomes a thin UI over the engine (à la Claude Desktop)</div></td>
   <td><div class="el"><b>the superset</b> all others migrate toward</div></td>
 </tr>
 
@@ -419,7 +426,7 @@
 <div class="qbox"><span class="qn">Q6</span> <b>Workspace &amp; DT_LINK — RESOLVED (nexus rev4).</b> Case A (link to a federation-mounted target resolves cross-node for free) verified. Case B (owner-discovery for a target on a node with no local mount) <b>declined</b> on structural grounds: <code>ZoneMetaStore.last_writer_address</code> is the owner SSOT; a separate path→owner registry = shadow SSOT + DRY violation + leaks federation topology into the kernel. <b>Decision: constrain workspace/link targets to federation-mounted paths</b> — ships today, zero new primitive. See the decisions callout above.</div>
 <div class="qbox"><span class="qn">Q7</span> <b>Standalone resume pointer.</b> Adopt CC's <code>bridge-pointer.json</code> (mtime-heartbeat + cross-worktree-freshest) for the offline scode case? (<code>AgentRegistry</code> is SSOT when nexus is present; standalone has no stored pointer today.) <small>(the red <span class="tbd">?</span> in the Resume row resolves here)</small></div>
 <div class="qbox"><span class="qn">Q8</span> <b>Migration sequencing.</b> Order of: (a) wire scode's dormant <code>KernelFsBackend</code> seam (flat <code>.scode/sessions/</code> → flat <code>/sessions/&lt;sid&gt;/</code>); (b) collapse sudowork <code>messages</code> → a view over the engine JSONL keyed by <code>acpSessionId</code>; (c) build the missing memory features. Which first?</div>
-<div class="qbox"><span class="qn">Q9</span> <b>sudowork adoption of the nexus workspace/identity model.</b> sudowork today has only conversation-id (SQLite) + <code>extra.workspace</code> — <b>no <code>agent-name</code> identity, no zones, no image/runtime split</b>. rev4 makes the workspace layout a <b>sudowork convention</b>, so this is ours to decide: (a) introduce the persistent <code>agent-name</code> layer — does a sudowork conversation map to a <code>session-id</code>, and what <i>is</i> <code>agent-name</code> (the CLI agent profile? the account/user?)? (b) adopt the content-type-first zones (<span class="path">/repos · /knowledge · /skills · /tools · /sessions · /scratch</span>) — which day 1? (c) reconcile zone-level <code>zone_perms</code> with sudowork's current per-<code>user_id</code> SQLite access (esp. multi-user WebUI + IM channels); (d) <code>on_terminate</code> GC policy — what does sudowork <code>sys_rmdir</code> on pid exit (<span class="path">/scratch</span> only, or more)? <small>(sudowork-side; (a)/(b) are product-direction calls — Ethan.)</small></div>
+<div class="qbox"><span class="qn">Q9</span> <b>sudowork adoption — (a)/(b) DECIDED, (c)/(d) open.</b> <b>DECIDED (2026-08, Ethan):</b> sudowork is a <b>UI</b>, the agent is sudocode → (a) sudowork does <i>not</i> get its own <code>agent-name</code>; a conversation keys by the engine's durable <code>session-id</code>, and <code>agent-name</code> is the engine's (sudowork reads it); (b) sudowork does <i>not</i> adopt zones directly — the workspace/repo zones are the agent's; sudowork passes the path and the engine mounts them. So sudowork's <b>→ nexus (direct)</b> bucket is essentially empty (it delegates through sudocode). <b>STILL OPEN:</b> (c) multi-user <code>zone_perms</code> vs sudowork's per-<code>user_id</code> SQLite ACL — the one genuine sudowork↔nexus-direct concern; (d) <code>on_terminate</code> GC policy for ephemeral (<span class="path">/scratch</span>).</div>
 
 <p class="note"><b>Repo SSOT:</b> <code>sudoprivacy/sudocode : docs/design/agent-context-storage-matrix.html</code> — this ShareOne view is remote-url-backed by that file, so comment here and the repo file is the source of record. Once consensus lands, this table gets tracked into <code>nexus-integration-architecture</code>.</p>
 <p class="note">Sources: Claude Code src/ (session/memory/bridge); sudocode origin/main v0.1.15 code-verified (session_control.rs / session.rs / tools / bash.rs / memory / agent_mailbox.rs); sudowork (database/schema.ts / storage.ts / AcpAgent.ts); <code>nexus-integration-architecture</code> §2–3. §3.3 verified current (a2a stamp hook in kernel <code>a2a</code> crate, armed at boot — no drift). Nexus <b>rev4 workspace reply</b> folded into Q1/Q6 + the decisions callout; session identity/path folded from <b>nexus #4564</b>. Draft 2026-08 — sudowork-win-pc-4.</p>

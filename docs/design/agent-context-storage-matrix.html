@@ -99,6 +99,7 @@
   <span><span class="tbd">?</span> migration undecided — a gap to fill</span>
 </div>
 <p class="note"><b>Badges compare each system to the target, per row.</b> <b>gap</b> — this system lacks a capability CC has / the end-state needs; on the burndown it advances <span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span> (what's missing is the <span class="was">left</span> side of that cell). <b>dup</b> — it keeps its <i>own</i> copy of data the <b>engine</b> (scode's session jsonl, ultimately the nexus <code>/sessions/</code> SSOT) already owns; <b>"merge long-term"</b> = that copy collapses into a <i>view</i> over the one SSOT — one store, not two. Example: sudowork's <code>messages</code> table is a full duplicate of the engine transcript → becomes a view (see the Migration row).</p>
+<p class="note"><b>The sudowork column reads in 3 buckets.</b> <b>stays (SQLite)</b> = UI-unique, kept · <b>→ sudocode</b> = delegate to the engine (read its store — the dedup) · <b>→ nexus (direct)</b> = what sudowork adopts <i>itself</i> on nexus (agent-name / zones, Q9) — <i>not</i> the transitive <code>engine→nexus</code>, which is the sudocode column's job. Chain: sudowork → sudocode → nexus, so each hop is written once.</p>
 
 <h2>The matrix</h2>
 <table>
@@ -128,7 +129,7 @@
   <td>
     <div class="el"><b>stays (SQLite):</b> conversation-list index · position/status/pin/cron/channel/user_id — UI-unique, sudowork's own</div>
     <div class="el"><b>→ sudocode:</b> session identity + transcript copy (<code>conversation-id</code> / <code>messages</code> / <code>acpSessionId</code>) — key by the engine's durable <code>session-id</code>, read its store <span class="b dup">dup</span></div>
-    <div class="el"><b>→ nexus:</b> sudowork itself as a first-class principal (<code>agent-name</code> / zones) <span class="tbd">? Q9</span></div>
+    <div class="el"><b>→ nexus (direct):</b> <code>agent-name</code> / zones — sudowork itself as a first-class principal <span class="tbd">? Q9</span></div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>

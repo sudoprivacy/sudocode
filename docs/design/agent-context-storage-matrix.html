@@ -84,6 +84,8 @@
 <b>This table's job:</b> put CC's flat <code>~/.claude/projects/&lt;cwd&gt;/</code> model on each row, then read across — (1) does the Nexus end-state <i>cover</i> it? (2) how do sudocode &amp; sudowork store it today, and what's <span class="b dup">dup</span> to merge? CC is the <span class="b ref">reference</span> we map from; Nexus is the target all three converge to.
 <br><br>
 <b>This is a working doc (migration burndown), not a snapshot.</b> CC (reference) and the Nexus end-state (target) are fixed; the two <b>current</b> columns — sudocode &amp; sudowork — are live, written as <span class="was">original</span> <span class="arw">→</span> <span class="to">what it maps to</span>. As each migration lands, advance that cell + its badge (<span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span>); a row is finished when its <i>current</i> = the Nexus <i>target</i>. Where we have <b>not decided</b> how a point migrates, the target slot is a red <span class="tbd">?</span> — a gap to fill, not an answer.
+<br><br>
+<b>Migration = align the logical model, not the bytes.</b> Adopting the end-state means matching its keys / structure / associations (<code>session-id</code> · flat <span class="path">/sessions/</span> · <code>owner</code> · DT_LINKs) — <i>not</i> reformatting content (nexus VFS stores opaque bytes) and <i>not</i> assuming nexus at runtime (the <code>FsBackend</code> abstraction makes nexus a <b>backend swap</b>; standalone still runs on local FS).
 </div>
 
 <div class="legend">

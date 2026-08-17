@@ -205,23 +205,36 @@ impl ToolDispatchContext {
 }
 
 /// Trait implemented by tool dispatchers that execute model-requested tools.
+///
+/// Execution is `async` + `&self`: a tool is a pure `(input, ctx) -> result`
+/// operation with no need for `&mut` on the dispatcher, and the conversation
+/// loop overlaps a concurrency-safe batch by polling several
+/// `execute_with_context` futures together on one thread (I/O interleaving,
+/// not thread parallelism — the blocking syscall inside each future is the
+/// only thing offloaded to a `spawn_blocking` pool, so the dispatcher never
+/// crosses a thread boundary and needs no `Sync`). Any per-invocation mutable
+/// state (spinner, prompter) lives behind single-threaded interior mutability
+/// in the impl.
 pub trait ToolExecutor: Send {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
     /// Dispatch with per-call context. Default forwards to
-    /// [`ToolExecutor::execute`], preserving backwards-compatibility for
-    /// tools that don't need parent state. Override to consult `ctx`
+    /// [`ToolExecutor::execute`]. Override to consult `ctx`
     /// (e.g. the Agent tool's fork branch reads
     /// `ctx.parent_assistant_message` to build the child's prefix).
-    fn execute_with_context(
-        &mut self,
+    async fn execute_with_context(
+        &self,
         tool_name: &str,
         input: &str,
         _ctx: &ToolDispatchContext,
     ) -> Result<String, ToolError> {
-        self.execute(tool_name, input)
+        self.execute(tool_name, input).await
     }
 
+    /// Setup-only hook to hand the dispatcher the turn's abort signal. Stays
+    /// `&mut self`: it is called once while the runtime still owns the
+    /// dispatcher exclusively (before any turn), so it never races the
+    /// `&self` concurrent `execute` path.
     fn set_abort_signal(&mut self, _abort_signal: HookAbortSignal) {}
 }
 
@@ -640,7 +653,7 @@ where
 
     /// Run a session health probe to verify the runtime is functional after compaction.
     /// Returns Ok(()) if healthy, Err if the session appears broken.
-    fn run_session_health_probe(&mut self) -> Result<(), String> {
+    async fn run_session_health_probe(&mut self) -> Result<(), String> {
         // Check if we have basic session integrity
         if self.session.messages.is_empty() && self.session.compaction.is_some() {
             // Freshly compacted with no messages - this is normal
@@ -650,7 +663,7 @@ where
         // Verify tool executor is responsive with a non-destructive probe
         // Using glob_search with a pattern that won't match anything
         let probe_input = r#"{"pattern": "*.health-check-probe-"}"#;
-        match self.tool_executor.execute("glob_search", probe_input) {
+        match self.tool_executor.execute("glob_search", probe_input).await {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("Tool executor probe failed: {e}")),
         }
@@ -864,7 +877,7 @@ where
             .unwrap_or_default();
 
         if self.session.compaction.is_some() {
-            if let Err(error) = self.run_session_health_probe() {
+            if let Err(error) = self.run_session_health_probe().await {
                 return Err(RuntimeError::new(format!(
                     "Session health probe failed after compaction: {error}. \
                      The session may be in an inconsistent state. \
@@ -1204,6 +1217,7 @@ where
                         let (mut output, mut is_error) = match self
                             .tool_executor
                             .execute_with_context(&tool_name, &effective_input, &dispatch_context)
+                            .await
                         {
                             Ok(output) => (output, false),
                             Err(error) => (error.to_string(), true),
@@ -1928,7 +1942,7 @@ fn merge_hook_feedback(messages: &[String], output: String, is_error: bool) -> S
     sections.join("\n\n")
 }
 
-type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError> + Send>;
+type ToolHandler = Box<dyn Fn(&str) -> Result<String, ToolError> + Send + Sync>;
 
 /// Simple in-memory tool executor for tests and lightweight integrations.
 #[derive(Default)]
@@ -1946,7 +1960,7 @@ impl StaticToolExecutor {
     pub fn register(
         mut self,
         tool_name: impl Into<String>,
-        handler: impl FnMut(&str) -> Result<String, ToolError> + Send + 'static,
+        handler: impl Fn(&str) -> Result<String, ToolError> + Send + Sync + 'static,
     ) -> Self {
         self.handlers.insert(tool_name.into(), Box::new(handler));
         self
@@ -1954,9 +1968,9 @@ impl StaticToolExecutor {
 }
 
 impl ToolExecutor for StaticToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.handlers
-            .get_mut(tool_name)
+            .get(tool_name)
             .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?(input)
     }
 }
@@ -3565,6 +3579,7 @@ mod tests {
         // when
         let error = executor
             .execute("missing", "{}")
+            .await
             .expect_err("unregistered tools should fail");
 
         // then

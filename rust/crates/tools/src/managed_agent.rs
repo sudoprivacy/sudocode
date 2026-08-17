@@ -116,9 +116,20 @@ struct ManagedToolExecutor {
 }
 
 impl ToolExecutor for ManagedToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
-        execute_tool_with_backend(tool_name, &input_value, self.fs.as_ref()).map_err(ToolError::new)
+        // Offload the blocking in-process syscall to the blocking pool so a
+        // concurrency-safe batch of read-only tools overlaps (I/O
+        // interleaving, not thread parallelism): only the `Arc<fs>` clone and
+        // owned args cross the thread boundary — the dispatcher never leaves
+        // its thread, so it needs no `Sync`.
+        let fs = Arc::clone(&self.fs);
+        let tool_name = tool_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            execute_tool_with_backend(&tool_name, &input_value, fs.as_ref()).map_err(ToolError::new)
+        })
+        .await
+        .map_err(|e| ToolError::new(format!("tool task join error: {e}")))?
     }
 }

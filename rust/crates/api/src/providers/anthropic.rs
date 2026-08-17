@@ -1064,6 +1064,11 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
     }
 }
 
+/// Anthropic's minimum `thinking.budget_tokens`. The API rejects a smaller
+/// budget, and additionally requires `budget_tokens < max_tokens` (thinking
+/// tokens are drawn from the same `max_tokens` pool as the visible response).
+const MIN_THINKING_BUDGET: u32 = 1024;
+
 /// Remove beta-only body fields that the standard `/v1/messages` and
 /// `/v1/messages/count_tokens` endpoints reject as `Extra inputs are not
 /// permitted`. The `betas` opt-in is communicated via the `anthropic-beta`
@@ -1080,15 +1085,25 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
                 object.insert("stop_sequences".to_string(), stop_val);
             }
         }
-        if request.thinking_enabled {
-            // Inject extended thinking configuration. budget_tokens is set
-            // to max_tokens — the model splits between thinking and visible
-            // output as needed.
+        // Extended thinking draws `budget_tokens` from the same `max_tokens`
+        // pool as the visible response, so the API requires
+        // `1024 <= budget_tokens < max_tokens`. Enable it only when the output
+        // budget is large enough to host a thinking budget; otherwise fall back
+        // to no thinking (a model whose max output is <= 1024 cannot think).
+        if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
+            // Grant up to half of the output budget to thinking — generous
+            // enough for deep reasoning on large-context models (32k on a 64k
+            // model) while reserving the other half for the visible response so
+            // a coding agent's large edits are never truncated. Clamp into the
+            // API-valid range `[1024, max_tokens)`.
+            let budget_tokens = (request.max_tokens / 2)
+                .max(MIN_THINKING_BUDGET)
+                .min(request.max_tokens - 1);
             object.insert(
                 "thinking".to_string(),
                 serde_json::json!({
                     "type": "enabled",
-                    "budget_tokens": request.max_tokens,
+                    "budget_tokens": budget_tokens,
                 }),
             );
         } else {
@@ -1608,6 +1623,81 @@ mod tests {
         super::strip_unsupported_beta_body_fields(&mut body, &MessageRequest::default());
 
         assert_eq!(body, original);
+    }
+
+    #[test]
+    fn thinking_budget_stays_below_max_tokens_and_above_minimum() {
+        // Regression guard for the Anthropic constraint
+        // `1024 <= thinking.budget_tokens < max_tokens`. Setting the budget
+        // equal to (or above) max_tokens returns a 400 invalid_request_error
+        // that breaks every request once extended thinking is enabled.
+        for max_tokens in [1025u32, 2048, 4096, 8192, 32_000, 64_000] {
+            let mut body = serde_json::json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": max_tokens,
+            });
+            let request = MessageRequest {
+                max_tokens,
+                thinking_enabled: true,
+                ..MessageRequest::default()
+            };
+
+            super::strip_unsupported_beta_body_fields(&mut body, &request);
+
+            let thinking = body
+                .get("thinking")
+                .unwrap_or_else(|| panic!("thinking must be injected for max_tokens={max_tokens}"));
+            assert_eq!(thinking["type"], "enabled");
+            let budget = thinking["budget_tokens"]
+                .as_u64()
+                .expect("budget_tokens must be a number") as u32;
+            assert!(
+                budget >= super::MIN_THINKING_BUDGET,
+                "budget {budget} must be >= {} (max_tokens={max_tokens})",
+                super::MIN_THINKING_BUDGET
+            );
+            assert!(
+                budget < max_tokens,
+                "budget {budget} must be < max_tokens {max_tokens}"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_is_skipped_when_output_budget_too_small() {
+        // A model whose max output is <= the minimum thinking budget cannot host
+        // extended thinking; the request must omit `thinking` rather than emit an
+        // invalid budget.
+        let mut body = serde_json::json!({ "model": "m", "max_tokens": 1024 });
+        let request = MessageRequest {
+            max_tokens: 1024,
+            thinking_enabled: true,
+            ..MessageRequest::default()
+        };
+
+        super::strip_unsupported_beta_body_fields(&mut body, &request);
+
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be omitted when max_tokens <= MIN_THINKING_BUDGET"
+        );
+    }
+
+    #[test]
+    fn thinking_absent_when_disabled() {
+        let mut body = serde_json::json!({ "model": "m", "max_tokens": 64_000 });
+        let request = MessageRequest {
+            max_tokens: 64_000,
+            thinking_enabled: false,
+            ..MessageRequest::default()
+        };
+
+        super::strip_unsupported_beta_body_fields(&mut body, &request);
+
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must not be injected when thinking_enabled is false"
+        );
     }
 
     #[test]

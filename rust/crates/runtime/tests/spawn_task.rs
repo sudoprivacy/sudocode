@@ -51,7 +51,7 @@ impl ApiClient for ScriptedReply {
 struct NoTools;
 
 impl ToolExecutor for NoTools {
-    fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+    async fn execute(&self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
         Err(ToolError::new(format!(
             "unexpected tool call in test: {tool_name}"
         )))

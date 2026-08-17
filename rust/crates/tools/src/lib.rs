@@ -6952,12 +6952,13 @@ impl SubagentToolExecutor {
 }
 
 impl ToolExecutor for SubagentToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.execute_with_context(tool_name, input, &ToolDispatchContext::default())
+            .await
     }
 
-    fn execute_with_context(
-        &mut self,
+    async fn execute_with_context(
+        &self,
         tool_name: &str,
         input: &str,
         ctx: &ToolDispatchContext,
@@ -9040,11 +9041,11 @@ mod tests {
         assert!(error.contains("requires workspace-write permission"));
     }
 
-    #[test]
-    fn subagent_tool_executor_denies_blocked_tool_before_dispatch() {
+    #[tokio::test]
+    async fn subagent_tool_executor_denies_blocked_tool_before_dispatch() {
         // given
         let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
-        let mut executor = SubagentToolExecutor::new(BTreeSet::from([String::from("write_file")]))
+        let executor = SubagentToolExecutor::new(BTreeSet::from([String::from("write_file")]))
             .with_enforcer(PermissionEnforcer::new(policy));
 
         // when
@@ -9057,6 +9058,7 @@ mod tests {
                 })
                 .to_string(),
             )
+            .await
             .expect_err("subagent write tool should be denied before dispatch");
 
         // then

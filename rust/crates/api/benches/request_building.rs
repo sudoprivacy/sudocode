@@ -79,6 +79,7 @@ fn create_sample_request(message_count: usize) -> MessageRequest {
         stop: None,
         reasoning_effort: None,
         cache_hints: None,
+        thinking_enabled: false,
     }
 }
 

@@ -2750,6 +2750,10 @@ impl AcpCliAgent {
         if let Some(rt) = runtime.runtime.as_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.reasoning_effort.clone());
+            let thinking = ConfigLoader::default_for(&cwd)
+                .load()
+                .map_or(true, |cfg| cfg.thinking());
+            rt.api_client_mut().set_thinking_enabled(thinking);
         }
         runtime
             .session()
@@ -2867,6 +2871,10 @@ impl AcpCliAgent {
         if let Some(rt) = runtime.runtime.as_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.reasoning_effort.clone());
+            let thinking = ConfigLoader::default_for(&cwd)
+                .load()
+                .map_or(true, |cfg| cfg.thinking());
+            rt.api_client_mut().set_thinking_enabled(thinking);
         }
 
         session.runtime = runtime;
@@ -3486,6 +3494,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         if let Some(rt) = runtime.runtime.as_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.inner.reasoning_effort.clone());
+            let thinking = ConfigLoader::default_for(&cwd)
+                .load()
+                .map_or(true, |cfg| cfg.thinking());
+            rt.api_client_mut().set_thinking_enabled(thinking);
         }
 
         let loaded_session_id = handle.id.clone();
@@ -4090,7 +4102,7 @@ impl LiveCli {
             }
         }
 
-        let cli = Self {
+        let mut cli = Self {
             config,
             runtime,
             session,
@@ -4103,6 +4115,13 @@ impl LiveCli {
             is_repl: false,
             iocraft_output: None,
         };
+
+        // Apply thinking config from settings.json (default: enabled).
+        let thinking_enabled = ConfigLoader::default_for(&cwd)
+            .load()
+            .map_or(true, |cfg| cfg.thinking());
+        cli.set_thinking_enabled(thinking_enabled);
+
         cli.persist_session()?;
 
         // Record session started event
@@ -4127,6 +4146,12 @@ impl LiveCli {
     fn set_reasoning_effort(&mut self, effort: Option<String>) {
         if let Some(rt) = self.runtime.runtime.as_mut() {
             rt.api_client_mut().set_reasoning_effort(effort);
+        }
+    }
+
+    fn set_thinking_enabled(&mut self, enabled: bool) {
+        if let Some(rt) = self.runtime.runtime.as_mut() {
+            rt.api_client_mut().set_thinking_enabled(enabled);
         }
     }
 

@@ -60,6 +60,8 @@ pub(crate) struct AnthropicRuntimeClient {
     pub(crate) tool_registry: GlobalToolRegistry,
     pub(crate) progress_reporter: Option<InternalPromptProgressReporter>,
     pub(crate) reasoning_effort: Option<String>,
+    /// Enable extended thinking for Anthropic models.
+    pub(crate) thinking_enabled: bool,
     /// Shared spinner reference for pausing, thinking indicator, and
     /// response-byte counting.
     pub(crate) spinner: Option<SpinnerRef>,
@@ -101,6 +103,7 @@ impl AnthropicRuntimeClient {
             tool_registry,
             progress_reporter: config.progress_reporter.clone(),
             reasoning_effort: None,
+            thinking_enabled: true,
             spinner: None,
             output_writer: None,
         })
@@ -134,6 +137,10 @@ impl AnthropicRuntimeClient {
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    pub(crate) fn set_thinking_enabled(&mut self, enabled: bool) {
+        self.thinking_enabled = enabled;
     }
 
     /// Returns a reference to the session tracer, if available.
@@ -227,6 +234,7 @@ impl ApiClient for AnthropicRuntimeClient {
             stream: true,
             reasoning_effort: self.reasoning_effort.clone(),
             cache_hints,
+            thinking_enabled: self.thinking_enabled,
             ..Default::default()
         };
 

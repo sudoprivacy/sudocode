@@ -2244,12 +2244,10 @@ pub struct PluginsCommandResult {
 enum DefinitionSource {
     ProjectClaw,
     ProjectCodex,
-    ProjectClaude,
     UserClawConfigHome,
     UserCodexHome,
     UserClaw,
     UserCodex,
-    UserClaude,
     Plugin,
 }
 
@@ -2275,11 +2273,9 @@ impl DefinitionScope {
 impl DefinitionSource {
     fn report_scope(self) -> DefinitionScope {
         match self {
-            Self::ProjectClaw | Self::ProjectCodex | Self::ProjectClaude => {
-                DefinitionScope::Project
-            }
+            Self::ProjectClaw | Self::ProjectCodex => DefinitionScope::Project,
             Self::UserClawConfigHome | Self::UserCodexHome => DefinitionScope::UserConfigHome,
-            Self::UserClaw | Self::UserCodex | Self::UserClaude => DefinitionScope::UserHome,
+            Self::UserClaw | Self::UserCodex => DefinitionScope::UserHome,
             Self::Plugin => DefinitionScope::Plugin,
         }
     }
@@ -3239,11 +3235,6 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
             DefinitionSource::ProjectCodex,
             ancestor.join(".codex").join(leaf),
         );
-        push_unique_root(
-            &mut roots,
-            DefinitionSource::ProjectClaude,
-            ancestor.join(".claude").join(leaf),
-        );
     }
 
     if let Ok(sudocode_config_home) = env::var("SUDO_CODE_CONFIG_HOME") {
@@ -3262,14 +3253,6 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
     }
 
-    if let Ok(claude_config_dir) = env::var("CLAUDE_CONFIG_DIR") {
-        push_unique_root(
-            &mut roots,
-            DefinitionSource::UserClaude,
-            PathBuf::from(claude_config_dir).join(leaf),
-        );
-    }
-
     if let Some(home) = env::var_os("HOME") {
         let home = PathBuf::from(home);
         push_unique_root(
@@ -3281,11 +3264,6 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
             &mut roots,
             DefinitionSource::UserCodex,
             home.join(".codex").join(leaf),
-        );
-        push_unique_root(
-            &mut roots,
-            DefinitionSource::UserClaude,
-            home.join(".claude").join(leaf),
         );
     }
 
@@ -3319,11 +3297,6 @@ fn discover_skill_roots_with_plugins(
             &mut roots,
             DefinitionSource::ProjectCodex,
             ancestor.join(".codex").join("skills"),
-        );
-        push_unique_skill_root(
-            &mut roots,
-            DefinitionSource::ProjectClaude,
-            ancestor.join(".claude").join("skills"),
         );
     }
 
@@ -3371,27 +3344,6 @@ fn discover_skill_roots_with_plugins(
             &mut roots,
             DefinitionSource::UserCodex,
             home.join(".codex").join("skills"),
-        );
-        push_unique_skill_root(
-            &mut roots,
-            DefinitionSource::UserClaude,
-            home.join(".claude").join("skills"),
-        );
-        push_unique_skill_root(
-            &mut roots,
-            DefinitionSource::UserClaude,
-            home.join(".claude").join("skills").join("omc-learned"),
-        );
-    }
-
-    if let Ok(claude_config_dir) = env::var("CLAUDE_CONFIG_DIR") {
-        let claude_config_dir = PathBuf::from(claude_config_dir);
-        let skills_dir = claude_config_dir.join("skills");
-        push_unique_skill_root(&mut roots, DefinitionSource::UserClaude, skills_dir.clone());
-        push_unique_skill_root(
-            &mut roots,
-            DefinitionSource::UserClaude,
-            skills_dir.join("omc-learned"),
         );
     }
 
@@ -4178,7 +4130,7 @@ fn render_skills_usage(unexpected: Option<&str>) -> String {
         "  Direct CLI       scode skills [list|install <path>|help|<skill> [args]]".to_string(),
         "  Invoke           /skills help overview -> $help overview".to_string(),
         "  Install root     $SUDO_CODE_CONFIG_HOME/skills or ~/.nexus/sudocode/skills".to_string(),
-        "  Sources          .nexus/sudocode/skills, .omc/skills, .agents/skills, .codex/skills, .claude/skills, ~/.nexus/sudocode/skills, ~/.omc/skills, ~/.agents/skills, ~/.config/opencode/skills, ~/.claude/skills/omc-learned, ~/.codex/skills, ~/.claude/skills".to_string(),
+        "  Sources          .nexus/sudocode/skills, .omc/skills, .agents/skills, .codex/skills, ~/.nexus/sudocode/skills, ~/.omc/skills, ~/.agents/skills, ~/.config/opencode/skills, ~/.codex/skills".to_string(),
     ];
     if let Some(args) = unexpected {
         lines.push(format!("  Unexpected       {args}"));
@@ -4201,14 +4153,11 @@ fn render_skills_usage_json(unexpected: Option<&str>) -> Value {
                 ".omc/skills",
                 ".agents/skills",
                 ".codex/skills",
-                ".claude/skills",
                 "~/.nexus/sudocode/skills",
                 "~/.omc/skills",
                 "~/.agents/skills",
                 "~/.config/opencode/skills",
-                "~/.claude/skills/omc-learned",
-                "~/.codex/skills",
-                "~/.claude/skills"
+                "~/.codex/skills"
             ],
         },
         "unexpected": unexpected,
@@ -4333,15 +4282,11 @@ fn format_mcp_oauth(oauth: Option<&McpOAuthConfig>) -> String {
 
 fn definition_source_id(source: DefinitionSource) -> &'static str {
     match source {
-        DefinitionSource::ProjectClaw
-        | DefinitionSource::ProjectCodex
-        | DefinitionSource::ProjectClaude => "project_scode",
+        DefinitionSource::ProjectClaw | DefinitionSource::ProjectCodex => "project_scode",
         DefinitionSource::UserClawConfigHome | DefinitionSource::UserCodexHome => {
             "user_sudocode_config_home"
         }
-        DefinitionSource::UserClaw | DefinitionSource::UserCodex | DefinitionSource::UserClaude => {
-            "user_scode"
-        }
+        DefinitionSource::UserClaw | DefinitionSource::UserCodex => "user_scode",
         DefinitionSource::Plugin => "plugin",
     }
 }
@@ -5437,7 +5382,7 @@ mod tests {
         let workspace = temp_dir("agents-workspace");
         let project_agents = workspace.join(".codex").join("agents");
         let user_home = temp_dir("agents-home");
-        let user_agents = user_home.join(".claude").join("agents");
+        let user_agents = user_home.join(".codex").join("agents");
 
         write_agent(
             &project_agents,
@@ -5735,7 +5680,7 @@ mod tests {
         ));
         assert!(skills_help.contains(".omc/skills"));
         assert!(skills_help.contains(".agents/skills"));
-        assert!(skills_help.contains("~/.claude/skills/omc-learned"));
+        assert!(skills_help.contains("~/.codex/skills"));
         assert!(!skills_help.contains("legacy /commands"));
 
         let skills_unexpected =
@@ -5764,9 +5709,7 @@ mod tests {
         assert!(sources.iter().any(|value| value == ".omc/skills"));
         assert!(sources.iter().any(|value| value == ".agents/skills"));
         assert!(sources.iter().any(|value| value == "~/.omc/skills"));
-        assert!(sources
-            .iter()
-            .any(|value| value == "~/.claude/skills/omc-learned"));
+        assert!(sources.iter().any(|value| value == "~/.codex/skills"));
 
         let _ = fs::remove_dir_all(cwd);
     }
@@ -5776,15 +5719,10 @@ mod tests {
         let _guard = env_guard();
         let workspace = temp_dir("skills-omc-workspace");
         let user_home = temp_dir("skills-omc-home");
-        let claude_config_dir = temp_dir("skills-omc-claude-config");
         let project_omc_skills = workspace.join(".omc").join("skills");
         let project_agents_skills = workspace.join(".agents").join("skills");
         let user_omc_skills = user_home.join(".omc").join("skills");
-        let claude_config_skills = claude_config_dir.join("skills");
-        let claude_config_commands = claude_config_dir.join("commands");
-        let learned_skills = claude_config_dir.join("skills").join("omc-learned");
         let original_home = std::env::var_os("HOME");
-        let original_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
 
         write_skill(&project_omc_skills, "hud", "OMC HUD guidance");
         write_skill(
@@ -5793,31 +5731,13 @@ mod tests {
             "Compatibility skill guidance",
         );
         write_skill(&user_omc_skills, "cancel", "OMC cancel guidance");
-        write_skill(
-            &claude_config_skills,
-            "statusline",
-            "Claude config skill guidance",
-        );
-        write_legacy_command(
-            &claude_config_commands,
-            "doctor-check",
-            "Claude config command guidance",
-        );
-        write_skill(&learned_skills, "learned", "Learned skill guidance");
         std::env::set_var("HOME", &user_home);
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
 
         let report = super::handle_skills_slash_command(None, &workspace).expect("skills list");
         assert!(report.contains("available skills"));
         assert!(report.contains("hud · OMC HUD guidance"));
         assert!(report.contains("trace · Compatibility skill guidance"));
         assert!(report.contains("cancel · OMC cancel guidance"));
-        assert!(report.contains("statusline · Claude config skill guidance"));
-        assert!(
-            !report.contains("doctor-check"),
-            "commands/*.md must no longer be listed as skills"
-        );
-        assert!(report.contains("learned · Learned skill guidance"));
 
         let help =
             super::handle_skills_slash_command_json(Some("help"), &workspace).expect("skills help");
@@ -5828,15 +5748,10 @@ mod tests {
         assert!(sources.iter().any(|value| value == ".omc/skills"));
         assert!(sources.iter().any(|value| value == ".agents/skills"));
         assert!(sources.iter().any(|value| value == "~/.omc/skills"));
-        assert!(sources
-            .iter()
-            .any(|value| value == "~/.claude/skills/omc-learned"));
 
         restore_env_var("HOME", original_home);
-        restore_env_var("CLAUDE_CONFIG_DIR", original_claude_config_dir);
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(user_home);
-        let _ = fs::remove_dir_all(claude_config_dir);
     }
 
     #[test]

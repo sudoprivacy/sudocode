@@ -42,7 +42,7 @@ pub enum Credential {
     ApiKey(String),
     /// Bearer / OAuth token string.
     Token(String),
-    /// Path to a credentials file (e.g. `~/.claude/credentials.json`).
+    /// Path to a credentials file (e.g. `~/.nexus/sudocode/credentials.json`).
     AuthFile(PathBuf),
     /// No credential available — provider may not require one.
     None,
@@ -620,7 +620,7 @@ mod tests {
                 api_key_env: None,
                 token: None,
                 token_env: Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()),
-                auth_file: Some("~/.claude/credentials.json".to_string()),
+                auth_file: Some("~/.nexus/sudocode/credentials.json".to_string()),
             },
         );
         subscription.insert(
@@ -1088,9 +1088,9 @@ mod tests {
 
     #[test]
     fn expand_tilde_works() {
-        let path = expand_tilde("~/.claude/credentials.json");
+        let path = expand_tilde("~/.nexus/sudocode/credentials.json");
         if let Some(home) = std::env::var_os("HOME") {
-            let expected = std::path::PathBuf::from(home).join(".claude/credentials.json");
+            let expected = std::path::PathBuf::from(home).join(".nexus/sudocode/credentials.json");
             assert_eq!(path, expected);
         }
     }

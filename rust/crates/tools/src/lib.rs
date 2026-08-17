@@ -7150,8 +7150,7 @@ fn lookup_custom_agent(
 
 /// Built-in preset names that must NOT be shadowed by a custom `.md`
 /// agent — the built-in behavior wins, even if a user drops a
-/// same-named .md file under `~/.claude/agents/`. Matches CC-fork's
-/// `getBuiltInAgents()` precedence at `loadAgentsDir.ts:357-402`.
+/// same-named .md file under `~/.nexus/sudocode/agents/`.
 fn is_builtin_subagent(name: &str) -> bool {
     matches!(
         name,
@@ -9602,13 +9601,17 @@ mod tests {
     }
 
     #[test]
-    fn skill_loads_project_local_claude_skill_prompt() {
+    fn skill_loads_project_local_skill_prompt() {
         let _guard = env_guard();
         let root = temp_path("project-skills");
         let home = root.join("home");
         let workspace = root.join("workspace");
         let nested = workspace.join("nested");
-        let skill_dir = workspace.join(".claude").join("skills").join("trace");
+        let skill_dir = workspace
+            .join(".nexus")
+            .join("sudocode")
+            .join("skills")
+            .join("trace");
         fs::create_dir_all(&skill_dir).expect("skill dir should exist");
         fs::create_dir_all(&nested).expect("nested cwd should exist");
         fs::write(
@@ -9634,7 +9637,7 @@ mod tests {
             .as_str()
             .expect("path")
             .replace('\\', "/")
-            .ends_with(".claude/skills/trace/SKILL.md"));
+            .ends_with(".nexus/sudocode/skills/trace/SKILL.md"));
         assert_eq!(output["description"], "Project-local trace helper");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -9708,169 +9711,6 @@ mod tests {
             agents_output["description"],
             "Project-local agents compatibility helper"
         );
-
-        std::env::set_current_dir(&original_dir).expect("restore cwd");
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match original_config_home {
-            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
-            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
-        }
-        match original_codex_home {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-        fs::remove_dir_all(root).expect("temp tree should clean up");
-    }
-
-    #[test]
-    fn skill_loads_learned_skill_from_claude_config_dir() {
-        let _guard = env_guard();
-        let root = temp_path("claude-config-learned-skill");
-        let home = root.join("home");
-        let claude_config_dir = root.join("claude-config");
-        let learned_skill_dir = claude_config_dir
-            .join("skills")
-            .join("omc-learned")
-            .join("learned");
-        fs::create_dir_all(&learned_skill_dir).expect("learned skill dir should exist");
-        fs::write(
-            learned_skill_dir.join("SKILL.md"),
-            "---\nname: learned\ndescription: Learned OMC skill\n---\n# learned\n",
-        )
-        .expect("learned skill file should exist");
-
-        let original_home = std::env::var("HOME").ok();
-        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
-        let original_codex_home = std::env::var("CODEX_HOME").ok();
-        let original_claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
-        std::env::remove_var("CODEX_HOME");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
-
-        let result = execute_tool("Skill", &json!({ "skill": "learned" }))
-            .expect("learned skill should resolve");
-
-        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .replace('\\', "/")
-            .ends_with("skills/omc-learned/learned/SKILL.md"));
-        assert_eq!(output["description"], "Learned OMC skill");
-
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match original_config_home {
-            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
-            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
-        }
-        match original_codex_home {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-        match original_claude_config_dir {
-            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        fs::remove_dir_all(root).expect("temp tree should clean up");
-    }
-
-    #[test]
-    fn skill_loads_direct_skill_but_not_legacy_command_from_claude_config_dir() {
-        let _guard = env_guard();
-        let root = temp_path("claude-config-direct-skill");
-        let home = root.join("home");
-        let claude_config_dir = root.join("claude-config");
-        let skill_dir = claude_config_dir.join("skills").join("statusline");
-        let command_dir = claude_config_dir.join("commands");
-        fs::create_dir_all(&skill_dir).expect("direct skill dir should exist");
-        fs::create_dir_all(&command_dir).expect("command dir should exist");
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: statusline\ndescription: Claude config skill\n---\n# statusline\n",
-        )
-        .expect("direct skill file should exist");
-        fs::write(
-            command_dir.join("doctor-check.md"),
-            "---\nname: doctor-check\ndescription: Claude config command\n---\n# doctor-check\n",
-        )
-        .expect("direct command file should exist");
-
-        let original_home = std::env::var("HOME").ok();
-        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
-        let original_codex_home = std::env::var("CODEX_HOME").ok();
-        let original_claude_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
-        std::env::remove_var("CODEX_HOME");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
-
-        let direct_skill =
-            execute_tool("Skill", &json!({ "skill": "statusline" })).expect("direct skill");
-        let direct_skill_output: serde_json::Value =
-            serde_json::from_str(&direct_skill).expect("valid skill json");
-        assert!(direct_skill_output["path"]
-            .as_str()
-            .expect("path")
-            .replace('\\', "/")
-            .ends_with("skills/statusline/SKILL.md"));
-        assert_eq!(direct_skill_output["description"], "Claude config skill");
-
-        execute_tool("Skill", &json!({ "skill": "doctor-check" }))
-            .expect_err("commands/*.md must no longer resolve as a skill");
-
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match original_config_home {
-            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
-            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
-        }
-        match original_codex_home {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-        match original_claude_config_dir {
-            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
-        fs::remove_dir_all(root).expect("temp tree should clean up");
-    }
-
-    #[test]
-    fn skill_rejects_project_local_legacy_command_markdown() {
-        let _guard = env_guard();
-        let root = temp_path("project-legacy-command");
-        let home = root.join("home");
-        let workspace = root.join("workspace");
-        let nested = workspace.join("nested");
-        let command_dir = workspace.join(".claude").join("commands");
-        fs::create_dir_all(&command_dir).expect("legacy command dir should exist");
-        fs::create_dir_all(&nested).expect("nested cwd should exist");
-        fs::write(
-            command_dir.join("team.md"),
-            "---\nname: team\ndescription: Legacy team workflow\n---\n# team\n",
-        )
-        .expect("legacy command file should exist");
-
-        let original_home = std::env::var("HOME").ok();
-        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
-        let original_codex_home = std::env::var("CODEX_HOME").ok();
-        let original_dir = std::env::current_dir().expect("cwd");
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
-        std::env::remove_var("CODEX_HOME");
-        std::env::set_current_dir(&nested).expect("set cwd");
-
-        execute_tool("Skill", &json!({ "skill": "team" }))
-            .expect_err("commands/*.md must no longer resolve as a skill");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         match original_home {
@@ -11112,7 +10952,7 @@ mod tests {
     }
 
     fn write_fixture_agent(home: &Path, name: &str, frontmatter: &str, body: &str) -> PathBuf {
-        let dir = home.join(".claude").join("agents");
+        let dir = home.join(".nexus").join("sudocode").join("agents");
         fs::create_dir_all(&dir).expect("mkdir fixture agents dir");
         let path = dir.join(format!("{name}.md"));
         let contents = format!("---\n{frontmatter}---\n{body}");

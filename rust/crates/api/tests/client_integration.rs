@@ -82,7 +82,7 @@ async fn send_message_posts_json_and_parses_response() {
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
-        Some(concat!("claude-code/", env!("CARGO_PKG_VERSION")))
+        Some(concat!("sudocode/", env!("CARGO_PKG_VERSION")))
     );
     assert_eq!(
         request.headers.get("anthropic-beta").map(String::as_str),
@@ -170,7 +170,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
 
     let client = AnthropicClient::new("test-key")
         .with_base_url(server.base_url())
-        .with_client_identity(ClientIdentity::new("claude-code", "9.9.9").with_runtime("rust-cli"))
+        .with_client_identity(ClientIdentity::new("sudocode", "9.9.9").with_runtime("rust-cli"))
         .with_beta("tools-2026-04-01")
         .with_extra_body_param("metadata", json!({"source": "sudocode"}))
         .with_session_tracer(SessionTracer::new("session-telemetry", sink.clone()));
@@ -190,7 +190,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
-        Some("claude-code/9.9.9")
+        Some("sudocode/9.9.9")
     );
     let body: serde_json::Value =
         serde_json::from_str(&request.body).expect("request body should be json");
@@ -335,7 +335,7 @@ async fn stream_message_parses_sse_events_with_tool_use() {
             .expect("time")
             .as_nanos()
     ));
-    std::env::set_var("CLAUDE_CONFIG_HOME", &temp_root);
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let sse = concat!(
         "event: message_start\n",
@@ -432,8 +432,8 @@ async fn stream_message_parses_sse_events_with_tool_use() {
         Some("api-response")
     );
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
-    std::env::remove_var("CLAUDE_CONFIG_HOME");
+    let _ = std::fs::remove_dir_all(temp_root);
+    std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -675,7 +675,7 @@ async fn send_message_reuses_recent_completion_cache_entries() {
             .expect("time")
             .as_nanos()
     ));
-    std::env::set_var("CLAUDE_CONFIG_HOME", &temp_root);
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
 
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let server = spawn_server(
@@ -711,8 +711,8 @@ async fn send_message_reuses_recent_completion_cache_entries() {
     assert_eq!(cache_stats.completion_cache_misses, 1);
     assert_eq!(cache_stats.completion_cache_writes, 1);
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
-    std::env::remove_var("CLAUDE_CONFIG_HOME");
+    let _ = std::fs::remove_dir_all(temp_root);
+    std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
 #[tokio::test]
@@ -727,7 +727,7 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
             .expect("time")
             .as_nanos()
     ));
-    std::env::set_var("CLAUDE_CONFIG_HOME", &temp_root);
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
 
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let server = spawn_server(
@@ -774,8 +774,8 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
         Some("cache read tokens dropped while prompt fingerprint remained stable")
     );
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
-    std::env::remove_var("CLAUDE_CONFIG_HOME");
+    let _ = std::fs::remove_dir_all(temp_root);
+    std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
 #[tokio::test]

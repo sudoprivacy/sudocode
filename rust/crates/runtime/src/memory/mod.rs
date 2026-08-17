@@ -1,5 +1,4 @@
-//! File-based persistent memory, modeled on Claude Code's
-//! `~/.claude/projects/<slug>/memory/` system.
+//! File-based persistent memory.
 //!
 //! Layout under the memory directory (default `~/.scode/memory/`,
 //! overridable via the `SUDOCODE_MEMORY_DIR` env var):

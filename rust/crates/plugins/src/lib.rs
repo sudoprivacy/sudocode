@@ -2172,7 +2172,7 @@ fn load_manifest_from_path(
             manifest_path.display()
         ))
     })?;
-    let compatibility_errors = detect_claude_code_manifest_contract_gaps(&raw_json);
+    let compatibility_errors = detect_unsupported_manifest_contracts(&raw_json);
     if !compatibility_errors.is_empty() {
         return Err(PluginError::ManifestValidation(compatibility_errors));
     }
@@ -2185,7 +2185,7 @@ fn load_manifest_from_path(
     build_plugin_manifest(root, raw_manifest)
 }
 
-fn detect_claude_code_manifest_contract_gaps(
+fn detect_unsupported_manifest_contracts(
     raw_manifest: &Value,
 ) -> Vec<PluginManifestValidationError> {
     let Some(root) = raw_manifest.as_object() else {
@@ -3321,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn load_plugin_from_directory_rejects_claude_code_manifest_contracts_with_guidance() {
+    fn load_plugin_from_directory_rejects_unsupported_manifest_contracts_with_guidance() {
         let root = temp_dir("manifest-claude-code-contract");
         write_file(
             root.join(MANIFEST_FILE_NAME).as_path(),

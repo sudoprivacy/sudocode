@@ -1,9 +1,8 @@
-//! PTY live e2e — `~/.claude/agents/*.md` custom sub-agent parser
+//! PTY live e2e — `~/.nexus/sudocode/agents/*.md` custom sub-agent parser
 //! wired into the Agent tool dispatch.
 //!
-//! Roadmap coverage: sub-agent CC-fork parity §4.3 Commit 8. A
-//! fixture `.md` file with a distinctive body is written under the
-//! test's `HOME/.claude/agents/`. The test drives the full chain:
+//! A fixture `.md` file with a distinctive body is written under the
+//! test's `HOME/.nexus/sudocode/agents/`. The test drives the full chain:
 //! parent LLM calls `Agent(subagent_type="<fixture-name>", ...)`, the
 //! runtime resolves the name through `runtime::custom_agents`, and
 //! the child sub-agent runs under the fixture's system prompt.
@@ -42,9 +41,9 @@ fn require_live(env: &TestEnv, test_name: &str) -> bool {
     false
 }
 
-/// Write a fixture `.md` custom agent under `<home>/.claude/agents/`.
+/// Write a fixture `.md` custom agent under `<home>/.nexus/sudocode/agents/`.
 fn write_fixture_agent(home: &Path, name: &str, frontmatter: &str, body: &str) {
-    let dir = home.join(".claude").join("agents");
+    let dir = home.join(".nexus").join("sudocode").join("agents");
     fs::create_dir_all(&dir).expect("mkdir agents dir");
     let contents = format!("---\n{frontmatter}---\n{body}");
     fs::write(dir.join(format!("{name}.md")), contents).expect("write fixture");
@@ -66,7 +65,7 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
     // The fixture: a naming-committee agent, restricted to read-only
     // tools so we know we're not accidentally hitting general-purpose.
     // `workspace_root/home` is what the harness passes as HOME to the
-    // child scode process — so custom_agents' `~/.claude/agents/`
+    // child scode process — so custom_agents' `~/.nexus/sudocode/agents/`
     // resolver looks under this exact path.
     write_fixture_agent(
         env.workspace_root().join("home").as_path(),

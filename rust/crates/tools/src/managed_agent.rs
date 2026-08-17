@@ -3,8 +3,7 @@
 //! Constructs the `ApiClient`, `ToolExecutor`, `SystemPrompt`, and
 //! `PermissionPolicy` dependencies from the `AgentDescriptor` metadata
 //! and calls `runtime::spawn_task::spawn_task` to launch the full LLM
-//! loop. The nexus cdylib's `SudoCodeSpawnAdapter` calls this instead
-//! of `spawn_task_echo`.
+//! loop. The nexus cdylib's `SudoCodeSpawnAdapter` calls this.
 //!
 //! Lives in the `tools` crate because it needs both the `api` crate
 //! (for `ProviderClient` / `resolve_provider_from_config`) and the
@@ -32,8 +31,7 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Spawn a managed-agent loop with the full ConversationRuntime.
 ///
-/// This is the v2 upgrade of `spawn_task_echo`. The caller
-/// (nexus cdylib `SudoCodeSpawnAdapter`) invokes this after
+/// The caller (nexus cdylib `SudoCodeSpawnAdapter`) invokes this after
 /// `register_proc_entry` stamps the per-pid procfs subtree.
 ///
 /// # Arguments

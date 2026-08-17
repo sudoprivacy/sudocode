@@ -177,26 +177,6 @@ where
     SpawnHandle { abort_signal, join }
 }
 
-/// Spawn the v1 echo-only loop (retained for backward compatibility
-/// and integration tests that don't need a full LLM provider).
-#[must_use]
-pub fn spawn_task_echo<K: KernelSyscall + Send + Sync + 'static>(
-    kernel: Arc<K>,
-    desc: AgentDescriptor,
-) -> SpawnHandle {
-    let abort_signal = HookAbortSignal::default();
-    let abort_for_thread = abort_signal.clone();
-
-    let join = thread::Builder::new()
-        .name(format!("managed-agent-echo-{}", desc.pid))
-        .spawn(move || {
-            run_echo_loop(&kernel, &desc, &abort_for_thread);
-        })
-        .expect("OS refused to spawn managed-agent thread");
-
-    SpawnHandle { abort_signal, join }
-}
-
 // ---------------------------------------------------------------------------
 // v2 loop — ConversationRuntime integration
 // ---------------------------------------------------------------------------
@@ -298,9 +278,19 @@ fn run_loop<K, C, T, F>(
 
                             if let Ok(bytes) = serde_json::to_vec(&response) {
                                 // Reply to the SENDER's inbox (A2A) or the
-                                // shared stream (LocalStream).
+                                // shared stream (LocalStream). The kernel's
+                                // byte-op path forwards a not-leader write to
+                                // the owning peer; if the write STILL fails
+                                // (sender inbox absent, peer unreachable) the
+                                // reply is lost, so surface it — a silent drop
+                                // reads as "the agent ignored me" across nodes.
                                 let reply_path = mailbox.reply_path(&sender);
-                                let _ = kernel.sys_write(&reply_path, &ctx, &bytes, 0);
+                                if let Err(e) = kernel.sys_write(&reply_path, &ctx, &bytes, 0) {
+                                    eprintln!(
+                                        "[managed-agent {self_id}] reply to {sender} \
+                                         ({reply_path}) failed: {e:?} — message dropped"
+                                    );
+                                }
                             }
 
                             // -- READY --
@@ -312,11 +302,21 @@ fn run_loop<K, C, T, F>(
                     next_offset = advanced as u64;
                 }
             }
-            Err(_) => {
-                // Path tear-down (procfs unregister) or transient kernel
-                // error — v2 treats every kernel error as terminal because
-                // the loop's lifetime is bounded by the pid's procfs subtree.
-                break;
+            Err(e) => {
+                // A read error is NOT terminal — `abort` (checked by the
+                // `while`) is the SOLE terminal signal. For the managed
+                // `/proc` stream, teardown fires `abort` via the service's
+                // on_terminate observer, so the loop still exits promptly.
+                // For the A2A inbox the stream is a durable, raft-replicated
+                // path: a cold-read-before-`resolve`, a momentary not-leader,
+                // or being read before the mint has planted it are all
+                // TRANSIENT — a `break` here would silently kill a co-hosted
+                // agent for the daemon's lifetime. Log, then fall through to
+                // `sys_watch` (which paces the retry at `WATCH_TIMEOUT_MS`)
+                // and re-check `abort`.
+                eprintln!(
+                    "[managed-agent {self_id}] inbox read error (transient, retrying): {e:?}"
+                );
             }
         }
         // Block until a FileWrite event fires on the inbox path, or
@@ -347,56 +347,6 @@ fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> 
         return None;
     }
     Some((from.to_string(), body))
-}
-
-// ---------------------------------------------------------------------------
-// v1 echo loop — retained for tests and backward compatibility
-// ---------------------------------------------------------------------------
-
-fn run_echo_loop<K: KernelSyscall>(
-    kernel: &Arc<K>,
-    desc: &AgentDescriptor,
-    abort: &HookAbortSignal,
-) {
-    let cwm_path = format!("/proc/{}/chat-with-me", desc.pid);
-    let agent_id = desc.name.as_str();
-    let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(agent_id), true);
-
-    let mut next_offset: u64 = 0;
-    while !abort.is_aborted() {
-        match kernel.sys_read(&cwm_path, &ctx, READ_TIMEOUT_MS, next_offset) {
-            Ok(result) => {
-                if let Some(bytes) = result.data.as_ref() {
-                    if !bytes.is_empty() {
-                        if let Some(reply) = build_echo_reply(bytes, agent_id) {
-                            let _ = kernel.sys_write(&cwm_path, &ctx, &reply, 0);
-                        }
-                    }
-                }
-                if let Some(advanced) = result.stream_next_offset {
-                    next_offset = advanced as u64;
-                }
-            }
-            Err(_) => break,
-        }
-        kernel.sys_watch(&cwm_path, WATCH_TIMEOUT_MS);
-    }
-}
-
-fn build_echo_reply(inbound: &[u8], self_agent_id: &str) -> Option<Vec<u8>> {
-    let value: serde_json::Value = serde_json::from_slice(inbound).ok()?;
-    let obj = value.as_object()?;
-    let from = obj.get("from").and_then(|v| v.as_str())?;
-    if from == self_agent_id {
-        return None;
-    }
-    let body = obj.get("body").and_then(|v| v.as_str()).unwrap_or("");
-    let reply = serde_json::json!({
-        "to": from,
-        "from": self_agent_id,
-        "body": format!("echo: {body}"),
-    });
-    serde_json::to_vec(&reply).ok()
 }
 
 // Loop tests live under `runtime/tests/spawn_task.rs` as an integration

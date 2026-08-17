@@ -32,7 +32,11 @@ fn spawn_mcp_in_workspace(workspace: &HarnessWorkspace, args: &[&str]) -> pty_ex
     for arg in args {
         cmd.push_str(&format!(" '{arg}'"));
     }
-    let mut sess = pty_expect::PtySession::spawn("sh", &["-c", &cmd]).expect("spawn scode mcp");
+    // Resolve `sh` through the shared SSOT: on Windows a bare "sh" handed to
+    // CreateProcessW fails with `os error 2` (no PATH lookup); `resolve_sh`
+    // finds Git-for-Windows' `sh.exe`.
+    let sh = common::resolve_sh();
+    let mut sess = pty_expect::PtySession::spawn(&sh, &["-c", &cmd]).expect("spawn scode mcp");
     sess.set_default_timeout(DEFAULT_TIMEOUT);
     sess
 }

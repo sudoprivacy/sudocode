@@ -2115,20 +2115,30 @@ fn push_thinking_block(
 /// assistant turn. Conservative: only read-only tools (they neither mutate the
 /// workspace nor prompt the user) qualify, so a run of them can overlap their
 /// I/O-bound execution while writers, bash, and interactive tools stay serial.
-/// Mirrors the read-only permission classification; extend cautiously (e.g. to
-/// same-class writes on distinct paths) only with a conflict check.
+///
+/// Names are sudocode's actual tool ids; membership mirrors Claude Code's
+/// `isReadOnly() == true` set (GlobTool / GrepTool / FileReadTool /
+/// ToolSearchTool / ListMcpResourcesTool / ReadMcpResourceTool / TaskGetTool).
+/// `AgentTool` is read-only in CC (it delegates permission to its children) but
+/// is kept serial here for now — concurrent sub-agent spawns are a separate,
+/// larger step. Extend cautiously (e.g. same-class writes on distinct paths)
+/// only behind a conflict check.
 fn is_concurrency_safe_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
+        // File reads
         "read_file"
             | "glob_search"
             | "grep_search"
-            | "ls"
+            // Search
             | "ToolSearch"
+            // MCP reads
             | "ListMcpResources"
             | "ReadMcpResource"
-            | "ListMcpPrompts"
-            | "GetMcpPrompt"
+            // Task reads (CC marks TaskGet read-only; List/Output are symmetric)
+            | "TaskGet"
+            | "TaskList"
+            | "TaskOutput"
     )
 }
 

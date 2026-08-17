@@ -1250,7 +1250,7 @@ mod tests {
         use crate::memory::MemoryPromptVariant;
 
         let root = temp_dir();
-        let agents_dir = root.join(".claude").join("agents");
+        let agents_dir = root.join(".sudocode").join("agents");
         fs::create_dir_all(&agents_dir).expect("agents dir");
         fs::write(
             agents_dir.join("archivist.md"),

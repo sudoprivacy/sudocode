@@ -91,7 +91,12 @@ pub(crate) struct CliToolExecutor {
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     spinner: Option<SpinnerRef>,
-    question_prompter: Option<Box<dyn QuestionPrompter>>,
+    // Single-threaded interior mutability: `execute` is `&self` (so a
+    // concurrency-safe batch can share the dispatcher), but the interactive
+    // AskUserQuestion prompter needs `&mut` to drive a prompt. AskUserQuestion
+    // is non-concurrency-safe (runs serial), so a `RefCell` (not a `Mutex`) is
+    // correct — the CLI turn loop is single-threaded.
+    question_prompter: RefCell<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
     /// Optional channel-backed writer that routes output through the iocraft
     /// render loop instead of writing directly to stdout.
@@ -113,7 +118,7 @@ impl CliToolExecutor {
             tool_registry,
             mcp_state,
             spinner: None,
-            question_prompter: None,
+            question_prompter: RefCell::new(None),
             abort_signal: None,
             output_writer: None,
         }
@@ -132,7 +137,7 @@ impl CliToolExecutor {
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
-        self.question_prompter = Some(prompter);
+        *self.question_prompter.get_mut() = Some(prompter);
     }
 
     /// Pause the spinner and clear its line before writing content.
@@ -311,12 +316,13 @@ fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
 }
 
 impl ToolExecutor for CliToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.execute_with_context(tool_name, input, &runtime::ToolDispatchContext::default())
+            .await
     }
 
-    fn execute_with_context(
-        &mut self,
+    async fn execute_with_context(
+        &self,
         tool_name: &str,
         input: &str,
         ctx: &runtime::ToolDispatchContext,
@@ -331,7 +337,7 @@ impl ToolExecutor for CliToolExecutor {
             )));
         }
         let value = parse_tool_call_input(input)?;
-        if tool_name == "AskUserQuestion" && self.question_prompter.is_some() {
+        if tool_name == "AskUserQuestion" && self.question_prompter.borrow().is_some() {
             return self.execute_ask_user_question(value);
         }
         // In REPL mode, intercept ExitPlanMode to show a confirmation
@@ -459,11 +465,12 @@ struct AskUserQuestionCliOption {
 }
 
 impl CliToolExecutor {
-    fn execute_ask_user_question(&mut self, value: serde_json::Value) -> Result<String, ToolError> {
+    fn execute_ask_user_question(&self, value: serde_json::Value) -> Result<String, ToolError> {
         let input: AskUserQuestionCliInput = serde_json::from_value(value)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
 
-        let Some(prompter) = self.question_prompter.as_mut() else {
+        let mut prompter_guard = self.question_prompter.borrow_mut();
+        let Some(prompter) = prompter_guard.as_mut() else {
             return Err(ToolError::new(
                 "AskUserQuestion requires an interactive question prompter",
             ));

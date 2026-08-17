@@ -2517,6 +2517,108 @@ mod tests {
         );
     }
 
+    /// One message emitting read_file, read_file, write_file, read_file — a
+    /// mixed batch. The two leading reads are concurrency-safe and must
+    /// overlap; the write is not, so it partitions the run and executes serial.
+    struct MixedBatchClient {
+        call_count: usize,
+    }
+
+    #[async_trait]
+    impl ApiClient for MixedBatchClient {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.call_count += 1;
+            if self.call_count == 1 {
+                let tool = |id: &str, name: &str| AssistantEvent::ToolUse {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input: "{\"path\":\"f\"}".to_string(),
+                    thought_signature: None,
+                };
+                Ok(events_to_stream(vec![
+                    tool("a", "read_file"),
+                    tool("b", "read_file"),
+                    tool("c", "write_file"),
+                    tool("d", "read_file"),
+                    AssistantEvent::MessageStop,
+                ]))
+            } else {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+    }
+
+    struct MixedBatchProbe {
+        active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        write_peak_active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ToolExecutor for MixedBatchProbe {
+        async fn execute(&self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.active.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            if tool_name == "write_file" {
+                self.write_peak_active.fetch_max(now, SeqCst);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.active.fetch_sub(1, SeqCst);
+            Ok("ok".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_partitions_writer_and_serialises_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::Arc;
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let write_peak_active = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            MixedBatchClient { call_count: 0 },
+            MixedBatchProbe {
+                active: Arc::clone(&active),
+                peak: Arc::clone(&peak),
+                write_peak_active: Arc::clone(&write_peak_active),
+            },
+            PermissionPolicy::new(PermissionMode::Allow),
+            SystemPromptBuilder::new().with_os("linux", "6.8").build(),
+        );
+
+        let summary = runtime
+            .run_turn("read, write, read", None, None)
+            .await
+            .expect("turn should succeed");
+
+        assert_eq!(
+            summary.tool_results.len(),
+            4,
+            "all four tools produced a result"
+        );
+        // The two leading reads form one concurrent batch (peak 2). The write
+        // is not concurrency-safe, so the run never grows past 2 — a wrong
+        // partition (treating write as safe) would batch all four and peak at 4.
+        assert_eq!(
+            peak.load(SeqCst),
+            2,
+            "the writer must partition the run: peak concurrency is the 2 leading reads, not 4"
+        );
+        // The writer executed alone — no sibling was in flight beside it.
+        assert_eq!(
+            write_peak_active.load(SeqCst),
+            1,
+            "the non-concurrency-safe write must run serially (no overlap)"
+        );
+    }
+
     #[tokio::test]
     async fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
         let api_client = ScriptedApiClient { call_count: 0 };

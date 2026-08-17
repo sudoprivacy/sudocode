@@ -385,17 +385,19 @@ fn try_proxy_passthrough(
     let kind = infer_provider_kind(provider_name, api_format);
 
     // Adjust base_url for the chosen format. Proxy configs typically use
-    // OpenAI convention (base_url ends with `/v1`), but AnthropicClient
-    // appends its own `/v1/messages`. Strip the trailing `/v1` for
-    // Anthropic format to avoid `/v1/v1/messages`.
+    // Proxy base URLs follow OpenAI convention (ending with `/v1`).
+    // OpenAI-format clients expect that prefix and append `/chat/completions`
+    // or `/responses` directly. All other formats (Anthropic, Gemini, future)
+    // construct their own versioned path (e.g. `/v1/messages`,
+    // `/v1beta/models/...`) — strip the trailing `/v1` to avoid double-prefix.
     let base_url = match api_format {
-        ApiFormat::AnthropicMessages => connection
+        ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => connection.base_url.clone(),
+        _ => connection
             .base_url
             .trim_end_matches('/')
             .strip_suffix("/v1")
             .unwrap_or(&connection.base_url)
             .to_string(),
-        _ => connection.base_url.clone(),
     };
 
     Some(ResolvedProvider {

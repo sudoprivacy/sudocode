@@ -1120,7 +1120,7 @@ automated in <a href="https://github.com/sudoprivacy/sudocode/blob/main/scripts/
 Verbatim CC prompt text is kept local (not committed), treated like the private
 CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
 
-<p class="table-title"><strong>Table A — what CC serves each model</strong> (SSOT reference, captured CC&nbsp;2.1.229, 2026-08-06).</p>
+<p class="table-title"><strong>Table A — what CC serves each model</strong> (SSOT reference, captured CC&nbsp;2.1.233, 2026-08-17).</p>
 
 <table>
   <thead><tr><th>Model</th><th>CC variant</th><th>System-prompt size</th><th>Memory block</th><th>Distinctive sections</th></tr></thead>
@@ -1128,15 +1128,17 @@ CC snapshot in <a href="#reference-sources">Reference sources</a>.</p>
     <tr><td><code>opus-4-8</code></td><td data-status="covered"><strong>Lean</strong></td><td>~6.3 KB</td><td><code># Memory</code> (2,092)</td><td><code># Harness</code> + 4 core sections only — no Doing&nbsp;tasks / Actions / Using&nbsp;tools / Tone / Text&nbsp;output. The <em>only</em> true-Lean model.</td></tr>
     <tr><td><code>opus-5</code></td><td data-status="gap-l2"><strong>Mid</strong></td><td>~9.6 KB</td><td><code># Memory</code> (2,092)</td><td>Lean's 5 sections <em>plus</em> <code># Delivering work</code> (2,002) + <code># Corrections</code> (1,355). <strong>Moved Lean→Mid since 2.1.207.</strong></td></tr>
     <tr><td><code>fable-5</code></td><td data-status="gap-l2"><strong>Mid</strong></td><td>~10.7 KB</td><td><code># Memory</code> (2,092)</td><td>Short <code># Harness</code> (661) + <code># Communicating with the user</code> (4,105) — a <em>different</em> Mid from opus-5.</td></tr>
-    <tr><td><code>opus-4-6</code> — <strong>current default</strong> (<code>config.rs</code> primary)</td><td data-status="gap"><strong>Full</strong></td><td>~27.8 KB</td><td><code># auto memory</code> (12,833)</td><td>Captured CC&nbsp;2.1.229 → <strong>Full</strong>, byte-identical to opus-4-5. <strong>Default stays Full — no silent cut for default users.</strong> Do <em>not</em> extrapolate "frontier → Lean": 4-6 is newer than 4-5 yet both are Full.</td></tr>
+    <tr><td><code>opus-4-6</code> — <strong>current default</strong> (<code>config.rs</code> primary)</td><td data-status="gap"><strong>Full</strong></td><td>~27.8 KB</td><td><code># auto memory</code> (12,833)</td><td>Captured CC&nbsp;2.1.233 → <strong>Full</strong>, byte-identical to opus-4-5. <strong>Default stays Full — no silent cut for default users.</strong> Do <em>not</em> extrapolate "frontier → Lean": 4-6 is newer than 4-5 yet both are Full.</td></tr>
     <tr><td><code>opus-4-5</code>, <code>sonnet-5</code>, <code>sonnet-4-5</code>, <code>haiku-4-5</code>, older</td><td data-status="gap"><strong>Full</strong></td><td>~27.8 KB</td><td><code># auto memory</code> (12,833)</td><td>All 10 verbose sections — newest sonnet/haiku still get the full prompt</td></tr>
     <tr><td><strong>non-Anthropic</strong> — GPT / qwen / DeepSeek / local (via sudorouter + openai-compat)</td><td data-status="gap-l2"><strong>scode's own</strong></td><td>n/a</td><td>n/a</td><td>CC does not run these, so there is <em>no CC prompt to mirror</em>. scode decides the tier itself — <strong>Lean by default</strong> (no CC baggage to shed). Roughly half the models scode runs in production.</td></tr>
   </tbody>
 </table>
 
-<p class="table-caption"><strong>As of CC 2.1.229 there are FOUR variants, not
-three</strong> (re-captured 2026-08-06 on an isolated 2.1.229 install; 2.1.207
-had three): true Lean is <code>opus-4-8</code> only; <code>opus-5</code> and
+<p class="table-caption"><strong>As of CC 2.1.233 there are FOUR variants, not
+three</strong> (re-validated 2026-08-17 on an isolated 2.1.233 install — mapping
++ sections unchanged since 2.1.229, only <code># Context management</code> grew
+~+51 chars; 2.1.207 had three): true Lean is <code>opus-4-8</code> only;
+<code>opus-5</code> and
 <code>fable-5</code> each get a <em>different</em> Mid; everything else is Full.
 The boundary is <em>model-specific, not generational</em> — sonnet-5 and
 haiku-4-5 are new but still Full. The production default <code>opus-4-6</code> is
@@ -1147,7 +1149,7 @@ collapsed <code># Memory</code> (2,092); Full keeps <code># auto memory</code>
 (12,833). CC's Lean cut vs Full: delete <code># Doing tasks</code> /
 <code># Executing actions</code> / <code># Using your tools</code> /
 <code># Tone and style</code> / <code># Text output</code>, collapse
-<code># auto memory</code> → <code># Memory</code>. Net 27,768 → 6,273 chars
+<code># auto memory</code> → <code># Memory</code>. Net 27,819 → 6,324 chars
 (−77%). (<code>opus-4-1</code>/<code>opus-4</code> requests are remapped to
 opus-4-8 by CC → Lean; that remap is CC's, not scode's concern.)</p>
 
@@ -1191,7 +1193,7 @@ CC sections worth adopting outright.</p>
 <p><strong>Net for lean models:</strong> memory is <em>already</em> compact
 (2,984) for all main-loop via #406, so the remaining tiering work is the main
 prompt: 10,890 → ~2,120 (−80.5%) for lean models. Combined with #406's memory, a
-lean model's root prompt lands near CC's lean ~6,273 (2.1.229). Because every
+lean model's root prompt lands near CC's lean ~6,324 (2.1.233). Because every
 sub-agent reuses <code>build()</code> via <code>load_system_prompt_for_agent</code>,
 the saving multiplies across each spawn.</p>
 
@@ -1206,7 +1208,7 @@ the saving multiplies across each spawn.</p>
     <tr><td><code># Session-specific guidance</code>: <code>/&lt;skill-name&gt;</code> → invoke via Skill, only listed skills</td><td>absent</td><td><strong>Adopt (all tiers)</strong> if scode surfaces user-invocable skills</td></tr>
     <tr><td>Dual-use security clause: "C2 frameworks, credential testing, exploit development require clear authorization context: pentesting, CTF, research" (IMPORTANT)</td><td>absent (scode's security line is shorter)</td><td><strong>Adopt (all tiers)</strong> — sharper safety scoping</td></tr>
     <tr><td><strong>NEW in 2.1.229</strong> — <code># Delivering work</code> (opus-5 Mid, 2,002): act on the actual request; don't silently narrow/widen scope; finish the <em>whole</em> task; reserve blocking questions for genuinely unsafe cases; a reaffirmed request = the user's decision</td><td>absent (scode has no scope-discipline section)</td><td><strong>Adopt (all tiers)</strong> — strong scope/completion discipline</td></tr>
-    <tr><td><strong>NEW in 2.1.229</strong> — <code># Corrections</code> (opus-5 Mid, 1,355): avoid excessive self-correction; only correct when it changes the user's decisions; no apologies/rumination; a follow-up question ≠ you were wrong. Also <em>"don't call AgentTool / workflows / deep-research unless requested"</em></td><td>absent</td><td><strong>Adopt (all tiers)</strong> — anti-rumination + tool-restraint</td></tr>
+    <tr><td><strong>NEW in 2.1.229</strong> — <code># Corrections</code> (opus-5 Mid, 1,406): avoid excessive self-correction; only correct when it changes the user's decisions; no apologies/rumination; a follow-up question ≠ you were wrong. Also <em>"don't call AgentTool / workflows / deep-research unless requested"</em></td><td>absent</td><td><strong>Adopt (all tiers)</strong> — anti-rumination + tool-restraint</td></tr>
     <tr><td><strong>NEW in 2.1.229</strong> — <code># Communicating with the user</code> (fable-5 Mid, 4,105): write for a teammate catching up; lead with the outcome; everything needed goes in the final message; readable &gt; concise</td><td>partial — scode's <code># Tone</code>/<code># Output efficiency</code> overlap</td><td><strong>Adopt / merge</strong> — supersedes scode's terser tone/output guidance</td></tr>
     <tr><td rowspan="7" data-status="gap"><strong>② In scode,<br>NOT in CC-lean</strong><br>(cut / compress)</td><td><code># Doing tasks</code> (2,196)</td><td>dropped entirely</td><td>Cut for lean models</td></tr>
     <tr><td><code># Executing actions with care</code> + <code>Examples:</code> list (1,575)</td><td><strong>compressed to one <code># Harness</code> paragraph</strong></td><td>Replace verbose+Examples with the one-liner</td></tr>
@@ -1232,7 +1234,7 @@ tier-gated.</p>
 <p class="table-title"><strong>Table D — memory prompt: 3-way (CC vs #406 vs scode).</strong> The one dimension already implemented on scode, so it needs a third column.</p>
 
 <table>
-  <thead><tr><th>Aspect</th><th>CC (2.1.229)</th><th>#406 (merged, scode)</th><th>Us — open decision</th></tr></thead>
+  <thead><tr><th>Aspect</th><th>CC (2.1.233)</th><th>#406 (merged, scode)</th><th>Us — open decision</th></tr></thead>
   <tbody>
     <tr><td>Selection axis</td><td>per-model tier</td><td>per-agent-type (opt-in-full)</td><td data-status="gap-l2">?</td></tr>
     <tr><td>Compact memory</td><td><code># Memory</code> 2,092 → lean/mid (opus-4-8 / opus-5 / fable-5)</td><td>compact <strong>2,984</strong> → main loop + built-in sub-agents + custom-without-<code>memory:</code> (<strong>all models</strong>)</td><td data-status="gap-l2">keep #406's (verified 2,984)</td></tr>

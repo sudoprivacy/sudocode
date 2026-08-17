@@ -1131,7 +1131,220 @@ where
                 parent_session_messages: self.session.messages.clone(),
             };
 
-            for tool_index in 0..pending_tool_uses.len() {
+            let mut batch_start = 0usize;
+            while batch_start < pending_tool_uses.len() {
+                // Group a run of consecutive concurrency-safe tools into one
+                // batch whose (I/O-bound) executes overlap; anything else is a
+                // serial singleton. Order across batches is preserved.
+                let mut batch_end = batch_start + 1;
+                if is_concurrency_safe_tool(&pending_tool_uses[batch_start].1) {
+                    while batch_end < pending_tool_uses.len()
+                        && is_concurrency_safe_tool(&pending_tool_uses[batch_end].1)
+                    {
+                        batch_end += 1;
+                    }
+                }
+
+                if batch_end - batch_start > 1 {
+                    // ── Concurrency-safe batch ─────────────────────────────
+                    // Phase 1 (serial, &mut self): pre-hook + permission.
+                    let mut prepared: Vec<PreparedTool> =
+                        Vec::with_capacity(batch_end - batch_start);
+                    for i in batch_start..batch_end {
+                        if self.hook_abort_signal.is_aborted() {
+                            self.push_interrupted_tool_results(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                &pending_tool_uses,
+                                i,
+                            )?;
+                            return Ok(self.cancelled_summary(
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
+                                iterations,
+                            ));
+                        }
+                        let (tool_use_id, tool_name, input) = pending_tool_uses[i].clone();
+                        let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
+                        let effective_input = pre_hook_result
+                            .updated_input()
+                            .map_or_else(|| input.clone(), ToOwned::to_owned);
+                        let permission_context = PermissionContext::new(
+                            pre_hook_result.permission_override(),
+                            pre_hook_result.permission_reason().map(ToOwned::to_owned),
+                        );
+                        let outcome = if pre_hook_result.is_cancelled() {
+                            PermissionOutcome::Deny {
+                                reason: format_hook_message(
+                                    &pre_hook_result,
+                                    &format!("PreToolUse hook cancelled tool `{tool_name}`"),
+                                ),
+                            }
+                        } else if pre_hook_result.is_failed() {
+                            PermissionOutcome::Deny {
+                                reason: format_hook_message(
+                                    &pre_hook_result,
+                                    &format!("PreToolUse hook failed for tool `{tool_name}`"),
+                                ),
+                            }
+                        } else if pre_hook_result.is_denied() {
+                            PermissionOutcome::Deny {
+                                reason: format_hook_message(
+                                    &pre_hook_result,
+                                    &format!("PreToolUse hook denied tool `{tool_name}`"),
+                                ),
+                            }
+                        } else if let Some(prompt) = prompter.as_mut() {
+                            self.permission_policy.authorize_with_context(
+                                &tool_name,
+                                &effective_input,
+                                &permission_context,
+                                Some(*prompt),
+                            )
+                        } else {
+                            self.permission_policy.authorize_with_context(
+                                &tool_name,
+                                &effective_input,
+                                &permission_context,
+                                None,
+                            )
+                        };
+                        let deny_reason = match outcome {
+                            PermissionOutcome::Allow => {
+                                self.record_tool_started(iterations, &tool_name);
+                                None
+                            }
+                            PermissionOutcome::Deny { reason } => Some(reason),
+                        };
+                        prepared.push(PreparedTool {
+                            tool_use_id,
+                            tool_name,
+                            effective_input,
+                            pre_hook_result,
+                            deny_reason,
+                        });
+                    }
+
+                    // Phase 2 (concurrent, &self): overlap the executes of the
+                    // permitted tools — only `&self.tool_executor` and the owned
+                    // inputs enter the futures, never `&mut self`.
+                    let exec_results: Vec<Option<Result<String, ToolError>>> =
+                        futures::future::join_all(prepared.iter().map(|p| async {
+                            if p.deny_reason.is_some() {
+                                None
+                            } else {
+                                Some(
+                                    self.tool_executor
+                                        .execute_with_context(
+                                            &p.tool_name,
+                                            &p.effective_input,
+                                            &dispatch_context,
+                                        )
+                                        .await,
+                                )
+                            }
+                        }))
+                        .await;
+
+                    // Phase 3 (serial, &mut self): post-hook + push, in order.
+                    for (offset, p) in prepared.into_iter().enumerate() {
+                        let result_message = if let Some(reason) = p.deny_reason {
+                            ConversationMessage::tool_result(
+                                p.tool_use_id,
+                                p.tool_name,
+                                merge_hook_feedback(p.pre_hook_result.messages(), reason, true),
+                                true,
+                            )
+                        } else {
+                            let (mut output, mut is_error) = match exec_results[offset]
+                                .as_ref()
+                                .expect("permitted tool has an execute result")
+                            {
+                                Ok(output) => (output.clone(), false),
+                                Err(error) => (error.to_string(), true),
+                            };
+                            if self.hook_abort_signal.is_aborted() {
+                                output =
+                                    merge_hook_feedback(p.pre_hook_result.messages(), output, true);
+                                let result_message = ConversationMessage::tool_result(
+                                    p.tool_use_id,
+                                    p.tool_name,
+                                    output,
+                                    true,
+                                );
+                                self.push_tool_result_message(
+                                    &mut observer,
+                                    iterations,
+                                    &mut tool_results,
+                                    result_message,
+                                )?;
+                                self.push_interrupted_tool_results(
+                                    &mut observer,
+                                    iterations,
+                                    &mut tool_results,
+                                    &pending_tool_uses,
+                                    batch_start + offset + 1,
+                                )?;
+                                return Ok(self.cancelled_summary(
+                                    assistant_messages,
+                                    tool_results,
+                                    prompt_cache_events,
+                                    iterations,
+                                ));
+                            }
+                            output =
+                                merge_hook_feedback(p.pre_hook_result.messages(), output, false);
+                            let post_hook_result = if is_error {
+                                self.run_post_tool_use_failure_hook(
+                                    &p.tool_name,
+                                    &p.effective_input,
+                                    &output,
+                                )
+                            } else {
+                                self.run_post_tool_use_hook(
+                                    &p.tool_name,
+                                    &p.effective_input,
+                                    &output,
+                                    false,
+                                )
+                            };
+                            if post_hook_result.is_denied()
+                                || post_hook_result.is_failed()
+                                || post_hook_result.is_cancelled()
+                            {
+                                is_error = true;
+                            }
+                            output = merge_hook_feedback(
+                                post_hook_result.messages(),
+                                output,
+                                post_hook_result.is_denied()
+                                    || post_hook_result.is_failed()
+                                    || post_hook_result.is_cancelled(),
+                            );
+                            ConversationMessage::tool_result(
+                                p.tool_use_id,
+                                p.tool_name,
+                                output,
+                                is_error,
+                            )
+                        };
+                        self.push_tool_result_message(
+                            &mut observer,
+                            iterations,
+                            &mut tool_results,
+                            result_message,
+                        )?;
+                    }
+
+                    batch_start = batch_end;
+                    continue;
+                }
+
+                // ── Serial singleton (existing per-tool flow) ──────────────
+                let tool_index = batch_start;
+                batch_start = batch_end;
                 if self.hook_abort_signal.is_aborted() {
                     self.push_interrupted_tool_results(
                         &mut observer,
@@ -1916,6 +2129,40 @@ fn push_thinking_block(
     });
 }
 
+/// Whether a tool is safe to run concurrently with its siblings in the same
+/// assistant turn. Conservative: only read-only tools (they neither mutate the
+/// workspace nor prompt the user) qualify, so a run of them can overlap their
+/// I/O-bound execution while writers, bash, and interactive tools stay serial.
+/// Mirrors the read-only permission classification; extend cautiously (e.g. to
+/// same-class writes on distinct paths) only with a conflict check.
+fn is_concurrency_safe_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "glob_search"
+            | "grep_search"
+            | "ls"
+            | "ToolSearch"
+            | "ListMcpResources"
+            | "ReadMcpResource"
+            | "ListMcpPrompts"
+            | "GetMcpPrompt"
+    )
+}
+
+/// Per-tool state carried from the serial pre-pass (hooks + permission) of a
+/// concurrency-safe batch to the serial post-pass (post-hook + push), across
+/// the concurrent execute phase in between.
+struct PreparedTool {
+    tool_use_id: String,
+    tool_name: String,
+    effective_input: String,
+    pre_hook_result: HookRunResult,
+    /// `None` when permission was granted (the tool is executed); `Some(reason)`
+    /// when denied before dispatch (no execute, the reason becomes the result).
+    deny_reason: Option<String>,
+}
+
 fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
     if result.messages().is_empty() {
         fallback.to_string()
@@ -2161,6 +2408,103 @@ mod tests {
                 AssistantEvent::MessageStop,
             ]))
         }
+    }
+
+    /// One assistant message emitting three read-only (`read_file`) tool
+    /// calls, then end-turn — drives a single concurrency-safe batch.
+    struct ConcurrencyProbeClient {
+        call_count: usize,
+    }
+
+    #[async_trait]
+    impl ApiClient for ConcurrencyProbeClient {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.call_count += 1;
+            if self.call_count == 1 {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::ToolUse {
+                        id: "r1".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{\"path\":\"a\"}".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "r2".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{\"path\":\"b\"}".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "r3".to_string(),
+                        name: "read_file".to_string(),
+                        input: "{\"path\":\"c\"}".to_string(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::MessageStop,
+                ]))
+            } else {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+    }
+
+    /// Records the peak number of simultaneously-in-flight executes. A serial
+    /// loop peaks at 1; a concurrency-safe batch peaks at the batch size.
+    struct PeakConcurrencyProbe {
+        active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ToolExecutor for PeakConcurrencyProbe {
+        async fn execute(&self, _tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.active.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            // Yield long enough for the sibling futures to also enter before any
+            // completes — deterministic on the single-threaded test runtime.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.active.fetch_sub(1, SeqCst);
+            Ok("ok".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrency_safe_tools_in_a_batch_execute_concurrently() {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            ConcurrencyProbeClient { call_count: 0 },
+            PeakConcurrencyProbe {
+                active: std::sync::Arc::clone(&active),
+                peak: std::sync::Arc::clone(&peak),
+            },
+            PermissionPolicy::new(PermissionMode::Allow),
+            SystemPromptBuilder::new().with_os("linux", "6.8").build(),
+        );
+
+        let summary = runtime
+            .run_turn("read three files", None, None)
+            .await
+            .expect("turn should succeed");
+
+        assert_eq!(
+            summary.tool_results.len(),
+            3,
+            "all three tools produced a result"
+        );
+        assert_eq!(
+            peak.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the three read-only tools must overlap (peak concurrency == batch size); \
+             a serial loop would peak at 1"
+        );
     }
 
     #[tokio::test]

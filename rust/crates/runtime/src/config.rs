@@ -158,6 +158,8 @@ pub struct RuntimeFeatureConfig {
     sandbox: SandboxConfig,
     provider_fallbacks: ProviderFallbackConfig,
     trusted_roots: Vec<String>,
+    /// Enable extended thinking for models that support it (default: true).
+    thinking: bool,
 }
 
 /// Ordered chain of fallback model identifiers used when the primary
@@ -429,6 +431,7 @@ impl ConfigLoader {
             sandbox: parse_optional_sandbox_config(&merged_value)?,
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
             trusted_roots: parse_optional_trusted_roots(&merged_value)?,
+            thinking: parse_optional_thinking(&merged_value),
         };
 
         Ok(RuntimeConfig {
@@ -528,6 +531,12 @@ impl RuntimeConfig {
         self.feature_config.model.as_deref()
     }
 
+    /// Whether extended thinking is enabled (default: true).
+    #[must_use]
+    pub fn thinking(&self) -> bool {
+        self.feature_config.thinking
+    }
+
     #[must_use]
     pub fn aliases(&self) -> &BTreeMap<String, String> {
         &self.feature_config.aliases
@@ -595,6 +604,11 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    #[must_use]
+    pub fn thinking(&self) -> bool {
+        self.thinking
     }
 
     #[must_use]
@@ -1025,6 +1039,14 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
         .and_then(|object| object.get("model"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
+}
+
+/// Parse `thinking` from settings. Default is `true` (enabled).
+fn parse_optional_thinking(root: &JsonValue) -> bool {
+    root.as_object()
+        .and_then(|object| object.get("thinking"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(true)
 }
 
 fn parse_optional_aliases(root: &JsonValue) -> Result<BTreeMap<String, String>, ConfigError> {

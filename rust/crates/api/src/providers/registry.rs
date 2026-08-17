@@ -335,7 +335,12 @@ pub fn resolve_provider_from_config(
         })?;
 
     // 5. Determine API format.
-    let api_format = resolve_api_format(&auth_mode_str, &mapping.provider, mapping.api.as_deref())?;
+    let api_format = resolve_api_format(
+        &auth_mode_str,
+        &mapping.provider,
+        mapping.api.as_deref(),
+        &mapping.model,
+    )?;
 
     // 6. Resolve credential.
     let credential = resolve_credential(&auth_mode_str, &mapping.provider, connection)?;
@@ -343,10 +348,12 @@ pub fn resolve_provider_from_config(
     // 7. Determine provider kind from the provider name / api format.
     let kind = infer_provider_kind(&mapping.provider, api_format);
 
+    let base_url = adjust_base_url_for_format(&connection.base_url, api_format);
+
     Ok(ResolvedProvider {
         kind,
         api_format,
-        base_url: connection.base_url.clone(),
+        base_url,
         credential,
         model_id: mapping.model.clone(),
     })
@@ -384,21 +391,7 @@ fn try_proxy_passthrough(
     let credential = resolve_credential("proxy", provider_name, connection).ok()?;
     let kind = infer_provider_kind(provider_name, api_format);
 
-    // Adjust base_url for the chosen format. Proxy configs typically use
-    // Proxy base URLs follow OpenAI convention (ending with `/v1`).
-    // OpenAI-format clients expect that prefix and append `/chat/completions`
-    // or `/responses` directly. All other formats (Anthropic, Gemini, future)
-    // construct their own versioned path (e.g. `/v1/messages`,
-    // `/v1beta/models/...`) — strip the trailing `/v1` to avoid double-prefix.
-    let base_url = match api_format {
-        ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => connection.base_url.clone(),
-        _ => connection
-            .base_url
-            .trim_end_matches('/')
-            .strip_suffix("/v1")
-            .unwrap_or(&connection.base_url)
-            .to_string(),
-    };
+    let base_url = adjust_base_url_for_format(&connection.base_url, api_format);
 
     Some(ResolvedProvider {
         kind,
@@ -421,15 +414,36 @@ fn endpoint_type_to_api_format(endpoint_type: &str) -> ApiFormat {
     }
 }
 
+/// Adjust `base_url` for the chosen API format.
+///
+/// Proxy base URLs follow OpenAI convention (ending with `/v1`).
+/// OpenAI-format clients expect that prefix and append `/chat/completions`
+/// or `/responses` directly. All other formats (Anthropic, Gemini, future)
+/// construct their own versioned path (e.g. `/v1/messages`,
+/// `/v1beta/models/...`) — strip the trailing `/v1` to avoid double-prefix.
+fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
+    match api_format {
+        ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => base_url.to_string(),
+        _ => base_url
+            .trim_end_matches('/')
+            .strip_suffix("/v1")
+            .unwrap_or(base_url)
+            .to_string(),
+    }
+}
+
 /// Resolve the wire API format.
 ///
 /// - Explicit `api`: `"openai-completions"`, `"openai-responses"`, or
 ///   `"anthropic-messages"`.
+/// - Proxy mode without `api`: consult model capabilities SSOT (same
+///   source as `try_proxy_passthrough`), falling back to OpenAI completions.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,
     provider_name: &str,
     api_override: Option<&str>,
+    model_id: &str,
 ) -> Result<ApiFormat, ApiError> {
     // If there's an explicit `api` field, use it.
     if let Some(api) = api_override {
@@ -443,9 +457,16 @@ fn resolve_api_format(
         };
     }
 
-    // For proxy mode without an explicit `api`, default to OpenAI completions.
+    // For proxy mode without an explicit `api`, consult model capabilities
+    // SSOT — same logic as try_proxy_passthrough, single source of truth
+    // via endpoint_type_to_api_format.
     if auth_mode == "proxy" {
-        return Ok(ApiFormat::OpenAiCompletions);
+        return Ok(
+            runtime::model_capabilities::preferred_endpoint_type(model_id)
+                .as_deref()
+                .map(endpoint_type_to_api_format)
+                .unwrap_or(ApiFormat::OpenAiCompletions),
+        );
     }
 
     // Infer from provider name.
@@ -683,7 +704,7 @@ mod tests {
             ModelProviderMapping {
                 provider: "sudorouter".to_string(),
                 model: "claude-opus-4-6".to_string(),
-                api: Some("openai-completions".to_string()),
+                api: None,
             },
         );
         opus_providers.insert(
@@ -901,25 +922,84 @@ mod tests {
     #[test]
     fn resolve_api_format_infers_correctly() {
         assert_eq!(
-            resolve_api_format("api-key", "anthropic", None).unwrap(),
+            resolve_api_format("api-key", "anthropic", None, "claude-opus-4-6").unwrap(),
             ApiFormat::AnthropicMessages
         );
         assert_eq!(
-            resolve_api_format("api-key", "openai", None).unwrap(),
+            resolve_api_format("api-key", "openai", None, "gpt-5.4").unwrap(),
             ApiFormat::OpenAiCompletions
         );
         assert_eq!(
-            resolve_api_format("proxy", "any", Some("openai-responses")).unwrap(),
+            resolve_api_format("proxy", "any", Some("openai-responses"), "gpt-5.4").unwrap(),
             ApiFormat::OpenAiResponses
         );
         assert_eq!(
-            resolve_api_format("api-key", "deepseek-anthropic", Some("anthropic-messages"))
-                .unwrap(),
+            resolve_api_format(
+                "api-key",
+                "deepseek-anthropic",
+                Some("anthropic-messages"),
+                "deepseek-r2"
+            )
+            .unwrap(),
+            ApiFormat::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn resolve_api_format_proxy_consults_ssot_fallback() {
+        // Bundled SSOT doesn't include endpoint_types, so proxy mode
+        // falls back to OpenAI completions.
+        let format = resolve_api_format("proxy", "sudorouter", None, "claude-sonnet-4-6").unwrap();
+        assert_eq!(format, ApiFormat::OpenAiCompletions);
+
+        // Unknown model also falls back.
+        let format =
+            resolve_api_format("proxy", "sudorouter", None, "unknown-model-xyz-999").unwrap();
+        assert_eq!(format, ApiFormat::OpenAiCompletions);
+    }
+
+    #[test]
+    fn endpoint_type_to_api_format_maps_correctly() {
+        assert_eq!(
+            endpoint_type_to_api_format("anthropic"),
             ApiFormat::AnthropicMessages
         );
         assert_eq!(
-            resolve_api_format("proxy", "any", None).unwrap(),
+            endpoint_type_to_api_format("gemini"),
+            ApiFormat::GeminiGenerateContent
+        );
+        assert_eq!(
+            endpoint_type_to_api_format("openai-response"),
+            ApiFormat::OpenAiResponses
+        );
+        assert_eq!(
+            endpoint_type_to_api_format("openai"),
             ApiFormat::OpenAiCompletions
+        );
+    }
+
+    #[test]
+    fn adjust_base_url_strips_v1_for_non_openai() {
+        assert_eq!(
+            adjust_base_url_for_format("https://hk.sudorouter.ai/v1", ApiFormat::AnthropicMessages),
+            "https://hk.sudorouter.ai"
+        );
+        assert_eq!(
+            adjust_base_url_for_format(
+                "https://hk.sudorouter.ai/v1",
+                ApiFormat::GeminiGenerateContent
+            ),
+            "https://hk.sudorouter.ai"
+        );
+        // OpenAI formats keep /v1.
+        assert_eq!(
+            adjust_base_url_for_format("https://hk.sudorouter.ai/v1", ApiFormat::OpenAiCompletions),
+            "https://hk.sudorouter.ai/v1"
+        );
+        // URL without /v1 stays unchanged.
+        assert_eq!(
+            adjust_base_url_for_format("https://api.anthropic.com", ApiFormat::AnthropicMessages),
+            "https://api.anthropic.com"
         );
     }
 
@@ -993,7 +1073,7 @@ mod tests {
     #[test]
     fn resolve_api_format_codex_returns_responses() {
         assert_eq!(
-            resolve_api_format("subscription", "codex", None).unwrap(),
+            resolve_api_format("subscription", "codex", None, "gpt-5.4-mini").unwrap(),
             ApiFormat::OpenAiResponses
         );
     }

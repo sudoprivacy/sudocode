@@ -435,7 +435,7 @@ impl AnthropicClient {
     ) -> Result<crate::HttpRequestResult, ApiError> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
-        strip_unsupported_beta_body_fields(&mut body);
+        strip_unsupported_beta_body_fields(&mut body, request);
         apply_cache_hints(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
 
@@ -543,7 +543,7 @@ impl AnthropicClient {
             self.base_url.trim_end_matches('/')
         );
         let mut request_body = self.request_profile.render_json_body(request)?;
-        strip_unsupported_beta_body_fields(&mut request_body);
+        strip_unsupported_beta_body_fields(&mut request_body, request);
         apply_cache_hints(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         let mut builder = self
@@ -1068,7 +1068,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
 /// `/v1/messages/count_tokens` endpoints reject as `Extra inputs are not
 /// permitted`. The `betas` opt-in is communicated via the `anthropic-beta`
 /// HTTP header on these endpoints, never as a JSON body field.
-fn strip_unsupported_beta_body_fields(body: &mut Value) {
+fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest) {
     if let Some(object) = body.as_object_mut() {
         object.remove("betas");
         // These fields are OpenAI-compatible only; Anthropic rejects them.
@@ -1080,9 +1080,22 @@ fn strip_unsupported_beta_body_fields(body: &mut Value) {
                 object.insert("stop_sequences".to_string(), stop_val);
             }
         }
-        // Strip thought_signature from tool_use content blocks. The API
-        // rejects this field when extended thinking is not enabled.
-        strip_thought_signatures(object);
+        if request.thinking_enabled {
+            // Inject extended thinking configuration. budget_tokens is set
+            // to max_tokens — the model splits between thinking and visible
+            // output as needed.
+            object.insert(
+                "thinking".to_string(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": request.max_tokens,
+                }),
+            );
+        } else {
+            // Strip thought_signature from tool_use content blocks. The API
+            // rejects this field when extended thinking is not enabled.
+            strip_thought_signatures(object);
+        }
     }
 }
 
@@ -1145,8 +1158,8 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
 }
 
 /// Walk `messages[].content[]` and remove `thought_signature` from any
-/// `tool_use` content blocks. Without an explicit `thinking` configuration
-/// in the request the Anthropic API treats the field as an extra input.
+/// `tool_use` content blocks. Only called when `thinking_enabled` is false —
+/// the API rejects this field when extended thinking is not enabled.
 fn strip_thought_signatures(body: &mut Map<String, Value>) {
     if let Some(Value::Array(messages)) = body.get_mut("messages") {
         for msg in messages.iter_mut() {
@@ -1570,7 +1583,7 @@ mod tests {
             "metadata": {"source": "test"},
         });
 
-        super::strip_unsupported_beta_body_fields(&mut body);
+        super::strip_unsupported_beta_body_fields(&mut body, &MessageRequest::default());
 
         assert!(
             body.get("betas").is_none(),
@@ -1592,7 +1605,7 @@ mod tests {
         });
         let original = body.clone();
 
-        super::strip_unsupported_beta_body_fields(&mut body);
+        super::strip_unsupported_beta_body_fields(&mut body, &MessageRequest::default());
 
         assert_eq!(body, original);
     }
@@ -1608,7 +1621,7 @@ mod tests {
             "stop": ["\n"],
         });
 
-        super::strip_unsupported_beta_body_fields(&mut body);
+        super::strip_unsupported_beta_body_fields(&mut body, &MessageRequest::default());
 
         // temperature is kept (Anthropic supports it)
         assert_eq!(body["temperature"], serde_json::json!(0.7));
@@ -1634,7 +1647,7 @@ mod tests {
             "stop": [],
         });
 
-        super::strip_unsupported_beta_body_fields(&mut body);
+        super::strip_unsupported_beta_body_fields(&mut body, &MessageRequest::default());
 
         assert!(body.get("stop").is_none());
         assert!(
@@ -1665,7 +1678,7 @@ mod tests {
             rendered.get("betas").is_some(),
             "render_json_body still emits betas; the strip helper guards the wire format",
         );
-        super::strip_unsupported_beta_body_fields(&mut rendered);
+        super::strip_unsupported_beta_body_fields(&mut rendered, &request);
 
         assert!(
             rendered.get("betas").is_none(),

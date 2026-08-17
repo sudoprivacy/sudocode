@@ -253,6 +253,11 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
     FieldSchema::leaf("env", FieldType::Object, "Environment variable overrides"),
     FieldSchema::leaf("aliases", FieldType::Object, "Command aliases"),
     FieldSchema::leaf(
+        "thinking",
+        FieldType::Bool,
+        "Enable extended thinking for supported models (default: true)",
+    ),
+    FieldSchema::leaf(
         "providerFallbacks",
         FieldType::Object,
         "Provider fallback chain",
@@ -371,6 +376,7 @@ mod tests {
             "sandbox",
             "env",
             "aliases",
+            "thinking",
             "providerFallbacks",
             "trustedRoots",
         ];

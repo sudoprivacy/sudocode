@@ -37,6 +37,12 @@ pub struct MessageRequest {
     /// don't support caching ignore them.
     #[serde(skip)]
     pub cache_hints: Option<CacheHints>,
+
+    /// Enable extended thinking (Anthropic-specific). When true, the
+    /// Anthropic client injects `thinking: { type: "enabled", budget_tokens }`
+    /// into the request body. Other providers ignore this field.
+    #[serde(skip)]
+    pub thinking_enabled: bool,
 }
 
 /// Provider-agnostic description of what to cache in a request.

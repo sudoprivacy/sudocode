@@ -54,8 +54,7 @@ pub fn default_memory_dir() -> PathBuf {
 /// `<workspace-base>` follows the same resolution rules as
 /// [`default_memory_dir_for`] MINUS its trailing `memory/` segment.
 ///
-/// Mirrors CC-fork's `agentMemory.ts` scoping (see
-/// `~/.claude/projects/<slug>/agent-memory/<agentType>/`) so agent A
+/// Per-agent memory scoping so agent A
 /// can `remember X=42` without leaking that into agent B's memory
 /// index. Distinct from the workspace-scoped
 /// [`default_memory_dir_for`] which every non-subagent turn uses.

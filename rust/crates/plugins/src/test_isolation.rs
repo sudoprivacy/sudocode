@@ -24,7 +24,7 @@ impl EnvLock {
 
         // Set up isolated environment
         std::fs::create_dir_all(&temp_home).ok();
-        std::fs::create_dir_all(temp_home.join(".claude/plugins/installed")).ok();
+        std::fs::create_dir_all(temp_home.join(".nexus/sudocode/plugins/installed")).ok();
         std::fs::create_dir_all(temp_home.join(".config")).ok();
 
         // Redirect HOME and XDG_CONFIG_HOME to temp directory
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_env_lock_creates_plugin_directories() {
         let lock = EnvLock::lock();
-        let plugins_dir = lock.temp_home().join(".claude/plugins/installed");
+        let plugins_dir = lock.temp_home().join(".nexus/sudocode/plugins/installed");
         assert!(plugins_dir.exists());
     }
 }

@@ -82,7 +82,7 @@ async fn send_message_posts_json_and_parses_response() {
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
-        Some(concat!("claude-code/", env!("CARGO_PKG_VERSION")))
+        Some(concat!("sudocode/", env!("CARGO_PKG_VERSION")))
     );
     assert_eq!(
         request.headers.get("anthropic-beta").map(String::as_str),
@@ -170,7 +170,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
 
     let client = AnthropicClient::new("test-key")
         .with_base_url(server.base_url())
-        .with_client_identity(ClientIdentity::new("claude-code", "9.9.9").with_runtime("rust-cli"))
+        .with_client_identity(ClientIdentity::new("sudocode", "9.9.9").with_runtime("rust-cli"))
         .with_beta("tools-2026-04-01")
         .with_extra_body_param("metadata", json!({"source": "sudocode"}))
         .with_session_tracer(SessionTracer::new("session-telemetry", sink.clone()));
@@ -190,7 +190,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
-        Some("claude-code/9.9.9")
+        Some("sudocode/9.9.9")
     );
     let body: serde_json::Value =
         serde_json::from_str(&request.body).expect("request body should be json");

@@ -651,12 +651,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_login() -> Result<(), Box<dyn std::error::Error>> {
-    let token_set = runtime::import_claude_code_credentials()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    eprintln!("Login successful — imported credentials from Claude Code.");
-    if !token_set.scopes.is_empty() {
-        eprintln!("Scopes: {}", token_set.scopes.join(", "));
-    }
+    eprintln!("Login via Claude Code credential import is no longer supported. Use ANTHROPIC_API_KEY or PROXY_AUTH_TOKEN instead.");
     Ok(())
 }
 
@@ -829,7 +824,7 @@ fn dump_manifests_at_path(
 }
 
 fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let phases = runtime::BootstrapPlan::claude_code_default()
+    let phases = runtime::BootstrapPlan::default_plan()
         .phases()
         .iter()
         .map(|phase| format!("{phase:?}"))

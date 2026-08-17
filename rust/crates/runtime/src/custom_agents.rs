@@ -1,7 +1,6 @@
-//! Custom sub-agent definitions parsed from `~/.claude/agents/*.md`
-//! (and sibling directories). Ports the CC-fork behaviour documented
-//! in `sudoprivacy/claude-code/src/tools/AgentTool/loadAgentsDir.ts`
-//! for the parity target on `.md`-with-YAML-frontmatter agent files.
+//! Custom sub-agent definitions parsed from `~/.nexus/sudocode/agents/*.md`
+//! (and project-local `.sudocode/agents/`). Ports the CC-fork behaviour
+//! for `.md`-with-YAML-frontmatter agent files.
 //!
 //! ## Layout expected on disk
 //!
@@ -29,10 +28,8 @@
 //! ## Search paths
 //!
 //! `standard_custom_agent_dirs(cwd)` returns, in priority order:
-//! 1. `~/.claude/agents/`
-//! 2. `~/.nexus/sudocode/agents/`
-//! 3. `<cwd>/.claude/agents/`
-//! 4. `<cwd>/.sudocode/agents/`
+//! 1. `~/.nexus/sudocode/agents/`
+//! 2. `<cwd>/.sudocode/agents/`
 //!
 //! First hit wins per-name — mirrors CC-fork's user/project/managed
 //! precedence.  The order is intentionally user-scope before
@@ -41,8 +38,8 @@
 //!
 //! ## Scope vs. sudocode's TOML-agents inventory
 //!
-//! Sudocode's `commands` crate reads `~/.claude/agents/*.toml` and
-//! `~/.codex/agents/*.toml` for its `/agents` slash-command
+//! Sudocode's `commands` crate reads `~/.nexus/sudocode/agents/*.toml`
+//! and `~/.codex/agents/*.toml` for its `/agents` slash-command
 //! inventory. This module reads `*.md` files from overlapping
 //! directories — no collision because the file extensions differ.
 //! A future contributor adding an agent should pick ONE format:
@@ -112,10 +109,8 @@ pub struct CustomAgentDefinition {
 pub fn standard_custom_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = home_dir() {
-        dirs.push(home.join(".claude").join("agents"));
         dirs.push(home.join(".nexus").join("sudocode").join("agents"));
     }
-    dirs.push(cwd.join(".claude").join("agents"));
     dirs.push(cwd.join(".sudocode").join("agents"));
     dirs
 }

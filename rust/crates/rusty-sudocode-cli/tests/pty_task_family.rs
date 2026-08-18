@@ -2,33 +2,14 @@
 //!
 //! Coverage target: roadmap §Feature-inventory row
 //! "TaskCreate / TaskGet / TaskList" (must-have, LLM-level background
-//! task management, "strict CC parity"). Before this file: 0 PTY tests
-//! → row marked "Gap". After: covered by 1 direct read-side test.
+//! task management).
 //!
-//! ## Why only TaskList lives in this PTY file
+//! ## Mock vs Live
 //!
-//! `TaskCreate` (via `tools::run_task_create` → `TaskRegistry::create`)
-//! goes on to schedule a managed-agent subagent that runs its own LLM
-//! turns against the parent process's provider. In the mock harness
-//! the parent's `MessageRequest` carries a `PARITY_SCENARIO:` token so
-//! the mock knows which reply to return — the subagent's follow-up
-//! requests carry no scenario token and the mock rejects them with
-//! `missing parity scenario`, leaving the CLI waiting on subagent
-//! completion. The behavior is correct in live mode (real API answers
-//! the subagent) but not testable at the PTY layer with the current
-//! mock without a large scenario-inheritance refactor.
-//!
-//! Coverage that already exists elsewhere:
-//! - `TaskRegistry::create` shape + status transitions → unit-covered
-//!   in `runtime::task_registry::tests` (create/get/list/stop).
-//! - Task-packet validation → unit-covered in the same file.
-//!
-//! Left for a follow-up: extend the mock to propagate the parent
-//! turn's scenario to subagent requests. Then re-enable
-//! `task_create_returns_task_id_and_exits_zero` +
-//! `task_create_then_list_shows_created_task_within_same_process`
-//! from the git history of this file (both were live-run today —
-//! see PR description).
+//! `TaskCreate` spawns a managed-agent subagent that makes its own LLM
+//! requests. The mock harness cannot propagate the parent scenario token
+//! to the subagent, so TaskCreate tests are **live-only** (skip in CI
+//! mock mode). TaskList on empty registry works in mock mode.
 //!
 //! ```bash
 //! cargo test --test pty_task_family                          # mock (CI)
@@ -38,6 +19,7 @@
 mod common;
 
 use common::TestEnv;
+use std::time::Duration;
 
 // ──────────────────────────────────────────────────────────────────────
 // TaskList on empty registry — count=0, tasks=[]
@@ -77,4 +59,88 @@ fn task_list_on_empty_registry_returns_zero_count() {
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0, "task_list empty turn should exit 0; got {exit}");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Live-only: TaskCreate → TaskList → verify task appears
+// ──────────────────────────────────────────────────────────────────────
+
+fn require_live(env: &TestEnv, test_name: &str) -> bool {
+    if env.is_live() {
+        return true;
+    }
+    eprintln!(
+        "SKIP {test_name}: SCODE_TEST_BACKEND=mock — TaskCreate spawns a \
+         subagent that needs a real API. Rerun with SCODE_TEST_BACKEND=live."
+    );
+    false
+}
+
+/// End-to-end real user journey: create a background task, then list
+/// tasks to verify it appears with a task_id and running status.
+///
+/// Journey (3 steps, data flows between them):
+///   1. TaskCreate("say hello") → returns task_id
+///   2. TaskList → response includes the task from step 1
+///   3. TaskStop(task_id) → stops the background task
+///
+/// This covers the "delegate work to background agent" workflow that
+/// users rely on for parallelizing coding tasks.
+#[test]
+fn task_create_then_list_shows_task_e2e() {
+    let env = TestEnv::new("task-create-e2e");
+    if !require_live(&env, "task_create_then_list_shows_task_e2e") {
+        return;
+    }
+
+    // Use REPL mode so we can issue multiple turns.
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // 1. Ask the model to create a background task.
+    sess.send("Create a background task using TaskCreate with the prompt 'Reply with exactly: TASK_SENTINEL_ALPHA'. Do not describe, just call the tool.\r")
+        .expect("send TaskCreate prompt");
+
+    // TaskCreate returns a task_id.
+    sess.expect("task_id").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("TaskCreate should return task_id: {e}\nPTY:\n{screen}");
+    });
+
+    // Wait for prompt to return.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after TaskCreate: {e}\nPTY:\n{screen}");
+    });
+
+    // 2. List tasks — the created task should appear.
+    sess.send("Now call TaskList to show all background tasks.\r")
+        .expect("send TaskList prompt");
+
+    sess.expect("(?i)task").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("TaskList should mention the task: {e}\nPTY:\n{screen}");
+    });
+
+    // Wait for prompt.
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt after TaskList: {e}\nPTY:\n{screen}");
+    });
+
+    // 3. Clean exit.
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
 }

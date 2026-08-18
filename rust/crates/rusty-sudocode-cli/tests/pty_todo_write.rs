@@ -34,6 +34,17 @@ use std::path::PathBuf;
 use common::TestEnv;
 use serde_json::Value;
 
+fn require_live(env: &TestEnv, test_name: &str) -> bool {
+    if env.is_live() {
+        return true;
+    }
+    eprintln!(
+        "SKIP {test_name}: SCODE_TEST_BACKEND=mock — multi-turn TodoWrite \
+         lifecycle needs real API. Rerun with SCODE_TEST_BACKEND=live."
+    );
+    false
+}
+
 fn todo_store(env: &TestEnv) -> PathBuf {
     env.workspace_root().join(".sudocode-todos.json")
 }
@@ -167,5 +178,102 @@ fn todo_write_all_completed_wipes_store_to_empty_array() {
     assert!(
         todo_store(&env).exists(),
         "store file should still exist after wipe (holding an empty array, not deleted)"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 3. Full lifecycle: create → update progress → complete → wipe
+// ──────────────────────────────────────────────────────────────────────
+
+/// End-to-end real user journey: agent creates a todo list, marks one
+/// item in_progress, then completes all items. Verifies:
+///   1. Initial write: 3 items on disk with pending statuses
+///   2. Progress update: one item moves to in_progress
+///   3. All completed: store wiped to empty array
+///
+/// This is the "track multi-step task progress" workflow — the most
+/// common TodoWrite usage pattern in production.
+#[test]
+fn todo_write_full_lifecycle_create_progress_complete() {
+    let env = TestEnv::new("todo-write-lifecycle");
+    if !require_live(&env, "todo_write_full_lifecycle_create_progress_complete") {
+        return;
+    }
+    let store = todo_store(&env);
+
+    // ── Step 1: Create 3 pending items ──
+    let prompt1 = env.prompt(
+        "Call TodoWrite with exactly 3 items, all with status \"pending\". \
+         Use content: \"Step A\", \"Step B\", \"Step C\". Just call the tool, no commentary.",
+        "todo_write_lifecycle_step1",
+    );
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "TodoWrite",
+        &prompt1,
+    ]);
+    sess.expect("TodoWrite").expect("step 1: invoke TodoWrite");
+    let exit = sess.expect_eof().expect("step 1: exit");
+    assert_eq!(exit, 0);
+
+    let todos = read_todos(&store);
+    assert_eq!(todos.len(), 3, "step 1: should have 3 items; got {todos:?}");
+    for item in &todos {
+        assert_eq!(
+            item["status"].as_str(),
+            Some("pending"),
+            "step 1: all items should be pending; got {item}"
+        );
+    }
+
+    // ── Step 2: Mark first item in_progress ──
+    let prompt2 = env.prompt(
+        "Call TodoWrite with the same 3 items but change the first item's status \
+         to \"in_progress\". Keep the other two as \"pending\". Just call the tool.",
+        "todo_write_lifecycle_step2",
+    );
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "TodoWrite",
+        &prompt2,
+    ]);
+    sess.expect("TodoWrite").expect("step 2: invoke TodoWrite");
+    let exit = sess.expect_eof().expect("step 2: exit");
+    assert_eq!(exit, 0);
+
+    let todos = read_todos(&store);
+    assert_eq!(todos.len(), 3, "step 2: still 3 items");
+    let statuses: Vec<&str> = todos.iter().filter_map(|t| t["status"].as_str()).collect();
+    assert!(
+        statuses.contains(&"in_progress"),
+        "step 2: at least one item should be in_progress; got {statuses:?}"
+    );
+
+    // ── Step 3: Complete all items → store should wipe ──
+    let prompt3 = env.prompt(
+        "Call TodoWrite with the same 3 items but set ALL statuses to \"completed\". \
+         Just call the tool.",
+        "todo_write_lifecycle_step3",
+    );
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "TodoWrite",
+        &prompt3,
+    ]);
+    sess.expect("TodoWrite").expect("step 3: invoke TodoWrite");
+    let exit = sess.expect_eof().expect("step 3: exit");
+    assert_eq!(exit, 0);
+
+    let todos = read_todos(&store);
+    assert_eq!(
+        todos.len(),
+        0,
+        "step 3: all-completed should wipe store to []; got {todos:?}"
     );
 }

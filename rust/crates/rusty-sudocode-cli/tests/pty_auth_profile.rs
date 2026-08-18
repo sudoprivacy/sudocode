@@ -70,3 +70,82 @@ fn config_set_auth_profile_persists_to_settings_local() {
         "settings.local.json must contain the persisted auth_profile selector; got:\n{content}"
     );
 }
+
+/// With `auth_profile` set, the resolver — surfaced via `scode doctor`'s Account
+/// check — selects the *named* proxy account, not the default first one. This is
+/// the payoff of the whole feature: a project points at its own account by name,
+/// and the credential still lives once in the global `sudocode.json`.
+#[test]
+fn doctor_resolves_selected_account_when_auth_profile_set() {
+    let env = TestEnv::new("auth-profile-resolve-selected");
+    write_two_account_config(&env);
+    // The project selects its own account by name.
+    write_auth_profile(&env, "team-b");
+
+    let mut sess = env.spawn(&["doctor"]);
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    // Only the Account check prints `account=<resolved>`, so matching
+    // `account=team-b` proves the selector actually drove resolution.
+    sess.expect("account=team-b").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("doctor should resolve auth_profile=team-b: {e}\nPTY screen:\n{screen}");
+    });
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("doctor exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}
+
+/// Without `auth_profile`, the resolver keeps the pre-existing behavior — the
+/// first configured proxy account — so the default path is unchanged
+/// (regression guard for the "credentials untouched by default" promise).
+#[test]
+fn doctor_defaults_to_first_account_without_auth_profile() {
+    let env = TestEnv::new("auth-profile-resolve-default");
+    write_two_account_config(&env);
+    // No auth_profile persisted — exercise the default resolution path.
+
+    let mut sess = env.spawn(&["doctor"]);
+    sess.set_default_timeout(Duration::from_secs(30));
+
+    // First account is `sudorouter` (from the sample); its base_url is distinct
+    // from team-b's, so this proves the default did NOT pick the added account.
+    sess.expect("account=sudorouter").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("doctor should default to the first account: {e}\nPTY screen:\n{screen}");
+    });
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("doctor exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}
+
+/// Write a global `sudocode.json` with two named proxy accounts (the real sample
+/// plus an added `team-b`) into the test's config home. Using the sample keeps
+/// the file valid; we only add one account so selection has something to choose.
+fn write_two_account_config(env: &TestEnv) {
+    let mut config: serde_json::Value =
+        serde_json::from_str(runtime::SAMPLE_SUDOCODE_JSON).expect("sample sudocode.json parses");
+    config["auth_modes"]["proxy"]["team-b"] = serde_json::json!({
+        "baseUrl": "http://team-b.test",
+        "apiKey": "test-key-team-b",
+    });
+    let serialized = serde_json::to_string_pretty(&config).expect("serialize sudocode.json");
+    fs::write(env.config_home().join("sudocode.json"), serialized)
+        .expect("write two-account sudocode.json");
+}
+
+/// Persist a project-scoped `auth_profile` selector to the same
+/// `settings.local.json` that `/config set auth_profile` writes to.
+fn write_auth_profile(env: &TestEnv, profile: &str) {
+    let dir = env.workspace_root().join(".nexus").join("sudocode");
+    fs::create_dir_all(&dir).expect("create project config dir");
+    fs::write(
+        dir.join("settings.local.json"),
+        format!("{{\n  \"auth_profile\": \"{profile}\"\n}}\n"),
+    )
+    .expect("write settings.local.json");
+}

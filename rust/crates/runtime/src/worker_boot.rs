@@ -30,6 +30,7 @@ fn now_secs() -> u64 {
 pub enum WorkerStatus {
     Spawning,
     TrustRequired,
+    ToolPermissionRequired,
     ReadyForPrompt,
     Running,
     Finished,
@@ -41,6 +42,7 @@ impl std::fmt::Display for WorkerStatus {
         match self {
             Self::Spawning => write!(f, "spawning"),
             Self::TrustRequired => write!(f, "trust_required"),
+            Self::ToolPermissionRequired => write!(f, "tool_permission_required"),
             Self::ReadyForPrompt => write!(f, "ready_for_prompt"),
             Self::Running => write!(f, "running"),
             Self::Finished => write!(f, "finished"),
@@ -53,6 +55,7 @@ impl std::fmt::Display for WorkerStatus {
 #[serde(rename_all = "snake_case")]
 pub enum WorkerFailureKind {
     TrustGate,
+    ToolPermissionGate,
     PromptDelivery,
     Protocol,
     Provider,
@@ -72,6 +75,7 @@ pub enum WorkerEventKind {
     Spawning,
     TrustRequired,
     TrustResolved,
+    ToolPermissionRequired,
     ReadyForPrompt,
     PromptMisdelivery,
     PromptReplayArmed,
@@ -104,6 +108,8 @@ pub enum WorkerPromptTarget {
 pub enum StartupFailureClassification {
     /// Trust prompt is required but not detected/resolved
     TrustRequired,
+    /// Tool permission prompt is blocking startup
+    ToolPermissionRequired,
     /// Prompt was delivered to wrong target (shell misdelivery)
     PromptMisdelivery,
     /// Prompt was sent but acceptance timed out
@@ -130,6 +136,12 @@ pub struct StartupEvidenceBundle {
     pub prompt_acceptance_state: bool,
     /// Result of trust prompt detection at timeout
     pub trust_prompt_detected: bool,
+    /// Whether a tool permission prompt was detected at timeout
+    #[serde(default)]
+    pub tool_permission_prompt_detected: bool,
+    /// Seconds since the tool permission prompt was first detected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_permission_prompt_age_seconds: Option<u64>,
     /// Transport health summary (true = healthy/responsive)
     pub transport_healthy: bool,
     /// MCP health summary (true = all servers healthy)
@@ -145,6 +157,10 @@ pub enum WorkerEventPayload {
         cwd: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         resolution: Option<WorkerTrustResolution>,
+    },
+    ToolPermissionPrompt {
+        server: Option<String>,
+        tool: Option<String>,
     },
     PromptDelivery {
         prompt_preview: String,
@@ -640,6 +656,11 @@ impl WorkerRegistry {
                 .events
                 .iter()
                 .any(|e| e.kind == WorkerEventKind::TrustRequired),
+            tool_permission_prompt_detected: worker
+                .events
+                .iter()
+                .any(|e| e.kind == WorkerEventKind::ToolPermissionRequired),
+            tool_permission_prompt_age_seconds: None,
             transport_healthy,
             mcp_healthy,
             elapsed_seconds: elapsed,
@@ -692,6 +713,11 @@ fn classify_startup_failure(evidence: &StartupEvidenceBundle) -> StartupFailureC
         && evidence.last_lifecycle_state == WorkerStatus::TrustRequired
     {
         return StartupFailureClassification::TrustRequired;
+    }
+
+    // Check for tool permission prompt blocking startup
+    if evidence.tool_permission_prompt_detected {
+        return StartupFailureClassification::ToolPermissionRequired;
     }
 
     // Check for prompt acceptance timeout
@@ -1639,6 +1665,8 @@ mod tests {
             prompt_sent_at: Some(1_234_567_890),
             prompt_acceptance_state: false,
             trust_prompt_detected: true,
+            tool_permission_prompt_detected: false,
+            tool_permission_prompt_age_seconds: None,
             transport_healthy: true,
             mcp_healthy: false,
             elapsed_seconds: 60,
@@ -1666,6 +1694,8 @@ mod tests {
             prompt_sent_at: None,
             prompt_acceptance_state: false,
             trust_prompt_detected: false,
+            tool_permission_prompt_detected: false,
+            tool_permission_prompt_age_seconds: None,
             transport_healthy: false,
             mcp_healthy: true,
             elapsed_seconds: 30,
@@ -1683,6 +1713,8 @@ mod tests {
             prompt_sent_at: None,
             prompt_acceptance_state: false,
             trust_prompt_detected: false,
+            tool_permission_prompt_detected: false,
+            tool_permission_prompt_age_seconds: None,
             transport_healthy: true,
             mcp_healthy: true,
             elapsed_seconds: 10,
@@ -1702,6 +1734,8 @@ mod tests {
             prompt_sent_at: None, // No prompt sent yet
             prompt_acceptance_state: false,
             trust_prompt_detected: false,
+            tool_permission_prompt_detected: false,
+            tool_permission_prompt_age_seconds: None,
             transport_healthy: true,
             mcp_healthy: false, // MCP unhealthy but transport healthy suggests crash
             elapsed_seconds: 45,

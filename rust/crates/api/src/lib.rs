@@ -59,3 +59,15 @@ pub use telemetry::{
     MemoryTelemetrySink, SessionTraceRecord, SessionTracer, TelemetryEvent, TelemetrySink,
     DEFAULT_ANTHROPIC_VERSION,
 };
+
+/// Crate-wide mutex for tests that mutate process-global environment
+/// variables. All test modules in this crate that touch `SUDO_CODE_CONFIG_HOME`,
+/// `ANTHROPIC_API_KEY`, etc. must acquire this lock to prevent flaky
+/// failures from concurrent env var access.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

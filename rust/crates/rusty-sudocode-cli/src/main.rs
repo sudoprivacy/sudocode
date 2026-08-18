@@ -5228,7 +5228,15 @@ impl LiveCli {
                 Ok(())
             }
             _ => {
-                eprintln!("Unknown config key '{key}'. Available: auto-interrupt, queue");
+                // Everything else routes through the single SSOT config writer
+                // (`tools::set_config_setting`) so `/config set` persists to the
+                // scope-appropriate settings file instead of a session-only,
+                // divergent in-memory copy. `auto-interrupt`/`queue` above stay
+                // session toggles by design (no on-disk representation).
+                match tools::set_config_setting(key, value) {
+                    Ok(msg) => self.out_println(format!("{DIM}{msg}{RESET}")),
+                    Err(err) => eprintln!("Error: {err}"),
+                }
                 Ok(())
             }
         }

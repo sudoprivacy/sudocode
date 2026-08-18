@@ -378,9 +378,15 @@ fn try_proxy_passthrough(
         }
     }
 
-    // Find the first proxy provider with a valid connection.
+    // Select the proxy account: the explicitly selected named account
+    // (`selected_account`, sourced from the layered settings' `auth_profile`)
+    // when set, otherwise the first available — the latter keeps existing
+    // single-account behavior byte-for-byte (regression-safe default).
     let proxy_providers = config.auth_modes.get("proxy")?;
-    let (provider_name, connection) = proxy_providers.iter().next()?;
+    let (provider_name, connection) = match config.selected_account.as_deref() {
+        Some(name) => proxy_providers.get_key_value(name)?,
+        None => proxy_providers.iter().next()?,
+    };
 
     // Pick API format from model_capabilities SSOT (preferred endpoint
     // type from sudorouter), falling back to openai-completions.
@@ -776,6 +782,7 @@ mod tests {
             auth_modes,
             models,
             web_search: Default::default(),
+            selected_account: None,
         }
     }
 

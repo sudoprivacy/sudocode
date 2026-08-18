@@ -7577,6 +7577,35 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
+/// SSOT entrypoint for writing a config setting. Both the agent `config`
+/// tool and the CLI `/config set` route through here, so there is exactly one
+/// scope-aware, file-backed writer (`supported_config_setting` → scope → file,
+/// read-modify-write). No caller keeps a divergent in-memory copy.
+pub fn set_config_setting(setting: &str, value: &str) -> Result<String, String> {
+    let output = execute_config(ConfigInput {
+        setting: setting.to_string(),
+        value: Some(ConfigValue::String(value.to_string())),
+    })?;
+    if output.success {
+        let shown = output
+            .new_value
+            .as_ref()
+            .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+            .unwrap_or_default();
+        Ok(format!("{setting} = {shown}"))
+    } else {
+        Err(output
+            .error
+            .unwrap_or_else(|| String::from("failed to set config")))
+    }
+}
+
+/// Whether `setting` is a known, writable config setting (single allowlist).
+#[must_use]
+pub fn is_supported_config_setting(setting: &str) -> bool {
+    supported_config_setting(setting.trim()).is_some()
+}
+
 fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
     let setting = input.setting.trim();
     if setting.is_empty() {
@@ -7899,6 +7928,16 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["theme"],
+            options: None,
+        },
+        // Per-project selector for which named account (under `auth_modes`) to
+        // use. Scope = Settings (project `settings.local.json`, gitignored): a
+        // reference only — the account itself (base_url + key) stays defined
+        // once in the global `sudocode.json` (single source of truth).
+        "auth_profile" => ConfigSettingSpec {
+            scope: ConfigScope::Settings,
+            kind: ConfigKind::String,
+            path: &["auth_profile"],
             options: None,
         },
         "editorMode" => ConfigSettingSpec {

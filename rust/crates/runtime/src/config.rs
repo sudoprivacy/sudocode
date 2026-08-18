@@ -131,6 +131,11 @@ pub struct SudoCodeConfig {
     pub models: BTreeMap<String, ModelConfigEntry>,
     /// `web_search` → search provider configuration.
     pub web_search: WebSearchConfig,
+    /// Runtime-selected named account (from the layered settings' `auth_profile`).
+    /// `None` = default resolution (unchanged, regression-safe). Populated by the
+    /// caller from merged settings; the account itself stays defined once under
+    /// `auth_modes` (single source of truth — this is a reference, not a copy).
+    pub selected_account: Option<String>,
 }
 
 impl SudoCodeConfig {
@@ -453,21 +458,55 @@ impl ConfigLoader {
     }
 
     /// Load `sudocode.json` using a custom filesystem backend.
+    ///
+    /// Layered: the global `<config_home>/sudocode.json` is the required base
+    /// and the single source of truth for account/model definitions. An
+    /// optional project `<cwd>/.nexus/sudocode/sudocode.json` deep-merges on top
+    /// so per-project overrides (e.g. models, web_search) resolve consistently
+    /// with the rest of the layered config. Auth credentials stay defined once
+    /// globally and are referenced per-project via `auth_profile` (see slice 2),
+    /// never copied — enforcing a single source of truth.
     pub fn load_sudocode_config_with(
         &self,
         backend: &dyn crate::fs_backend::FsBackend,
     ) -> Result<SudoCodeConfig, ConfigError> {
-        let path = self.config_home.join("sudocode.json");
-        if !backend.exists(&path.to_string_lossy()).unwrap_or(false) {
+        let global_path = self.config_home.join("sudocode.json");
+        let Some(base) = read_optional_json_object_with(backend, &global_path)? else {
             return Err(ConfigError::Parse(format!(
                 "missing sudocode.json: expected at {path}\n\
                  Create this file to configure models and providers.\n\n\
                  To get started, copy the sample config:\n  \
                  cp crates/runtime/src/sudocode.sample.json {path}",
-                path = path.display()
+                path = global_path.display()
             )));
+        };
+        let mut merged = base.object;
+        let project_path = self
+            .cwd
+            .join(".nexus")
+            .join("sudocode")
+            .join("sudocode.json");
+        if let Some(project) = read_optional_json_object_with(backend, &project_path)? {
+            deep_merge_objects(&mut merged, &project.object);
         }
-        parse_sudocode_json_with(backend, &path)
+        let mut config = parse_sudocode_from_object(&merged, &global_path.display().to_string())?;
+        // Wire the per-project account selection from the layered settings'
+        // `auth_profile`. Single source of truth: the account (base_url + key)
+        // stays defined once under `auth_modes`; here we only read *which* named
+        // account is selected. Best-effort — settings errors leave it unset, so
+        // resolution falls back to the unchanged default.
+        if let Ok(runtime) = self.load() {
+            if let Some(profile) = runtime
+                .merged
+                .get("auth_profile")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+            {
+                config.selected_account = Some(profile.to_string());
+            }
+        }
+        Ok(config)
     }
 }
 
@@ -1263,8 +1302,18 @@ fn parse_sudocode_json_str_with_label(
             "{label}: expected JSON object at top level",
         )));
     };
-    let sentinel = Path::new(label);
+    parse_sudocode_from_object(root_obj, label)
+}
 
+/// Parse a `SudoCodeConfig` from an already-parsed (and possibly layer-merged)
+/// JSON object. Shared by single-file parsing and the layered loader so that
+/// auth / models / web_search resolve from the same merged view as the rest of
+/// the config (one deterministic resolution, single source of truth per key).
+fn parse_sudocode_from_object(
+    root_obj: &BTreeMap<String, JsonValue>,
+    label: &str,
+) -> Result<SudoCodeConfig, ConfigError> {
+    let sentinel = Path::new(label);
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
     let models = parse_sudocode_models_section(root_obj, sentinel)?;
     let web_search = parse_web_search_section(root_obj);
@@ -1273,6 +1322,7 @@ fn parse_sudocode_json_str_with_label(
         auth_modes,
         models,
         web_search,
+        selected_account: None,
     })
 }
 

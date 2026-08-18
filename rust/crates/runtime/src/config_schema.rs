@@ -267,6 +267,11 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         FieldType::StringArray,
         "Trusted project root paths",
     ),
+    FieldSchema::leaf(
+        "auth_profile",
+        FieldType::String,
+        "Named account under auth_modes.proxy to use for this scope",
+    ),
     FieldSchema::object(
         "experimental",
         EXPERIMENTAL_CHILDREN,

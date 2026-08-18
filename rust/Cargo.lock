@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "a2a"
+version = "0.1.0"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=2a62e6a5618d0008872c958d95db4e3ebaae6120#2a62e6a5618d0008872c958d95db4e3ebaae6120"
+dependencies = [
+ "contracts",
+ "kernel",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -856,7 +867,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=2a62e6a5618d0008872c958d95db4e3ebaae6120#2a62e6a5618d0008872c958d95db4e3ebaae6120"
 dependencies = [
  "parking_lot",
  "serde",
@@ -2295,7 +2306,7 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=2a62e6a5618d0008872c958d95db4e3ebaae6120#2a62e6a5618d0008872c958d95db4e3ebaae6120"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2357,9 +2368,10 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=2a62e6a5618d0008872c958d95db4e3ebaae6120#2a62e6a5618d0008872c958d95db4e3ebaae6120"
 dependencies = [
  "ahash",
+ "arc-swap",
  "base64",
  "blake3",
  "contracts",
@@ -2382,6 +2394,8 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
  "tonic 0.14.6",
  "tracing",
  "x509-parser",
@@ -2555,7 +2569,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=c9ecc9da2b755039a1028bbb619ee7cbb86f5dad#c9ecc9da2b755039a1028bbb619ee7cbb86f5dad"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=2a62e6a5618d0008872c958d95db4e3ebaae6120#2a62e6a5618d0008872c958d95db4e3ebaae6120"
 
 [[package]]
 name = "nexus-vfs-client"
@@ -3715,6 +3729,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.23"
 dependencies = [
+ "a2a",
  "agent-client-protocol",
  "agent-client-protocol-schema",
  "agent-client-protocol-tokio",

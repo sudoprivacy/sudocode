@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 # For the in-process co-host live proof (tests/cohost_live_llm.rs): builds a
 # real Kernel, plants the /proc mailbox stream, and drives spawn_managed_agent
 # through a real LLM turn. Same nexus-vfs rev the runtime crate pins.
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "c9ecc9da2b755039a1028bbb619ee7cbb86f5dad", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2a62e6a5618d0008872c958d95db4e3ebaae6120", default-features = false }
 
 [lints]
 workspace = true

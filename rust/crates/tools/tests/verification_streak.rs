@@ -127,7 +127,10 @@ fn streak_then_nudge_then_reset_then_second_streak_fires_again() {
 
     // After reset, 2 more completions still under threshold → no nudge.
     let r4 = complete_task(&ids[3]);
-    assert!(!r4.contains("<system-reminder>"), "streak reset after nudge");
+    assert!(
+        !r4.contains("<system-reminder>"),
+        "streak reset after nudge"
+    );
     let r5 = complete_task(&ids[4]);
     assert!(!r5.contains("<system-reminder>"), "still under threshold");
 

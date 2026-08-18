@@ -831,11 +831,21 @@ fn render_task_panel(tasks: &[runtime::Task]) -> String {
         let remaining = &tasks[MAX_TASK_DISPLAY..];
         let pending = remaining
             .iter()
-            .filter(|t| matches!(t.status, runtime::TaskStatus::Pending | runtime::TaskStatus::Created))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    runtime::TaskStatus::Pending | runtime::TaskStatus::Created
+                )
+            })
             .count();
         let in_progress = remaining
             .iter()
-            .filter(|t| matches!(t.status, runtime::TaskStatus::InProgress | runtime::TaskStatus::Running))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    runtime::TaskStatus::InProgress | runtime::TaskStatus::Running
+                )
+            })
             .count();
         let mut summary_parts = Vec::new();
         if pending > 0 {

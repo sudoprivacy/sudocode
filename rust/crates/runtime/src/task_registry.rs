@@ -45,7 +45,11 @@ pub struct Task {
     pub subject: String,
     pub prompt: String,
     pub description: Option<String>,
-    #[serde(rename = "activeForm", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "activeForm",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub active_form: Option<String>,
     pub task_packet: Option<TaskPacket>,
     pub status: TaskStatus,
@@ -89,8 +93,7 @@ pub fn task_store_path() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("SUDOCODE_TASK_STORE") {
         return Ok(PathBuf::from(path));
     }
-    let cwd =
-        crate::current_workspace_root().map_err(|error| error.to_string())?;
+    let cwd = crate::current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-tasks.json"))
 }
 
@@ -644,7 +647,9 @@ mod tests {
         let tasks = registry2.list(None);
         assert_eq!(tasks.len(), 2);
 
-        let reloaded = registry2.get(&t1.task_id).expect("task should survive reload");
+        let reloaded = registry2
+            .get(&t1.task_id)
+            .expect("task should survive reload");
         assert_eq!(reloaded.subject, "First");
         assert_eq!(reloaded.status, TaskStatus::InProgress);
         assert_eq!(reloaded.active_form.as_deref(), Some("Doing first"));

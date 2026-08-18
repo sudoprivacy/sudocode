@@ -9520,8 +9520,7 @@ mod tests {
             &json!({ "subject": "Run tests", "description": "Execute test suite" }),
         )
         .expect("TaskCreate should succeed");
-        let created: serde_json::Value =
-            serde_json::from_str(&create_result).expect("valid json");
+        let created: serde_json::Value = serde_json::from_str(&create_result).expect("valid json");
         let task_id = created["task_id"].as_str().unwrap();
 
         let update_result = execute_tool(
@@ -9529,8 +9528,7 @@ mod tests {
             &json!({ "taskId": task_id, "status": "in_progress" }),
         )
         .expect("TaskUpdate should succeed");
-        let updated: serde_json::Value =
-            serde_json::from_str(&update_result).expect("valid json");
+        let updated: serde_json::Value = serde_json::from_str(&update_result).expect("valid json");
         assert_eq!(updated["status"], "in_progress");
 
         let complete_result = execute_tool(

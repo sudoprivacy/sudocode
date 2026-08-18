@@ -114,6 +114,16 @@ pub(crate) fn parse_frame_with_provider(
     }
 
     if data_lines.is_empty() {
+        // No `data:` lines at all. If the frame is not even SSE-shaped the
+        // server sent something else entirely (an HTML error page from a
+        // proxy, or a bare JSON error body). Surface it instead of silently
+        // dropping it — otherwise the user sees an empty response with no
+        // hint of what went wrong.
+        if event_name.is_none() {
+            if let Some(error) = detect_non_sse_error(trimmed) {
+                return Err(error);
+            }
+        }
         return Ok(None);
     }
 
@@ -125,6 +135,56 @@ pub(crate) fn parse_frame_with_provider(
     serde_json::from_str::<StreamEvent>(&payload)
         .map(Some)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
+}
+
+/// Detect a response body that is not an SSE stream at all: an HTML error
+/// page (misconfigured endpoint, proxy outage page) or a bare JSON error
+/// envelope sent without SSE framing. Returns an error carrying a short body
+/// snippet so the failure is visible to the user; returns `None` for
+/// anything that still looks like benign SSE noise (comments, keep-alives).
+pub(crate) fn detect_non_sse_error(trimmed: &str) -> Option<ApiError> {
+    if trimmed.starts_with('<') {
+        let snippet = crate::error::truncate_body_snippet(trimmed, 200);
+        return Some(ApiError::Api {
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            error_type: Some("invalid_response".to_string()),
+            message: Some(format!(
+                "provider returned HTML instead of an SSE stream (check the endpoint URL): {snippet}"
+            )),
+            request_id: None,
+            body: snippet,
+            retryable: false,
+            suggested_action: Some("verify the API endpoint URL is correct".to_string()),
+            retry_after: None,
+        });
+    }
+
+    let raw = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    let err_obj = raw.get("error")?;
+    let message = err_obj
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("provider returned an error instead of an SSE stream")
+        .to_string();
+    let status = err_obj
+        .get("code")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
+        .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+    Some(ApiError::Api {
+        status,
+        error_type: err_obj
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        message: Some(message),
+        request_id: None,
+        body: crate::error::truncate_body_snippet(trimmed, 500),
+        retryable: false,
+        suggested_action: None,
+        retry_after: None,
+    })
 }
 
 #[cfg(test)]

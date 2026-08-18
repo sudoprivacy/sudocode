@@ -441,7 +441,7 @@ fn looks_like_context_window_error(text: &str) -> bool {
 /// Truncate `body` so the resulting snippet contains at most `max_chars`
 /// characters (counted by Unicode scalar values, not bytes), preserving the
 /// leading slice of the body that the caller most often needs to inspect.
-fn truncate_body_snippet(body: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_body_snippet(body: &str, max_chars: usize) -> String {
     let mut taken_chars = 0;
     let mut byte_end = 0;
     for (offset, character) in body.char_indices() {

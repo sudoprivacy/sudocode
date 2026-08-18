@@ -481,6 +481,16 @@ impl MessageStream {
                     }
                 }
                 Ok(None) => {
+                    // Flush any trailing non-SSE body (HTML error page, bare
+                    // JSON error) so it surfaces instead of being dropped.
+                    if let (MessageStreamParser::Chat(parser), MessageStreamState::Chat(state)) =
+                        (&mut self.parser, &mut self.state)
+                    {
+                        for parsed in parser.finish()? {
+                            self.sse_events_read += 1;
+                            self.pending.extend(state.ingest_chunk(parsed)?);
+                        }
+                    }
                     self.done = true;
                 }
                 Err(error) => {
@@ -600,6 +610,26 @@ impl OpenAiSseParser {
         }
 
         Ok(events)
+    }
+
+    /// Flush whatever is left in the buffer once the HTTP stream ends. A
+    /// well-formed SSE stream ends on a frame separator, so leftovers are
+    /// usually a non-SSE body (HTML error page, bare JSON error) that never
+    /// contained a separator — parse it so the error surfaces instead of
+    /// being dropped.
+    fn finish(&mut self) -> Result<Vec<ChatCompletionChunk>, ApiError> {
+        if self.buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let trailing = std::mem::take(&mut self.buffer);
+        match parse_sse_frame(
+            &String::from_utf8_lossy(&trailing),
+            &self.provider,
+            &self.model,
+        )? {
+            Some(event) => Ok(vec![event]),
+            None => Ok(Vec::new()),
+        }
     }
 }
 
@@ -2348,8 +2378,13 @@ fn parse_sse_frame(
     }
 
     let mut data_lines = Vec::new();
+    let mut has_event_line = false;
     for line in trimmed.lines() {
         if line.starts_with(':') {
+            continue;
+        }
+        if line.starts_with("event:") {
+            has_event_line = true;
             continue;
         }
         if let Some(data) = line.strip_prefix("data:") {
@@ -2357,6 +2392,15 @@ fn parse_sse_frame(
         }
     }
     if data_lines.is_empty() {
+        // No `data:` lines at all. If the frame is not even SSE-shaped the
+        // server sent something else entirely (an HTML error page from a
+        // proxy, or a bare JSON error body). Surface it instead of silently
+        // dropping it.
+        if !has_event_line {
+            if let Some(error) = crate::sse::detect_non_sse_error(trimmed) {
+                return Err(error);
+            }
+        }
         return Ok(None);
     }
     let payload = data_lines.join("\n");
@@ -2447,7 +2491,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
-    let retryable = is_retryable_status(status);
+    let retryable = is_retryable_status(status) || is_retryable_400(status, &body);
 
     let suggested_action = suggested_action_for_status(status);
 
@@ -2469,6 +2513,23 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
 
 const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Some gateways and proxies return HTTP 400 with a body like "HTTP 400 from
+/// backend (no parseable body)" when a transient network blip corrupts the
+/// exchange. These are gateway errors wearing a 400 mask, not real bad
+/// requests, so they deserve the same retry treatment as a 502. Genuine
+/// client errors (bad parameter, unknown model, oversized prompt) never
+/// contain these phrases and still fail immediately.
+fn is_retryable_400(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    lowered.contains("no parseable body")
+        || lowered.contains("connection reset")
+        || lowered.contains("broken pipe")
+        || lowered.contains("empty reply from server")
 }
 
 /// Generate a suggested user action based on the HTTP status code and error context.

@@ -1,7 +1,11 @@
 #![allow(clippy::must_use_candidate, clippy::unnecessary_map_or)]
-//! In-memory task registry for sub-agent task lifecycle management.
+//! Task registry — SSOT for all task state.
+//!
+//! Persists to `.sudocode-tasks.json` (or `$SUDOCODE_TASK_STORE`) on
+//! every mutation so the ContextSlot can display live progress.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +16,8 @@ use crate::{validate_packet, TaskPacket, TaskPacketValidationError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    Pending,
+    InProgress,
     Created,
     Running,
     Completed,
@@ -22,6 +28,8 @@ pub enum TaskStatus {
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Pending => write!(f, "pending"),
+            Self::InProgress => write!(f, "in_progress"),
             Self::Created => write!(f, "created"),
             Self::Running => write!(f, "running"),
             Self::Completed => write!(f, "completed"),
@@ -34,8 +42,11 @@ impl std::fmt::Display for TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub task_id: String,
+    pub subject: String,
     pub prompt: String,
     pub description: Option<String>,
+    #[serde(rename = "activeForm", default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
     pub task_packet: Option<TaskPacket>,
     pub status: TaskStatus,
     pub created_at: u64,
@@ -60,6 +71,7 @@ pub struct TaskRegistry {
 struct RegistryInner {
     tasks: HashMap<String, Task>,
     counter: u64,
+    store_path: Option<PathBuf>,
 }
 
 fn now_secs() -> u64 {
@@ -69,14 +81,98 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Resolve the on-disk store path for task persistence.
+///
+/// Priority: `$SUDOCODE_TASK_STORE` env var, then
+/// `<workspace_root>/.sudocode-tasks.json`.
+pub fn task_store_path() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("SUDOCODE_TASK_STORE") {
+        return Ok(PathBuf::from(path));
+    }
+    let cwd =
+        crate::current_workspace_root().map_err(|error| error.to_string())?;
+    Ok(cwd.join(".sudocode-tasks.json"))
+}
+
 impl TaskRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Load persisted tasks from `path`. Missing / unreadable files
+    /// produce an empty registry (not an error).
+    pub fn load(path: &Path) -> Self {
+        let mut inner = RegistryInner {
+            tasks: HashMap::new(),
+            counter: 0,
+            store_path: Some(path.to_owned()),
+        };
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(tasks) = serde_json::from_str::<Vec<Task>>(&text) {
+                for task in tasks {
+                    let id = task.task_id.clone();
+                    inner.counter = inner.counter.max(
+                        id.rsplit('_')
+                            .next()
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(0),
+                    );
+                    inner.tasks.insert(id, task);
+                }
+            }
+        }
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    /// Persist current tasks to the configured store path.
+    fn save(inner: &RegistryInner) {
+        let Some(path) = &inner.store_path else {
+            return;
+        };
+        let tasks: Vec<&Task> = inner.tasks.values().collect();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(
+            path,
+            serde_json::to_string_pretty(&tasks).unwrap_or_default(),
+        );
+    }
+
+    /// Set the persistence path (enables save-on-mutate).
+    pub fn set_store_path(&self, path: PathBuf) {
+        let mut inner = self.inner.lock().expect("registry lock poisoned");
+        inner.store_path = Some(path);
+    }
+
+    pub fn create_with_subject(
+        &self,
+        subject: &str,
+        description: Option<&str>,
+        active_form: Option<&str>,
+    ) -> Task {
+        self.create_task_full(
+            subject.to_owned(),
+            subject.to_owned(),
+            description.map(str::to_owned),
+            active_form.map(str::to_owned),
+            None,
+            TaskStatus::Pending,
+        )
+    }
+
     pub fn create(&self, prompt: &str, description: Option<&str>) -> Task {
-        self.create_task(prompt.to_owned(), description.map(str::to_owned), None)
+        self.create_task_full(
+            prompt.to_owned(),
+            prompt.to_owned(),
+            description.map(str::to_owned),
+            None,
+            None,
+            TaskStatus::Created,
+        )
     }
 
     pub fn create_from_packet(
@@ -84,19 +180,28 @@ impl TaskRegistry {
         packet: TaskPacket,
     ) -> Result<Task, TaskPacketValidationError> {
         let packet = validate_packet(packet)?.into_inner();
-        // Use scope_path as description if available, otherwise use scope as string
         let description = packet
             .scope_path
             .clone()
             .or_else(|| Some(packet.scope.to_string()));
-        Ok(self.create_task(packet.objective.clone(), description, Some(packet)))
+        Ok(self.create_task_full(
+            packet.objective.clone(),
+            packet.objective.clone(),
+            description,
+            None,
+            Some(packet),
+            TaskStatus::Created,
+        ))
     }
 
-    fn create_task(
+    fn create_task_full(
         &self,
+        subject: String,
         prompt: String,
         description: Option<String>,
+        active_form: Option<String>,
         task_packet: Option<TaskPacket>,
+        initial_status: TaskStatus,
     ) -> Task {
         let mut inner = self.inner.lock().expect("registry lock poisoned");
         inner.counter += 1;
@@ -104,16 +209,19 @@ impl TaskRegistry {
         let task_id = format!("task_{:08x}_{}", ts, inner.counter);
         let task = Task {
             task_id: task_id.clone(),
+            subject,
             prompt,
             description,
+            active_form,
             task_packet,
-            status: TaskStatus::Created,
+            status: initial_status,
             created_at: ts,
             updated_at: ts,
             messages: Vec::new(),
             output: String::new(),
         };
         inner.tasks.insert(task_id, task.clone());
+        Self::save(&inner);
         task
     }
 
@@ -151,7 +259,9 @@ impl TaskRegistry {
 
         task.status = TaskStatus::Stopped;
         task.updated_at = now_secs();
-        Ok(task.clone())
+        let result = task.clone();
+        Self::save(&inner);
+        Ok(result)
     }
 
     pub fn update(&self, task_id: &str, message: &str) -> Result<Task, String> {
@@ -167,7 +277,9 @@ impl TaskRegistry {
             timestamp: now_secs(),
         });
         task.updated_at = now_secs();
-        Ok(task.clone())
+        let result = task.clone();
+        Self::save(&inner);
+        Ok(result)
     }
 
     pub fn output(&self, task_id: &str) -> Result<String, String> {
@@ -187,6 +299,7 @@ impl TaskRegistry {
             .ok_or_else(|| format!("task not found: {task_id}"))?;
         task.output.push_str(output);
         task.updated_at = now_secs();
+        // No save — output is high-frequency / transient.
         Ok(())
     }
 
@@ -198,12 +311,50 @@ impl TaskRegistry {
             .ok_or_else(|| format!("task not found: {task_id}"))?;
         task.status = status;
         task.updated_at = now_secs();
+        Self::save(&inner);
         Ok(())
+    }
+
+    /// Update structured fields on a task (subject, description, active_form, status).
+    /// Returns the updated task.
+    pub fn update_fields(
+        &self,
+        task_id: &str,
+        subject: Option<&str>,
+        description: Option<&str>,
+        active_form: Option<&str>,
+        status: Option<TaskStatus>,
+    ) -> Result<Task, String> {
+        let mut inner = self.inner.lock().expect("registry lock poisoned");
+        let task = inner
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| format!("task not found: {task_id}"))?;
+        if let Some(s) = subject {
+            task.subject = s.to_owned();
+        }
+        if let Some(d) = description {
+            task.description = Some(d.to_owned());
+        }
+        if let Some(af) = active_form {
+            task.active_form = Some(af.to_owned());
+        }
+        if let Some(st) = status {
+            task.status = st;
+        }
+        task.updated_at = now_secs();
+        let result = task.clone();
+        Self::save(&inner);
+        Ok(result)
     }
 
     pub fn remove(&self, task_id: &str) -> Option<Task> {
         let mut inner = self.inner.lock().expect("registry lock poisoned");
-        inner.tasks.remove(task_id)
+        let removed = inner.tasks.remove(task_id);
+        if removed.is_some() {
+            Self::save(&inner);
+        }
+        removed
     }
 
     #[must_use]
@@ -228,11 +379,26 @@ mod tests {
         let task = registry.create("Do something", Some("A test task"));
         assert_eq!(task.status, TaskStatus::Created);
         assert_eq!(task.prompt, "Do something");
+        assert_eq!(task.subject, "Do something");
         assert_eq!(task.description.as_deref(), Some("A test task"));
         assert_eq!(task.task_packet, None);
 
         let fetched = registry.get(&task.task_id).expect("task should exist");
         assert_eq!(fetched.task_id, task.task_id);
+    }
+
+    #[test]
+    fn creates_task_with_subject() {
+        let registry = TaskRegistry::new();
+        let task = registry.create_with_subject(
+            "Fix login bug",
+            Some("Investigate auth timeout"),
+            Some("Fixing login bug"),
+        );
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert_eq!(task.subject, "Fix login bug");
+        assert_eq!(task.prompt, "Fix login bug");
+        assert_eq!(task.active_form.as_deref(), Some("Fixing login bug"));
     }
 
     #[test]
@@ -257,6 +423,7 @@ mod tests {
             .expect("packet-backed task should be created");
 
         assert_eq!(task.prompt, packet.objective);
+        assert_eq!(task.subject, packet.objective);
         assert_eq!(task.description.as_deref(), Some("runtime/task system"));
         assert_eq!(task.task_packet, Some(packet.clone()));
 
@@ -351,8 +518,9 @@ mod tests {
 
     #[test]
     fn task_status_display_all_variants() {
-        // given
         let cases = [
+            (TaskStatus::Pending, "pending"),
+            (TaskStatus::InProgress, "in_progress"),
             (TaskStatus::Created, "created"),
             (TaskStatus::Running, "running"),
             (TaskStatus::Completed, "completed"),
@@ -360,16 +528,16 @@ mod tests {
             (TaskStatus::Stopped, "stopped"),
         ];
 
-        // when
         let rendered: Vec<_> = cases
             .into_iter()
             .map(|(status, expected)| (status.to_string(), expected))
             .collect();
 
-        // then
         assert_eq!(
             rendered,
             vec![
+                ("pending".to_string(), "pending"),
+                ("in_progress".to_string(), "in_progress"),
                 ("created".to_string(), "created"),
                 ("running".to_string(), "running"),
                 ("completed".to_string(), "completed"),
@@ -381,17 +549,14 @@ mod tests {
 
     #[test]
     fn stop_rejects_completed_task() {
-        // given
         let registry = TaskRegistry::new();
         let task = registry.create("done", None);
         registry
             .set_status(&task.task_id, TaskStatus::Completed)
             .expect("set status should succeed");
 
-        // when
         let result = registry.stop(&task.task_id);
 
-        // then
         let error = result.expect_err("completed task should be rejected");
         assert!(error.contains("already in terminal state"));
         assert!(error.contains("completed"));
@@ -399,17 +564,14 @@ mod tests {
 
     #[test]
     fn stop_rejects_failed_task() {
-        // given
         let registry = TaskRegistry::new();
         let task = registry.create("failed", None);
         registry
             .set_status(&task.task_id, TaskStatus::Failed)
             .expect("set status should succeed");
 
-        // when
         let result = registry.stop(&task.task_id);
 
-        // then
         let error = result.expect_err("failed task should be rejected");
         assert!(error.contains("already in terminal state"));
         assert!(error.contains("failed"));
@@ -417,27 +579,21 @@ mod tests {
 
     #[test]
     fn stop_succeeds_from_created_state() {
-        // given
         let registry = TaskRegistry::new();
         let task = registry.create("created task", None);
 
-        // when
         let stopped = registry.stop(&task.task_id).expect("stop should succeed");
 
-        // then
         assert_eq!(stopped.status, TaskStatus::Stopped);
         assert!(stopped.updated_at >= task.updated_at);
     }
 
     #[test]
     fn new_registry_is_empty() {
-        // given
         let registry = TaskRegistry::new();
 
-        // when
         let all_tasks = registry.list(None);
 
-        // then
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
         assert!(all_tasks.is_empty());
@@ -445,13 +601,10 @@ mod tests {
 
     #[test]
     fn create_without_description() {
-        // given
         let registry = TaskRegistry::new();
 
-        // when
         let task = registry.create("Do the thing", None);
 
-        // then
         assert!(task.task_id.starts_with("task_"));
         assert_eq!(task.description, None);
         assert_eq!(task.task_packet, None);
@@ -461,13 +614,72 @@ mod tests {
 
     #[test]
     fn remove_nonexistent_returns_none() {
-        // given
         let registry = TaskRegistry::new();
 
-        // when
         let removed = registry.remove("missing");
 
-        // then
         assert!(removed.is_none());
+    }
+
+    #[test]
+    fn persistence_round_trip() {
+        let dir = std::env::temp_dir().join(format!("task_reg_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tasks.json");
+        let _ = std::fs::remove_file(&path);
+
+        // Create tasks with persistence
+        let registry = TaskRegistry::load(&path);
+        let t1 = registry.create_with_subject("First", Some("Do first"), Some("Doing first"));
+        registry
+            .set_status(&t1.task_id, TaskStatus::InProgress)
+            .unwrap();
+        let _t2 = registry.create_with_subject("Second", None, None);
+
+        // Load into a new registry
+        let registry2 = TaskRegistry::load(&path);
+        let tasks = registry2.list(None);
+        assert_eq!(tasks.len(), 2);
+
+        let reloaded = registry2.get(&t1.task_id).expect("task should survive reload");
+        assert_eq!(reloaded.subject, "First");
+        assert_eq!(reloaded.status, TaskStatus::InProgress);
+        assert_eq!(reloaded.active_form.as_deref(), Some("Doing first"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_fields_changes_subject_and_status() {
+        let registry = TaskRegistry::new();
+        let task = registry.create_with_subject("Original", Some("desc"), None);
+
+        let updated = registry
+            .update_fields(
+                &task.task_id,
+                Some("Renamed"),
+                None,
+                Some("Renaming"),
+                Some(TaskStatus::Completed),
+            )
+            .unwrap();
+
+        assert_eq!(updated.subject, "Renamed");
+        assert_eq!(updated.active_form.as_deref(), Some("Renaming"));
+        assert_eq!(updated.status, TaskStatus::Completed);
+        assert_eq!(updated.description.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn pending_and_in_progress_statuses() {
+        let registry = TaskRegistry::new();
+        let task = registry.create_with_subject("My task", None, None);
+        assert_eq!(task.status, TaskStatus::Pending);
+
+        registry
+            .set_status(&task.task_id, TaskStatus::InProgress)
+            .unwrap();
+        let fetched = registry.get(&task.task_id).unwrap();
+        assert_eq!(fetched.status, TaskStatus::InProgress);
     }
 }

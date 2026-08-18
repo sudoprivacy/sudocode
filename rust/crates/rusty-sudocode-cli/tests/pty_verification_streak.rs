@@ -1,14 +1,14 @@
 //! PTY live e2e — auto-verification streak nudge fires after 3
-//! TodoWrite completions and gets reset by a Verification spawn.
+//! TaskUpdate(status=completed) calls and gets reset by a
+//! Verification spawn.
 //!
 //! Roadmap coverage: sub-agent CC-fork parity §4.4 Commit 10.
 //!
 //! ## Long-workflow (5-step chain, data-flow linked)
 //!
-//! 1. Parent LLM writes a TodoWrite plan with 3 todos, marks the
-//!    first Completed.
-//! 2. Marks the second Completed (streak = 2).
-//! 3. Marks the third Completed — the tool's JSON return value now
+//! 1. Parent LLM creates three tasks via TaskCreate.
+//! 2. Marks each one completed via TaskUpdate(status=completed).
+//! 3. After the third completion, the tool's JSON return value
 //!    contains the `<system-reminder>` nudge substring. The parent
 //!    sees it in the tool_use result on its next turn.
 //! 4. Parent, per the nudge, spawns
@@ -47,19 +47,19 @@ fn require_live(env: &TestEnv, test_name: &str) -> bool {
 }
 
 #[test]
-fn three_todowrite_completions_nudge_verification_spawn() {
+fn three_task_completions_nudge_verification_spawn() {
     let env = TestEnv::new("pty-verification-streak");
-    if !require_live(&env, "three_todowrite_completions_nudge_verification_spawn") {
+    if !require_live(&env, "three_task_completions_nudge_verification_spawn") {
         return;
     }
 
     let prompt = format!(
         "Follow this multi-step workflow: \
-         (1) Use TodoWrite to create three todos: 'implement A', 'implement B', 'implement C'. \
-             Start with the first marked as in_progress and the others as pending. \
-         (2) Use TodoWrite again to mark 'implement A' as completed and 'implement B' as in_progress. \
-         (3) Use TodoWrite again to mark both A and B as completed and 'implement C' as in_progress. \
-         (4) Use TodoWrite again to mark all three (A, B, C) as completed. \
+         (1) Use TaskCreate to create three tasks: \
+             subject='implement A', subject='implement B', subject='implement C'. \
+         (2) Use TaskUpdate to mark 'implement A' as completed (status='completed'). \
+         (3) Use TaskUpdate to mark 'implement B' as completed. \
+         (4) Use TaskUpdate to mark 'implement C' as completed. \
              You should now see a system-reminder about running a Verification pass. \
          (5) In response to that reminder, spawn a Verification sub-agent: \
              Agent(subagent_type=\"Verification\", description=\"final verification\", \
@@ -73,12 +73,11 @@ fn three_todowrite_completions_nudge_verification_spawn() {
     sess.set_default_timeout(long);
 
     // Success = the sentinel surfaces. Only possible if:
-    //   - The model executed TodoWrite 4 times ending in all-completed.
-    //   - The verification_watcher fired a nudge after step 4.
+    //   - The model created tasks and completed them via TaskUpdate.
+    //   - The verification_watcher fired a nudge after 3 completions.
     //   - The model interpreted the nudge and dispatched the Verification agent.
     //   - The Verification agent ran and emitted the sentinel.
     //   - The parent reported it back.
-    // Any broken link in this chain fails the test.
     sess.expect(VERIFIED_SENTINEL).unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!(

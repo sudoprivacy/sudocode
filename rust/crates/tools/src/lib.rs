@@ -277,6 +277,12 @@ fn global_task_registry() -> &'static TaskRegistry {
 /// use the same credential path as the main agent.
 static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
 
+/// Return all tasks from the global registry. Used by the CLI to push
+/// task state to the ContextSlot after TaskCreate/TaskUpdate.
+pub fn global_task_list() -> Vec<runtime::Task> {
+    global_task_registry().list(None)
+}
+
 /// Called by the CLI at startup to set the auth mode for the entire process.
 /// Subagents automatically inherit this unless explicitly overridden.
 pub fn set_global_auth_mode(mode: api::AuthMode) {

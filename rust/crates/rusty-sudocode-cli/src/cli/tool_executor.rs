@@ -101,6 +101,8 @@ pub(crate) struct CliToolExecutor {
     /// Optional channel-backed writer that routes output through the iocraft
     /// render loop instead of writing directly to stdout.
     output_writer: Option<OutputSender>,
+    /// Optional UI command sender for ContextSlot updates (Task* → UI).
+    ui_sender: Option<crate::repl_ui::UiCommandSender>,
 }
 
 impl CliToolExecutor {
@@ -121,6 +123,7 @@ impl CliToolExecutor {
             question_prompter: RefCell::new(None),
             abort_signal: None,
             output_writer: None,
+            ui_sender: None,
         }
     }
 
@@ -130,6 +133,10 @@ impl CliToolExecutor {
 
     pub(crate) fn set_output_writer(&mut self, writer: OutputSender) {
         self.output_writer = Some(writer);
+    }
+
+    pub(crate) fn set_ui_sender(&mut self, sender: crate::repl_ui::UiCommandSender) {
+        self.ui_sender = Some(sender);
     }
 
     pub(crate) fn set_repl_mode(&mut self, is_repl: bool) {
@@ -385,6 +392,14 @@ impl ToolExecutor for CliToolExecutor {
         }
         if is_mcp_tool {
             runtime::clear_mcp_progress_callback();
+        }
+        // After TaskCreate/TaskUpdate succeeds, push the full task list
+        // to the ContextSlot so the UI renders live progress.
+        if matches!(tool_name, "TaskCreate" | "TaskUpdate") {
+            if let (Ok(_), Some(ref ui)) = (&result, &self.ui_sender) {
+                let tasks = tools::global_task_list();
+                ui.update_context(tasks);
+            }
         }
         match result {
             Ok(output) => {

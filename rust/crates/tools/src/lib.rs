@@ -804,13 +804,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_tool_output",
-            description: "Page an oversized earlier tool result back into context by line. When a tool's output was too large to inline, the transcript shows a <persisted-output id=\"...\"> marker with a head preview; pass that id here to read the full result in bounded slices (offset = start line, limit = line count).",
+            description: "Page an oversized earlier tool result back into context. When a tool's output was too large to inline, the transcript shows a <persisted-output id=\"...\"> marker with a head preview; pass that id here to read the rest in bounded byte windows. Walk forward: start at the marker's offset, then pass each response's `nextOffset` as the next `offset` until `nextOffset` is null.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "The tool_use id from the <persisted-output> marker." },
-                    "offset": { "type": "integer", "minimum": 0, "description": "0-based start line (default 0)." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum lines to return." }
+                    "offset": { "type": "integer", "minimum": 0, "description": "Start byte offset into the full result (default 0). Use the previous response's nextOffset to continue." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum bytes to return in this window (default 16384, capped at 65536)." }
                 },
                 "required": ["id"],
                 "additionalProperties": false
@@ -2984,27 +2984,51 @@ fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, Str
 /// supplies only the opaque tool_use `id` from the `<persisted-output>`
 /// marker; the physical file (`<session-dir>/tool-results/<id>`) is resolved
 /// here from the trusted dispatch context and never crosses the model
-/// boundary. Reading reuses `read_file`'s bounded, line-addressed reader
-/// (offset = start line, limit = line count), and the resolved `file_path`
-/// is dropped from the response so the path stays engine-internal.
+/// boundary. Retrieval is a **byte window** (`offset`/`limit` in bytes, `limit`
+/// hard-capped) rather than line-addressed: an offloaded result may be a single
+/// enormous line (e.g. a JSON-wrapped bash stdout), so a line-based read could
+/// hand back the entire blob and re-blow the very context offload shrank. A byte
+/// window is always bounded and pages through any content; callers walk forward
+/// via the returned `nextOffset` until it is null.
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_tool_output(
     input: ReadToolOutputInput,
     ctx: Option<&ToolDispatchContext>,
     fs: &dyn FsBackend,
 ) -> Result<String, String> {
+    /// Bytes returned when the caller omits `limit`.
+    const DEFAULT_LIMIT: usize = 16_384;
+    /// Hard ceiling on a single window — the bound that makes read-more safe.
+    const MAX_LIMIT: usize = 65_536;
+
     let dir = ctx
         .and_then(|c| c.tool_results_dir.as_ref())
         .ok_or_else(|| "no offloaded tool output is available in this session".to_string())?;
     let resolved = dir.join(Session::sanitize_offload_id(&input.id));
-    let out = read_file(fs, &resolved.to_string_lossy(), input.offset, input.limit)
-        .map_err(io_to_string)?;
+    let bytes = fs.read(&resolved.to_string_lossy()).map_err(io_to_string)?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "offloaded tool output is not valid UTF-8".to_string())?;
+    let total = content.len();
+
+    // Clamp the window to char boundaries so we never split a multi-byte char.
+    let mut start = input.offset.unwrap_or(0).min(total);
+    while start > 0 && !content.is_char_boundary(start) {
+        start -= 1;
+    }
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let mut end = start.saturating_add(limit).min(total);
+    while end > start && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let next_offset = if end < total { Some(end) } else { None };
+
     to_pretty_json(json!({
         "id": input.id,
-        "content": out.file.content,
-        "startLine": out.file.start_line,
-        "numLines": out.file.num_lines,
-        "totalLines": out.file.total_lines,
+        "content": &content[start..end],
+        "byteOffset": start,
+        "byteEnd": end,
+        "totalBytes": total,
+        "nextOffset": next_offset,
     }))
 }
 
@@ -8783,21 +8807,19 @@ mod tests {
 
     #[test]
     fn read_tool_output_pages_offloaded_result_without_leaking_path() {
-        // Offload a multi-line blob via the real Session writer, then page it
-        // back through read_tool_output: proves the write and the read agree
-        // on the file (shared id sanitizer) and that no filesystem path leaks
-        // into the model-facing payload. Each session gets its own dir, so
-        // `tool-results/` (a sibling of the transcript) stays isolated.
+        // Offload a blob via the real Session writer, then page it back through
+        // read_tool_output as byte windows: proves the write and the read agree
+        // on the file (shared id sanitizer), that windows are bounded + walk via
+        // nextOffset, and that no filesystem path leaks into the model-facing
+        // payload. Each session gets its own dir, so `tool-results/` (a sibling
+        // of the transcript) stays isolated.
         let session_dir = temp_path("readmore");
         fs::create_dir_all(&session_dir).expect("session dir");
         let session_file = session_dir.join("session.jsonl");
         let session = Session::new().with_persistence_path(session_file.clone());
 
         let id = "tu_readmore_1";
-        let body = (0..100)
-            .map(|i| format!("line-{i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body: String = (0..1000).map(|i| format!("line-{i}\n")).collect();
         session
             .offload_tool_result(id, body.as_bytes())
             .expect("offload should write");
@@ -8806,28 +8828,78 @@ mod tests {
             tool_results_dir: session.tool_results_dir(),
             ..Default::default()
         };
+        let read = |offset: Option<usize>, limit: Option<usize>| {
+            super::run_read_tool_output(
+                super::ReadToolOutputInput {
+                    id: id.to_string(),
+                    offset,
+                    limit,
+                },
+                Some(&ctx),
+                &runtime::StdFsBackend,
+            )
+            .expect("read-more should succeed")
+        };
 
-        // offset = start line (0-based), limit = line count → lines 10..13.
-        let out = super::run_read_tool_output(
-            super::ReadToolOutputInput {
-                id: id.to_string(),
-                offset: Some(10),
-                limit: Some(3),
-            },
-            Some(&ctx),
-            &runtime::StdFsBackend,
-        )
-        .expect("read-more should succeed");
+        // First window: bytes [0, 20). Bounded, and reports the total + the next
+        // offset so the caller can walk forward.
+        let out = read(Some(0), Some(20));
+        assert!(out.contains("line-0"));
+        assert!(out.contains("\"byteOffset\": 0"));
+        assert!(out.contains("\"byteEnd\": 20"));
+        assert!(out.contains(&format!("\"totalBytes\": {}", body.len())));
+        assert!(out.contains("\"nextOffset\": 20"));
 
-        assert!(out.contains("line-10"));
-        assert!(out.contains("line-12"));
-        assert!(!out.contains("line-13"), "limit must bound the slice");
-        assert!(out.contains("\"totalLines\": 100"));
+        // Continuing from nextOffset yields the following bytes, not a repeat.
+        let out2 = read(Some(20), Some(20));
+        assert!(out2.contains("\"byteOffset\": 20"));
+        assert!(!out2.contains("line-0\\n"));
+
+        // Reading the tail sets nextOffset to null (fully consumed).
+        let tail = read(Some(body.len() - 5), Some(64));
+        assert!(tail.contains("\"nextOffset\": null"));
 
         // No physical path — not the tool-results dir, not the session dir —
         // crosses into the payload the model sees.
         assert!(!out.contains("tool-results"));
         assert!(!out.contains(&*session_dir.to_string_lossy()));
+
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn read_tool_output_bounds_a_giant_single_line() {
+        // Regression for the JSON-wrapped-bash case: an offloaded result can be
+        // one enormous line. A byte window must still be hard-bounded (never
+        // hand back the whole blob and re-blow the context offload shrank).
+        let session_dir = temp_path("readmore-giant");
+        fs::create_dir_all(&session_dir).expect("session dir");
+        let session = Session::new().with_persistence_path(session_dir.join("session.jsonl"));
+
+        let id = "tu_giant";
+        let body = "X".repeat(200_000); // no newlines at all
+        session
+            .offload_tool_result(id, body.as_bytes())
+            .expect("offload should write");
+
+        let ctx = runtime::ToolDispatchContext {
+            tool_results_dir: session.tool_results_dir(),
+            ..Default::default()
+        };
+        // Ask for more than the cap; the window is clamped to MAX_LIMIT (65536)
+        // and nextOffset advances into the same line so paging still works.
+        let out = super::run_read_tool_output(
+            super::ReadToolOutputInput {
+                id: id.to_string(),
+                offset: Some(0),
+                limit: Some(1_000_000),
+            },
+            Some(&ctx),
+            &runtime::StdFsBackend,
+        )
+        .expect("read-more should succeed");
+        assert!(out.contains("\"byteEnd\": 65536"), "window must be capped");
+        assert!(out.contains("\"nextOffset\": 65536"));
 
         let _ = fs::remove_dir_all(&session_dir);
     }

@@ -816,10 +816,11 @@ where
             Ok((_path, total)) => {
                 // The physical path never leaves the engine; the model only
                 // ever sees the opaque tool_use id. The full result is paged
-                // back in by line via `read_tool_output(id=..., offset, limit)`.
+                // back in as byte windows via `read_tool_output`, continuing
+                // from where this preview stops (offset={end}).
                 let end = head(PREVIEW_BYTES);
                 format!(
-                    "{}\n\n<persisted-output bytes={total} id=\"{tool_use_id}\">\n[Tool output was {total} bytes; the first {end} are shown above as a preview. The full result is preserved — read more by line with read_tool_output(id=\"{tool_use_id}\", offset=<line>, limit=<lines>).]\n</persisted-output>",
+                    "{}\n\n<persisted-output bytes={total} id=\"{tool_use_id}\">\n[Tool output was {total} bytes; the first {end} are shown above as a preview. Read the rest in bounded windows with read_tool_output(id=\"{tool_use_id}\", offset={end}) — continue from each response's nextOffset until it is null.]\n</persisted-output>",
                     &output[..end]
                 )
             }

@@ -554,6 +554,17 @@ impl GlobalToolRegistry {
             }
         }
 
+        // Reject empty/whitespace-only token lists — they would silently
+        // resolve to "no tools allowed" instead of "unrestricted".
+        if allowed.is_empty() {
+            return Err(
+                "--allowedTools was provided but contained no valid tool names. \
+                 Pass specific tool names (e.g. --allowedTools bash,read_file) \
+                 or omit the flag entirely for unrestricted access."
+                    .to_string(),
+            );
+        }
+
         Ok(Some(allowed))
     }
 
@@ -8917,6 +8928,23 @@ mod tests {
         let empty_permission =
             permission_mode_from_plugin("").expect_err("empty plugin permission should fail");
         assert!(empty_permission.contains("unsupported plugin permission: "));
+    }
+
+    #[test]
+    fn allowed_tools_rejects_empty_token_lists() {
+        let registry = GlobalToolRegistry::builtin();
+
+        // Completely empty
+        let result = registry.normalize_allowed_tools(&[String::new()]);
+        assert!(result.is_err(), "empty string should be rejected");
+
+        // Only commas/whitespace
+        let result = registry.normalize_allowed_tools(&[",,  , ".to_string()]);
+        assert!(result.is_err(), "whitespace-only tokens should be rejected");
+
+        // Multiple empty strings
+        let result = registry.normalize_allowed_tools(&["".to_string(), "  ".to_string()]);
+        assert!(result.is_err(), "all-empty values should be rejected");
     }
 
     #[test]

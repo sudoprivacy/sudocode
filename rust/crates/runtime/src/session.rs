@@ -264,6 +264,70 @@ impl Session {
             .unwrap_or(&DEFAULT)
     }
 
+    /// The offload dir for a given session file + id:
+    /// `<sessions-dir>/tool-results/<session-id>/`. The single SSOT for the
+    /// offloaded-tool-results location — shared by the writer
+    /// ([`Self::tool_results_dir`]) and session-deletion GC so both always
+    /// agree on the subtree to create/read/remove.
+    #[must_use]
+    pub fn tool_results_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
+        let parent = session_file.parent()?;
+        Some(
+            parent
+                .join("tool-results")
+                .join(Self::sanitize_offload_id(session_id)),
+        )
+    }
+
+    /// This session's `tool-results/<session-id>/` dir (a grandchild of the
+    /// shared sessions dir). `None` for an in-memory session. Namespacing by
+    /// session-id is required, not cosmetic: managed session files live flat
+    /// in one sessions dir (`<sessions>/<session-id>.jsonl`), so a plain
+    /// sibling dir would let one session's tool_use ids collide with another's
+    /// and leave nothing to GC per session.
+    #[must_use]
+    pub fn tool_results_dir(&self) -> Option<PathBuf> {
+        Self::tool_results_dir_for(self.persistence_path()?, &self.session_id)
+    }
+
+    /// Offload a full tool-result blob to `<session-dir>/tool-results/<id>` via
+    /// the session's `FsBackend` — backend-agnostic: it lands on the local FS
+    /// under `StdFsBackend` and on the nexus VFS under `KernelFsBackend`, no
+    /// caller change. `id` is the (unique) tool_use id; it is sanitized to a
+    /// safe filename. Written once. Returns the stored path and byte length.
+    /// Map an arbitrary tool_use id to a filesystem-safe filename: every
+    /// char outside `[A-Za-z0-9_-]` becomes `_`. Applied symmetrically by the
+    /// offload write ([`Self::offload_tool_result`]) and the read-more path
+    /// (`read_tool_output`) so both resolve the same file — and a hostile id
+    /// can neither escape the tool-results dir nor reintroduce a separator.
+    #[must_use]
+    pub fn sanitize_offload_id(id: &str) -> String {
+        id.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    pub fn offload_tool_result(&self, id: &str, full: &[u8]) -> std::io::Result<(String, u64)> {
+        let dir = self.tool_results_dir().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "session has no persistence path")
+        })?;
+        let dir_str = dir.to_string_lossy().into_owned();
+        let backend = self.backend();
+        backend.create_dir_all(&dir_str)?;
+        let path_str = dir
+            .join(Self::sanitize_offload_id(id))
+            .to_string_lossy()
+            .into_owned();
+        backend.write_atomic(&path_str, full)?;
+        Ok((path_str, full.len() as u64))
+    }
+
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
         let snapshot = self.render_jsonl_snapshot()?;
@@ -1392,6 +1456,60 @@ mod tests {
 
         assert!(first < second);
         assert!(second < third);
+    }
+
+    #[test]
+    fn offload_tool_result_writes_full_blob_and_returns_path_and_size() {
+        let session_file = temp_session_path("offload");
+        let session = Session::new().with_persistence_path(session_file.clone());
+
+        let id = "tool_use_ABC-123";
+        let payload = "x".repeat(50_000);
+        let (path, size) = session
+            .offload_tool_result(id, payload.as_bytes())
+            .expect("offload should write");
+
+        assert_eq!(size, payload.len() as u64);
+
+        // The blob lands under the session's own tool-results/<session-id>/ dir;
+        // the id here is already filesystem-safe so it round-trips unchanged.
+        let dir = session.tool_results_dir().expect("tool-results dir");
+        assert_eq!(PathBuf::from(&path), dir.join(id));
+
+        let written = fs::read(&path).expect("offloaded file should exist");
+        assert_eq!(written, payload.as_bytes());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+        let _ = fs::remove_file(&session_file);
+    }
+
+    #[test]
+    fn offload_tool_result_sanitizes_ids_to_stay_in_dir() {
+        let session_file = temp_session_path("offload-sanitize");
+        let session = Session::new().with_persistence_path(session_file.clone());
+
+        let (path, _size) = session
+            .offload_tool_result("../../etc/passwd", b"data")
+            .expect("offload should write");
+
+        // Every char outside [A-Za-z0-9_-] becomes '_', so a hostile id can
+        // neither escape the tool-results dir nor reintroduce separators.
+        let dir = session.tool_results_dir().expect("tool-results dir");
+        let written = PathBuf::from(&path);
+        assert!(
+            written.starts_with(&dir),
+            "offloaded path must stay under tool-results"
+        );
+        let name = written.file_name().unwrap().to_string_lossy();
+        assert!(
+            !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+            "sanitized id must not contain path separators or .."
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+        let _ = fs::remove_file(&session_file);
     }
 
     #[test]

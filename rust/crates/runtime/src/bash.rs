@@ -103,10 +103,6 @@ pub struct BashCommandOutput {
     pub no_output_expected: Option<bool>,
     #[serde(rename = "structuredContent")]
     pub structured_content: Option<Vec<serde_json::Value>>,
-    #[serde(rename = "persistedOutputPath")]
-    pub persisted_output_path: Option<String>,
-    #[serde(rename = "persistedOutputSize")]
-    pub persisted_output_size: Option<u64>,
     #[serde(rename = "sandboxStatus")]
     pub sandbox_status: Option<SandboxStatus>,
 }
@@ -166,8 +162,6 @@ pub fn execute_bash_with_progress(
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
             sandbox_status: Some(sandbox_status),
         });
     }
@@ -345,8 +339,14 @@ async fn execute_bash_async(
         result = &mut output => result?,
     };
 
-    let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
-    let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
+    let stdout = truncate_output(
+        &String::from_utf8_lossy(&output.stdout),
+        MAX_OUTPUT_BYTES_SAFETY,
+    );
+    let stderr = truncate_output(
+        &String::from_utf8_lossy(&output.stderr),
+        MAX_OUTPUT_BYTES_SAFETY,
+    );
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = output.status.code().and_then(|code| {
         if code == 0 {
@@ -369,8 +369,6 @@ async fn execute_bash_async(
         return_code_interpretation,
         no_output_expected,
         structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
         sandbox_status: Some(sandbox_status),
     })
 }
@@ -506,8 +504,8 @@ async fn execute_bash_streaming(
     // Wait for the child to fully exit
     let status = child.wait().await?;
 
-    let stdout = truncate_output(&stdout_buf);
-    let stderr = truncate_output(&stderr_buf);
+    let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
+    let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = status.code().and_then(|code| {
         if code == 0 {
@@ -530,8 +528,6 @@ async fn execute_bash_streaming(
         return_code_interpretation,
         no_output_expected,
         structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
         sandbox_status: Some(sandbox_status),
     })
 }
@@ -555,8 +551,6 @@ fn interrupted_bash_output(
         return_code_interpretation: Some(return_code_interpretation.to_string()),
         no_output_expected: Some(true),
         structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
         sandbox_status: Some(sandbox_status),
     }
 }
@@ -865,21 +859,28 @@ mod tests {
     }
 }
 
-/// Maximum output bytes before truncation (16 KiB, matching upstream).
-const MAX_OUTPUT_BYTES: usize = 16_384;
+/// Baseline output byte budget (16 KiB); the central offload threshold in the
+/// conversation loop matches it.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 16_384;
 
-/// Truncate output to `MAX_OUTPUT_BYTES`, appending a marker when trimmed.
-fn truncate_output(s: &str) -> String {
-    if s.len() <= MAX_OUTPUT_BYTES {
+/// Hard safety cap for a single tool output buffered in memory before it
+/// reaches the central offload (`conversation.rs`). Far above the offload
+/// threshold, so normal oversized output flows through and gets offloaded to
+/// disk; this only guards against pathological unbounded output (e.g. `yes`).
+const MAX_OUTPUT_BYTES_SAFETY: usize = 10 * 1024 * 1024;
+
+/// Truncate output to `max` bytes, appending a marker when trimmed.
+pub(crate) fn truncate_output(s: &str, max: usize) -> String {
+    if s.len() <= max {
         return s.to_string();
     }
-    // Find the last valid UTF-8 boundary at or before MAX_OUTPUT_BYTES
-    let mut end = MAX_OUTPUT_BYTES;
+    // Find the last valid UTF-8 boundary at or before `max`
+    let mut end = max;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
     let mut truncated = s[..end].to_string();
-    truncated.push_str("\n\n[output truncated — exceeded 16384 bytes]");
+    truncated.push_str(&format!("\n\n[output truncated — exceeded {max} bytes]"));
     truncated
 }
 
@@ -890,13 +891,13 @@ mod truncation_tests {
     #[test]
     fn short_output_unchanged() {
         let s = "hello world";
-        assert_eq!(truncate_output(s), s);
+        assert_eq!(truncate_output(s, MAX_OUTPUT_BYTES), s);
     }
 
     #[test]
     fn long_output_truncated() {
         let s = "x".repeat(20_000);
-        let result = truncate_output(&s);
+        let result = truncate_output(&s, MAX_OUTPUT_BYTES);
         assert!(result.len() < 20_000);
         assert!(result.ends_with("[output truncated — exceeded 16384 bytes]"));
     }
@@ -904,13 +905,13 @@ mod truncation_tests {
     #[test]
     fn exact_boundary_unchanged() {
         let s = "a".repeat(MAX_OUTPUT_BYTES);
-        assert_eq!(truncate_output(&s), s);
+        assert_eq!(truncate_output(&s, MAX_OUTPUT_BYTES), s);
     }
 
     #[test]
     fn one_over_boundary_truncated() {
         let s = "a".repeat(MAX_OUTPUT_BYTES + 1);
-        let result = truncate_output(&s);
+        let result = truncate_output(&s, MAX_OUTPUT_BYTES);
         assert!(result.contains("[output truncated"));
     }
 }

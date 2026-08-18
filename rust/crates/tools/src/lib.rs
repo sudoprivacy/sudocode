@@ -803,6 +803,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "read_tool_output",
+            description: "Page an oversized earlier tool result back into context by line. When a tool's output was too large to inline, the transcript shows a <persisted-output id=\"...\"> marker with a head preview; pass that id here to read the full result in bounded slices (offset = start line, limit = line count).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The tool_use id from the <persisted-output> marker." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "0-based start line (default 0)." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum lines to return." }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "write_file",
             description: "Write a text file in the workspace.",
             input_schema: json!({
@@ -1569,6 +1584,11 @@ fn execute_tool_with_enforcer(
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             from_value::<ReadFileInput>(input).and_then(|input| run_read_file(input, fs))
+        }
+        "read_tool_output" => {
+            maybe_enforce_permission_check(enforcer, name, input)?;
+            from_value::<ReadToolOutputInput>(input)
+                .and_then(|input| run_read_tool_output(input, ctx, fs))
         }
         "write_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -2951,8 +2971,6 @@ fn branch_divergence_output(
             })),
         )
         .expect("lane event should serialize")]),
-        persisted_output_path: None,
-        persisted_output_size: None,
         sandbox_status: None,
     }
 }
@@ -2960,6 +2978,34 @@ fn branch_divergence_output(
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, String> {
     to_pretty_json(read_file(fs, &input.path, input.offset, input.limit).map_err(io_to_string)?)
+}
+
+/// Page an offloaded oversized tool result back into context. The model
+/// supplies only the opaque tool_use `id` from the `<persisted-output>`
+/// marker; the physical file (`<session-dir>/tool-results/<id>`) is resolved
+/// here from the trusted dispatch context and never crosses the model
+/// boundary. Reading reuses `read_file`'s bounded, line-addressed reader
+/// (offset = start line, limit = line count), and the resolved `file_path`
+/// is dropped from the response so the path stays engine-internal.
+#[allow(clippy::needless_pass_by_value)]
+fn run_read_tool_output(
+    input: ReadToolOutputInput,
+    ctx: Option<&ToolDispatchContext>,
+    fs: &dyn FsBackend,
+) -> Result<String, String> {
+    let dir = ctx
+        .and_then(|c| c.tool_results_dir.as_ref())
+        .ok_or_else(|| "no offloaded tool output is available in this session".to_string())?;
+    let resolved = dir.join(Session::sanitize_offload_id(&input.id));
+    let out = read_file(fs, &resolved.to_string_lossy(), input.offset, input.limit)
+        .map_err(io_to_string)?;
+    to_pretty_json(json!({
+        "id": input.id,
+        "content": out.file.content,
+        "startLine": out.file.start_line,
+        "numLines": out.file.num_lines,
+        "totalLines": out.file.total_lines,
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3213,6 +3259,13 @@ fn io_to_string(error: std::io::Error) -> String {
 #[derive(Debug, Deserialize)]
 struct ReadFileInput {
     path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadToolOutputInput {
+    id: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -8271,8 +8324,6 @@ fn execute_shell_command(
             return_code_interpretation: None,
             no_output_expected: Some(true),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
             sandbox_status: None,
         });
     }
@@ -8376,8 +8427,6 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
                 .map(|code| format!("exit_code:{code}")),
             no_output_expected: Some(stdio_empty),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
             sandbox_status: None,
         },
         ShellOutcome::Interrupted => runtime::BashCommandOutput {
@@ -8393,8 +8442,6 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             return_code_interpretation: Some(String::from("interrupted")),
             no_output_expected: Some(false),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
             sandbox_status: None,
         },
         ShellOutcome::TimedOut => runtime::BashCommandOutput {
@@ -8413,8 +8460,6 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             return_code_interpretation: Some(String::from("timeout")),
             no_output_expected: Some(false),
             structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
             sandbox_status: None,
         },
     }
@@ -8734,6 +8779,74 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("sudocode-tools-{unique}-{name}"))
+    }
+
+    #[test]
+    fn read_tool_output_pages_offloaded_result_without_leaking_path() {
+        // Offload a multi-line blob via the real Session writer, then page it
+        // back through read_tool_output: proves the write and the read agree
+        // on the file (shared id sanitizer) and that no filesystem path leaks
+        // into the model-facing payload. Each session gets its own dir, so
+        // `tool-results/` (a sibling of the transcript) stays isolated.
+        let session_dir = temp_path("readmore");
+        fs::create_dir_all(&session_dir).expect("session dir");
+        let session_file = session_dir.join("session.jsonl");
+        let session = Session::new().with_persistence_path(session_file.clone());
+
+        let id = "tu_readmore_1";
+        let body = (0..100)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        session
+            .offload_tool_result(id, body.as_bytes())
+            .expect("offload should write");
+
+        let ctx = runtime::ToolDispatchContext {
+            tool_results_dir: session.tool_results_dir(),
+            ..Default::default()
+        };
+
+        // offset = start line (0-based), limit = line count → lines 10..13.
+        let out = super::run_read_tool_output(
+            super::ReadToolOutputInput {
+                id: id.to_string(),
+                offset: Some(10),
+                limit: Some(3),
+            },
+            Some(&ctx),
+            &runtime::StdFsBackend,
+        )
+        .expect("read-more should succeed");
+
+        assert!(out.contains("line-10"));
+        assert!(out.contains("line-12"));
+        assert!(!out.contains("line-13"), "limit must bound the slice");
+        assert!(out.contains("\"totalLines\": 100"));
+
+        // No physical path — not the tool-results dir, not the session dir —
+        // crosses into the payload the model sees.
+        assert!(!out.contains("tool-results"));
+        assert!(!out.contains(&*session_dir.to_string_lossy()));
+
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn read_tool_output_without_dispatch_context_is_a_clean_error() {
+        // No offload dir (in-memory session / missing context) must fail with
+        // a message — never panic, never read an arbitrary path.
+        let err = super::run_read_tool_output(
+            super::ReadToolOutputInput {
+                id: "whatever".to_string(),
+                offset: None,
+                limit: None,
+            },
+            None,
+            &runtime::StdFsBackend,
+        )
+        .expect_err("must error without an offload dir");
+        assert!(err.contains("no offloaded tool output"));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

@@ -62,6 +62,7 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         "WebFetch",
         // Read-only code exploration
         "read_file",
+        "read_tool_output",
         "glob_search",
         "grep_search",
         // Coordinator's own bookkeeping

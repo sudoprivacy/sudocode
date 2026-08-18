@@ -1,10 +1,12 @@
 //! Managed-agent loop spawn entry — v2 ConversationRuntime integration.
 //!
 //! Wires the per-pid agent loop into a full LLM turn-driver that waits
-//! on `/proc/{pid}/chat-with-me` for inbound JSON envelopes (via
-//! `sys_watch` condvar blocking), drives each prompt through a
-//! [`crate::ConversationRuntime`], and writes structured responses back
-//! through the same mailbox path.
+//! on the agent's mailbox (via `sys_watch` condvar blocking) for inbound
+//! [`MailboxEnvelope`]s and drives each one through a
+//! [`crate::ConversationRuntime`]. The loop does NOT auto-reply: the agent
+//! decides whether to respond by calling the `send_message` tool during the
+//! turn (routed through [`mailbox_sender`]). Not calling it = silence, so a
+//! two-agent conversation ends instead of ping-ponging every turn forever.
 //!
 //! ## State machine
 //!
@@ -44,6 +46,12 @@ use std::thread;
 pub use kernel::core::agents::registry::AgentDescriptor;
 pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
+
+// The A2A mailbox message contract is owned by the `a2a` substrate (it stamps
+// `from` + owns the path suffix). Re-export its SSOT types so this loop and the
+// downstream `tools` crate consume the one definition instead of hand-rolling
+// `{from,to,body}` JSON or the `chat-with-me` suffix.
+pub use a2a::{MailboxEnvelope, CHAT_WITH_ME_SUFFIX};
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
 use crate::hooks::HookAbortSignal;
@@ -92,7 +100,11 @@ impl Mailbox {
         match self {
             Mailbox::LocalStream { path, .. } => path.clone(),
             Mailbox::A2aInbox { base, self_name } => {
-                format!("{}/{}/chat-with-me", base.trim_end_matches('/'), self_name)
+                format!(
+                    "{}/{}{CHAT_WITH_ME_SUFFIX}",
+                    base.trim_end_matches('/'),
+                    self_name
+                )
             }
         }
     }
@@ -112,10 +124,47 @@ impl Mailbox {
         match self {
             Mailbox::LocalStream { path, .. } => path.clone(),
             Mailbox::A2aInbox { base, .. } => {
-                format!("{}/{}/chat-with-me", base.trim_end_matches('/'), sender)
+                format!(
+                    "{}/{}{CHAT_WITH_ME_SUFFIX}",
+                    base.trim_end_matches('/'),
+                    sender
+                )
             }
         }
     }
+}
+
+/// A type-erased "send a message to a peer's mailbox" capability handed to the
+/// co-hosted agent's `send_message` tool. This is the ONE place a co-hosted
+/// agent's reply is written: the poll loop no longer auto-forwards turn output,
+/// so a reply happens ONLY when the agent deliberately calls the tool. It writes
+/// a [`MailboxEnvelope`] (the a2a SSOT) to the recipient's inbox; the a2a stamp
+/// hook overwrites `from` with the authenticated caller when auth is armed.
+pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
+/// Build the [`MailboxSender`] for a co-hosted agent (its kernel + mailbox +
+/// operation identity). Lives here, next to `Mailbox::reply_path`, so the
+/// envelope build + reply-path + `sys_write` stay in one place.
+#[must_use]
+pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
+    kernel: Arc<K>,
+    mailbox: Mailbox,
+    owner_id: String,
+    zone_id: String,
+) -> MailboxSender {
+    let self_name = mailbox.self_id().to_string();
+    Arc::new(move |to: &str, body: &str| {
+        let env = MailboxEnvelope {
+            from: self_name.clone(),
+            to: to.to_string(),
+            body: body.to_string(),
+        };
+        let ctx = OperationContext::new(&owner_id, &zone_id, false, Some(&self_name), true);
+        kernel
+            .sys_write(&mailbox.reply_path(to), &ctx, &env.to_bytes(), 0)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    })
 }
 
 /// Handle returned by [`spawn_task`].
@@ -239,58 +288,21 @@ fn run_loop<K, C, T, F>(
             Ok(result) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
-                        if let Some((sender, prompt)) = parse_inbound(bytes, &self_id) {
+                        if let Some((sender, body)) = parse_inbound(bytes, &self_id) {
                             // -- BUSY --
                             state_cb(AgentLoopState::Busy);
 
-                            let turn_result = rt.block_on(runtime.run_turn(&prompt, None, None));
-
-                            let response = match turn_result {
-                                Ok(summary) => {
-                                    let text = summary
-                                        .assistant_messages
-                                        .iter()
-                                        .filter_map(|m| {
-                                            m.blocks.iter().find_map(|b| match b {
-                                                crate::session::ContentBlock::Text { text } => {
-                                                    Some(text.as_str())
-                                                }
-                                                _ => None,
-                                            })
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    serde_json::json!({
-                                        "to": sender,
-                                        "from": self_id,
-                                        "body": text,
-                                    })
-                                }
-                                Err(e) => {
-                                    serde_json::json!({
-                                        "to": sender,
-                                        "from": self_id,
-                                        "body": format!("error: {e}"),
-                                        "error": true,
-                                    })
-                                }
-                            };
-
-                            if let Ok(bytes) = serde_json::to_vec(&response) {
-                                // Reply to the SENDER's inbox (A2A) or the
-                                // shared stream (LocalStream). The kernel's
-                                // byte-op path forwards a not-leader write to
-                                // the owning peer; if the write STILL fails
-                                // (sender inbox absent, peer unreachable) the
-                                // reply is lost, so surface it — a silent drop
-                                // reads as "the agent ignored me" across nodes.
-                                let reply_path = mailbox.reply_path(&sender);
-                                if let Err(e) = kernel.sys_write(&reply_path, &ctx, &bytes, 0) {
-                                    eprintln!(
-                                        "[managed-agent {self_id}] reply to {sender} \
-                                         ({reply_path}) failed: {e:?} — message dropped"
-                                    );
-                                }
+                            // Drive ONE turn on the inbound message. The sender is
+                            // surfaced in the prompt so the agent can address a reply.
+                            // The agent decides whether to reply by calling the
+                            // `send_message` tool DURING the turn — the loop NO LONGER
+                            // harvests the turn's text and auto-forwards it. Not
+                            // calling `send_message` means silence, so the
+                            // conversation ends instead of two agents bouncing every
+                            // turn's output back to each other forever (the ping-pong).
+                            let turn_input = format!("[message from {sender}]\n\n{body}");
+                            if let Err(e) = rt.block_on(runtime.run_turn(&turn_input, None, None)) {
+                                eprintln!("[managed-agent {self_id}] turn error: {e:?}");
                             }
 
                             // -- READY --
@@ -332,21 +344,13 @@ fn run_loop<K, C, T, F>(
 /// Returns `Some((sender, body))` when the envelope is a JSON object
 /// with `from != self` and a non-empty `body` field.
 fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let obj = value.as_object()?;
-    let from = obj.get("from").and_then(|v| v.as_str())?;
-    if from == self_agent_id {
+    let env = MailboxEnvelope::from_bytes(bytes)?;
+    // Skip anything without a real sender + body: our OWN writes (self-reply
+    // storm guard), an unstamped/senderless envelope, or an empty message.
+    if env.from.is_empty() || env.from == self_agent_id || env.body.is_empty() {
         return None;
     }
-    let body = obj
-        .get("body")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if body.is_empty() {
-        return None;
-    }
-    Some((from.to_string(), body))
+    Some((env.from, env.body))
 }
 
 // Loop tests live under `runtime/tests/spawn_task.rs` as an integration

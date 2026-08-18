@@ -14,7 +14,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use runtime::spawn_task::{AgentDescriptor, AgentLoopState, KernelSyscall, Mailbox, SpawnHandle};
+use runtime::spawn_task::{
+    mailbox_sender, AgentDescriptor, AgentLoopState, KernelSyscall, Mailbox, MailboxSender,
+    SpawnHandle,
+};
 use runtime::{
     FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
     SystemPromptBuilder, ToolError, ToolExecutor,
@@ -61,7 +64,12 @@ where
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     // -- ApiClient: provider chain from model id --
-    let api_client = ProviderRuntimeClient::new(model, BTreeSet::new())
+    // The co-hosted agent is A2A-capable, so its tool set includes
+    // `send_message` (its ONLY, deliberate reply path — see the ping-pong fix).
+    // The full tool set (file ops, etc.) is gated behind the agent-profile work;
+    // the duet needs only send_message.
+    let allowed_tools: BTreeSet<String> = std::iter::once("send_message".to_string()).collect();
+    let api_client = ProviderRuntimeClient::new(model, allowed_tools)
         .expect("failed to construct API client from model label");
 
     // -- FsBackend: in-process VFS, NOT host std::fs. The co-hosted
@@ -77,9 +85,19 @@ where
         workspace_root,
     ));
 
-    // -- ToolExecutor: dispatch through the global tool registry, bound
-    // to the VFS backend so every file tool is in-process. --
-    let tool_executor = ManagedToolExecutor { fs };
+    // -- Mailbox sender: the co-host's deliberate-reply capability, built from
+    // this agent's kernel + mailbox + operation identity. Clone the mailbox and
+    // identity here because `spawn_task` below moves the originals. --
+    let send = mailbox_sender(
+        Arc::clone(&kernel),
+        mailbox.clone(),
+        desc.owner_id.clone(),
+        desc.zone_id.clone(),
+    );
+
+    // -- ToolExecutor: file tools in-process via the VFS backend; `send_message`
+    // routes through the mailbox sender. --
+    let tool_executor = ManagedToolExecutor { fs, send };
 
     // -- SystemPrompt: minimal prompt for managed-agent context --
     let system_prompt = SystemPromptBuilder::new()
@@ -111,12 +129,34 @@ where
 /// in-process against the kernel trie.
 struct ManagedToolExecutor {
     fs: Arc<dyn FsBackend>,
+    /// The co-hosted agent's outbound-message capability. `send_message` is the
+    /// ONLY way this agent replies to a peer — the poll loop no longer
+    /// auto-forwards turn output (the ping-pong fix), so a reply happens ONLY
+    /// when the agent deliberately calls the tool.
+    send: MailboxSender,
 }
 
 impl ToolExecutor for ManagedToolExecutor {
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
+
+        // `send_message` is the co-host's deliberate-reply path — a quick
+        // in-process mailbox write bound to THIS agent's identity, not a file
+        // op, so it routes through the mailbox sender, not the fs backend.
+        if tool_name == "send_message" {
+            let to = input_value
+                .get("to")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::new("send_message requires a string 'to'"))?;
+            let body = input_value
+                .get("body")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::new("send_message requires a string 'body'"))?;
+            (self.send)(to, body).map_err(ToolError::new)?;
+            return Ok(format!("message delivered to {to}"));
+        }
+
         // Offload the blocking in-process syscall to the blocking pool so a
         // concurrency-safe batch of read-only tools overlaps (I/O
         // interleaving, not thread parallelism): only the `Arc<fs>` clone and

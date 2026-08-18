@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
-use runtime::spawn_task::{spawn_task, Mailbox, SpawnHandle};
+use runtime::spawn_task::{
+    mailbox_sender, spawn_task, Mailbox, MailboxEnvelope, MailboxSender, SpawnHandle,
+};
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ModelFamilyIdentity,
     PermissionMode, PermissionPolicy, RuntimeError, SystemPromptBuilder, ToolError, ToolExecutor,
@@ -55,6 +57,61 @@ impl ToolExecutor for NoTools {
         Err(ToolError::new(format!(
             "unexpected tool call in test: {tool_name}"
         )))
+    }
+}
+
+/// [`ApiClient`] whose one turn calls the `send_message` tool addressed to
+/// `to` with `body` — the co-host's DELIBERATE reply path. Emits a single
+/// `ToolUse` + `MessageStop` so the loop drives the tool without network I/O.
+struct SendsReply {
+    to: String,
+    body: String,
+    /// Whether the one `send_message` call has been issued. The turn's tool
+    /// loop calls `stream` again after executing the tool; that follow-up round
+    /// must end the turn (no further tool) — otherwise the agent would send on
+    /// every round forever within a single turn.
+    sent: bool,
+}
+
+#[async_trait]
+impl ApiClient for SendsReply {
+    async fn stream(&mut self, _request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        if self.sent {
+            // Follow-up round after the tool result: end the turn, no more tools.
+            return Ok(Box::pin(futures::stream::iter(vec![Ok(
+                AssistantEvent::MessageStop,
+            )])));
+        }
+        self.sent = true;
+        let input = serde_json::json!({ "to": self.to, "body": self.body }).to_string();
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(AssistantEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: "send_message".to_string(),
+                input,
+                thought_signature: None,
+            }),
+            Ok(AssistantEvent::MessageStop),
+        ])))
+    }
+}
+
+/// Executor mirroring the production `ManagedToolExecutor` send path: routes
+/// `send_message` through the [`MailboxSender`] (the SSOT send-write), so a
+/// scripted `send_message` turn actually writes to the recipient's inbox.
+struct SendingTools {
+    send: MailboxSender,
+}
+
+impl ToolExecutor for SendingTools {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        assert_eq!(tool_name, "send_message", "unexpected tool");
+        let v: serde_json::Value =
+            serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
+        let to = v.get("to").and_then(|x| x.as_str()).expect("to");
+        let body = v.get("body").and_then(|x| x.as_str()).expect("body");
+        (self.send)(to, body).map_err(ToolError::new)?;
+        Ok("delivered".to_string())
     }
 }
 
@@ -123,6 +180,41 @@ fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> S
     )
 }
 
+/// Spawn the REAL `run_loop` with a scripted `send_message` turn: on each
+/// inbound message the agent DELIBERATELY replies `reply_body` to `reply_to`
+/// via the mailbox sender (the production reply path).
+fn spawn_sending(
+    kernel: Arc<Kernel>,
+    desc: AgentDescriptor,
+    mailbox: Mailbox,
+    reply_to: &str,
+    reply_body: &str,
+) -> SpawnHandle {
+    let system_prompt = SystemPromptBuilder::new()
+        .with_model_family(ModelFamilyIdentity::Claude)
+        .build();
+    let send = mailbox_sender(
+        Arc::clone(&kernel),
+        mailbox.clone(),
+        desc.owner_id.clone(),
+        desc.zone_id.clone(),
+    );
+    spawn_task(
+        kernel,
+        desc,
+        mailbox,
+        SendsReply {
+            to: reply_to.to_string(),
+            body: reply_body.to_string(),
+            sent: false,
+        },
+        SendingTools { send },
+        system_prompt,
+        PermissionPolicy::new(PermissionMode::Allow),
+        |_state| {},
+    )
+}
+
 fn user_ctx() -> OperationContext {
     OperationContext::new("test-user", "root", false, Some("user-test"), true)
 }
@@ -135,10 +227,14 @@ fn write_envelope(
     to: &str,
     body: &str,
 ) {
-    let env = serde_json::json!({ "from": from, "to": to, "body": body });
+    let env = MailboxEnvelope {
+        from: from.to_string(),
+        to: to.to_string(),
+        body: body.to_string(),
+    };
     let reqs = [WriteRequest {
         path: path.to_string(),
-        content: serde_json::to_vec(&env).unwrap(),
+        content: env.to_bytes(),
         offset: 0,
     }];
     kernel
@@ -232,13 +328,15 @@ fn local_stream_round_trip_drives_real_run_loop() {
     mount(&kernel, "/proc");
     let path = "/proc/pid-ls/chat-with-me";
     plant_stream(&kernel, path);
-    let handle = spawn_real(
+    let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-ls", "scode"),
         Mailbox::LocalStream {
             path: path.to_string(),
             self_id: "scode".to_string(),
         },
+        "user-test",
+        REPLY_TEXT,
     );
 
     let ctx = user_ctx();
@@ -247,7 +345,7 @@ fn local_stream_round_trip_drives_real_run_loop() {
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
-    let reply = reply.expect("real run_loop produced no reply on the shared stream");
+    let reply = reply.expect("agent's send_message produced no reply on the shared stream");
     assert_eq!(reply.get("body").and_then(|b| b.as_str()), Some(REPLY_TEXT));
     assert_eq!(reply.get("to").and_then(|t| t.as_str()), Some("user-test"));
 }
@@ -258,13 +356,15 @@ fn a2a_reads_own_inbox_and_replies_to_senders_inbox() {
     mount(&kernel, "/agents");
     plant_stream(&kernel, "/agents/win-ai/chat-with-me");
     plant_stream(&kernel, "/agents/user-test/chat-with-me");
-    let handle = spawn_real(
+    let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
         Mailbox::A2aInbox {
             base: "/agents".to_string(),
             self_name: "win-ai".to_string(),
         },
+        "user-test",
+        REPLY_TEXT,
     );
 
     let ctx = user_ctx();
@@ -341,13 +441,15 @@ fn skips_own_writes_no_reply_storm() {
     mount(&kernel, "/proc");
     let path = "/proc/pid-filter/chat-with-me";
     plant_stream(&kernel, path);
-    let handle = spawn_real(
+    let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-filter", "scode"),
         Mailbox::LocalStream {
             path: path.to_string(),
             self_id: "scode".to_string(),
         },
+        "user-test",
+        REPLY_TEXT,
     );
 
     let ctx = user_ctx();
@@ -377,13 +479,15 @@ fn a2a_inbox_survives_read_before_it_exists() {
     let kernel = Arc::new(Kernel::new());
     // Deliberately do NOT mount /agents yet → the loop's first reads all Err
     // (NotMounted). The old `Err(_) => break` would kill the loop here.
-    let handle = spawn_real(
+    let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
         Mailbox::A2aInbox {
             base: "/agents".to_string(),
             self_name: "win-ai".to_string(),
         },
+        "user-test",
+        REPLY_TEXT,
     );
     // Let the loop spin on the error path across several watch cycles.
     thread::sleep(Duration::from_millis(300));
@@ -414,5 +518,56 @@ fn a2a_inbox_survives_read_before_it_exists() {
     assert!(
         reply.is_some(),
         "loop died on the pre-mint read error (F1 regression) — no reply after the inbox appeared"
+    );
+}
+
+#[test]
+fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
+    // THE ping-pong fix: a turn that produces TEXT but does NOT call
+    // `send_message` must write nothing back. The old loop harvested the turn's
+    // text and auto-forwarded it, so every message bounced a reply forever; now
+    // silence (no `send_message`) lets the exchange end.
+    let kernel = Arc::new(Kernel::new());
+    mount(&kernel, "/agents");
+    plant_stream(&kernel, "/agents/win-ai/chat-with-me");
+    plant_stream(&kernel, "/agents/user-test/chat-with-me");
+    // `spawn_real` = ScriptedReply (text only) + NoTools (send_message never called).
+    let handle = spawn_real(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+    );
+
+    let ctx = user_ctx();
+    write_envelope(
+        &kernel,
+        "/agents/win-ai/chat-with-me",
+        &ctx,
+        "user-test",
+        "win-ai",
+        "hi",
+    );
+    // Give the loop ample time to run the turn and (wrongly) auto-forward.
+    let leaked = wait_for_reply(
+        &kernel,
+        "/agents/user-test/chat-with-me",
+        &ctx,
+        "win-ai",
+        Duration::from_secs(2),
+    );
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    assert!(
+        leaked.is_none(),
+        "a text-only turn auto-forwarded a reply — the ping-pong (auto-forward) is back"
+    );
+    assert_eq!(
+        count_from(&kernel, "/agents/win-ai/chat-with-me", &ctx, "win-ai"),
+        0,
+        "the agent wrote to its own inbox on a silent turn"
     );
 }

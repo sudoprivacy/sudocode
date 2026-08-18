@@ -425,6 +425,20 @@ pub struct ToolSpec {
     pub required_permission: PermissionMode,
 }
 
+/// The single ToolSpec → wire `ToolDefinition` mapping. Both the CLI path
+/// (`GlobalToolRegistry::definitions`) and the co-host path
+/// (`ProviderRuntimeClient::stream` via `tool_specs_for_allowed_tools`) go
+/// through here, so the spec→definition shape has one SSOT.
+impl From<ToolSpec> for ToolDefinition {
+    fn from(spec: ToolSpec) -> Self {
+        ToolDefinition {
+            name: spec.name.to_string(),
+            description: Some(spec.description.to_string()),
+            input_schema: spec.input_schema,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlobalToolRegistry {
     plugin_tools: Vec<PluginTool>,
@@ -581,11 +595,7 @@ impl GlobalToolRegistry {
             .into_iter()
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
             .filter(|spec| coord_gate(spec.name))
-            .map(|spec| ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            });
+            .map(ToolDefinition::from);
         let runtime = self
             .runtime_tools
             .iter()
@@ -1400,6 +1410,24 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "send_message",
+            description: "Send a message to another agent's mailbox. Call this ONLY \
+                          when you decide to reply to a peer; if you have nothing to \
+                          say, do NOT call it — staying silent lets the conversation \
+                          end instead of bouncing forever. Only available to agents \
+                          that have a mailbox (A2A / co-hosted).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "The recipient agent's id." },
+                    "body": { "type": "string", "description": "The message to send." }
+                },
+                "required": ["to", "body"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
     ];
     if cron_tools_disabled() {
@@ -6587,11 +6615,7 @@ impl ApiClient for ProviderRuntimeClient {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
-            .map(|spec| ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            })
+            .map(ToolDefinition::from)
             .collect::<Vec<_>>();
         let messages = convert_messages(&request.messages);
         let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());

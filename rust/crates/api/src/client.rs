@@ -362,6 +362,7 @@ mod tests {
             auth_modes,
             models,
             web_search: Default::default(),
+            selected_account: None,
         }
     }
 

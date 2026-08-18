@@ -132,7 +132,8 @@ impl TaskRegistry {
         let Some(path) = &inner.store_path else {
             return;
         };
-        let tasks: Vec<&Task> = inner.tasks.values().collect();
+        let mut tasks: Vec<&Task> = inner.tasks.values().collect();
+        tasks.sort_by_key(|t| t.created_at);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -232,12 +233,14 @@ impl TaskRegistry {
 
     pub fn list(&self, status_filter: Option<TaskStatus>) -> Vec<Task> {
         let inner = self.inner.lock().expect("registry lock poisoned");
-        inner
+        let mut tasks: Vec<Task> = inner
             .tasks
             .values()
             .filter(|t| status_filter.map_or(true, |s| t.status == s))
             .cloned()
-            .collect()
+            .collect();
+        tasks.sort_by_key(|t| t.created_at);
+        tasks
     }
 
     pub fn stop(&self, task_id: &str) -> Result<Task, String> {

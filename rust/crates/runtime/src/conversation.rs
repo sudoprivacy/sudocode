@@ -184,6 +184,12 @@ pub struct ToolDispatchContext {
     /// Populated by the runtime tool loop from `Session::messages`.
     /// Consumed by [`Self::is_inside_fork_child`].
     pub parent_session_messages: Vec<ConversationMessage>,
+    /// The current session's `tool-results/` directory — the sole handle
+    /// the `read_tool_output` tool needs to page an offloaded oversized
+    /// result back in. The runtime resolves it from `Session`; the model
+    /// only ever names the opaque tool_use id, so the physical path never
+    /// crosses the model boundary. `None` for in-memory sessions.
+    pub tool_results_dir: Option<std::path::PathBuf>,
 }
 
 impl ToolDispatchContext {
@@ -779,6 +785,50 @@ where
         Ok(())
     }
 
+    /// If a tool output exceeds the offload threshold, spill the full bytes to
+    /// `<session-dir>/tool-results/<tool_use_id>` (via the session `FsBackend`,
+    /// backend-agnostic) and replace it in-transcript with a head preview + a
+    /// deterministic `<persisted-output>` marker. Persisting the *replaced*
+    /// message is itself the content-replacement: resume replays it verbatim,
+    /// so the prompt-cache prefix stays byte-identical. The full bytes live only
+    /// in the offloaded file (the read-more side-channel); the transcript is the
+    /// prompt SSOT.
+    fn maybe_offload_tool_output(&self, tool_use_id: &str, output: String) -> String {
+        /// Outputs at or under this stay fully inline. Shares the bash output
+        /// budget so the "16 KiB" threshold lives in one place.
+        const OFFLOAD_THRESHOLD: usize = crate::bash::MAX_OUTPUT_BYTES;
+        /// Bytes of the head kept inline as a preview when offloading.
+        const PREVIEW_BYTES: usize = 12_288;
+        if output.len() <= OFFLOAD_THRESHOLD {
+            return output;
+        }
+        let head = |n: usize| {
+            let mut end = n.min(output.len());
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        };
+        match self
+            .session
+            .offload_tool_result(tool_use_id, output.as_bytes())
+        {
+            Ok((_path, total)) => {
+                // The physical path never leaves the engine; the model only
+                // ever sees the opaque tool_use id. The full result is paged
+                // back in by line via `read_tool_output(id=..., offset, limit)`.
+                let end = head(PREVIEW_BYTES);
+                format!(
+                    "{}\n\n<persisted-output bytes={total} id=\"{tool_use_id}\">\n[Tool output was {total} bytes; the first {end} are shown above as a preview. The full result is preserved — read more by line with read_tool_output(id=\"{tool_use_id}\", offset=<line>, limit=<lines>).]\n</persisted-output>",
+                    &output[..end]
+                )
+            }
+            // Offload failed (e.g. no persistence path) — never send an
+            // unbounded prompt; fall back to a bounded truncation (shared with bash).
+            Err(_) => crate::bash::truncate_output(&output, OFFLOAD_THRESHOLD),
+        }
+    }
+
     fn push_interrupted_tool_results(
         &mut self,
         observer: &mut Option<&mut dyn RuntimeObserver>,
@@ -1129,6 +1179,7 @@ where
             let dispatch_context = ToolDispatchContext {
                 parent_assistant_message: Some(assistant_message),
                 parent_session_messages: self.session.messages.clone(),
+                tool_results_dir: self.session.tool_results_dir(),
             };
 
             let mut batch_start = 0usize;
@@ -1493,6 +1544,7 @@ where
                                 || post_hook_result.is_cancelled(),
                         );
 
+                        let output = self.maybe_offload_tool_output(&tool_use_id, output);
                         ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
@@ -2679,6 +2731,122 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn oversized_tool_output_is_offloaded_and_resume_is_byte_identical() {
+        // A tool whose output exceeds the offload threshold. A unique tail
+        // sentinel sits past the preview window so we can prove it is spilled
+        // to the offload file and never inlined into the transcript.
+        const SENTINEL: &str = "UNIQUE_TAIL_SENTINEL_ZZZ";
+        let big = format!("{}{SENTINEL}", "A".repeat(20_000));
+
+        struct OneToolThenStop;
+        #[async_trait]
+        impl ApiClient for OneToolThenStop {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                if request.messages.iter().any(|m| m.role == MessageRole::Tool) {
+                    return Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]));
+                }
+                Ok(events_to_stream(vec![
+                    AssistantEvent::ToolUse {
+                        id: "big-1".to_string(),
+                        name: "big".to_string(),
+                        input: String::new(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        struct AllowAll;
+        impl PermissionPrompter for AllowAll {
+            fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+                PermissionPromptDecision::Allow
+            }
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let session_file = std::env::temp_dir().join(format!("runtime-offload-e2e-{nanos}.jsonl"));
+
+        let tool_output = big.clone();
+        let mut runtime = ConversationRuntime::new(
+            Session::new().with_persistence_path(session_file.clone()),
+            OneToolThenStop,
+            StaticToolExecutor::new().register("big", move |_input| Ok(tool_output.clone())),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            SystemPrompt::default(),
+        );
+
+        runtime
+            .run_turn("please run big", Some(&mut AllowAll), None)
+            .await
+            .expect("conversation loop should succeed");
+
+        // 1. Full blob spilled to the session's tool-results/<id>, byte-exact.
+        let offloaded = runtime
+            .session()
+            .tool_results_dir()
+            .expect("tool-results dir")
+            .join("big-1");
+        let spilled = fs::read_to_string(&offloaded).expect("offloaded blob should exist");
+        assert_eq!(spilled, big);
+
+        // 2. In-transcript tool_result is the replaced preview+marker, NOT the
+        //    full blob: it carries the opaque-id marker, keeps only the head,
+        //    and drops the tail sentinel.
+        let tool_msg = runtime
+            .session()
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("tool result message should exist");
+        let ContentBlock::ToolResult { output, .. } = &tool_msg.blocks[0] else {
+            panic!("expected a tool_result block");
+        };
+        assert!(output.contains("<persisted-output"));
+        assert!(output.contains("id=\"big-1\""));
+        assert!(!output.contains(SENTINEL), "tail must not be inlined");
+        assert!(output.len() < big.len());
+        let inline_output = output.clone();
+
+        // 3. Resume replays byte-identically: the persisted transcript never
+        //    held the tail, and reloads to the exact same tool_result content
+        //    (so the prompt-cache prefix stays warm across --resume).
+        let on_disk = fs::read_to_string(&session_file).expect("transcript should persist");
+        assert!(
+            !on_disk.contains(SENTINEL),
+            "transcript must not hold the tail"
+        );
+
+        let restored = Session::load_from_path(&session_file).expect("session should reload");
+        let restored_tool = restored
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Tool)
+            .expect("reloaded tool result should exist");
+        let ContentBlock::ToolResult {
+            output: restored_output,
+            ..
+        } = &restored_tool.blocks[0]
+        else {
+            panic!("expected a reloaded tool_result block");
+        };
+        assert_eq!(*restored_output, inline_output);
+
+        let _ = fs::remove_file(&offloaded);
+        let _ = fs::remove_dir(offloaded.parent().unwrap());
+        let _ = fs::remove_file(&session_file);
     }
 
     #[tokio::test]

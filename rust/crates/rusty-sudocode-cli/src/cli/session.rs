@@ -145,6 +145,15 @@ pub(crate) fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::err
         return Err(format!("session file does not exist: {}", path.display()).into());
     }
     fs::remove_file(path)?;
+    // GC the session's offloaded tool-results subtree (write-once blobs spilled
+    // from oversized tool outputs). The managed file is `<session-id>.jsonl`, so
+    // its stem is the session-id that namespaces the offload dir. Best-effort:
+    // an absent dir (session never offloaded anything) is not an error.
+    if let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+        if let Some(dir) = Session::tool_results_dir_for(path, session_id) {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
     Ok(())
 }
 
@@ -270,4 +279,38 @@ pub(crate) fn session_clear_backup_path(session_path: &Path) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("session.jsonl");
     session_path.with_file_name(format!("{file_name}.before-clear-{timestamp}.bak"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn delete_managed_session_gcs_offloaded_tool_results() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let sessions_dir = std::env::temp_dir().join(format!("scode-del-gc-{nanos}"));
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session_id = "sess-abc-123";
+        let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
+        fs::write(&session_file, b"{}\n").expect("write session file");
+
+        // An offloaded blob under the session's namespaced tool-results dir.
+        let offload_dir =
+            Session::tool_results_dir_for(&session_file, session_id).expect("offload dir");
+        fs::create_dir_all(&offload_dir).expect("offload dir");
+        fs::write(offload_dir.join("tool-1"), b"big output").expect("write blob");
+        assert!(offload_dir.exists());
+
+        delete_managed_session(&session_file).expect("delete should succeed");
+
+        // Both the transcript and the offloaded subtree are gone.
+        assert!(!session_file.exists());
+        assert!(!offload_dir.exists());
+
+        let _ = fs::remove_dir_all(&sessions_dir);
+    }
 }

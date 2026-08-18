@@ -200,7 +200,7 @@ mod tests {
 
         // then
         assert_eq!(state, BaseCommitState::Matches);
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
                 actual: new_sha,
             }
         );
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod tests {
 
         // then
         assert_eq!(state, BaseCommitState::NoExpectedBase);
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
 
         // then
         assert_eq!(state, BaseCommitState::NotAGitRepo);
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -268,7 +268,7 @@ mod tests {
 
         // then
         assert_eq!(value, Some("abc1234def5678".to_string()));
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
 
         // then
         assert!(value.is_none());
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
 
         // then
         assert!(value.is_none());
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
             source,
             Some(BaseCommitSource::Flag("from_flag".to_string()))
         );
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -333,7 +333,7 @@ mod tests {
             source,
             Some(BaseCommitSource::File("from_file".to_string()))
         );
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
 
         // then
         assert!(source.is_none());
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
 
         // then
         assert_eq!(state, BaseCommitState::Matches);
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -432,6 +432,6 @@ mod tests {
                 actual: new_sha,
             }
         );
-        fs::remove_dir_all(&root).expect("cleanup");
+        let _ = fs::remove_dir_all(&root);
     }
 }

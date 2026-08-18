@@ -12,7 +12,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::workspace_root::current_workspace_root;
-use kernel::kernel::syscall::KernelSyscall;
+use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
 use kernel::kernel::OperationContext;
 
 // ---------------------------------------------------------------------------
@@ -438,7 +438,11 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         // full paths like `/ws/a.rs`, not basenames. The `FsBackend`
         // contract (matching `StdFsBackend` / `NexusVfsFsBackend`) is the
         // basename, so strip the leading directory. DT_DIR == 1.
-        let entries = self.kernel.sys_readdir(path, zone, false);
+        // Single-level (default `ReaddirOpts`): the `FsBackend` contract is a
+        // basename listing of direct children, so no recursive descent here.
+        let entries = self
+            .kernel
+            .sys_readdir(path, zone, false, ReaddirOpts::default());
         Ok(entries
             .into_iter()
             .map(|(child, entry_type)| FsDirEntry {

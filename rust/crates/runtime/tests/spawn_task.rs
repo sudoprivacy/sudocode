@@ -1,34 +1,132 @@
-//! Integration tests for `runtime::spawn_task`. Lives outside the
-//! lib's `#[cfg(test)] mod` so it compiles as its own test binary
-//! and stays decoupled from unrelated lib-test fixtures.
+//! Integration tests for `runtime::spawn_task` — drive the REAL v2
+//! `run_loop` (the exact production loop the co-host runs), NOT a scaffold.
+//!
+//! A scripted mock [`ApiClient`] returns one fixed text turn so the loop's
+//! mailbox mechanics are exercised deterministically with no network: inbound
+//! envelope parse, `from != self` self-filtering, reply routing for BOTH
+//! [`Mailbox`] variants, abort teardown, and the transient-read survival
+//! contract — a durable A2A inbox must NOT die on a read error / on being
+//! read before it exists (the regression guard for the co-host boot race,
+//! where the loop is spawned before the mint has planted the inbox).
+//!
+//! Lives outside the lib's `#[cfg(test)] mod` so it compiles as its own test
+//! binary; it uses the crate's normal deps (`async-trait`, `futures`).
 
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
-use runtime::spawn_task::spawn_task_echo;
+use runtime::spawn_task::{
+    mailbox_sender, spawn_task, Mailbox, MailboxEnvelope, MailboxSender, SpawnHandle,
+};
+use runtime::{
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ModelFamilyIdentity,
+    PermissionMode, PermissionPolicy, RuntimeError, SystemPromptBuilder, ToolError, ToolExecutor,
+};
 
 const DT_STREAM: i32 = 4;
 const STREAM_CAPACITY: usize = 65_536;
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Fixed text the scripted provider replies with — asserted end-to-end.
+const REPLY_TEXT: &str = "PONG";
 
-/// Add the `/proc` mount to the kernel's VFSRouter. Without this,
-/// `sys_read` / `sys_write` against `/proc/*` paths errors at
-/// `vfs_router.route()` before consulting the metastore. Mirrors
-/// `mount_proc` in the nexus-side managed_agent integration tests.
-fn mount_proc(kernel: &Kernel) {
-    kernel
-        .vfs_router_arc()
-        .add_mount("/proc", "root", None, false);
+// ── Mock provider: one fixed text turn, no tool calls ──────────────────
+
+/// [`ApiClient`] that streams a single `TextDelta` + `MessageStop`, so a
+/// turn resolves to the fixed [`REPLY_TEXT`] with zero network I/O.
+struct ScriptedReply;
+
+#[async_trait]
+impl ApiClient for ScriptedReply {
+    async fn stream(&mut self, _request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(AssistantEvent::TextDelta(REPLY_TEXT.to_string())),
+            Ok(AssistantEvent::MessageStop),
+        ])))
+    }
 }
 
-fn plant_chat_stream(kernel: &Kernel, pid: &str) {
-    let path = format!("/proc/{pid}/chat-with-me");
+/// The scripted turn emits no `ToolUse`, so the executor is never invoked;
+/// a call would be a bug in the loop, so it fails loudly.
+struct NoTools;
+
+impl ToolExecutor for NoTools {
+    async fn execute(&self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+        Err(ToolError::new(format!(
+            "unexpected tool call in test: {tool_name}"
+        )))
+    }
+}
+
+/// [`ApiClient`] whose one turn calls the `send_message` tool addressed to
+/// `to` with `body` — the co-host's DELIBERATE reply path. Emits a single
+/// `ToolUse` + `MessageStop` so the loop drives the tool without network I/O.
+struct SendsReply {
+    to: String,
+    body: String,
+    /// Whether the one `send_message` call has been issued. The turn's tool
+    /// loop calls `stream` again after executing the tool; that follow-up round
+    /// must end the turn (no further tool) — otherwise the agent would send on
+    /// every round forever within a single turn.
+    sent: bool,
+}
+
+#[async_trait]
+impl ApiClient for SendsReply {
+    async fn stream(&mut self, _request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        if self.sent {
+            // Follow-up round after the tool result: end the turn, no more tools.
+            return Ok(Box::pin(futures::stream::iter(vec![Ok(
+                AssistantEvent::MessageStop,
+            )])));
+        }
+        self.sent = true;
+        let input = serde_json::json!({ "to": self.to, "body": self.body }).to_string();
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(AssistantEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: "send_message".to_string(),
+                input,
+                thought_signature: None,
+            }),
+            Ok(AssistantEvent::MessageStop),
+        ])))
+    }
+}
+
+/// Executor mirroring the production `ManagedToolExecutor` send path: routes
+/// `send_message` through the [`MailboxSender`] (the SSOT send-write), so a
+/// scripted `send_message` turn actually writes to the recipient's inbox.
+struct SendingTools {
+    send: MailboxSender,
+}
+
+impl ToolExecutor for SendingTools {
+    async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        assert_eq!(tool_name, "send_message", "unexpected tool");
+        let v: serde_json::Value =
+            serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
+        let to = v.get("to").and_then(|x| x.as_str()).expect("to");
+        let body = v.get("body").and_then(|x| x.as_str()).expect("body");
+        (self.send)(to, body).map_err(ToolError::new)?;
+        Ok("delivered".to_string())
+    }
+}
+
+// ── Kernel / mailbox helpers ───────────────────────────────────────────
+
+fn mount(kernel: &Kernel, mount_point: &str) {
+    kernel
+        .vfs_router_arc()
+        .add_mount(mount_point, "root", None, false);
+}
+
+fn plant_stream(kernel: &Kernel, path: &str) {
     kernel
         .sys_setattr(
-            &path,
+            path,
             DT_STREAM,
             /* backend_name */ "",
             /* backend */ None,
@@ -50,7 +148,7 @@ fn plant_chat_stream(kernel: &Kernel, pid: &str) {
             /* source */ None,
             /* remote_metastore */ None,
         )
-        .expect("plant /proc/{pid}/chat-with-me DT_STREAM");
+        .expect("plant DT_STREAM");
 }
 
 fn make_desc(pid: &str, name: &str) -> AgentDescriptor {
@@ -64,24 +162,134 @@ fn make_desc(pid: &str, name: &str) -> AgentDescriptor {
     }
 }
 
-fn user_ctx() -> OperationContext {
-    OperationContext::new(
-        "test-user",
-        "root",
-        /* is_admin */ false,
-        Some("user-test"),
-        /* is_system */ true,
+/// Spawn the REAL `run_loop` (via `spawn_task`) with the scripted mock —
+/// the exact loop the co-host runs, minus the network provider.
+fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> SpawnHandle {
+    let system_prompt = SystemPromptBuilder::new()
+        .with_model_family(ModelFamilyIdentity::Claude)
+        .build();
+    spawn_task(
+        kernel,
+        desc,
+        mailbox,
+        ScriptedReply,
+        NoTools,
+        system_prompt,
+        PermissionPolicy::new(PermissionMode::Allow),
+        |_state| {},
     )
 }
 
-fn read_envelopes(
+/// Spawn the REAL `run_loop` with a scripted `send_message` turn: on each
+/// inbound message the agent DELIBERATELY replies `reply_body` to `reply_to`
+/// via the mailbox sender (the production reply path).
+fn spawn_sending(
+    kernel: Arc<Kernel>,
+    desc: AgentDescriptor,
+    mailbox: Mailbox,
+    reply_to: &str,
+    reply_body: &str,
+) -> SpawnHandle {
+    let system_prompt = SystemPromptBuilder::new()
+        .with_model_family(ModelFamilyIdentity::Claude)
+        .build();
+    let send = mailbox_sender(
+        Arc::clone(&kernel),
+        mailbox.clone(),
+        desc.owner_id.clone(),
+        desc.zone_id.clone(),
+    );
+    spawn_task(
+        kernel,
+        desc,
+        mailbox,
+        SendsReply {
+            to: reply_to.to_string(),
+            body: reply_body.to_string(),
+            sent: false,
+        },
+        SendingTools { send },
+        system_prompt,
+        PermissionPolicy::new(PermissionMode::Allow),
+        |_state| {},
+    )
+}
+
+fn user_ctx() -> OperationContext {
+    OperationContext::new("test-user", "root", false, Some("user-test"), true)
+}
+
+fn write_envelope(
     kernel: &Kernel,
     path: &str,
     ctx: &OperationContext,
-    from_offset: u64,
-) -> (Vec<serde_json::Value>, u64) {
-    let mut offset = from_offset;
-    let mut out = Vec::new();
+    from: &str,
+    to: &str,
+    body: &str,
+) {
+    let env = MailboxEnvelope {
+        from: from.to_string(),
+        to: to.to_string(),
+        body: body.to_string(),
+    };
+    let reqs = [WriteRequest {
+        path: path.to_string(),
+        content: env.to_bytes(),
+        offset: 0,
+    }];
+    kernel
+        .sys_write(&reqs, ctx)
+        .pop()
+        .expect("sys_write returned empty vec")
+        .expect("write envelope");
+}
+
+/// Poll `path` until an envelope `from` the given author with a non-empty
+/// body arrives, or `timeout` elapses.
+fn wait_for_reply(
+    kernel: &Kernel,
+    path: &str,
+    ctx: &OperationContext,
+    from: &str,
+    timeout: Duration,
+) -> Option<serde_json::Value> {
+    let deadline = Instant::now() + timeout;
+    let mut offset = 0u64;
+    while Instant::now() < deadline {
+        let reqs = [ReadRequest {
+            path: path.to_string(),
+            offset,
+            len: None,
+            timeout_ms: 0,
+        }];
+        if let Some(Ok(result)) = kernel.sys_read(&reqs, ctx).pop() {
+            if let Some(bytes) = result.data.as_ref() {
+                if !bytes.is_empty() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                        let is_from = v.get("from").and_then(|f| f.as_str()) == Some(from);
+                        let has_body = v
+                            .get("body")
+                            .and_then(|b| b.as_str())
+                            .is_some_and(|b| !b.is_empty());
+                        if is_from && has_body {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+            if let Some(next) = result.stream_next_offset {
+                offset = next as u64;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// Count envelopes on `path` authored by `from`, walking the whole stream.
+fn count_from(kernel: &Kernel, path: &str, ctx: &OperationContext, from: &str) -> usize {
+    let mut offset = 0u64;
+    let mut count = 0;
     loop {
         let reqs = [ReadRequest {
             path: path.to_string(),
@@ -89,13 +297,14 @@ fn read_envelopes(
             len: None,
             timeout_ms: 0,
         }];
-        let mut results = kernel.sys_read(&reqs, ctx);
-        match results.pop() {
+        match kernel.sys_read(&reqs, ctx).pop() {
             Some(Ok(result)) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
-                            out.push(v);
+                            if v.get("from").and_then(|f| f.as_str()) == Some(from) {
+                                count += 1;
+                            }
                         }
                     }
                 }
@@ -108,150 +317,257 @@ fn read_envelopes(
             _ => break,
         }
     }
-    (out, offset)
+    count
 }
 
-fn wait_for_envelope_with_body(
-    kernel: &Kernel,
-    path: &str,
-    ctx: &OperationContext,
-    body_eq: &str,
-    timeout: Duration,
-) -> Option<serde_json::Value> {
-    let deadline = Instant::now() + timeout;
-    let mut offset = 0u64;
-    while Instant::now() < deadline {
-        let (envelopes, next) = read_envelopes(kernel, path, ctx, offset);
-        offset = next;
-        for env in envelopes {
-            if env.get("body").and_then(|v| v.as_str()) == Some(body_eq) {
-                return Some(env);
-            }
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    None
+// ── Tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn local_stream_round_trip_drives_real_run_loop() {
+    let kernel = Arc::new(Kernel::new());
+    mount(&kernel, "/proc");
+    let path = "/proc/pid-ls/chat-with-me";
+    plant_stream(&kernel, path);
+    let handle = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("pid-ls", "scode"),
+        Mailbox::LocalStream {
+            path: path.to_string(),
+            self_id: "scode".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
+
+    let ctx = user_ctx();
+    write_envelope(&kernel, path, &ctx, "user-test", "scode", "hello");
+    let reply = wait_for_reply(&kernel, path, &ctx, "scode", Duration::from_secs(5));
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    let reply = reply.expect("agent's send_message produced no reply on the shared stream");
+    assert_eq!(reply.get("body").and_then(|b| b.as_str()), Some(REPLY_TEXT));
+    assert_eq!(reply.get("to").and_then(|t| t.as_str()), Some("user-test"));
 }
 
 #[test]
-fn echo_round_trip_through_proc_pid_chat_with_me() {
+fn a2a_reads_own_inbox_and_replies_to_senders_inbox() {
     let kernel = Arc::new(Kernel::new());
-    mount_proc(&kernel);
-    plant_chat_stream(&kernel, "v0-echo-1");
-    let desc = make_desc("v0-echo-1", "agent-v0");
-    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
+    mount(&kernel, "/agents");
+    plant_stream(&kernel, "/agents/win-ai/chat-with-me");
+    plant_stream(&kernel, "/agents/user-test/chat-with-me");
+    let handle = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
 
     let ctx = user_ctx();
-    let cwm_path = "/proc/v0-echo-1/chat-with-me";
-    let prompt = serde_json::json!({
-        "from": "user-test",
-        "to": "agent-v0",
-        "body": "hello",
-    });
-    let write_reqs = [WriteRequest {
-        path: cwm_path.to_string(),
-        content: serde_json::to_vec(&prompt).unwrap(),
-        offset: 0,
-    }];
-    kernel
-        .sys_write(&write_reqs, &ctx)
-        .pop()
-        .expect("sys_write returned empty vec")
-        .expect("user write to chat-with-me");
-
-    let echo = wait_for_envelope_with_body(
+    // Sender writes to win-ai's OWN inbox …
+    write_envelope(
         &kernel,
-        cwm_path,
+        "/agents/win-ai/chat-with-me",
         &ctx,
-        "echo: hello",
-        Duration::from_secs(2),
+        "user-test",
+        "win-ai",
+        "hi",
+    );
+    // … and the reply must land in the SENDER's inbox, not win-ai's.
+    let reply = wait_for_reply(
+        &kernel,
+        "/agents/user-test/chat-with-me",
+        &ctx,
+        "win-ai",
+        Duration::from_secs(5),
     );
     handle.abort_signal.abort();
     let _ = handle.join.join();
-    let echo = echo.expect("agent echo response did not arrive within 2s");
 
-    assert_eq!(echo.get("from").and_then(|v| v.as_str()), Some("agent-v0"));
-    assert_eq!(echo.get("to").and_then(|v| v.as_str()), Some("user-test"));
+    let reply = reply.expect("A2A co-host produced no reply in the sender's inbox");
+    assert_eq!(reply.get("body").and_then(|b| b.as_str()), Some(REPLY_TEXT));
+    assert_eq!(reply.get("to").and_then(|t| t.as_str()), Some("user-test"));
+    // The reply went to the sender's box, so win-ai's own inbox holds only
+    // the inbound (no self-directed reply).
+    assert_eq!(
+        count_from(&kernel, "/agents/win-ai/chat-with-me", &ctx, "win-ai"),
+        0,
+        "reply must route to the sender's inbox, not the agent's own"
+    );
 }
 
 #[test]
 fn loop_exits_on_abort_signal() {
     let kernel = Arc::new(Kernel::new());
-    mount_proc(&kernel);
-    plant_chat_stream(&kernel, "v0-abort-1");
-    let desc = make_desc("v0-abort-1", "agent-abort");
-
-    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
-    // No prompt sent — the loop is sitting in the poll sleep.
-    // abort() must wake it within one POLL_INTERVAL + a sys_read
-    // round trip.
+    mount(&kernel, "/proc");
+    let path = "/proc/pid-abort/chat-with-me";
+    plant_stream(&kernel, path);
+    let handle = spawn_real(
+        Arc::clone(&kernel),
+        make_desc("pid-abort", "scode"),
+        Mailbox::LocalStream {
+            path: path.to_string(),
+            self_id: "scode".to_string(),
+        },
+    );
+    // No message sent — the loop is parked on `sys_watch`. abort() must let
+    // it exit on the next `while !abort` check (≤ one watch timeout).
     handle.abort_signal.abort();
 
     let watcher = thread::Builder::new()
         .spawn(move || handle.join.join())
         .expect("watcher thread");
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(3);
     while !watcher.is_finished() {
-        if Instant::now() >= deadline {
-            panic!("spawn_task thread did not exit within 2s of abort()");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "run_loop did not exit within 3s of abort()"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     let _ = watcher.join();
 }
 
 #[test]
-fn skips_own_writes_to_avoid_echo_loop() {
-    // The agent's own echo writes carry from=self_agent_id; the
-    // loop must filter these out so the mailbox does not
-    // exponentially explode. Walks one round trip and asserts the
-    // stream contains exactly one agent echo (no echo-of-echo).
+fn skips_own_writes_no_reply_storm() {
+    // LocalStream reads AND replies on the same path, so the agent sees its
+    // own reply on the next poll; `from == self` filtering must stop it from
+    // replying to itself (which would explode the mailbox).
     let kernel = Arc::new(Kernel::new());
-    mount_proc(&kernel);
-    plant_chat_stream(&kernel, "v0-loop-1");
-    let desc = make_desc("v0-loop-1", "agent-loop");
-    let handle = spawn_task_echo(Arc::clone(&kernel), desc);
+    mount(&kernel, "/proc");
+    let path = "/proc/pid-filter/chat-with-me";
+    plant_stream(&kernel, path);
+    let handle = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("pid-filter", "scode"),
+        Mailbox::LocalStream {
+            path: path.to_string(),
+            self_id: "scode".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
 
     let ctx = user_ctx();
-    let cwm_path = "/proc/v0-loop-1/chat-with-me";
-    let prompt = serde_json::json!({
-        "from": "user-test",
-        "to": "agent-loop",
-        "body": "ping",
-    });
-    let write_reqs = [WriteRequest {
-        path: cwm_path.to_string(),
-        content: serde_json::to_vec(&prompt).unwrap(),
-        offset: 0,
-    }];
-    kernel
-        .sys_write(&write_reqs, &ctx)
-        .pop()
-        .expect("sys_write returned empty vec")
-        .unwrap();
-
-    let _ = wait_for_envelope_with_body(
-        &kernel,
-        cwm_path,
-        &ctx,
-        "echo: ping",
-        Duration::from_secs(2),
-    )
-    .expect("first echo did not arrive");
-    // Settle for several poll intervals so any bug-induced
-    // echo-of-echo would have written by now.
-    thread::sleep(POLL_INTERVAL * 4);
+    write_envelope(&kernel, path, &ctx, "user-test", "scode", "ping");
+    let _ = wait_for_reply(&kernel, path, &ctx, "scode", Duration::from_secs(5))
+        .expect("first agent reply did not arrive");
+    // Settle several watch cycles so any self-reply bug would have written by now.
+    thread::sleep(Duration::from_millis(600));
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
-    let (envelopes, _) = read_envelopes(&kernel, cwm_path, &ctx, 0);
-    let agent_echoes = envelopes
-        .iter()
-        .filter(|v| v.get("from").and_then(|f| f.as_str()) == Some("agent-loop"))
-        .count();
     assert_eq!(
-        agent_echoes, 1,
-        "expected exactly one agent echo, got {agent_echoes} — \
-         loop is echoing its own writes"
+        count_from(&kernel, path, &ctx, "scode"),
+        1,
+        "agent replied to its own message — the from==self filter is broken"
+    );
+}
+
+#[test]
+fn a2a_inbox_survives_read_before_it_exists() {
+    // F1 regression: the co-host boot spawns the loop bound to
+    // `/agents/<self>/chat-with-me`, which the mint may not have planted yet
+    // (or which a fresh raft replica hasn't resolved). The OLD loop broke on
+    // the first `Err` and the agent silently died for the daemon's lifetime.
+    // The loop must SURVIVE the transient error and serve the message once
+    // the inbox appears.
+    let kernel = Arc::new(Kernel::new());
+    // Deliberately do NOT mount /agents yet → the loop's first reads all Err
+    // (NotMounted). The old `Err(_) => break` would kill the loop here.
+    let handle = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
+    // Let the loop spin on the error path across several watch cycles.
+    thread::sleep(Duration::from_millis(300));
+
+    // Now the "mint" lands: mount + plant the inbox and the sender's box.
+    mount(&kernel, "/agents");
+    plant_stream(&kernel, "/agents/win-ai/chat-with-me");
+    plant_stream(&kernel, "/agents/user-test/chat-with-me");
+    let ctx = user_ctx();
+    write_envelope(
+        &kernel,
+        "/agents/win-ai/chat-with-me",
+        &ctx,
+        "user-test",
+        "win-ai",
+        "hi",
+    );
+
+    let reply = wait_for_reply(
+        &kernel,
+        "/agents/user-test/chat-with-me",
+        &ctx,
+        "win-ai",
+        Duration::from_secs(5),
+    );
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+    assert!(
+        reply.is_some(),
+        "loop died on the pre-mint read error (F1 regression) — no reply after the inbox appeared"
+    );
+}
+
+#[test]
+fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
+    // THE ping-pong fix: a turn that produces TEXT but does NOT call
+    // `send_message` must write nothing back. The old loop harvested the turn's
+    // text and auto-forwarded it, so every message bounced a reply forever; now
+    // silence (no `send_message`) lets the exchange end.
+    let kernel = Arc::new(Kernel::new());
+    mount(&kernel, "/agents");
+    plant_stream(&kernel, "/agents/win-ai/chat-with-me");
+    plant_stream(&kernel, "/agents/user-test/chat-with-me");
+    // `spawn_real` = ScriptedReply (text only) + NoTools (send_message never called).
+    let handle = spawn_real(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+    );
+
+    let ctx = user_ctx();
+    write_envelope(
+        &kernel,
+        "/agents/win-ai/chat-with-me",
+        &ctx,
+        "user-test",
+        "win-ai",
+        "hi",
+    );
+    // Give the loop ample time to run the turn and (wrongly) auto-forward.
+    let leaked = wait_for_reply(
+        &kernel,
+        "/agents/user-test/chat-with-me",
+        &ctx,
+        "win-ai",
+        Duration::from_secs(2),
+    );
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    assert!(
+        leaked.is_none(),
+        "a text-only turn auto-forwarded a reply — the ping-pong (auto-forward) is back"
+    );
+    assert_eq!(
+        count_from(&kernel, "/agents/win-ai/chat-with-me", &ctx, "win-ai"),
+        0,
+        "the agent wrote to its own inbox on a silent turn"
     );
 }

@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
 use kernel::kernel::{Kernel, OperationContext};
 use runtime::{
-    edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput, KernelFsBackend,
+    edit_file, glob_search, grep_search, read_file, write_file, FsBackend, GrepSearchInput,
+    KernelFsBackend, Session,
 };
 
 /// Minimal in-memory content backend so a fresh `Kernel` can round-trip
@@ -162,6 +163,41 @@ fn relative_paths_resolve_against_the_agent_workspace() {
     write_file(&fs, "todo.md", "- ship it").expect("relative write");
     let read = read_file(&fs, "/ws/todo.md", None, None).expect("absolute read back");
     assert_eq!(read.file.content, "- ship it");
+}
+
+#[test]
+fn oversized_tool_output_offloads_onto_the_vfs() {
+    // Proof that the offload path is fully backend-agnostic and needs NOTHING
+    // new from nexus: point a session's persistence + FsBackend at the VFS, run
+    // the real `offload_tool_result`, and read the blob back through the same
+    // kernel. The write lands as a regular file (a DT_FILE) on the VFS via the
+    // exact `create_dir_all` + `write_atomic` (→ sys_setattr/sys_stat/sys_write)
+    // the local backend uses; read-more's `fs.read` (→ sys_read) round-trips it.
+    // The VFS root (where sessions/offload live) is chosen here on the
+    // sudocode side — nexus only stores what it is told.
+    let kernel = kernel_with_root_backend();
+    let fs: Arc<dyn FsBackend> = Arc::new(vfs_backend(&kernel));
+
+    let session = Session::new()
+        .with_persistence_path("/ws/sessions/sid-1.jsonl")
+        .with_fs_backend(Arc::clone(&fs));
+
+    let id = "toolu_vfs_1";
+    let body = "L".repeat(40_000); // > the 16 KiB offload threshold
+    let (path, size) = session
+        .offload_tool_result(id, body.as_bytes())
+        .expect("offload should write to the VFS");
+
+    assert_eq!(size, body.len() as u64);
+    // The blob lives on the VFS, never on the host filesystem.
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "offload must not touch the host filesystem"
+    );
+    // Byte-exact read-back through the kernel backend (this is exactly what
+    // read_tool_output does under the hood: fs.read → sys_read).
+    let read_back = fs.read(&path).expect("VFS read of offloaded blob");
+    assert_eq!(read_back, body.as_bytes());
 }
 
 #[test]

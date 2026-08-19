@@ -15,6 +15,8 @@ use rustyline::{
     EventHandler, Helper, KeyCode, KeyEvent, Modifiers, Movement, RepeatCount,
 };
 
+use crate::render::{BOLD, DIM, RESET};
+
 /// Callback invoked by `UpArrowHandler` when the input buffer is empty.
 /// Returns `Some(text)` to splice into the buffer (async REPL dequeue);
 /// returns `None` to fall through to history navigation.
@@ -189,7 +191,7 @@ impl ConditionalEventHandler for ImagePasteHandler {
         // redraw.
         let hash_prefix = &registered.hash[..12];
         let mut stdout = std::io::stdout();
-        write!(stdout, "\r\x1b[2K  \x1b[1m[Image #{hash_prefix}]\x1b[0m\n").ok();
+        write!(stdout, "\r\x1b[2K  {BOLD}[Image #{hash_prefix}]{RESET}\n").ok();
         stdout.flush().ok();
 
         Some(Cmd::Noop)
@@ -487,7 +489,7 @@ impl LineEditor {
                         // Show exit hint.
                         write!(
                             stdout,
-                            "\x1b[2E\x1b[2K  \x1b[2mPress Ctrl-C again to exit\x1b[0m\x1b[2F"
+                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F", DIM = DIM, RESET = RESET
                         )?;
                     } else if self
                         .pending_exit_at
@@ -502,7 +504,7 @@ impl LineEditor {
                         // Show exit hint in the footer area (2 lines below prompt).
                         write!(
                             stdout,
-                            "\x1b[2E\x1b[2K  \x1b[2mPress Ctrl-C again to exit\x1b[0m\x1b[2F"
+                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F", DIM = DIM, RESET = RESET
                         )?;
                     }
 

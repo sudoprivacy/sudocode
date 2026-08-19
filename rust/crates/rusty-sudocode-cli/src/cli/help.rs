@@ -7,6 +7,7 @@ use runtime::{ConfigLoader, ConfigSource, ContentBlock, ProjectContext, Session}
 use serde_json::json;
 
 use crate::cli::session::LATEST_SESSION_REFERENCE;
+use crate::render::{ansi_fg, theme, BOLD, RESET};
 use crate::PRIMARY_SESSION_EXTENSION;
 use crate::{
     truncate_for_prompt, CliOutputFormat, LocalHelpTopic, DEPRECATED_INSTALL_COMMAND,
@@ -464,18 +465,18 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
     let mut sections = Vec::new();
     if !staged.trim().is_empty() {
         sections.push(format!(
-            "\x1b[1mStaged changes:\x1b[0m\n{}",
+            "{BOLD}Staged changes:{RESET}\n{}",
             colorize_unified_diff(staged.trim_end())
         ));
     }
     if !unstaged.trim().is_empty() {
         sections.push(format!(
-            "\x1b[1mUnstaged changes:\x1b[0m\n{}",
+            "{BOLD}Unstaged changes:{RESET}\n{}",
             colorize_unified_diff(unstaged.trim_end())
         ));
     }
 
-    Ok(format!("\x1b[1mDiff\x1b[0m\n\n{}", sections.join("\n\n")))
+    Ok(format!("{BOLD}Diff{RESET}\n\n{}", sections.join("\n\n")))
 }
 
 /// Apply per-line color to a unified-diff string.
@@ -489,6 +490,11 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 /// Preserves the original line endings so `colorize_unified_diff(s) ==
 /// s` modulo escape sequences for terminal-emulator behavior.
 pub(crate) fn colorize_unified_diff(diff: &str) -> String {
+    let t = theme();
+    let bold = BOLD;
+    let info = ansi_fg(t.info);
+    let added = ansi_fg(t.diff_added);
+    let removed = ansi_fg(t.diff_removed);
     let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
     for line in diff.split_inclusive('\n') {
         let trailing_newline = line.ends_with('\n');
@@ -498,13 +504,13 @@ pub(crate) fn colorize_unified_diff(diff: &str) -> String {
             || body.starts_with("diff --git ")
             || body.starts_with("index ")
         {
-            Some("\x1b[1m")
+            Some(bold)
         } else if body.starts_with("@@") {
-            Some("\x1b[36m")
+            Some(info.as_str())
         } else if body.starts_with('+') {
-            Some("\x1b[32m")
+            Some(added.as_str())
         } else if body.starts_with('-') {
-            Some("\x1b[31m")
+            Some(removed.as_str())
         } else {
             None
         };
@@ -512,7 +518,7 @@ pub(crate) fn colorize_unified_diff(diff: &str) -> String {
             Some(prefix) => {
                 out.push_str(prefix);
                 out.push_str(body);
-                out.push_str("\x1b[0m");
+                out.push_str(RESET);
             }
             None => out.push_str(body),
         }

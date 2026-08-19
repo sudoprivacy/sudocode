@@ -580,9 +580,12 @@ impl SpinnerHandle {
                         && last_bytes_change.elapsed().as_secs_f64()
                             >= SpinnerHandle::STALL_THRESHOLD_SECS;
 
-                    // yellow(33) for stall, blue(34) for active
-                    let color_code = if is_stalled { "33" } else { "34" };
-                    let colored = format!("\x1b[{color_code}m{line}\x1b[0m");
+                    let color = if is_stalled {
+                        ansi_fg(theme().warning)
+                    } else {
+                        ansi_fg(theme().info)
+                    };
+                    let colored = format!("{color}{line}{RESET}");
                     pb.set_message(colored);
                     pb.tick();
                 }
@@ -608,13 +611,15 @@ impl SpinnerHandle {
     pub fn finish(&mut self, label: &str) {
         self.stop_updater();
         self.pb.finish_and_clear();
-        println!("\x1b[32m✔ {label}\x1b[0m");
+        let success = ansi_fg(theme().success);
+        println!("{success}✔ {label}{RESET}");
     }
 
     pub fn fail(&mut self, label: &str) {
         self.stop_updater();
         self.pb.finish_and_clear();
-        println!("\x1b[31m✘ {label}\x1b[0m");
+        let error = ansi_fg(theme().error);
+        println!("{error}✘ {label}{RESET}");
     }
 }
 
@@ -1346,14 +1351,16 @@ impl MarkdownStreamState {
 }
 
 fn apply_code_block_background(line: &str) -> String {
+    let bg = theme().code_bg;
     let trimmed = line.trim_end_matches('\n');
     let trailing_newline = if trimmed.len() == line.len() {
         ""
     } else {
         "\n"
     };
-    let with_background = trimmed.replace("\u{1b}[0m", "\u{1b}[0;48;5;236m");
-    format!("\u{1b}[48;5;236m{with_background}\u{1b}[0m{trailing_newline}")
+    let reset_with_bg = format!("\u{1b}[0;48;5;{bg}m");
+    let with_background = trimmed.replace("\u{1b}[0m", &reset_with_bg);
+    format!("\u{1b}[48;5;{bg}m{with_background}{RESET}{trailing_newline}")
 }
 
 /// Pre-process raw markdown so that fenced code blocks whose body contains

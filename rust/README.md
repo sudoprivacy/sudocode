@@ -50,7 +50,7 @@ rust/
 - **telemetry** — session trace events and supporting telemetry payloads.
 - **tools** — tool specs and execution: Bash, ReadFile, WriteFile,
   EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent,
-  TodoWrite, NotebookEdit, Skill, ToolSearch, and the runtime-facing
+  TaskCreate, TaskUpdate, TaskList, NotebookEdit, Skill, ToolSearch, and the runtime-facing
   tool discovery surface.
 
 ## Local commands

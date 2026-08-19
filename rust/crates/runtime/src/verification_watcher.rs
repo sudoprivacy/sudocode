@@ -9,18 +9,14 @@
 //!
 //! ## Wiring points (in the `tools` crate)
 //!
-//! - **Increment**: [`record_completions`] called from
-//!   `run_todo_write` for each newly-completed todo transition.
-//!   `TaskUpdate` in sudocode is a message-append tool that does not
-//!   close a task, so it does NOT increment (unlike CC's TaskUpdate
-//!   which can transition status). If sudocode later adds a
-//!   status-transition tool, wire it here too.
+//! - **Increment**: [`record_completion_by_id`] called from
+//!   `run_task_update` when status transitions to `Completed`.
 //! - **Reset**: [`reset_streak`] called from `prepare_agent_job`
 //!   when the spawned sub-agent is `subagent_type = "Verification"`.
 //!   Assumes the model DID follow the nudge and started a real
 //!   verifier — resetting keeps the counter honest.
 //! - **Read + consume**: [`should_nudge_and_consume`] called at the
-//!   end of `run_todo_write` (and by any other completion emitter);
+//!   end of `run_task_update` (when completing a task);
 //!   returns `Some(&str)` exactly once per streak-hitting-threshold,
 //!   then resets the counter atomically so the nudge doesn't repeat.
 //!
@@ -80,11 +76,9 @@ pub fn record_completions(n: usize) {
 
 /// Process-global dedupe set: content strings whose completion has
 /// already been counted for the CURRENT streak. Cleared on
-/// [`reset_streak`]. This exists because sudocode's TodoWrite tool
-/// clears its on-disk store when all todos are Completed — after
-/// that, a re-listed "already done" batch would look brand new to a
-/// naive delta computation. Persisting the counted set in-memory
-/// makes the counter stable across those clears.
+/// [`reset_streak`]. Persisting the counted set in-memory
+/// prevents re-counting a task whose completion is reported
+/// multiple times (e.g. re-applying the same TaskUpdate).
 fn counted_ids() -> &'static Mutex<BTreeSet<String>> {
     static SEEN: std::sync::OnceLock<Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(BTreeSet::new()))
@@ -95,8 +89,7 @@ fn counted_ids() -> &'static Mutex<BTreeSet<String>> {
 /// the last reset. Returns `true` when the counter was actually
 /// bumped, `false` when the id was a duplicate.
 ///
-/// Content strings are the natural key — TodoItem doesn't have a
-/// stable ID field and re-persistence uses the same content.
+/// The task's subject string is the natural key for deduplication.
 pub fn record_completion_by_id(id: &str) -> bool {
     let mut set = counted_ids().lock().unwrap_or_else(|e| e.into_inner());
     if set.contains(id) {
@@ -112,13 +105,10 @@ pub fn record_completion_by_id(id: &str) -> bool {
 /// again from zero.
 ///
 /// The dedupe set is intentionally NOT cleared: after a
-/// Verification pass, the model typically re-lists the SAME
-/// already-completed todos (sudocode's TodoWrite clears the on-disk
-/// store when all are done, so the re-list looks brand-new to the
-/// old_todos delta). Clearing the dedupe set would treat those
-/// re-lists as fresh completions and re-fire the nudge immediately,
-/// which is worse than annoying — it teaches the model to ignore
-/// the reminder.
+/// Verification pass, re-completing the same task must NOT
+/// re-increment the counter. Clearing the dedupe set would
+/// treat those as fresh completions and re-fire the nudge
+/// immediately.
 pub fn reset_streak() {
     counter().store(0, Ordering::SeqCst);
 }

@@ -4451,6 +4451,7 @@ impl LiveCli {
             .tool_executor_mut()
             .set_output_writer(output.clone());
         runtime.tool_executor_mut().set_repl_mode(self.is_repl);
+        runtime.tool_executor_mut().set_ui_sender(ui.clone());
         runtime
             .tool_executor_mut()
             .set_question_prompter(Box::new(IocraftQuestionPrompter::new(

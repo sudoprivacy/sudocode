@@ -719,6 +719,7 @@ fn get_using_tools_section() -> String {
      - To search file contents use Grep instead of grep or rg\n\
       - Reserve Bash exclusively for system commands and terminal operations that require shell execution.\n\
      - When you need the user to provide structured preferences, configuration values, setup answers, yes/no choices, save locations, style/layout/language selections, or other form-like input, use AskUserQuestion instead of asking in plain assistant text. Do not present numbered questionnaires directly in normal assistant prose when AskUserQuestion is available.\n\
+     - Use TaskCreate to plan and track work. Mark each task completed as soon as it's done; don't batch.\n\
      - You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, make all independent tool calls in parallel for optimal performance. However, if some tool calls depend on previous calls, do NOT call these in parallel — call them sequentially.\n\
      - For simple, directed codebase searches (e.g. for a specific file/class/function) use Glob or Grep directly.\n\n\
      # Committing changes with git\n\n\

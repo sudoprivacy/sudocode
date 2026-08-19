@@ -45,17 +45,6 @@ pub mod testing {
         crate::compose_next_turn_from_envelopes(envelopes)
     }
 
-    /// Test seam for `execute_todo_write`, returning the raw JSON
-    /// output string so callers can grep for the streak-nudge
-    /// substring without depending on the private `TodoWriteOutput`
-    /// struct shape.
-    pub fn execute_todo_write_for_test(input_json: &str) -> Result<String, String> {
-        let input: crate::TodoWriteInput =
-            serde_json::from_str(input_json).map_err(|e| e.to_string())?;
-        let output = crate::execute_todo_write(input)?;
-        serde_json::to_string(&output).map_err(|e| e.to_string())
-    }
-
     /// Test seam for `prepare_agent_job`. Callers just want to fire
     /// the side effect (Verification -> reset_streak); the manifest
     /// return value is discarded because the test env has no real
@@ -275,12 +264,24 @@ fn global_cron_registry() -> &'static CronRegistry {
 fn global_task_registry() -> &'static TaskRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(TaskRegistry::new)
+    REGISTRY.get_or_init(|| {
+        if let Ok(path) = runtime::task_registry::task_store_path() {
+            TaskRegistry::load(&path)
+        } else {
+            TaskRegistry::new()
+        }
+    })
 }
 
 /// Global auth mode set by the CLI at startup. Subagents inherit this so they
 /// use the same credential path as the main agent.
 static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
+
+/// Return all tasks from the global registry. Used by the CLI to push
+/// task state to the ContextSlot after TaskCreate/TaskUpdate.
+pub fn global_task_list() -> Vec<runtime::Task> {
+    global_task_registry().list(None)
+}
 
 /// Called by the CLI at startup to set the auth mode for the entire process.
 /// Subagents automatically inherit this unless explicitly overridden.
@@ -924,34 +925,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "TodoWrite",
-            description: "Update the structured task list for the current session.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "content": { "type": "string" },
-                                "activeForm": { "type": "string" },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "completed"]
-                                }
-                            },
-                            "required": ["content", "activeForm", "status"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["todos"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
             name: "Skill",
             description: "Load a local skill definition and its instructions.",
             input_schema: json!({
@@ -1178,17 +1151,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TaskCreate",
-            description: "Create a background task that runs in a separate subprocess.",
+            description: "Create a structured task to track progress in the current session.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "prompt": { "type": "string" },
-                    "description": { "type": "string" }
+                    "subject": { "type": "string", "description": "A brief title for the task" },
+                    "description": { "type": "string", "description": "What needs to be done" },
+                    "activeForm": { "type": "string", "description": "Present continuous form shown in spinner when in_progress (e.g. 'Running tests')" },
+                    "prompt": { "type": "string", "description": "Alias for subject (backward compat)" },
+                    "metadata": { "type": "object" }
                 },
-                "required": ["prompt"],
+                "required": ["subject", "description"],
                 "additionalProperties": false
             }),
-            required_permission: PermissionMode::DangerFullAccess,
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "TaskGet",
@@ -1233,17 +1209,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TaskUpdate",
-            description: "Send a message or update to a running background task.",
+            description: "Update a task's status, subject, or other fields.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string" },
-                    "message": { "type": "string" }
+                    "taskId": { "type": "string", "description": "The ID of the task to update" },
+                    "task_id": { "type": "string", "description": "Alias for taskId (backward compat)" },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "New status for the task"
+                    },
+                    "subject": { "type": "string", "description": "New subject for the task" },
+                    "description": { "type": "string", "description": "New description" },
+                    "activeForm": { "type": "string", "description": "Present continuous form for spinner" },
+                    "message": { "type": "string", "description": "Append a message to the task (backward compat)" }
                 },
-                "required": ["task_id", "message"],
+                "required": ["taskId"],
                 "additionalProperties": false
             }),
-            required_permission: PermissionMode::DangerFullAccess,
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "TaskOutput",
@@ -1522,7 +1507,7 @@ pub fn execute_tool_with_abort(
 /// Keys are the NORMALIZED (lower-cased) alias form — the CC PascalCase
 /// names (`Bash`, `Read`, …) normalize to these. Only tools whose
 /// `execute_tool` match arm is lower/snake_case appear here; PascalCase-
-/// native tools (`EnterPlanMode`, `TodoWrite`, `Skill`, `Agent`, …) are
+/// native tools (`EnterPlanMode`, `TaskCreate`, `Skill`, `Agent`, …) are
 /// NOT aliased — [`canonicalize_tool_name`] passes them through unchanged.
 const TOOL_ALIASES: &[(&str, &str)] = &[
     ("bash", "bash"),
@@ -1540,7 +1525,7 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
 ///
 /// Names NOT in [`TOOL_ALIASES`] pass through UNCHANGED — critical for
 /// the PascalCase-native tools (`EnterPlanMode`, `ExitPlanMode`,
-/// `TodoWrite`, `WebFetch`, `Skill`, `Agent`, `TaskCreate`, …) whose
+/// `TaskCreate`, `WebFetch`, `Skill`, `Agent`, `TaskUpdate`, …) whose
 /// `execute_tool` match arms are PascalCase: lower-casing them (the prior
 /// behaviour) turned every one into `unsupported tool`.
 fn canonicalize_tool_name(name: &str) -> String {
@@ -1608,7 +1593,6 @@ fn execute_tool_with_enforcer(
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, ctx)),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
@@ -1793,14 +1777,21 @@ fn run_ask_user_question_v2(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
+    let subject = input
+        .subject
+        .or(input.prompt)
+        .ok_or_else(|| "subject is required".to_string())?;
     let registry = global_task_registry();
-    let task = registry.create(&input.prompt, input.description.as_deref());
+    let task = registry.create_with_subject(
+        &subject,
+        input.description.as_deref(),
+        input.active_form.as_deref(),
+    );
     to_pretty_json(json!({
         "task_id": task.task_id,
         "status": task.status,
-        "prompt": task.prompt,
+        "subject": task.subject,
         "description": task.description,
-        "task_packet": task.task_packet,
         "created_at": task.created_at
     }))
 }
@@ -1812,7 +1803,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
         Some(task) => to_pretty_json(json!({
             "task_id": task.task_id,
             "status": task.status,
-            "prompt": task.prompt,
+            "subject": task.subject,
             "description": task.description,
             "task_packet": task.task_packet,
             "created_at": task.created_at,
@@ -1832,7 +1823,7 @@ fn run_task_list(input: Value) -> Result<String, String> {
             json!({
                 "task_id": t.task_id,
                 "status": t.status,
-                "prompt": t.prompt,
+                "subject": t.subject,
                 "description": t.description,
                 "task_packet": t.task_packet,
                 "created_at": t.created_at,
@@ -1943,16 +1934,54 @@ fn run_task_stop(input: TaskIdInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
+    use runtime::task_registry::TaskStatus;
+
+    let task_id = input.resolved_task_id()?;
     let registry = global_task_registry();
-    match registry.update(&input.task_id, &input.message) {
-        Ok(task) => to_pretty_json(json!({
-            "task_id": task.task_id,
-            "status": task.status,
-            "message_count": task.messages.len(),
-            "last_message": input.message
-        })),
-        Err(e) => Err(e),
+
+    // Parse status string → TaskStatus
+    let new_status = input
+        .status
+        .as_deref()
+        .map(|s| match s {
+            "pending" => Ok(TaskStatus::Pending),
+            "in_progress" => Ok(TaskStatus::InProgress),
+            "completed" => Ok(TaskStatus::Completed),
+            other => Err(format!("invalid status: {other}")),
+        })
+        .transpose()?;
+
+    // Append legacy message if provided
+    if let Some(msg) = &input.message {
+        registry.update(&task_id, msg)?;
     }
+
+    // Apply structured field updates
+    let task = registry.update_fields(
+        &task_id,
+        input.subject.as_deref(),
+        input.description.as_deref(),
+        input.active_form.as_deref(),
+        new_status,
+    )?;
+
+    // Verification watcher: record completion + check for streak nudge
+    let verification_streak_nudge = if new_status == Some(TaskStatus::Completed) {
+        runtime::verification_watcher::record_completion_by_id(&task.subject);
+        runtime::verification_watcher::should_nudge_and_consume()
+    } else {
+        None
+    };
+
+    let mut result = json!({
+        "task_id": task.task_id,
+        "status": task.status,
+        "subject": task.subject,
+    });
+    if let Some(nudge) = verification_streak_nudge {
+        result["verificationStreakNudge"] = json!(nudge);
+    }
+    to_pretty_json(result)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3132,10 +3161,6 @@ fn run_web_search(input: WebSearchInput) -> Result<String, String> {
     .unwrap_or_else(|_| Err("web search thread panicked".into()))
 }
 
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
-    to_pretty_json(execute_todo_write(input)?)
-}
-
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
@@ -3325,27 +3350,6 @@ struct WebSearchInput {
     query: String,
     allowed_domains: Option<Vec<String>>,
     blocked_domains: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TodoWriteInput {
-    todos: Vec<TodoItem>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-struct TodoItem {
-    content: String,
-    #[serde(rename = "activeForm")]
-    active_form: String,
-    status: TodoStatus,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum TodoStatus {
-    Pending,
-    InProgress,
-    Completed,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3586,9 +3590,13 @@ fn normalize_ask_user_question_input(
 
 #[derive(Debug, Deserialize)]
 struct TaskCreateInput {
-    prompt: String,
+    subject: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(rename = "activeForm")]
+    active_form: Option<String>,
+    /// Backward compat alias for `subject`.
+    prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3598,8 +3606,26 @@ struct TaskIdInput {
 
 #[derive(Debug, Deserialize)]
 struct TaskUpdateInput {
-    task_id: String,
-    message: String,
+    /// Primary field (camelCase).
+    #[serde(rename = "taskId")]
+    task_id_camel: Option<String>,
+    /// Backward compat (snake_case).
+    task_id: Option<String>,
+    status: Option<String>,
+    subject: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "activeForm")]
+    active_form: Option<String>,
+    message: Option<String>,
+}
+
+impl TaskUpdateInput {
+    fn resolved_task_id(&self) -> Result<String, String> {
+        self.task_id_camel
+            .clone()
+            .or_else(|| self.task_id.clone())
+            .ok_or_else(|| "taskId is required".to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3704,27 +3730,6 @@ struct WebSearchOutput {
     results: Vec<WebSearchResultItem>,
     #[serde(rename = "durationSeconds")]
     duration_seconds: f64,
-}
-
-#[derive(Debug, Serialize)]
-struct TodoWriteOutput {
-    #[serde(rename = "oldTodos")]
-    old_todos: Vec<TodoItem>,
-    #[serde(rename = "newTodos")]
-    new_todos: Vec<TodoItem>,
-    #[serde(rename = "verificationNudgeNeeded")]
-    verification_nudge_needed: Option<bool>,
-    /// `<system-reminder>` block injected exactly once when the
-    /// `runtime::verification_watcher` streak counter crosses the
-    /// threshold (default 3). Consumed inline — subsequent
-    /// TodoWrite calls do NOT repeat the nudge until the streak
-    /// resets (either by another 3-completion streak or by
-    /// dispatching `Agent(subagent_type="Verification")`).
-    #[serde(
-        rename = "verificationStreakNudge",
-        skip_serializing_if = "Option::is_none"
-    )]
-    verification_streak_nudge: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4532,72 +4537,6 @@ fn dedupe_hits(hits: &mut Vec<SearchHit>) {
     hits.retain(|hit| seen.insert(hit.url.clone()));
 }
 
-fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {
-    validate_todos(&input.todos)?;
-    let store_path = todo_store_path()?;
-    let old_todos = if store_path.exists() {
-        serde_json::from_str::<Vec<TodoItem>>(
-            &std::fs::read_to_string(&store_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
-
-    let all_done = input
-        .todos
-        .iter()
-        .all(|todo| matches!(todo.status, TodoStatus::Completed));
-    let persisted = if all_done {
-        Vec::new()
-    } else {
-        input.todos.clone()
-    };
-
-    if let Some(parent) = store_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(
-        &store_path,
-        serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-
-    let verification_nudge_needed = (all_done
-        && input.todos.len() >= 3
-        && !input
-            .todos
-            .iter()
-            .any(|todo| todo.content.to_lowercase().contains("verif")))
-    .then_some(true);
-
-    // Streak counter: each newly-completed todo (by content string)
-    // bumps the process-global watcher exactly once via
-    // `record_completion_by_id` — the dedupe set inside
-    // `runtime::verification_watcher` shields us from sudocode's
-    // "TodoWrite clears the on-disk store when all todos are
-    // completed" behavior, which would otherwise over-count a
-    // re-persisted batch. Once the streak crosses the threshold
-    // (default 3), the model gets a one-shot `<system-reminder>`
-    // nudging it to spawn a Verification sub-agent. Reset happens
-    // either automatically on the next Verification spawn
-    // (`prepare_agent_job`) or via `should_nudge_and_consume`'s
-    // check-and-reset semantics.
-    for todo in &input.todos {
-        if matches!(todo.status, TodoStatus::Completed) {
-            runtime::verification_watcher::record_completion_by_id(&todo.content);
-        }
-    }
-    let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
-
-    Ok(TodoWriteOutput {
-        old_todos,
-        new_todos: input.todos,
-        verification_nudge_needed,
-        verification_streak_nudge,
-    })
-}
-
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let skill_path = resolve_skill_path(&input.skill)?;
     let prompt = std::fs::read_to_string(&skill_path).map_err(|error| error.to_string())?;
@@ -4610,28 +4549,6 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
         description,
         prompt,
     })
-}
-
-fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
-    if todos.is_empty() {
-        return Err(String::from("todos must not be empty"));
-    }
-    // Allow multiple in_progress items for parallel workflows
-    if todos.iter().any(|todo| todo.content.trim().is_empty()) {
-        return Err(String::from("todo content must not be empty"));
-    }
-    if todos.iter().any(|todo| todo.active_form.trim().is_empty()) {
-        return Err(String::from("todo activeForm must not be empty"));
-    }
-    Ok(())
-}
-
-fn todo_store_path() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("SUDOCODE_TODO_STORE") {
-        return Ok(std::path::PathBuf::from(path));
-    }
-    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
-    Ok(cwd.join(".sudocode-todos.json"))
 }
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
@@ -5608,7 +5525,9 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "WebSearch",
             "ToolSearch",
             "Skill",
-            "TodoWrite",
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskList",
             "StructuredOutput",
             "SendUserMessage",
         ],
@@ -5620,7 +5539,9 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "WebFetch",
             "WebSearch",
             "ToolSearch",
-            "TodoWrite",
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskList",
             "StructuredOutput",
             "SendUserMessage",
             "PowerShell",
@@ -5662,7 +5583,9 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "grep_search",
             "WebFetch",
             "WebSearch",
-            "TodoWrite",
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskList",
             "Skill",
             "ToolSearch",
             "NotebookEdit",
@@ -5694,7 +5617,9 @@ fn general_purpose_tools() -> BTreeSet<String> {
         "grep_search",
         "WebFetch",
         "WebSearch",
-        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
         "Skill",
         "ToolSearch",
         "NotebookEdit",
@@ -9001,7 +8926,8 @@ mod tests {
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"WebFetch"));
         assert!(names.contains(&"WebSearch"));
-        assert!(names.contains(&"TodoWrite"));
+        assert!(names.contains(&"TaskCreate"));
+        assert!(names.contains(&"TaskUpdate"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"ToolSearch"));
@@ -9035,12 +8961,12 @@ mod tests {
         for tool in [
             "EnterPlanMode",
             "ExitPlanMode",
-            "TodoWrite",
             "WebFetch",
             "WebSearch",
             "Skill",
             "Agent",
             "TaskCreate",
+            "TaskUpdate",
             "StructuredOutput",
             "NotebookEdit",
         ] {
@@ -9556,103 +9482,66 @@ mod tests {
     }
 
     #[test]
-    fn todo_write_persists_and_returns_previous_state() {
+    fn task_create_returns_subject_and_pending_status() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("todos.json");
-        std::env::set_var("SUDOCODE_TODO_STORE", &path);
+        let path = temp_path("tasks-create.json");
+        std::env::set_var("SUDOCODE_TASK_STORE", &path);
 
-        let first = execute_tool(
-            "TodoWrite",
+        let result = execute_tool(
+            "TaskCreate",
             &json!({
-                "todos": [
-                    {"content": "Add tool", "activeForm": "Adding tool", "status": "in_progress"},
-                    {"content": "Run tests", "activeForm": "Running tests", "status": "pending"}
-                ]
+                "subject": "Write parser",
+                "description": "Build the AST parser module",
+                "activeForm": "Writing parser"
             }),
         )
-        .expect("TodoWrite should succeed");
-        let first_output: serde_json::Value = serde_json::from_str(&first).expect("valid json");
-        assert_eq!(first_output["oldTodos"].as_array().expect("array").len(), 0);
+        .expect("TaskCreate should succeed");
+        std::env::remove_var("SUDOCODE_TASK_STORE");
+        let _ = std::fs::remove_file(&path);
 
-        let second = execute_tool(
-            "TodoWrite",
-            &json!({
-                "todos": [
-                    {"content": "Add tool", "activeForm": "Adding tool", "status": "completed"},
-                    {"content": "Run tests", "activeForm": "Running tests", "status": "completed"},
-                    {"content": "Verify", "activeForm": "Verifying", "status": "completed"}
-                ]
-            }),
-        )
-        .expect("TodoWrite should succeed");
-        std::env::remove_var("SUDOCODE_TODO_STORE");
-        let _ = std::fs::remove_file(path);
-
-        let second_output: serde_json::Value = serde_json::from_str(&second).expect("valid json");
-        assert_eq!(
-            second_output["oldTodos"].as_array().expect("array").len(),
-            2
-        );
-        assert_eq!(
-            second_output["newTodos"].as_array().expect("array").len(),
-            3
-        );
-        assert!(second_output["verificationNudgeNeeded"].is_null());
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(output["subject"], "Write parser");
+        assert_eq!(output["status"], "pending");
+        assert!(output["task_id"].as_str().is_some());
     }
 
     #[test]
-    fn todo_write_rejects_invalid_payloads_and_sets_verification_nudge() {
+    fn task_update_status_transitions() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("todos-errors.json");
-        std::env::set_var("SUDOCODE_TODO_STORE", &path);
+        let path = temp_path("tasks-update.json");
+        std::env::set_var("SUDOCODE_TASK_STORE", &path);
 
-        let empty = execute_tool("TodoWrite", &json!({ "todos": [] }))
-            .expect_err("empty todos should fail");
-        assert!(empty.contains("todos must not be empty"));
-
-        // Multiple in_progress items are now allowed for parallel workflows
-        let _multi_active = execute_tool(
-            "TodoWrite",
-            &json!({
-                "todos": [
-                    {"content": "One", "activeForm": "Doing one", "status": "in_progress"},
-                    {"content": "Two", "activeForm": "Doing two", "status": "in_progress"}
-                ]
-            }),
+        let create_result = execute_tool(
+            "TaskCreate",
+            &json!({ "subject": "Run tests", "description": "Execute test suite" }),
         )
-        .expect("multiple in-progress todos should succeed");
+        .expect("TaskCreate should succeed");
+        let created: serde_json::Value = serde_json::from_str(&create_result).expect("valid json");
+        let task_id = created["task_id"].as_str().unwrap();
 
-        let blank_content = execute_tool(
-            "TodoWrite",
-            &json!({
-                "todos": [
-                    {"content": "   ", "activeForm": "Doing it", "status": "pending"}
-                ]
-            }),
+        let update_result = execute_tool(
+            "TaskUpdate",
+            &json!({ "taskId": task_id, "status": "in_progress" }),
         )
-        .expect_err("blank content should fail");
-        assert!(blank_content.contains("todo content must not be empty"));
+        .expect("TaskUpdate should succeed");
+        let updated: serde_json::Value = serde_json::from_str(&update_result).expect("valid json");
+        assert_eq!(updated["status"], "in_progress");
 
-        let nudge = execute_tool(
-            "TodoWrite",
-            &json!({
-                "todos": [
-                    {"content": "Write tests", "activeForm": "Writing tests", "status": "completed"},
-                    {"content": "Fix errors", "activeForm": "Fixing errors", "status": "completed"},
-                    {"content": "Ship branch", "activeForm": "Shipping branch", "status": "completed"}
-                ]
-            }),
+        let complete_result = execute_tool(
+            "TaskUpdate",
+            &json!({ "taskId": task_id, "status": "completed" }),
         )
-        .expect("completed todos should succeed");
-        std::env::remove_var("SUDOCODE_TODO_STORE");
-        let _ = fs::remove_file(path);
+        .expect("TaskUpdate should succeed");
+        let completed: serde_json::Value =
+            serde_json::from_str(&complete_result).expect("valid json");
+        assert_eq!(completed["status"], "completed");
 
-        let output: serde_json::Value = serde_json::from_str(&nudge).expect("valid json");
-        assert_eq!(output["verificationNudgeNeeded"], true);
+        std::env::remove_var("SUDOCODE_TASK_STORE");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -10697,7 +10586,7 @@ mod tests {
         assert!(!explore.contains("bash"));
 
         let plan = allowed_tools_for_subagent("Plan");
-        assert!(plan.contains("TodoWrite"));
+        assert!(plan.contains("TaskCreate"));
         assert!(plan.contains("StructuredOutput"));
         assert!(!plan.contains("Agent"));
 

@@ -510,12 +510,14 @@ impl FuzzySelectState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
     SetTurnResult(String),
     ShowInputHint(String),
+    /// Update the ContextSlot's task panel with the current task list.
+    UpdateContext(Vec<runtime::Task>),
 }
 
 #[derive(Clone)]
@@ -538,6 +540,10 @@ impl UiCommandSender {
 
     pub fn show_input_hint(&self, text: &str) {
         let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
+    }
+
+    pub fn update_context(&self, tasks: Vec<runtime::Task>) {
+        let _ = self.tx.send(UiCommand::UpdateContext(tasks));
     }
 }
 
@@ -793,6 +799,72 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+// ── ContextSlot — persistent area for TaskPanel (+ future sections) ──
+
+/// Maximum number of task items shown inline before folding.
+const MAX_TASK_DISPLAY: usize = 4;
+
+/// Render the task panel as a compact single-line string.
+///
+/// Status icons: `■` in_progress/running, `☑` completed, `□` pending/created, `✗` failed/stopped.
+/// If more than `MAX_TASK_DISPLAY` items, excess is folded into a
+/// summary: `+N more (X pending, Y in_progress)`.
+fn render_task_panel(tasks: &[runtime::Task]) -> String {
+    if tasks.is_empty() {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+    let display_count = tasks.len().min(MAX_TASK_DISPLAY);
+
+    for task in &tasks[..display_count] {
+        let icon = match task.status {
+            runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => "\u{25a0}", // ■
+            runtime::TaskStatus::Completed => "\u{2611}",                                 // ☑
+            runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped => "\u{2717}",     // ✗
+            _ => "\u{25a1}",                                                              // □
+        };
+        parts.push(format!("{icon} {}", task.subject));
+    }
+
+    if tasks.len() > MAX_TASK_DISPLAY {
+        let remaining = &tasks[MAX_TASK_DISPLAY..];
+        let pending = remaining
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    runtime::TaskStatus::Pending | runtime::TaskStatus::Created
+                )
+            })
+            .count();
+        let in_progress = remaining
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    runtime::TaskStatus::InProgress | runtime::TaskStatus::Running
+                )
+            })
+            .count();
+        let mut summary_parts = Vec::new();
+        if pending > 0 {
+            summary_parts.push(format!("{pending} pending"));
+        }
+        if in_progress > 0 {
+            summary_parts.push(format!("{in_progress} in_progress"));
+        }
+        let detail = if summary_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", summary_parts.join(", "))
+        };
+        parts.push(format!("+{} more{detail}", remaining.len()));
+    }
+
+    format!("\u{1f4cb} {}", parts.join("  "))
+}
+
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
@@ -802,6 +874,10 @@ struct ReplContext {
     permission_mode: String,
     tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
+    /// Task items for the ContextSlot. Updated by `UiCommand::UpdateContext`
+    /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
+    /// instead of a `use_state` hook to avoid shifting hook indices.
+    context_tasks: Arc<Mutex<Vec<runtime::Task>>>,
 }
 
 #[component]
@@ -814,6 +890,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let tips_text = ctx.tips_line.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
+    let context_tasks = Arc::clone(&ctx.context_tasks);
+    let context_tasks_for_future = Arc::clone(&ctx.context_tasks);
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -907,6 +985,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::ShowInputHint(text)) => {
                             input_slot.set(InputSlot::Hint(text));
+                        }
+                        Ok(UiCommand::UpdateContext(tasks)) => {
+                            if let Ok(mut items) = context_tasks_for_future.lock() {
+                                *items = tasks;
+                            }
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
@@ -1277,6 +1360,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sep = "\u{2500}".repeat(w);
     let footer_text = format_footer_text(&footer_slot, &perm);
 
+    // Merge ContextSlot into the upper separator as a single
+    // multi-line Text element so the element tree structure stays
+    // identical (avoids iocraft hook-index shifts).
+    let task_line = context_tasks
+        .lock()
+        .ok()
+        .map(|items| render_task_panel(&items))
+        .unwrap_or_default();
+    let upper_sep = if task_line.is_empty() {
+        sep.clone()
+    } else {
+        format!("{task_line}\n{sep}")
+    };
+
     element! {
         View(flex_direction: FlexDirection::Column) {
             // StatusSlot
@@ -1286,8 +1383,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 StatusSlot::Tips => Some(element! { Text(content: tips_text.clone(), color: Color::DarkGrey) }),
                 StatusSlot::Empty => None,
             })
-            // Separator
-            Text(content: sep.clone(), color: Color::DarkGrey)
+            // Upper chrome: separator (+ ContextSlot + separator when tasks exist)
+            Text(content: upper_sep, color: Color::DarkGrey)
             // InputSlot
             #(panel_text.map(|panel| element! {
                 Text(content: panel, color: Color::Cyan)
@@ -1364,6 +1461,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
+        context_tasks: Arc::new(Mutex::new(Vec::new())),
     };
 
     let banner = startup_banner.to_string();

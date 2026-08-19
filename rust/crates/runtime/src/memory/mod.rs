@@ -15,6 +15,17 @@
 pub mod entry;
 pub mod index;
 pub mod loader;
+pub mod provider;
+
+/// One process-wide lock for every test in this module tree that mutates
+/// `HOME` or `SUDOCODE_MEMORY_DIR`.
+///
+/// `loader`, `provider` and this module's tests all resolve paths from the
+/// same process globals, so they have to serialize against the *same* mutex.
+/// Two module-local mutexes serialize nothing, which shows up as directories
+/// resolved against another test's `HOME`.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +35,7 @@ pub use loader::{
     agent_memory_dir_for, default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV,
     MEMORY_INDEX_FILE,
 };
+pub use provider::{FileMemoryProvider, MemoryContext, MemoryProvider};
 
 use crate::prompt::SystemPromptBuilder;
 
@@ -198,26 +210,27 @@ pub fn append_to_builder_with(
     cwd: Option<&Path>,
     variant: MemoryPromptVariant,
 ) -> SystemPromptBuilder {
-    let owned;
-    let dir = if let Some(d) = memory_dir {
-        d
-    } else if let Some(cwd) = cwd {
-        owned = default_memory_dir_for(cwd);
-        owned.as_path()
-    } else {
-        owned = default_memory_dir();
-        owned.as_path()
-    };
-    loader::ensure_memory_dir_exists(dir);
-    match MemoryIndex::load(dir) {
-        Ok(idx) => builder.append_section(idx.render_for_prompt_with(dir, variant)),
-        _ => {
-            let empty = MemoryIndex {
-                directory: dir.to_path_buf(),
-                ..Default::default()
-            };
-            builder.append_section(empty.render_for_prompt_with(dir, variant))
-        }
+    let ctx = MemoryContext::resolve(memory_dir, cwd, None, variant);
+    append_from_provider(builder, &FileMemoryProvider::new(), &ctx)
+}
+
+/// Append whatever `provider` contributes for `ctx`.
+///
+/// A provider that reports itself unavailable, or that contributes nothing,
+/// leaves the builder untouched rather than emitting an empty memory
+/// heading. This is the single seam every memory backend goes through.
+#[must_use]
+pub fn append_from_provider(
+    builder: SystemPromptBuilder,
+    provider: &dyn MemoryProvider,
+    ctx: &MemoryContext,
+) -> SystemPromptBuilder {
+    if !provider.is_available() {
+        return builder;
+    }
+    match provider.system_prompt_block(ctx) {
+        Some(block) => builder.append_section(block),
+        None => builder,
     }
 }
 
@@ -433,10 +446,7 @@ mod tests {
     use super::*;
     use crate::prompt::SystemPromptBuilder;
     use std::fs;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

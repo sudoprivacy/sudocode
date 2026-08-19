@@ -79,8 +79,8 @@ use std::time::Duration;
 
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
 use crate::input_chrome;
-use crate::render::{DIM, RESET};
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
+use crate::render::{DIM, RESET};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
 pub type SharedQueueMode = Arc<AtomicU8>;

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
 use super::format::format_tool_result;
-use crate::render::{ansi_fg, ansi_bold_fg, theme, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
+use crate::render::{ansi_bold_fg, ansi_fg, theme, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
 use crate::repl_ui::OutputSender;
 use crate::{AllowedToolSet, RuntimeMcpState};
 
@@ -670,7 +670,9 @@ impl CliToolExecutor {
         print_line(&format!("{BOLD}Choose an action:{RESET}"));
         print_line(&format!("  {info}[1]{RESET} Clear context & execute plan"));
         print_line(&format!("  {info}[2]{RESET} Keep context & execute"));
-        print_line(&format!("  {info}[3]{RESET} Keep planning (provide feedback)"));
+        print_line(&format!(
+            "  {info}[3]{RESET} Keep planning (provide feedback)"
+        ));
         print_line("");
 
         // Read the choice from the user.
@@ -707,9 +709,9 @@ impl CliToolExecutor {
                 set_pending_plan_execution(plan_for_execution);
 
                 let success = ansi_fg(theme().success);
-                print_line(
-                    &format!("{success}\u{2714} Plan confirmed. Will clear context and execute...{RESET}"),
-                );
+                print_line(&format!(
+                    "{success}\u{2714} Plan confirmed. Will clear context and execute...{RESET}"
+                ));
                 self.resume_spinner();
                 Ok(result)
             }
@@ -726,7 +728,9 @@ impl CliToolExecutor {
                     .map_err(ToolError::new)?;
 
                 let success = ansi_fg(theme().success);
-                print_line(&format!("{success}\u{2714} Exiting plan mode, keeping context.{RESET}"));
+                print_line(&format!(
+                    "{success}\u{2714} Exiting plan mode, keeping context.{RESET}"
+                ));
                 self.resume_spinner();
                 Ok(result)
             }

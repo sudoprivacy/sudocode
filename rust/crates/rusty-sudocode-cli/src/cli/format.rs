@@ -220,8 +220,11 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
 // constants. Expressed via concat! so the value can remain a `const`.
-pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str =
-    concat!("\x1b[2m", "… output truncated for display; full result preserved in session.", "\x1b[0m");
+pub(crate) const DISPLAY_TRUNCATION_NOTICE: &str = concat!(
+    "\x1b[2m",
+    "… output truncated for display; full result preserved in session.",
+    "\x1b[0m"
+);
 pub(crate) const READ_DISPLAY_MAX_LINES: usize = 10;
 pub(crate) const READ_DISPLAY_MAX_CHARS: usize = 2_000;
 /// Default upper bound on lines shown inline when summarizing tool results.
@@ -954,14 +957,20 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
 
     // Header: ╭─ Name ──...──╮
     let header_fill = border_chars.saturating_sub(name_width + 3);
-    let header = format!("  {g}╭─ {cn}{name}{RESET}{g} {}╮{RESET}", "─".repeat(header_fill));
+    let header = format!(
+        "  {g}╭─ {cn}{name}{RESET}{g} {}╮{RESET}",
+        "─".repeat(header_fill)
+    );
 
     // Content lines: │ content{padding} │
     let mut body = String::new();
     for line in &wrapped {
         let vis = display_width(&strip_ansi_codes(line));
         let pad = inner.saturating_sub(vis);
-        body.push_str(&format!("\n  {g}│{RESET} {line}{}{g} │{RESET}", " ".repeat(pad)));
+        body.push_str(&format!(
+            "\n  {g}│{RESET} {line}{}{g} │{RESET}",
+            " ".repeat(pad)
+        ));
     }
 
     // Bottom: ╰──────╯
@@ -1371,9 +1380,9 @@ pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> Str
                 "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
             )
         }
-        _ => format!(
-            "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",
-        ),
+        _ => {
+            format!("{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
+        }
     };
     match original {
         Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)

@@ -489,7 +489,9 @@ impl LineEditor {
                         // Show exit hint.
                         write!(
                             stdout,
-                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F", DIM = DIM, RESET = RESET
+                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F",
+                            DIM = DIM,
+                            RESET = RESET
                         )?;
                     } else if self
                         .pending_exit_at
@@ -504,7 +506,9 @@ impl LineEditor {
                         // Show exit hint in the footer area (2 lines below prompt).
                         write!(
                             stdout,
-                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F", DIM = DIM, RESET = RESET
+                            "\x1b[2E\x1b[2K  {DIM}Press Ctrl-C again to exit{RESET}\x1b[2F",
+                            DIM = DIM,
+                            RESET = RESET
                         )?;
                     }
 

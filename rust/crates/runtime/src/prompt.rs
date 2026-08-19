@@ -109,6 +109,65 @@ impl SystemPrompt {
     pub fn is_empty(&self) -> bool {
         self.static_sections.is_empty() && self.dynamic_sections.is_empty()
     }
+
+    /// Replace every static section — the built-in identity and behaviour
+    /// blocks (`You are Sudo Code…`, `# System`, `# Doing tasks`,
+    /// `# Executing actions with care`, `# Using your tools`,
+    /// `# Tone and style`, `# Output efficiency`) — with `text` as the
+    /// single static block.
+    ///
+    /// Dynamic sections (environment context, project context,
+    /// `AGENTS.md` instructions, runtime config, auto-memory, plugin
+    /// capabilities) are left untouched, so the caller-supplied prompt
+    /// still sees the workspace it is operating in. Callers that want a
+    /// blank-slate prompt can clear `dynamic_sections` themselves.
+    pub fn override_static_sections(&mut self, text: impl Into<String>) {
+        self.static_sections = vec![text.into()];
+    }
+
+    /// Append `text` as the last dynamic section.
+    ///
+    /// Being last puts it closest to the conversation, so it outranks the
+    /// workspace-discovered `AGENTS.md` instructions and the auto-memory
+    /// instructions that precede it. Orthogonal to
+    /// [`Self::override_static_sections`]: the two compose.
+    pub fn append_dynamic_section(&mut self, text: impl Into<String>) {
+        self.dynamic_sections.push(text.into());
+    }
+}
+
+/// Caller-supplied adjustments to the built system prompt — from the CLI
+/// (`--system-prompt` / `--append-system-prompt`) or from an ACP client
+/// (`_meta.sudocode.systemPrompt` / `_meta.sudocode.appendSystemPrompt`).
+///
+/// The two fields are orthogonal and may be combined: `system_prompt`
+/// replaces the static blocks, `append_system_prompt` adds a trailing
+/// dynamic block. Neither is truncated or escaped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemPromptOverrides {
+    /// Replaces every static section (see
+    /// [`SystemPrompt::override_static_sections`]).
+    pub system_prompt: Option<String>,
+    /// Appended as the last dynamic section (see
+    /// [`SystemPrompt::append_dynamic_section`]).
+    pub append_system_prompt: Option<String>,
+}
+
+impl SystemPromptOverrides {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.system_prompt.is_none() && self.append_system_prompt.is_none()
+    }
+
+    /// Apply both adjustments to `prompt`: override first, then append.
+    pub fn apply(&self, prompt: &mut SystemPrompt) {
+        if let Some(text) = &self.system_prompt {
+            prompt.override_static_sections(text.clone());
+        }
+        if let Some(text) = &self.append_system_prompt {
+            prompt.append_dynamic_section(text.clone());
+        }
+    }
 }
 
 /// Contents of an instruction file included in prompt construction.

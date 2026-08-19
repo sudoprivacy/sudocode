@@ -941,17 +941,23 @@ mod tests {
 
     #[test]
     fn colorize_diff_paints_added_and_removed_lines() {
+        use crate::render::{ansi_fg, theme, BOLD, RESET};
+        let t = theme();
+        let added = ansi_fg(t.diff_added);
+        let removed = ansi_fg(t.diff_removed);
+        let info = ansi_fg(t.info);
+
         let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
         let painted = colorize_unified_diff(diff);
         // Plain text content is preserved exactly when ANSI escapes are stripped.
         assert_eq!(strip_ansi(&painted), diff);
-        // The added line gets the green escape, the removed line the red one.
-        assert!(painted.contains("\u{1b}[32m+new\u{1b}[0m"));
-        assert!(painted.contains("\u{1b}[31m-old\u{1b}[0m"));
-        // Hunk header is cyan.
-        assert!(painted.contains("\u{1b}[36m@@ -1,1 +1,1 @@\u{1b}[0m"));
+        // The added line gets the theme's diff_added color, removed gets diff_removed.
+        assert!(painted.contains(&format!("{added}+new{RESET}")));
+        assert!(painted.contains(&format!("{removed}-old{RESET}")));
+        // Hunk header uses theme's info color.
+        assert!(painted.contains(&format!("{info}@@ -1,1 +1,1 @@{RESET}")));
         // File header line `diff --git` is bold.
-        assert!(painted.contains("\u{1b}[1mdiff --git a/foo b/foo\u{1b}[0m"));
+        assert!(painted.contains(&format!("{BOLD}diff --git a/foo b/foo{RESET}")));
     }
 
     #[test]

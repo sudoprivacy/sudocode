@@ -20,6 +20,7 @@ use crate::permissions::{
     PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
     QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
+use crate::prompt::SystemPromptOverrides;
 use crate::usage::UsageCostCurrency;
 use crate::workspace_root::WorkspaceRootScope;
 use agent_client_protocol::{
@@ -227,10 +228,17 @@ fn acp_mcp_servers_to_scoped(
 pub trait SdkAcpDelegate: Send + Sync + 'static {
     /// Create a new session for the given working directory, returning
     /// `(session_id, cwd, abort_signal)` on success.
+    ///
+    /// `prompt_overrides` carries the client's `_meta.sudocode.systemPrompt`
+    /// (replace the built-in static blocks) and
+    /// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block)
+    /// from `session/new`; they apply for the whole lifetime of the session,
+    /// including runtime rebuilds on `session/setModel`.
     fn new_session(
         &self,
         cwd: PathBuf,
         mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
+        prompt_overrides: SystemPromptOverrides,
     ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
 
     /// Run a prompt turn. The implementation should call observer methods
@@ -288,11 +296,16 @@ pub trait SdkAcpDelegate: Send + Sync + 'static {
 
     /// Load an existing persisted session by its ID and working directory,
     /// returning `(session_id, cwd, abort_signal)` on success.
+    ///
+    /// `prompt_overrides` has the same meaning as on [`Self::new_session`];
+    /// it is not persisted with the transcript, so a client that wants it on
+    /// a resumed session passes it again on `session/load`.
     fn load_session(
         &self,
         session_id: &str,
         cwd: PathBuf,
         mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
+        prompt_overrides: SystemPromptOverrides,
     ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
 }
 
@@ -476,9 +489,56 @@ fn initialize_meta() -> Map<String, serde_json::Value> {
             "autoHandlesWrongModel": cap.auto_handles_wrong_model,
         }),
     );
+    // Feature flags for clients: `session/new` / `session/load` accept
+    // `_meta.sudocode.systemPrompt` and `_meta.sudocode.appendSystemPrompt`
+    // (see `system_prompt_overrides_from_meta`).
+    sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
+    sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     let mut meta = Map::new();
     meta.insert("sudocode".to_string(), json!(sudocode_ns));
     meta
+}
+
+/// `_meta.sudocode` key: replace the built-in static system-prompt blocks.
+pub const SYSTEM_PROMPT_META_KEY: &str = "systemPrompt";
+/// `_meta.sudocode` key: append a trailing dynamic system-prompt block.
+pub const APPEND_SYSTEM_PROMPT_META_KEY: &str = "appendSystemPrompt";
+
+/// Read `_meta.sudocode.systemPrompt` / `_meta.sudocode.appendSystemPrompt`
+/// from a `session/new` or `session/load` request.
+///
+/// Each key is optional and they compose. A present key must be a non-empty
+/// string, otherwise `invalid_params` — a client that mistypes a value
+/// learns about it instead of silently getting the default prompt. The
+/// text is passed through verbatim: no truncation, no escaping, no size
+/// cap (the model's context window is the real limit, and the API reports
+/// that explicitly).
+fn system_prompt_overrides_from_meta(
+    meta: Option<&agent_client_protocol_schema::Meta>,
+) -> Result<SystemPromptOverrides, AcpError> {
+    let ns = meta.and_then(|m| m.get("sudocode"));
+    Ok(SystemPromptOverrides {
+        system_prompt: non_empty_string_meta(ns, SYSTEM_PROMPT_META_KEY)?,
+        append_system_prompt: non_empty_string_meta(ns, APPEND_SYSTEM_PROMPT_META_KEY)?,
+    })
+}
+
+fn non_empty_string_meta(
+    sudocode_ns: Option<&serde_json::Value>,
+    key: &str,
+) -> Result<Option<String>, AcpError> {
+    let Some(value) = sudocode_ns.and_then(|ns| ns.get(key)) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some(text) if !text.trim().is_empty() => Ok(Some(text.to_string())),
+        Some(_) => Err(AcpError::invalid_params(format!(
+            "_meta.sudocode.{key} must not be empty"
+        ))),
+        None => Err(AcpError::invalid_params(format!(
+            "_meta.sudocode.{key} must be a string"
+        ))),
+    }
 }
 
 fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::Value> {
@@ -1107,6 +1167,14 @@ pub(crate) async fn run_acp_on_transport(
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let prompt_overrides =
+                        match system_prompt_overrides_from_meta(req.meta.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                responder.respond_with_error(acp_error_to_sdk(&e))?;
+                                return Ok(());
+                            }
+                        };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     cx.spawn(async move {
@@ -1123,7 +1191,7 @@ pub(crate) async fn run_acp_on_transport(
                                 .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
                             let _scope = WorkspaceRootScope::enter(cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
-                            d.new_session(req.cwd, mcp_servers)
+                            d.new_session(req.cwd, mcp_servers, prompt_overrides)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
@@ -1549,6 +1617,14 @@ pub(crate) async fn run_acp_on_transport(
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    let prompt_overrides =
+                        match system_prompt_overrides_from_meta(req.meta.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                responder.respond_with_error(acp_error_to_sdk(&e))?;
+                                return Ok(());
+                            }
+                        };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
@@ -1566,7 +1642,7 @@ pub(crate) async fn run_acp_on_transport(
                                 .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
-                            d.load_session(&sid, cwd, mcp_servers)
+                            d.load_session(&sid, cwd, mcp_servers, prompt_overrides)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));

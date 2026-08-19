@@ -50,11 +50,11 @@ use cli::api_client::{
 };
 use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
-    load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd, parse_args,
-    permission_mode_from_label, require_sudocode_config_for_cwd, resolve_model_alias,
-    resolve_model_alias_with_config, resolve_repl_model, try_resolve_bare_skill_prompt,
-    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
-    LocalHelpTopic,
+    load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
+    parse_args_with_prompt_overrides, permission_mode_from_label, require_sudocode_config_for_cwd,
+    resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
+    try_resolve_bare_skill_prompt, try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet,
+    CliAction, CliOutputFormat, LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
@@ -432,7 +432,9 @@ fn extract_sudorouter_credentials(config: &api::SudoCodeConfig) -> Option<(Strin
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let action = parse_args(&args)?;
+    let (action, prompt_overrides) = parse_args_with_prompt_overrides(&args)?;
+    // Only writer in the process; a second `set` cannot happen.
+    let _ = CLI_PROMPT_OVERRIDES.set(prompt_overrides);
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
     // If an ensure_authenticated() call is ever added below this point it
@@ -859,6 +861,14 @@ fn print_system_prompt(
         "unknown",
         resolve_model_identity(model),
     )?;
+    // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
+    // prepend the CC-fork coordinator role prompt so `scode
+    // print-system-prompt` reflects what the runtime would send.
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
+    // Same order as a live session (`build_system_prompt_for` →
+    // `build_runtime_with_plugin_state`): CLI prompt flags first, plugin
+    // capability summary last.
+    apply_cli_prompt_overrides(&mut prompt);
     // Mirror what build_runtime_with_plugin_state does for live sessions:
     // append active SudoCode plugin capabilities so system-prompt output
     // matches what the runtime actually sends.  Load failures captured inside
@@ -867,10 +877,6 @@ fn print_system_prompt(
     if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
         prompt.dynamic_sections.push(section);
     }
-    // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
-    // prepend the CC-fork coordinator role prompt so `scode
-    // print-system-prompt` reflects what the runtime would send.
-    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -2609,6 +2615,10 @@ struct AcpCliSession {
     /// reused when the runtime is rebuilt (e.g. model switch) so they
     /// survive across the session's lifetime.
     session_mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    /// Caller-supplied system-prompt adjustments (`_meta.sudocode.systemPrompt`
+    /// / `appendSystemPrompt` on session/new or session/load). Kept on the
+    /// session so a runtime rebuild (model switch) re-applies them.
+    prompt_overrides: runtime::SystemPromptOverrides,
 }
 
 /// One live ACP session as held by [`AcpCliAgent`].
@@ -2701,6 +2711,7 @@ impl AcpCliAgent {
         &self,
         cwd: &Path,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<AcpCliSession, AcpError> {
         let cwd = canonical_session_cwd(cwd)?;
         // Config, plugin/MCP state and the API client's `.env` lookup all
@@ -2708,9 +2719,7 @@ impl AcpCliAgent {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_system_prompt_for(&cwd, &model).map_err(|error| {
-            AcpError::internal(format!("failed to build system prompt: {error}"))
-        })?;
+        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
         let session_state = new_cli_session_for(&cwd)
             .map_err(|error| AcpError::internal(format!("failed to create session: {error}")))?;
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id).map_err(
@@ -2773,6 +2782,7 @@ impl AcpCliAgent {
             abort_signal,
             started_at: Instant::now(),
             session_mcp_servers: mcp_servers.clone(),
+            prompt_overrides,
         })
     }
 
@@ -2843,8 +2853,7 @@ impl AcpCliAgent {
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
         let auth_mode = resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-        let system_prompt = build_system_prompt_for(&cwd, &resolved)
-            .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
+        let system_prompt = build_acp_system_prompt(&cwd, &resolved, &session.prompt_overrides)?;
         let mut runtime = build_runtime_for_cwd(
             &cwd,
             cloned_session,
@@ -3107,8 +3116,11 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
-        let session = self.inner.build_session(&cwd, &mcp_servers)?;
+        let session = self
+            .inner
+            .build_session(&cwd, &mcp_servers, prompt_overrides)?;
         let session_id = session.handle.id.clone();
         let session_cwd = session.cwd.clone();
         let abort_signal = session.abort_signal.clone();
@@ -3444,6 +3456,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
         let cwd = canonical_session_cwd(&cwd)?;
         // The session store, config and system prompt all resolve against
@@ -3455,9 +3468,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_system_prompt_for(&cwd, &model).map_err(|e| {
-            runtime::AcpError::internal(format!("failed to build system prompt: {e}"))
-        })?;
+        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
         let sudocode_config =
             require_sudocode_config_for_cwd(&cwd).map_err(runtime::AcpError::internal)?;
         let auth_mode =
@@ -3506,6 +3517,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 abort_signal,
                 started_at: Instant::now(),
                 session_mcp_servers: mcp_servers,
+                prompt_overrides,
             },
         );
         Ok((loaded_session_id, cwd, signal))
@@ -5860,6 +5872,37 @@ fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::
     build_system_prompt_for(&env::current_dir()?, model)
 }
 
+/// ACP variant of [`build_system_prompt_for`]: builds the process-default
+/// prompt for `cwd`/`model` (including any `--system-prompt` /
+/// `--append-system-prompt` CLI flags), then layers the session's
+/// `_meta.sudocode.systemPrompt` / `appendSystemPrompt` on top: the former
+/// swaps the static blocks, the latter appends a trailing dynamic block.
+/// Workspace-derived dynamic blocks (environment, `AGENTS.md`, memory,
+/// plugins) stay, so the caller's prompt still knows where it is running.
+fn build_acp_system_prompt(
+    cwd: &Path,
+    model: &str,
+    prompt_overrides: &runtime::SystemPromptOverrides,
+) -> Result<SystemPrompt, AcpError> {
+    let mut prompt = build_system_prompt_for(cwd, model)
+        .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
+    prompt_overrides.apply(&mut prompt);
+    Ok(prompt)
+}
+
+/// Process-wide `--system-prompt` / `--append-system-prompt` flags, set once
+/// from `run()` and applied by every prompt build in this process (REPL,
+/// `--print`, `scode system-prompt`, and the ACP default a session starts
+/// from before its own `_meta` adjustments).
+static CLI_PROMPT_OVERRIDES: std::sync::OnceLock<runtime::SystemPromptOverrides> =
+    std::sync::OnceLock::new();
+
+fn apply_cli_prompt_overrides(prompt: &mut SystemPrompt) {
+    if let Some(overrides) = CLI_PROMPT_OVERRIDES.get() {
+        overrides.apply(prompt);
+    }
+}
+
 fn build_system_prompt_for(
     cwd: &Path,
     model: &str,
@@ -5881,6 +5924,7 @@ fn build_system_prompt_for(
     // takes primacy over the default identity. See
     // runtime::coordinator_mode for the full port.
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
+    apply_cli_prompt_overrides(&mut prompt);
     Ok(prompt)
 }
 

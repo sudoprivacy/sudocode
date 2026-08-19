@@ -55,6 +55,31 @@ scode doctor
 server status, config resolution, the permission policy, the sandbox
 mode, and the tool / skill inventory.
 
+## Custom system prompt
+
+```bash
+# Replace the built-in identity + behaviour blocks
+scode --system-prompt "You are a terse release bot." "cut a release"
+
+# Keep the defaults, add house rules as the final system-prompt block
+scode --append-system-prompt "Never push to main." "cut a release"
+
+# Both at once — they compose
+scode --system-prompt "..." --append-system-prompt "..." "cut a release"
+
+# Preview what the model will receive
+scode system-prompt --append-system-prompt "Never push to main."
+```
+
+`--system-prompt` swaps out the static blocks (`You are Sudo Code…`,
+`# System`, `# Doing tasks`, …); `--append-system-prompt` adds a trailing
+block after the workspace context (environment, `AGENTS.md`, auto-memory).
+Neither is truncated or escaped, and the workspace context is always kept.
+Both are global flags, so they also apply to `scode acp` as the process
+default that ACP sessions can further adjust per session via
+`_meta.sudocode.systemPrompt` / `appendSystemPrompt` — see
+[`acp.md`](./acp.md#per-session-system-prompt-_metasudocode).
+
 ## Models
 
 Select a model with `--model`. See [`models.md`](./models.md) for aliases

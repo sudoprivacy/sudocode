@@ -86,6 +86,16 @@ struct Cli {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
+    /// Replace the built-in system prompt (identity + behaviour blocks) with TEXT.
+    /// Workspace context (AGENTS.md, environment, memory) is still appended.
+    #[arg(long, global = true, value_name = "TEXT")]
+    system_prompt: Option<String>,
+
+    /// Append TEXT as the final system-prompt block (after AGENTS.md and memory).
+    /// Combines with --system-prompt.
+    #[arg(long, global = true, value_name = "TEXT")]
+    append_system_prompt: Option<String>,
+
     #[command(subcommand)]
     command: Option<Cmd>,
 
@@ -419,25 +429,41 @@ fn parse_permission_mode_value(value: &str) -> Result<PermissionMode, String> {
 // Main entry point: parse CLI args via clap → CliAction
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_args(args: &[String]) -> Result<CliAction, String> {
+/// Parse argv into the [`CliAction`] to run plus the process-wide
+/// `--system-prompt` / `--append-system-prompt` flags, which are not part of
+/// any [`CliAction`] because they apply to every prompt build regardless of
+/// the action.
+pub(crate) fn parse_args_with_prompt_overrides(
+    args: &[String],
+) -> Result<(CliAction, runtime::SystemPromptOverrides), String> {
     // Slash-commands (`scode /help`) use a `/` prefix that clap can't handle.
     // Route them before calling clap.
     if let Some(first) = args.first() {
         if first.starts_with('/') {
-            return parse_slash_command_invocation(args);
+            return parse_slash_command_invocation(args)
+                .map(|action| (action, runtime::SystemPromptOverrides::default()));
         }
     }
 
     // Intercept `<subcommand> --help [--output-format json]` before clap
     // so we can emit structured JSON help instead of clap's default text.
     if let Some(action) = parse_local_help_action(args) {
-        return action;
+        return action.map(|action| (action, runtime::SystemPromptOverrides::default()));
     }
 
     let cli = Cli::try_parse_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()));
 
     match cli {
-        Ok(cli) => convert_cli_to_action(cli),
+        Ok(mut cli) => {
+            let prompt_overrides = runtime::SystemPromptOverrides {
+                system_prompt: non_empty(cli.system_prompt.take(), "--system-prompt")?,
+                append_system_prompt: non_empty(
+                    cli.append_system_prompt.take(),
+                    "--append-system-prompt",
+                )?,
+            };
+            convert_cli_to_action(cli).map(|action| (action, prompt_overrides))
+        }
         Err(e) => {
             // clap returns special error kinds for --help and --version.
             // Let them print to stdout and exit cleanly instead of going
@@ -449,6 +475,16 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 _ => Err(e.to_string()),
             }
         }
+    }
+}
+
+/// A prompt flag given as an empty / whitespace-only string is almost
+/// certainly a quoting mistake; reject it instead of silently sending a
+/// blank block.
+fn non_empty(value: Option<String>, flag: &str) -> Result<Option<String>, String> {
+    match value {
+        Some(text) if text.trim().is_empty() => Err(format!("{flag} must not be empty")),
+        other => Ok(other),
     }
 }
 
@@ -1277,7 +1313,9 @@ mod tests {
             .iter()
             .map(|word| (*word).to_string())
             .collect::<Vec<_>>();
-        parse_args(&args).expect("parse cli args")
+        parse_args_with_prompt_overrides(&args)
+            .expect("parse cli args")
+            .0
     }
 
     #[test]

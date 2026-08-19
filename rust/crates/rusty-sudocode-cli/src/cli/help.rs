@@ -103,6 +103,7 @@ pub(crate) fn render_help_topic(topic: LocalHelpTopic) -> String {
   Usage            scode system-prompt [--cwd <path>] [--date YYYY-MM-DD] [--output-format <format>]
   Purpose          render the resolved system prompt that `scode` would send for the given cwd + date
   Options          --cwd overrides the workspace dir · --date injects a deterministic date stamp
+                   --system-prompt / --append-system-prompt are honoured, so the output previews them
   Formats          text (default), json
   Related          scode doctor · scode dump-manifests"
             .to_string(),
@@ -811,6 +812,19 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "                              supported). ACP session-injected MCP servers bypass this."
     )?;
+    writeln!(
+        out,
+        "  --system-prompt TEXT       Replace the built-in system prompt (identity + behaviour"
+    )?;
+    writeln!(
+        out,
+        "                              blocks); workspace context (AGENTS.md, memory) still follows"
+    )?;
+    writeln!(
+        out,
+        "  --append-system-prompt TEXT  Append TEXT as the final system-prompt block; combines with"
+    )?;
+    writeln!(out, "                              --system-prompt")?;
     writeln!(
         out,
         "  --version, -V              Print version and build information locally"

@@ -55,6 +55,55 @@ session and independent across sessions:
   waits for turns in another directory to finish or to pause on user input
   before it starts, and a paused turn gives the directory back while it waits.
 
+### Per-session system prompt (`_meta.sudocode.*`)
+
+`session/new` and `session/load` accept two optional, orthogonal keys under
+the request's `_meta.sudocode` object. Both are plain strings, passed to the
+model verbatim — no truncation, no escaping, no size cap beyond the model's
+own context window, and no policy about who may use which: that is the
+caller's (e.g. a multi-tenant service's) decision.
+
+```json
+{
+  "cwd": "/work/tenant-a",
+  "mcpServers": [],
+  "_meta": {
+    "sudocode": {
+      "systemPrompt": "You are Tenant A's release bot. ...",
+      "appendSystemPrompt": "House rules: never push to main. ..."
+    }
+  }
+}
+```
+
+| Key | Effect |
+|---|---|
+| `systemPrompt` | **Override.** Replaces the built-in static system-prompt blocks (the `You are Sudo Code…` identity, `# System`, `# Doing tasks`, `# Executing actions with care`, `# Using your tools`, `# Tone and style`, `# Output efficiency`) with this text as the single static block. |
+| `appendSystemPrompt` | **Append.** Added as the last dynamic block — after the environment / project context, the discovered `AGENTS.md` instructions, the runtime-config summary and the auto-memory instructions (only the short plugin-capability inventory, when plugins are enabled, follows it). Being last gives it the highest recency weight, so it outranks workspace files such as `AGENTS.md`. |
+
+The two compose: set both and the static blocks are replaced *and* the
+extra block is appended. Workspace-derived dynamic blocks (environment,
+`AGENTS.md`, memory) are always kept, so an overridden prompt still knows
+which directory it is operating in.
+
+Rules:
+
+- A present key must be a non-empty string; an empty/whitespace string or a
+  non-string value is rejected with `invalid_params` (`-32602`) rather than
+  silently ignored.
+- The values are bound to the session for its whole lifetime — a
+  `session/setModel` rebuilds the runtime with them re-applied. They are
+  **not** persisted with the transcript; a client that wants them on a
+  resumed session passes them again on `session/load`.
+- They layer on top of the process-wide `--system-prompt` /
+  `--append-system-prompt` CLI flags of the `scode acp` process, if any:
+  a session `systemPrompt` replaces whatever the process default static
+  block is, and a session `appendSystemPrompt` is appended after the
+  process-level append.
+- The `initialize` response advertises `_meta.sudocode.systemPromptOverride:
+  true` and `_meta.sudocode.systemPromptAppend: true` so clients can
+  feature-detect.
+
 ### `session/load`
 
 `agentCapabilities.loadSession` is advertised. `session/load

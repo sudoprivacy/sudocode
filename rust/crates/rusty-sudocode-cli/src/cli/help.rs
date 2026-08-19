@@ -7,6 +7,7 @@ use runtime::{ConfigLoader, ConfigSource, ContentBlock, ProjectContext, Session}
 use serde_json::json;
 
 use crate::cli::session::LATEST_SESSION_REFERENCE;
+use crate::render::{ansi_fg, theme, BOLD, RESET};
 use crate::PRIMARY_SESSION_EXTENSION;
 use crate::{
     truncate_for_prompt, CliOutputFormat, LocalHelpTopic, DEPRECATED_INSTALL_COMMAND,
@@ -464,18 +465,18 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
     let mut sections = Vec::new();
     if !staged.trim().is_empty() {
         sections.push(format!(
-            "\x1b[1mStaged changes:\x1b[0m\n{}",
+            "{BOLD}Staged changes:{RESET}\n{}",
             colorize_unified_diff(staged.trim_end())
         ));
     }
     if !unstaged.trim().is_empty() {
         sections.push(format!(
-            "\x1b[1mUnstaged changes:\x1b[0m\n{}",
+            "{BOLD}Unstaged changes:{RESET}\n{}",
             colorize_unified_diff(unstaged.trim_end())
         ));
     }
 
-    Ok(format!("\x1b[1mDiff\x1b[0m\n\n{}", sections.join("\n\n")))
+    Ok(format!("{BOLD}Diff{RESET}\n\n{}", sections.join("\n\n")))
 }
 
 /// Apply per-line color to a unified-diff string.
@@ -489,6 +490,11 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 /// Preserves the original line endings so `colorize_unified_diff(s) ==
 /// s` modulo escape sequences for terminal-emulator behavior.
 pub(crate) fn colorize_unified_diff(diff: &str) -> String {
+    let t = theme();
+    let bold = BOLD;
+    let info = ansi_fg(t.info);
+    let added = ansi_fg(t.diff_added);
+    let removed = ansi_fg(t.diff_removed);
     let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
     for line in diff.split_inclusive('\n') {
         let trailing_newline = line.ends_with('\n');
@@ -498,13 +504,13 @@ pub(crate) fn colorize_unified_diff(diff: &str) -> String {
             || body.starts_with("diff --git ")
             || body.starts_with("index ")
         {
-            Some("\x1b[1m")
+            Some(bold)
         } else if body.starts_with("@@") {
-            Some("\x1b[36m")
+            Some(info.as_str())
         } else if body.starts_with('+') {
-            Some("\x1b[32m")
+            Some(added.as_str())
         } else if body.starts_with('-') {
-            Some("\x1b[31m")
+            Some(removed.as_str())
         } else {
             None
         };
@@ -512,7 +518,7 @@ pub(crate) fn colorize_unified_diff(diff: &str) -> String {
             Some(prefix) => {
                 out.push_str(prefix);
                 out.push_str(body);
-                out.push_str("\x1b[0m");
+                out.push_str(RESET);
             }
             None => out.push_str(body),
         }
@@ -935,17 +941,23 @@ mod tests {
 
     #[test]
     fn colorize_diff_paints_added_and_removed_lines() {
+        use crate::render::{ansi_fg, theme, BOLD, RESET};
+        let t = theme();
+        let added = ansi_fg(t.diff_added);
+        let removed = ansi_fg(t.diff_removed);
+        let info = ansi_fg(t.info);
+
         let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
         let painted = colorize_unified_diff(diff);
         // Plain text content is preserved exactly when ANSI escapes are stripped.
         assert_eq!(strip_ansi(&painted), diff);
-        // The added line gets the green escape, the removed line the red one.
-        assert!(painted.contains("\u{1b}[32m+new\u{1b}[0m"));
-        assert!(painted.contains("\u{1b}[31m-old\u{1b}[0m"));
-        // Hunk header is cyan.
-        assert!(painted.contains("\u{1b}[36m@@ -1,1 +1,1 @@\u{1b}[0m"));
+        // The added line gets the theme's diff_added color, removed gets diff_removed.
+        assert!(painted.contains(&format!("{added}+new{RESET}")));
+        assert!(painted.contains(&format!("{removed}-old{RESET}")));
+        // Hunk header uses theme's info color.
+        assert!(painted.contains(&format!("{info}@@ -1,1 +1,1 @@{RESET}")));
         // File header line `diff --git` is bold.
-        assert!(painted.contains("\u{1b}[1mdiff --git a/foo b/foo\u{1b}[0m"));
+        assert!(painted.contains(&format!("{BOLD}diff --git a/foo b/foo{RESET}")));
     }
 
     #[test]

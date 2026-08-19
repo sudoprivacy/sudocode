@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
 use super::format::format_tool_result;
-use crate::render::{SpinnerRef, TerminalRenderer};
+use crate::render::{ansi_bold_fg, ansi_fg, theme, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
 use crate::repl_ui::OutputSender;
 use crate::{AllowedToolSet, RuntimeMcpState};
 
@@ -176,10 +176,10 @@ impl CliToolExecutor {
                     }
                 }
                 let line = if let Some(msg) = &progress.message {
-                    format!("  \x1b[2m\u{27f3} {msg}{status}\x1b[0m")
+                    format!("  {DIM}\u{27f3} {msg}{status}{RESET}")
                 } else {
                     format!(
-                        "  \x1b[2m\u{27f3} progress: {:.0}{status}\x1b[0m",
+                        "  {DIM}\u{27f3} progress: {:.0}{status}{RESET}",
                         progress.progress
                     )
                 };
@@ -210,7 +210,7 @@ impl CliToolExecutor {
                 format!("{} B", progress.total_bytes)
             };
             let line = format!(
-                "  \x1b[2m\u{27f3} {last_line}  ({} lines, {bytes_display})\x1b[0m",
+                "  {DIM}\u{27f3} {last_line}  ({} lines, {bytes_display}){RESET}",
                 progress.total_lines,
             );
             if let Some(ref writer) = output_writer {
@@ -650,30 +650,33 @@ impl CliToolExecutor {
         self.pause_spinner();
 
         print_line("");
-        print_line("\x1b[1m\u{1f4cb} Plan ready for review:\x1b[0m");
+        print_line(&format!("{BOLD}\u{1f4cb} Plan ready for review:{RESET}"));
         print_line("");
 
         let lines: Vec<&str> = plan_display.lines().collect();
         let display_limit = 20;
         for line in lines.iter().take(display_limit) {
-            print_line(&format!("  \x1b[2m{line}\x1b[0m"));
+            print_line(&format!("  {DIM}{line}{RESET}"));
         }
         if lines.len() > display_limit {
             print_line(&format!(
-                "  \x1b[2m... ({} more lines)\x1b[0m",
+                "  {DIM}... ({} more lines){RESET}",
                 lines.len() - display_limit
             ));
         }
 
         print_line("");
-        print_line("\x1b[1mChoose an action:\x1b[0m");
-        print_line("  \x1b[36m[1]\x1b[0m Clear context & execute plan");
-        print_line("  \x1b[36m[2]\x1b[0m Keep context & execute");
-        print_line("  \x1b[36m[3]\x1b[0m Keep planning (provide feedback)");
+        let info = ansi_fg(theme().info);
+        print_line(&format!("{BOLD}Choose an action:{RESET}"));
+        print_line(&format!("  {info}[1]{RESET} Clear context & execute plan"));
+        print_line(&format!("  {info}[2]{RESET} Keep context & execute"));
+        print_line(&format!(
+            "  {info}[3]{RESET} Keep planning (provide feedback)"
+        ));
         print_line("");
 
         // Read the choice from the user.
-        print!("\x1b[1mYour choice (1/2/3): \x1b[0m");
+        print!("{BOLD}Your choice (1/2/3): {RESET}");
         io::stdout()
             .flush()
             .map_err(|e| ToolError::new(e.to_string()))?;
@@ -705,9 +708,10 @@ impl CliToolExecutor {
                 };
                 set_pending_plan_execution(plan_for_execution);
 
-                print_line(
-                    "\x1b[32m\u{2714} Plan confirmed. Will clear context and execute...\x1b[0m",
-                );
+                let success = ansi_fg(theme().success);
+                print_line(&format!(
+                    "{success}\u{2714} Plan confirmed. Will clear context and execute...{RESET}"
+                ));
                 self.resume_spinner();
                 Ok(result)
             }
@@ -723,13 +727,17 @@ impl CliToolExecutor {
                     )
                     .map_err(ToolError::new)?;
 
-                print_line("\x1b[32m\u{2714} Exiting plan mode, keeping context.\x1b[0m");
+                let success = ansi_fg(theme().success);
+                print_line(&format!(
+                    "{success}\u{2714} Exiting plan mode, keeping context.{RESET}"
+                ));
                 self.resume_spinner();
                 Ok(result)
             }
             _ => {
                 // Choice 3 or any other input: stay in plan mode.
-                print_line("\x1b[33m\u{21a9} Staying in plan mode. Provide feedback to refine the plan.\x1b[0m");
+                let warning = ansi_fg(theme().warning);
+                print_line(&format!("{warning}\u{21a9} Staying in plan mode. Provide feedback to refine the plan.{RESET}"));
                 self.resume_spinner();
                 Err(ToolError::new(
                     "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",

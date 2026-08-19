@@ -17,7 +17,7 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer};
+use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, RESET};
 use crate::repl_ui::OutputSender;
 use std::sync::Arc;
 
@@ -808,7 +808,7 @@ impl ResponseGlyphState {
                     out.push_str("  ");
                 } else {
                     self.started = true;
-                    out.push_str("\r\x1b[2K\x1b[1m⏺\x1b[0m ");
+                    out.push_str(&format!("\r\x1b[2K{BOLD}⏺{RESET} "));
                 }
                 self.visible_col = 2;
             }

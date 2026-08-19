@@ -20,12 +20,14 @@
 
 use std::io::{self, Write};
 
+use crate::render::{DIM, RESET};
+
 fn term_width() -> usize {
     crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize)
 }
 
 fn separator(width: usize) -> String {
-    format!("\x1b[2m{}\x1b[0m", "─".repeat(width))
+    format!("{DIM}{}{RESET}", "─".repeat(width))
 }
 
 fn format_footer(permission_mode: &str) -> String {
@@ -40,7 +42,7 @@ fn format_footer(permission_mode: &str) -> String {
         "read-only" => "read only",
         other => other,
     };
-    format!("  \x1b[2m{icon} {label} mode · /help for commands · /permissions to change\x1b[0m")
+    format!("  {DIM}{icon} {label} mode · /help for commands · /permissions to change{RESET}")
 }
 
 /// Print the sandwich chrome (top sep, prompt placeholder, bottom sep,

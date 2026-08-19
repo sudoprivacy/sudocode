@@ -80,6 +80,7 @@ use std::time::Duration;
 use crate::input::{EscAbortHook, LineEditor, ReadOutcome};
 use crate::input_chrome;
 use crate::input_queue::{QueueMode, SubmitOutcome, TurnInputCoordinator};
+use crate::render::{DIM, RESET};
 
 /// Shared queue mode that can be toggled at runtime via `/config set`.
 pub type SharedQueueMode = Arc<AtomicU8>;
@@ -336,7 +337,7 @@ pub fn run_coordinator_loop<D: TurnDriver + 'static>(
                     }
                     SubmitOutcome::Rejected => {
                         eprintln!(
-                            "\x1b[2m(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead)\x1b[0m"
+                            "{DIM}(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead){RESET}"
                         );
                     }
                 }

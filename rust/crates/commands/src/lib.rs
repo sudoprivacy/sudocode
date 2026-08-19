@@ -154,7 +154,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "init",
         aliases: &[],
-        summary: "Create a starter CLAUDE.md for this repo",
+        summary: "Create a starter AGENTS.md for this repo",
         argument_hint: None,
         resume_supported: true,
     },

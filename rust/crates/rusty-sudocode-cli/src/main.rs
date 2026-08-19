@@ -5821,11 +5821,6 @@ fn print_skills_for_outcome(
     Ok(())
 }
 
-fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    Ok(initialize_repo(&cwd)?.render())
-}
-
 fn run_init(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let report = initialize_repo(&cwd)?;

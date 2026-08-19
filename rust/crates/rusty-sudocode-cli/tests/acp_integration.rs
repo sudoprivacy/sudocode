@@ -485,6 +485,18 @@ async fn scenario_initialize(client: &mut AcpTestClient) {
     assert_eq!(img_cap["downsampleTargetBytes"].as_u64(), Some(512 * 1024));
     assert_eq!(img_cap["autoHandlesOversized"].as_bool(), Some(true));
     assert_eq!(img_cap["autoHandlesWrongModel"].as_bool(), Some(true));
+
+    // `_meta.sudocode.systemPromptOverride` / `systemPromptAppend` tell
+    // clients (apeiron, sudowork) that `session/new` / `session/load` honour
+    // `_meta.sudocode.systemPrompt` / `appendSystemPrompt` — see
+    // `acp_session_new_system_prompt_override_and_append_reach_model`.
+    for flag in ["systemPromptOverride", "systemPromptAppend"] {
+        assert_eq!(
+            result["_meta"]["sudocode"][flag].as_bool(),
+            Some(true),
+            "initialize must advertise _meta.sudocode.{flag}"
+        );
+    }
 }
 
 async fn scenario_session_new(client: &mut AcpTestClient, cwd: &std::path::Path) -> String {
@@ -2246,6 +2258,219 @@ async fn acp_session_new_mcp_survives_model_switch() {
         blob.contains("echo:hello from mcp parity"),
         "mcp should remain available after model switch; got: {blob}"
     );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Run one `streaming_text` turn on `session_id` and return the raw body of
+/// the last `/v1/messages` request the mock received for it.
+async fn last_model_request_after_prompt(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    session_id: &str,
+    text: &str,
+) -> String {
+    let before = server.captured_requests().await.len();
+    let (_notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text {text}") }]
+            }),
+        )
+        .await;
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "turn should complete: {resp}"
+    );
+    let requests = server.captured_requests().await;
+    assert!(requests.len() > before, "prompt should reach the model");
+    requests
+        .iter()
+        .rev()
+        .find(|r| !r.path.contains("count_tokens"))
+        .expect("a /v1/messages request")
+        .raw_body
+        .clone()
+}
+
+/// `session/new` carrying the given `_meta.sudocode` object; returns the raw response.
+async fn session_new_with_meta(
+    client: &mut AcpTestClient,
+    cwd: &std::path::Path,
+    sudocode_meta: Value,
+) -> Value {
+    let (_, resp) = client
+        .send_request(
+            "session/new",
+            json!({
+                "cwd": cwd.to_string_lossy(),
+                "mcpServers": [],
+                "_meta": { "sudocode": sudocode_meta },
+            }),
+        )
+        .await;
+    resp
+}
+
+fn session_id_of(resp: &Value) -> String {
+    resp["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sessionId should be present; got: {resp}"))
+        .to_string()
+}
+
+/// Empty / non-string `_meta.sudocode.systemPrompt` / `appendSystemPrompt`
+/// values must be rejected with `invalid_params`, never silently ignored.
+async fn assert_bad_prompt_meta_rejected(
+    client: &mut AcpTestClient,
+    root: &std::path::Path,
+    valid_override: &str,
+) {
+    for bad_meta in [
+        json!({"systemPrompt": ""}),
+        json!({"systemPrompt": 42}),
+        json!({"appendSystemPrompt": "   "}),
+        json!({"appendSystemPrompt": ["x"]}),
+        json!({"systemPrompt": valid_override, "appendSystemPrompt": 7}),
+    ] {
+        let resp = session_new_with_meta(client, root, bad_meta.clone()).await;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32602),
+            "bad _meta.sudocode {bad_meta} must be rejected with invalid_params; got: {resp}"
+        );
+    }
+}
+
+/// Built-in identity block: present on the default prompt, gone under override.
+const DEFAULT_IDENTITY: &str = "You are Sudo Code";
+/// The dynamic block every session carries; the append must land after it.
+const MEMORY_HEADING: &str = "# auto memory";
+
+/// `_meta.sudocode.systemPrompt` (replace the built-in static blocks) and
+/// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block) on
+/// `session/new`, checked on the wire body the model receives:
+///  - neither → the default prompt (regression guard),
+///  - append only → appended after the auto-memory block, identity kept,
+///  - override only → identity replaced, nothing appended,
+///  - both → both take effect (the two are orthogonal),
+///  - other sessions in the process are unaffected,
+///  - both survive `session/setModel`, and `session/load` honours both,
+///  - empty / non-string values → `invalid_params` for either key.
+#[tokio::test]
+async fn acp_session_new_system_prompt_override_and_append_reach_model() {
+    const OVERRIDE: &str = "You are override-persona-3b9e1d. Reply tersely.";
+    const APPEND: &str = "Tenant rule append-4f7a20: always sign off with AHOY.";
+    const LOAD_OVERRIDE: &str = "You are load-persona-7c2f40. Reply in haiku.";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("sysprompt-override");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let root = workspace.root.clone();
+
+    // neither: default prompt, nothing injected.
+    let plain = scenario_session_new(&mut client, &root).await;
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "p1").await;
+    assert!(
+        body.contains(DEFAULT_IDENTITY) && !body.contains(OVERRIDE) && !body.contains(APPEND),
+        "no _meta → default prompt; body: {body}"
+    );
+
+    // append only.
+    let resp =
+        session_new_with_meta(&mut client, &root, json!({"appendSystemPrompt": APPEND})).await;
+    let append_only = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &append_only, "a1").await;
+    assert!(
+        body.contains(DEFAULT_IDENTITY) && body.contains(APPEND),
+        "append must reach the model with the identity block intact; body: {body}"
+    );
+    let (memory_at, append_at) = (body.find(MEMORY_HEADING), body.find(APPEND));
+    assert!(
+        memory_at.is_some() && append_at > memory_at,
+        "append must land after the auto-memory block: memory@{memory_at:?} append@{append_at:?}"
+    );
+
+    // override only.
+    let resp = session_new_with_meta(&mut client, &root, json!({"systemPrompt": OVERRIDE})).await;
+    let override_only = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &override_only, "o1").await;
+    assert!(
+        body.contains(OVERRIDE) && !body.contains(DEFAULT_IDENTITY) && !body.contains(APPEND),
+        "override must replace the identity block; body: {body}"
+    );
+
+    // both.
+    let resp = session_new_with_meta(
+        &mut client,
+        &root,
+        json!({"systemPrompt": OVERRIDE, "appendSystemPrompt": APPEND}),
+    )
+    .await;
+    let both = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &both, "b1").await;
+    assert!(
+        body.contains(OVERRIDE) && body.contains(APPEND) && !body.contains(DEFAULT_IDENTITY),
+        "override and append must compose; body: {body}"
+    );
+
+    // The default session in the same process is still untouched.
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "p2").await;
+    assert!(
+        body.contains(DEFAULT_IDENTITY) && !body.contains(OVERRIDE) && !body.contains(APPEND),
+        "other sessions must not inherit another session's _meta; body: {body}"
+    );
+
+    // setModel rebuilds the runtime; both adjustments must be re-applied.
+    let (_, set_resp) = client
+        .send_request(
+            "session/set_model",
+            json!({"sessionId": both, "modelId": "haiku"}),
+        )
+        .await;
+    assert!(
+        set_resp.get("error").is_none(),
+        "session/setModel should succeed; got: {set_resp}"
+    );
+    let body = last_model_request_after_prompt(&mut client, &server, &both, "b2").await;
+    assert!(
+        body.contains(OVERRIDE) && body.contains(APPEND) && !body.contains(DEFAULT_IDENTITY),
+        "override + append must survive a model switch; body: {body}"
+    );
+
+    // session/load accepts the same fields.
+    let (_, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": plain,
+                "cwd": root.to_string_lossy(),
+                "mcpServers": [],
+                "_meta": { "sudocode": { "systemPrompt": LOAD_OVERRIDE, "appendSystemPrompt": APPEND } },
+            }),
+        )
+        .await;
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load with _meta should succeed; got: {load_resp}"
+    );
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "p3").await;
+    assert!(
+        body.contains(LOAD_OVERRIDE) && body.contains(APPEND) && !body.contains(DEFAULT_IDENTITY),
+        "session/load override + append must reach the model; body: {body}"
+    );
+
+    // Validation: empty / non-string values are invalid_params for either key.
+    assert_bad_prompt_meta_rejected(&mut client, &root, OVERRIDE).await;
 
     client.shutdown().await;
     workspace.cleanup();

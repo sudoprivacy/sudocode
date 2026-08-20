@@ -12,11 +12,16 @@
 //! tools: [read_file, glob_search, grep_search]
 //! permissionMode: read-only
 //! memory: project
-//! omitClaudeMd: true
 //! ---
 //! You are a naming committee.  Reply with names, one per line.  Do
 //! not explain or elaborate.
 //! ```
+//!
+//! Unrecognised frontmatter keys are ignored. That includes CC's
+//! `omitClaudeMd`: Sudo Code never loads a CLAUDE.md hierarchy (only
+//! `AGENTS.md` is discovered), so the flag has nothing to switch off and
+//! is deliberately not modelled. Existing agent files that still carry it
+//! keep parsing; the key is a no-op.
 //!
 //! Files without frontmatter — or with frontmatter missing the
 //! required `name` and `description` fields — are silently skipped
@@ -62,14 +67,15 @@ use std::path::{Path, PathBuf};
 /// | `model`              | `model`                 | `Some("inherit")` means fall back to parent model.|
 /// | `permission_mode`    | `permissionMode`        | Threaded to `PermissionMode::from_str` at spawn.  |
 /// | `memory`             | `memory`                | `user` / `project` / `local`, or `None`.          |
-/// | `omit_claude_md`     | `omitClaudeMd`          | Slim-subagent kill-switch; default `false`.       |
 /// | `system_prompt`      | agent body              | Everything after the closing `---`.               |
 /// | `source_path`        | `filename` + `baseDir`  | Reconstructed on-demand from this path.           |
 ///
 /// Not (yet) ported: `disallowedTools`, `skills`, `mcpServers`,
 /// `hooks`, `color`, `effort`, `maxTurns`,
 /// `criticalSystemReminder_EXPERIMENTAL`, `requiredMcpServers`,
-/// `background`, `initialPrompt`, `isolation`. When a downstream commit
+/// `background`, `initialPrompt`, `isolation`. Intentionally not
+/// ported: `omitClaudeMd` (no CLAUDE.md loading exists to suppress; the
+/// key is accepted and ignored). When a downstream commit
 /// needs one of them, the parser can be extended without touching
 /// callers because [`load_md_agent_from_str`] is the sole entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,9 +99,6 @@ pub struct CustomAgentDefinition {
     pub permission_mode: Option<String>,
     /// Memory scope: `user`, `project`, `local`, or `None`.
     pub memory: Option<String>,
-    /// When `true`, the parent CLAUDE.md hierarchy is omitted from the
-    /// child's system prompt — matches CC's cost-saving flag.
-    pub omit_claude_md: bool,
     /// Everything after the closing `---` delimiter, verbatim.  Used
     /// as the child's system-prompt body.
     pub system_prompt: String,
@@ -171,7 +174,6 @@ pub fn load_md_agent_from_str(contents: &str, source_path: &Path) -> Option<Cust
     let mut model: Option<String> = None;
     let mut permission_mode: Option<String> = None;
     let mut memory: Option<String> = None;
-    let mut omit_claude_md = false;
 
     for (key, raw_value) in parse_frontmatter_kv(frontmatter) {
         match key.as_str() {
@@ -185,14 +187,12 @@ pub fn load_md_agent_from_str(contents: &str, source_path: &Path) -> Option<Cust
                 permission_mode = Some(strip_quotes(&raw_value).to_string());
             }
             "memory" => memory = Some(strip_quotes(&raw_value).to_string()),
-            "omitClaudeMd" | "omit_claude_md" => {
-                omit_claude_md = parse_bool(&raw_value).unwrap_or(false);
-            }
             _ => {
-                // Unrecognised keys are silently accepted; a future
-                // commit that adds e.g. `color` or `effort` support
-                // will pick them up here without breaking existing
-                // frontmatter authored ahead of time.
+                // Unrecognised keys (including CC's `omitClaudeMd`, see
+                // module docs) are silently accepted; a future commit
+                // that adds e.g. `color` or `effort` support will pick
+                // them up here without breaking existing frontmatter
+                // authored ahead of time.
             }
         }
     }
@@ -207,7 +207,6 @@ pub fn load_md_agent_from_str(contents: &str, source_path: &Path) -> Option<Cust
         model,
         permission_mode,
         memory,
-        omit_claude_md,
         system_prompt: body.trim_start_matches('\n').to_string(),
         source_path: source_path.to_path_buf(),
     })
@@ -320,14 +319,6 @@ fn parse_tools_list(raw: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn parse_bool(raw: &str) -> Option<bool> {
-    match strip_quotes(raw).trim().to_ascii_lowercase().as_str() {
-        "true" | "yes" | "on" | "1" => Some(true),
-        "false" | "no" | "off" | "0" => Some(false),
-        _ => None,
-    }
-}
-
 /// Return the current user's home dir. Delegated so tests can shim it
 /// via env var without touching every call site.
 fn home_dir() -> Option<PathBuf> {
@@ -364,7 +355,6 @@ mod tests {
         assert_eq!(def.description, "Names things.");
         assert!(def.tools.is_none(), "no tools -> inherit default");
         assert!(def.model.is_none());
-        assert!(!def.omit_claude_md);
         assert!(def.system_prompt.contains("You are a namer."));
     }
 
@@ -424,7 +414,7 @@ body";
         assert_eq!(def.model.as_deref(), Some("opus"));
         assert_eq!(def.permission_mode.as_deref(), Some("read-only"));
         assert_eq!(def.memory.as_deref(), Some("project"));
-        assert!(def.omit_claude_md);
+        // `omitClaudeMd` is a CC-only key; it must be tolerated but has no field.
     }
 
     #[test]

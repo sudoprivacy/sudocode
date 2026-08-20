@@ -70,7 +70,7 @@ pub(crate) fn render_help_topic(topic: LocalHelpTopic) -> String {
             .to_string(),
         LocalHelpTopic::Init => "Init
   Usage            scode init [--output-format <format>]
-  Purpose          create .nexus/sudocode/, .scode.json, .gitignore, and CLAUDE.md in the current project
+  Purpose          create .nexus/sudocode/, .scode.json, .gitignore, and AGENTS.md in the current project
   Output           list of created vs. skipped files (idempotent: safe to re-run)
   Formats          text (default), json
   Related          scode status · scode doctor"

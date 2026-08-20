@@ -101,8 +101,10 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     // `[^\n]*` cannot reach a `\r\n` and the expect times out.
     sess.expect("─╮[^\n]*\r\n")
         .expect("tool-call box top line should end with CRLF, not a bare LF");
-    sess.expect("└ [^\n]*\r\n")
-        .expect("tool-result body line should end with CRLF, not a bare LF");
+    // The tool result line uses ⏺ (bold dot) as the icon. Match either
+    // the legacy `└ ` or the current `⏺` format — both must end CRLF.
+    sess.expect("(?:└ |⏺)[^\n]*\r\n")
+        .expect("tool-result line should end with CRLF, not a bare LF");
     // The status line is the last turn output through the FIFO channel —
     // once it is on the stream, the whole turn has rendered.
     sess.expect("ctx ").expect("turn status line");
@@ -110,6 +112,7 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     let mut box_indents = indents_of_rows_containing(&sess, "╭─ ");
     box_indents.extend(indents_of_rows_containing(&sess, "$ printf"));
     box_indents.extend(indents_of_rows_containing(&sess, "└ "));
+    box_indents.extend(indents_of_rows_containing(&sess, "⏺"));
     assert!(
         !box_indents.is_empty(),
         "expected the tool-call box and tool-result rows on screen"

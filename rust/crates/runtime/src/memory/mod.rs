@@ -184,41 +184,12 @@ impl MemoryIndex {
     }
 }
 
-/// Helper that appends the rendered memory section onto a
-/// [`SystemPromptBuilder`] using the compact instructions. See
-/// [`append_to_builder_with`] for the variant-aware form.
-///
-/// When `memory_dir` is `None`, the directory is derived from `cwd`
-/// (project-scoped path under `~/.scode/projects/<slug>/memory/`).
-/// When `cwd` is also `None`, falls back to `default_memory_dir()`.
-#[must_use]
-pub fn append_to_builder(
-    builder: SystemPromptBuilder,
-    memory_dir: Option<&Path>,
-    cwd: Option<&Path>,
-) -> SystemPromptBuilder {
-    append_to_builder_with(builder, memory_dir, cwd, MemoryPromptVariant::Compact)
-}
-
-/// Variant-aware sibling of [`append_to_builder`]. The instructions are
-/// always injected (even with zero entries) so the model knows the memory
-/// directory path and how to save/forget entries.
-#[must_use]
-pub fn append_to_builder_with(
-    builder: SystemPromptBuilder,
-    memory_dir: Option<&Path>,
-    cwd: Option<&Path>,
-    variant: MemoryPromptVariant,
-) -> SystemPromptBuilder {
-    let ctx = MemoryContext::resolve(memory_dir, cwd, None, variant);
-    append_from_provider(builder, &FileMemoryProvider::new(), &ctx)
-}
-
 /// Append whatever `provider` contributes for `ctx`.
 ///
 /// A provider that reports itself unavailable, or that contributes nothing,
 /// leaves the builder untouched rather than emitting an empty memory
 /// heading. This is the single seam every memory backend goes through.
+#[inline]
 #[must_use]
 pub fn append_from_provider(
     builder: SystemPromptBuilder,
@@ -532,16 +503,15 @@ mod tests {
     }
 
     #[test]
-    fn append_to_builder_injects_instructions_even_when_empty() {
+    fn append_from_provider_injects_instructions_even_when_empty() {
         let dir = temp_dir("empty-instructions");
-        let appended = append_to_builder(
+        let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
+        let appended = append_from_provider(
             SystemPromptBuilder::new().with_os("linux", "test"),
-            Some(&dir),
-            None,
+            &FileMemoryProvider::new(),
+            &ctx,
         )
         .render();
-        // Auto-memory instructions are always injected so the model
-        // knows the memory directory path and how to save entries.
         assert!(appended.contains("# auto memory"));
         assert!(appended.contains(&dir.display().to_string()));
         assert!(appended.contains("(no memory entries loaded)"));
@@ -549,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn append_to_builder_injects_section() {
+    fn append_from_provider_injects_section() {
         let dir = temp_dir("inject");
         fs::write(
             dir.join("MEMORY.md"),
@@ -562,10 +532,11 @@ mod tests {
         let idx = MemoryIndex::load(&dir).expect("load");
         assert!(!idx.is_empty());
 
-        let prompt = append_to_builder(
+        let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
+        let prompt = append_from_provider(
             SystemPromptBuilder::new().with_os("linux", "test"),
-            Some(&dir),
-            None,
+            &FileMemoryProvider::new(),
+            &ctx,
         )
         .render();
 

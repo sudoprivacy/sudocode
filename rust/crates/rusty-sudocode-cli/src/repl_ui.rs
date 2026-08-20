@@ -893,10 +893,7 @@ fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
                 format!("{}\u{2717}{RESET}", ansi_fg(t.error)),
                 format!("{DIM}{}{RESET}", task.subject),
             ),
-            _ => (
-                "\u{25a1}".to_string(),
-                task.subject.clone(),
-            ),
+            _ => ("\u{25a1}".to_string(), task.subject.clone()),
         };
         lines.push(format!("  {icon} {subject_fmt}"));
     }
@@ -951,7 +948,6 @@ fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
 
     lines.join("\n")
 }
-
 
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {

@@ -393,9 +393,12 @@ impl ToolExecutor for CliToolExecutor {
         if is_mcp_tool {
             runtime::clear_mcp_progress_callback();
         }
-        // After TaskCreate/TaskUpdate succeeds, push the full task list
+        // After any Task* mutation succeeds, push the full task list
         // to the ContextSlot so the UI renders live progress.
-        if matches!(tool_name, "TaskCreate" | "TaskUpdate") {
+        if matches!(
+            tool_name,
+            "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskStop"
+        ) {
             if let (Ok(_), Some(ref ui)) = (&result, &self.ui_sender) {
                 let tasks = tools::global_task_list();
                 ui.update_context(tasks);

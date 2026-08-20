@@ -68,7 +68,7 @@ use cli::format::{
     format_internal_prompt_progress_line, format_issue_report, format_model_report,
     format_model_switch_report, format_permission_prompt_box, format_permissions_report,
     format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_call_start, format_tool_result, format_tool_timeline,
+    format_sandbox_report, format_tool_call_start, format_tool_result,
     format_turn_status_line_with_branch, format_ultraplan_report, render_messages,
     render_resume_usage, render_version_report, truncate_for_summary,
 };
@@ -4382,9 +4382,6 @@ impl LiveCli {
                         ));
                     }
                     let elapsed = turn_start.elapsed();
-                    if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
-                        self.out_println(timeline);
-                    }
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
@@ -4494,9 +4491,6 @@ impl LiveCli {
                         output.println(&format_auto_compaction_notice(event.removed_message_count));
                     }
                     let elapsed = turn_start.elapsed();
-                    if let Some(timeline) = format_tool_timeline(&summary.tool_results, elapsed) {
-                        output.println(&timeline);
-                    }
                     let usage = self.runtime.usage().current_turn_usage();
                     let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();

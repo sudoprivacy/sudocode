@@ -801,35 +801,106 @@ fn strip_ansi(input: &str) -> String {
 
 // ── ContextSlot — persistent area for TaskPanel (+ future sections) ──
 
-/// Maximum number of task items shown inline before folding.
-const MAX_TASK_DISPLAY: usize = 4;
-
-/// Render the task panel as a compact single-line string.
+/// Render the task panel matching CC's `TaskListV2` layout:
 ///
-/// Status icons: `■` in_progress/running, `☑` completed, `□` pending/created, `✗` failed/stopped.
-/// If more than `MAX_TASK_DISPLAY` items, excess is folded into a
-/// summary: `+N more (X pending, Y in_progress)`.
-fn render_task_panel(tasks: &[runtime::Task]) -> String {
+/// ```text
+/// 5 tasks (2 done, 1 in progress, 2 open)
+///   ✓ Update docs
+///   ■ Write unit tests
+///   □ Fix login bug
+///   … +2 pending, 1 completed
+/// ```
+///
+/// - Header: count summary with done/in_progress/open breakdown
+/// - Each visible task: icon + subject (completed = strikethrough+dim, in_progress = bold)
+/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
+/// - Priority order: in_progress > pending > completed; hidden summary
+fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
+    use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
+
     if tasks.is_empty() {
         return String::new();
     }
 
-    let mut parts = Vec::new();
-    let display_count = tasks.len().min(MAX_TASK_DISPLAY);
+    // Dynamic max display: CC uses min(10, max(3, rows - 14)).
+    // When terminal is very short (≤10 rows), hide entirely.
+    let max_display = if term_rows <= 10 {
+        return String::new();
+    } else {
+        10usize.min(3usize.max(term_rows.saturating_sub(14)))
+    };
 
-    for task in &tasks[..display_count] {
-        let icon = match task.status {
-            runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => "\u{25a0}", // ■
-            runtime::TaskStatus::Completed => "\u{2611}",                                 // ☑
-            runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped => "\u{2717}",     // ✗
-            _ => "\u{25a1}",                                                              // □
+    let t = theme();
+    let success = ansi_fg(t.success);
+    let info = ansi_fg(t.info);
+
+    let completed_count = tasks
+        .iter()
+        .filter(|t| t.status == runtime::TaskStatus::Completed)
+        .count();
+    let in_progress_count = tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                runtime::TaskStatus::InProgress | runtime::TaskStatus::Running
+            )
+        })
+        .count();
+    let open_count = tasks.len() - completed_count;
+
+    // Header summary line
+    let mut header_parts = Vec::new();
+    header_parts.push(format!("{BOLD}{completed_count}{RESET} done"));
+    if in_progress_count > 0 {
+        header_parts.push(format!("{BOLD}{in_progress_count}{RESET} in progress"));
+    }
+    header_parts.push(format!("{BOLD}{open_count}{RESET} open"));
+    let header = format!(
+        "{DIM}{BOLD}{}{RESET}{DIM} tasks ({}){}",
+        tasks.len(),
+        header_parts.join(", "),
+        RESET
+    );
+
+    let mut lines = Vec::with_capacity(tasks.len() + 2);
+    lines.push(header);
+
+    // Sort by priority: in_progress first, then pending, then completed
+    let mut sorted: Vec<&runtime::Task> = tasks.iter().collect();
+    sorted.sort_by_key(|t| match t.status {
+        runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => 0,
+        runtime::TaskStatus::Pending | runtime::TaskStatus::Created => 1,
+        runtime::TaskStatus::Completed => 2,
+        _ => 3,
+    });
+
+    let display_count = sorted.len().min(max_display);
+    let visible = &sorted[..display_count];
+    let hidden = &sorted[display_count..];
+
+    for task in visible {
+        let (icon, subject_fmt) = match task.status {
+            runtime::TaskStatus::Completed => (
+                format!("{success}\u{2713}{RESET}"),
+                format!("{DIM}\x1b[9m{}\x1b[29m{RESET}", task.subject),
+            ),
+            runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => (
+                format!("{info}\u{25a0}{RESET}"),
+                format!("{BOLD}{}{RESET}", task.subject),
+            ),
+            runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped => (
+                format!("{}\u{2717}{RESET}", ansi_fg(t.error)),
+                format!("{DIM}{}{RESET}", task.subject),
+            ),
+            _ => ("\u{25a1}".to_string(), task.subject.clone()),
         };
-        parts.push(format!("{icon} {}", task.subject));
+        lines.push(format!("  {icon} {subject_fmt}"));
     }
 
-    if tasks.len() > MAX_TASK_DISPLAY {
-        let remaining = &tasks[MAX_TASK_DISPLAY..];
-        let pending = remaining
+    if !hidden.is_empty() {
+        let mut parts = Vec::new();
+        let hp = hidden
             .iter()
             .filter(|t| {
                 matches!(
@@ -838,7 +909,7 @@ fn render_task_panel(tasks: &[runtime::Task]) -> String {
                 )
             })
             .count();
-        let in_progress = remaining
+        let hi = hidden
             .iter()
             .filter(|t| {
                 matches!(
@@ -847,22 +918,35 @@ fn render_task_panel(tasks: &[runtime::Task]) -> String {
                 )
             })
             .count();
-        let mut summary_parts = Vec::new();
-        if pending > 0 {
-            summary_parts.push(format!("{pending} pending"));
+        let hc = hidden
+            .iter()
+            .filter(|t| t.status == runtime::TaskStatus::Completed)
+            .count();
+        let hs = hidden
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped
+                )
+            })
+            .count();
+        if hi > 0 {
+            parts.push(format!("{hi} in progress"));
         }
-        if in_progress > 0 {
-            summary_parts.push(format!("{in_progress} in_progress"));
+        if hp > 0 {
+            parts.push(format!("{hp} pending"));
         }
-        let detail = if summary_parts.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", summary_parts.join(", "))
-        };
-        parts.push(format!("+{} more{detail}", remaining.len()));
+        if hc > 0 {
+            parts.push(format!("{hc} completed"));
+        }
+        if hs > 0 {
+            parts.push(format!("{hs} stopped"));
+        }
+        lines.push(format!("{DIM}  \u{2026} +{}{RESET}", parts.join(", ")));
     }
 
-    format!("\u{1f4cb} {}", parts.join("  "))
+    lines.join("\n")
 }
 
 /// Context passed to `ReplApp` via `ContextProvider`.
@@ -896,7 +980,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // use_terminal_size must be called before use_future and use_terminal_events
     // to maintain consistent hook ordering.
-    let (term_width, _) = hooks.use_terminal_size();
+    let (term_width, term_height) = hooks.use_terminal_size();
 
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -925,6 +1009,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
+        let mut task_hide_deadline: Option<Instant> = None;
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
 
@@ -988,12 +1073,45 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::UpdateContext(tasks)) => {
                             if let Ok(mut items) = context_tasks_for_future.lock() {
-                                *items = tasks;
+                                let has_incomplete = tasks.iter().any(|t| {
+                                    !matches!(
+                                        t.status,
+                                        runtime::TaskStatus::Completed
+                                            | runtime::TaskStatus::Failed
+                                            | runtime::TaskStatus::Stopped
+                                    )
+                                });
+                                if tasks.is_empty() {
+                                    // Empty list → hide immediately
+                                    items.clear();
+                                    task_hide_deadline = None;
+                                } else if has_incomplete {
+                                    // Has open tasks → show, cancel any hide timer
+                                    *items = tasks;
+                                    task_hide_deadline = None;
+                                } else if task_hide_deadline.is_none() {
+                                    // All terminal → start 5s hide timer
+                                    *items = tasks;
+                                    task_hide_deadline =
+                                        Some(Instant::now() + Duration::from_secs(5));
+                                } else {
+                                    *items = tasks;
+                                }
                             }
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
+                }
+            }
+
+            // Auto-hide task panel 5s after all tasks reach terminal state.
+            if let Some(deadline) = task_hide_deadline {
+                if Instant::now() >= deadline {
+                    if let Ok(mut items) = context_tasks_for_future.lock() {
+                        items.clear();
+                    }
+                    task_hide_deadline = None;
                 }
             }
 
@@ -1366,7 +1484,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let task_line = context_tasks
         .lock()
         .ok()
-        .map(|items| render_task_panel(&items))
+        .map(|items| render_task_panel(&items, term_height as usize))
         .unwrap_or_default();
     let upper_sep = if task_line.is_empty() {
         sep.clone()
@@ -1461,7 +1579,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
-        context_tasks: Arc::new(Mutex::new(Vec::new())),
+        context_tasks: Arc::new(Mutex::new(tools::global_task_list())),
     };
 
     let banner = startup_banner.to_string();

@@ -222,11 +222,9 @@ pub fn load_entries(memory_dir: &Path) -> std::io::Result<Vec<MemoryEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::ENV_LOCK;
     use std::fs;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

@@ -658,23 +658,18 @@ fn load_system_prompt_impl(
         .with_model_family(model_family)
         .with_project_context(project_context)
         .with_runtime_config(config);
-    let builder = match agent_type {
-        Some(agent) => {
-            let dir = crate::memory::agent_memory_dir_for(&cwd, agent);
-            crate::memory::append_to_builder_with(
-                builder_base,
-                Some(&dir),
-                Some(&cwd),
-                memory_prompt_variant_for_agent(agent, &cwd),
-            )
-        }
-        None => crate::memory::append_to_builder_with(
-            builder_base,
-            None,
-            Some(&cwd),
-            crate::memory::MemoryPromptVariant::Compact,
-        ),
+    // Preserves the previous per-branch choice exactly: sub-agent spawns ask
+    // the agent definition, the main loop always takes the compact edition.
+    let variant = match agent_type {
+        Some(agent) => memory_prompt_variant_for_agent(agent, &cwd),
+        None => crate::memory::MemoryPromptVariant::Compact,
     };
+    let memory_ctx = crate::memory::MemoryContext::resolve(None, Some(&cwd), agent_type, variant);
+    let builder = crate::memory::append_from_provider(
+        builder_base,
+        &crate::memory::FileMemoryProvider::new(),
+        &memory_ctx,
+    );
     Ok(builder.build())
 }
 

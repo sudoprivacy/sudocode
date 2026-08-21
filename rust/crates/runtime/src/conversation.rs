@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    compact_session, compact_session_sync, estimate_session_tokens, CompactionConfig,
-    CompactionResult, AUTOCOMPACT_BUFFER_TOKENS,
+    autocompact_buffer_tokens, compact_session, compact_session_sync, estimate_session_tokens,
+    CompactionConfig, CompactionResult,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -1951,7 +1951,8 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     let max_output = crate::model_capabilities::max_output_tokens_or_default(model);
     // Clamp max_output to avoid overflow on small context windows
     let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
-    context_window.saturating_sub(effective_max_output + AUTOCOMPACT_BUFFER_TOKENS)
+    let buffer = autocompact_buffer_tokens(model);
+    context_window.saturating_sub(effective_max_output + buffer)
 }
 
 fn build_assistant_message(
@@ -4042,9 +4043,9 @@ mod tests {
         let _g = env_guard();
         // Ensure no env-var override is active.
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
-        // The threshold is context_window - min(max_output, 20K) - 13K.
+        // The threshold is context_window - min(max_output, 20K) - buffer.
         // For claude-sonnet-4-6 (200K context, 64K output):
-        //   200_000 - min(64_000, 20_000) - 13_000 = 167_000
+        //   buffer = 13K (200K < 400K), threshold = 200K - 20K - 13K = 167K
         let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
         assert_eq!(threshold, 167_000);
 

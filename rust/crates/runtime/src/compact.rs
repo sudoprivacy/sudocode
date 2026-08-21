@@ -109,10 +109,30 @@ const COMPACTION_SYSTEM_PROMPT: &str =
 /// here covers re-compactions whose input is already a prior summary.
 pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 20_000;
 
-/// Buffer subtracted from context window when computing the auto-compact
-/// threshold (`context_window - max_output - buffer`). Matches CC's
-/// `AUTOCOMPACT_BUFFER_TOKENS`.
+/// Base buffer subtracted from context window when computing the auto-compact
+/// threshold. Scaled by [`autocompact_buffer_tokens`] for large context
+/// windows — see CC's `getAutocompactBufferTokens()`.
 pub const AUTOCOMPACT_BUFFER_TOKENS: u32 = 13_000;
+
+/// Context-aware autocompact buffer. Larger context windows need more
+/// headroom because a single turn can produce proportionally more tokens
+/// (longer model outputs + larger tool results).
+///
+/// Matches CC's `getAutocompactBufferTokens()`:
+/// - 800K+ context → 50K buffer
+/// - 400K+ context → 30K buffer
+/// - else → 13K (base constant)
+#[must_use]
+pub fn autocompact_buffer_tokens(model: &str) -> u32 {
+    let context_window = crate::model_capabilities::context_window_or_default(model);
+    if context_window >= 800_000 {
+        50_000
+    } else if context_window >= 400_000 {
+        30_000
+    } else {
+        AUTOCOMPACT_BUFFER_TOKENS
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -829,6 +849,25 @@ mod tests {
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
     use crate::usage::{TokenUsage, UsageCostCurrency};
+
+    #[test]
+    fn autocompact_buffer_scales_with_context_window() {
+        // Small model (200K context) → base 13K buffer
+        let small = super::autocompact_buffer_tokens("claude-sonnet-4-6");
+        assert_eq!(small, 13_000);
+
+        // Medium model (400K context) → 30K buffer
+        let medium = super::autocompact_buffer_tokens("gpt-5.4-mini");
+        assert_eq!(medium, 30_000);
+
+        // Large model (1M context) → 50K buffer
+        let large = super::autocompact_buffer_tokens("claude-opus-4-8");
+        assert_eq!(large, 50_000);
+
+        // Unknown model falls back to SSOT default (200K) → 13K
+        let unknown = super::autocompact_buffer_tokens("unknown-model-xyz");
+        assert_eq!(unknown, 13_000);
+    }
 
     #[test]
     fn formats_compact_summary_like_upstream() {

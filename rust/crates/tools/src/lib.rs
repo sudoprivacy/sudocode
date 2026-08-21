@@ -1159,7 +1159,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "description": { "type": "string", "description": "What needs to be done" },
                     "activeForm": { "type": "string", "description": "Present continuous form shown in spinner when in_progress (e.g. 'Running tests')" },
                     "prompt": { "type": "string", "description": "Alias for subject (backward compat)" },
-                    "metadata": { "type": "object" }
+                    "metadata": { "type": "object" },
+                    "dependencies": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Task IDs this task depends on (must complete before this task can start)"
+                    }
                 },
                 "required": ["subject", "description"],
                 "additionalProperties": false
@@ -1223,7 +1228,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "subject": { "type": "string", "description": "New subject for the task" },
                     "description": { "type": "string", "description": "New description" },
                     "activeForm": { "type": "string", "description": "Present continuous form for spinner" },
-                    "message": { "type": "string", "description": "Append a message to the task (backward compat)" }
+                    "message": { "type": "string", "description": "Append a message to the task (backward compat)" },
+                    "dependencies": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "New dependency list (replaces existing dependencies)"
+                    }
                 },
                 "required": ["taskId"],
                 "additionalProperties": false
@@ -1782,16 +1792,22 @@ fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
         .or(input.prompt)
         .ok_or_else(|| "subject is required".to_string())?;
     let registry = global_task_registry();
+    // Validate dependencies exist
+    if !input.dependencies.is_empty() {
+        registry.validate_dependencies(&input.dependencies)?;
+    }
     let task = registry.create_with_subject(
         &subject,
         input.description.as_deref(),
         input.active_form.as_deref(),
+        input.dependencies,
     );
     to_pretty_json(json!({
         "task_id": task.task_id,
         "status": task.status,
         "subject": task.subject,
         "description": task.description,
+        "dependencies": task.dependencies,
         "created_at": task.created_at
     }))
 }
@@ -1805,6 +1821,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
             "status": task.status,
             "subject": task.subject,
             "description": task.description,
+            "dependencies": task.dependencies,
             "task_packet": task.task_packet,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
@@ -1825,6 +1842,7 @@ fn run_task_list(input: Value) -> Result<String, String> {
                 "status": t.status,
                 "subject": t.subject,
                 "description": t.description,
+                "dependencies": t.dependencies,
                 "task_packet": t.task_packet,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at
@@ -1951,6 +1969,13 @@ fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
         })
         .transpose()?;
 
+    // Validate dependencies if updating them
+    if let Some(deps) = &input.dependencies {
+        if !deps.is_empty() {
+            registry.validate_dependencies(deps)?;
+        }
+    }
+
     // Append legacy message if provided
     if let Some(msg) = &input.message {
         registry.update(&task_id, msg)?;
@@ -1963,6 +1988,7 @@ fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
         input.description.as_deref(),
         input.active_form.as_deref(),
         new_status,
+        input.dependencies,
     )?;
 
     // Verification watcher: record completion + check for streak nudge
@@ -1977,6 +2003,7 @@ fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
         "task_id": task.task_id,
         "status": task.status,
         "subject": task.subject,
+        "dependencies": task.dependencies,
     });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);
@@ -3597,6 +3624,8 @@ struct TaskCreateInput {
     active_form: Option<String>,
     /// Backward compat alias for `subject`.
     prompt: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3617,6 +3646,8 @@ struct TaskUpdateInput {
     #[serde(rename = "activeForm")]
     active_form: Option<String>,
     message: Option<String>,
+    #[serde(default)]
+    dependencies: Option<Vec<String>>,
 }
 
 impl TaskUpdateInput {

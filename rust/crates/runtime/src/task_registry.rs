@@ -659,7 +659,12 @@ mod tests {
 
         // Create tasks with persistence
         let registry = TaskRegistry::load(&path);
-        let t1 = registry.create_with_subject("First", Some("Do first"), Some("Doing first"), Vec::new());
+        let t1 = registry.create_with_subject(
+            "First",
+            Some("Do first"),
+            Some("Doing first"),
+            Vec::new(),
+        );
         registry
             .set_status(&t1.task_id, TaskStatus::InProgress)
             .unwrap();
@@ -728,10 +733,16 @@ mod tests {
         let registry = TaskRegistry::new();
         let t1 = registry.create_with_subject("A", None, None, Vec::new());
         let t2 = registry.create_with_subject("B", None, None, Vec::new());
-        let updated = registry.update_fields(
-            &t2.task_id, None, None, None, None,
-            Some(vec![t1.task_id.clone()]),
-        ).unwrap();
+        let updated = registry
+            .update_fields(
+                &t2.task_id,
+                None,
+                None,
+                None,
+                None,
+                Some(vec![t1.task_id.clone()]),
+            )
+            .unwrap();
         assert_eq!(updated.dependencies, vec![t1.task_id]);
     }
 

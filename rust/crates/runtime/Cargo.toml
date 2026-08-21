@@ -37,13 +37,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Pinned to the SAME nexus-vfs rev the nexus daemon (rust/nexusd) uses, so
 # `SpawnTask<Kernel>` monomorphises to one type when nexusd links both
 # sudocode_runtime and the nexus service crates (co-host binary edge).
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2a62e6a5618d0008872c958d95db4e3ebaae6120", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b98c08e62fe0bb1f3474a78a89b0c7864639e521", default-features = false }
 # The A2A messaging substrate: SSOT for the mailbox message schema
 # (`MailboxEnvelope`) + the `/chat-with-me` path suffix. MUST be the same
 # nexus-vfs rev as `kernel` (a2a itself deps kernel; a mismatched rev = two
 # distinct `Kernel` types). Re-exported from `spawn_task` so downstream crates
 # use it without a direct a2a dependency.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2a62e6a5618d0008872c958d95db4e3ebaae6120", default-features = false }
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b98c08e62fe0bb1f3474a78a89b0c7864639e521", default-features = false }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

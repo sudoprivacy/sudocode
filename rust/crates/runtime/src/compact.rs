@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::conversation::ApiClient;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
@@ -109,10 +112,155 @@ const COMPACTION_SYSTEM_PROMPT: &str =
 /// here covers re-compactions whose input is already a prior summary.
 pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 20_000;
 
-/// Buffer subtracted from context window when computing the auto-compact
-/// threshold (`context_window - max_output - buffer`). Matches CC's
-/// `AUTOCOMPACT_BUFFER_TOKENS`.
+/// Base buffer subtracted from context window when computing the auto-compact
+/// threshold. Scaled by [`autocompact_buffer_tokens`] for large context
+/// windows — see CC's `getAutocompactBufferTokens()`.
 pub const AUTOCOMPACT_BUFFER_TOKENS: u32 = 13_000;
+
+/// Context-aware autocompact buffer. Larger context windows need more
+/// headroom because a single turn can produce proportionally more tokens
+/// (longer model outputs + larger tool results).
+///
+/// Matches CC's `getAutocompactBufferTokens()`:
+/// - 800K+ context → 50K buffer
+/// - 400K+ context → 30K buffer
+/// - else → 13K (base constant)
+#[must_use]
+pub fn autocompact_buffer_tokens(model: &str) -> u32 {
+    let context_window = crate::model_capabilities::context_window_or_default(model);
+    if context_window >= 800_000 {
+        50_000
+    } else if context_window >= 400_000 {
+        30_000
+    } else {
+        AUTOCOMPACT_BUFFER_TOKENS
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-compact file restore (CC parity)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of recently-read files to re-inject after compaction.
+/// Matches CC's `POST_COMPACT_MAX_FILES_TO_RESTORE`.
+const POST_COMPACT_MAX_FILES: usize = 5;
+
+/// Total token budget for all re-injected file content.
+/// Matches CC's `POST_COMPACT_TOKEN_BUDGET`.
+const POST_COMPACT_TOKEN_BUDGET: usize = 50_000;
+
+/// Per-file token cap. Matches CC's `POST_COMPACT_MAX_TOKENS_PER_FILE`.
+const POST_COMPACT_MAX_TOKENS_PER_FILE: usize = 5_000;
+
+/// Tracks the most recent read_file tool result for each path.
+/// Populated by `ConversationRuntime` each time a `read_file` tool
+/// succeeds; consumed after compaction to restore file context.
+#[derive(Debug, Default)]
+pub struct ReadFileTracker {
+    entries: BTreeMap<PathBuf, Instant>,
+}
+
+impl ReadFileTracker {
+    /// Record that a file was read at the current instant.
+    pub fn record(&mut self, path: PathBuf) {
+        self.entries.insert(path, Instant::now());
+    }
+
+    /// Clear all tracked entries (called after file restore messages are built).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Build user messages re-injecting recently-read file content.
+    ///
+    /// Files already visible in `preserved_messages` (the tail kept after
+    /// compaction) are skipped — they're already in the model's context.
+    /// Returns messages ordered most-recent-first, constrained by both
+    /// file count and token budget.
+    #[must_use]
+    pub fn build_post_compact_file_messages(
+        &self,
+        preserved_messages: &[ConversationMessage],
+    ) -> Vec<ConversationMessage> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect read_file paths already in the preserved tail.
+        let preserved_paths = collect_read_file_paths(preserved_messages);
+
+        // Sort by timestamp (most recent first), skip preserved.
+        let mut candidates: Vec<(&PathBuf, &Instant)> = self
+            .entries
+            .iter()
+            .filter(|(path, _)| !preserved_paths.iter().any(|pp| pp == *path))
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(a.1));
+        candidates.truncate(POST_COMPACT_MAX_FILES);
+
+        let mut messages = Vec::new();
+        let mut total_tokens = 0usize;
+
+        for (path, _) in candidates {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Estimate tokens and enforce per-file + total budget
+            let token_estimate = content.len() / 4 + 1;
+            let capped = if token_estimate > POST_COMPACT_MAX_TOKENS_PER_FILE {
+                // Truncate to fit the per-file budget (conservative char estimate)
+                let max_chars = POST_COMPACT_MAX_TOKENS_PER_FILE * 4;
+                &content[..content.floor_char_boundary(max_chars.min(content.len()))]
+            } else {
+                content.as_str()
+            };
+
+            let capped_tokens = capped.len() / 4 + 1;
+            if total_tokens + capped_tokens > POST_COMPACT_TOKEN_BUDGET {
+                break;
+            }
+            total_tokens += capped_tokens;
+
+            let display_path = path.display();
+            messages.push(ConversationMessage::user_text(format!(
+                "[Post-compact file restore: {display_path}]\n{capped}"
+            )));
+        }
+
+        messages
+    }
+}
+
+/// Extract `read_file` tool-use paths from a message slice.
+fn collect_read_file_paths(messages: &[ConversationMessage]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for msg in messages {
+        for block in &msg.blocks {
+            if let ContentBlock::ToolUse { name, input, .. } = block {
+                if name == "read_file" || name == "Read" {
+                    if let Some(p) = extract_file_path_from_tool_input(input) {
+                        paths.push(PathBuf::from(&p));
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Parse the `file_path` field from a tool-use input JSON string.
+/// Public for use by `ConversationRuntime::find_tool_use_file_path`.
+pub fn extract_file_path_from_tool_input(input: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
+    parsed
+        .get("file_path")
+        .or_else(|| parsed.get("filePath"))
+        .or_else(|| parsed.get("path"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -381,10 +529,61 @@ fn build_compaction_messages(
     messages
 }
 
+/// Maximum retries for the compaction streaming call.
+/// Matches CC's `MAX_COMPACT_STREAMING_RETRIES`.
+const MAX_COMPACT_RETRIES: u32 = 2;
+
+/// Maximum PTL (prompt-too-long) truncation retries.
+/// Matches CC's `MAX_PTL_RETRIES`.
+const MAX_PTL_RETRIES: u32 = 3;
+
+/// Check if an error is retryable (transient failures, not permanent ones).
+fn is_retryable_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("server error")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("529")
+        || lower.contains("overloaded")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+}
+
+/// Check if an error indicates prompt-too-long.
+fn is_prompt_too_long(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("prompt is too long")
+        || lower.contains("prompt_too_long")
+        || lower.contains("maximum context length")
+        || lower.contains("token limit")
+}
+
+/// Drop the oldest ~20% of message groups from compaction input to make
+/// room for a PTL retry. Returns `None` if nothing can be dropped.
+fn truncate_head_for_ptl(messages: &[ConversationMessage]) -> Option<Vec<ConversationMessage>> {
+    if messages.len() <= 2 {
+        return None;
+    }
+    // Drop ~20% of messages from the front (excluding the final compaction prompt)
+    let drop_count = std::cmp::max(1, (messages.len() - 1) / 5);
+    let remaining = &messages[drop_count..];
+    if remaining.len() < 2 {
+        return None;
+    }
+    Some(remaining.to_vec())
+}
+
 /// Compacts a session using an LLM to produce a high-quality summary.
 ///
-/// This is the primary compaction path. Falls back to local heuristic
-/// compaction when the API client doesn't support `send_compaction`.
+/// Retries transient failures up to [`MAX_COMPACT_RETRIES`] times with
+/// exponential backoff. On prompt-too-long errors, truncates the oldest
+/// messages and retries up to [`MAX_PTL_RETRIES`] times.
+///
+/// Falls back to local heuristic compaction when the API client doesn't
+/// support `send_compaction`.
 pub async fn compact_session<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
@@ -430,16 +629,45 @@ pub async fn compact_session<C: ApiClient>(
         crate::model_capabilities::max_output_tokens_or_default(model),
     );
 
-    // Call the LLM
-    let llm_summary = api_client
-        .send_compaction(
-            model,
-            COMPACTION_SYSTEM_PROMPT,
-            compaction_messages,
-            max_tokens,
-        )
-        .await
-        .map_err(|e| CompactionError::ApiError(e.to_string()))?;
+    // Call the LLM with retry logic
+    let mut current_messages = compaction_messages;
+    let mut ptl_attempts = 0u32;
+    let mut last_error = String::new();
+
+    let llm_summary = 'outer: loop {
+        for attempt in 0..=MAX_COMPACT_RETRIES {
+            match api_client
+                .send_compaction(
+                    model,
+                    COMPACTION_SYSTEM_PROMPT,
+                    current_messages.clone(),
+                    max_tokens,
+                )
+                .await
+            {
+                Ok(summary) => break 'outer summary,
+                Err(e) => {
+                    last_error = e.to_string();
+                    if is_prompt_too_long(&last_error) {
+                        ptl_attempts += 1;
+                        if ptl_attempts <= MAX_PTL_RETRIES {
+                            if let Some(truncated) = truncate_head_for_ptl(&current_messages) {
+                                current_messages = truncated;
+                                continue 'outer;
+                            }
+                        }
+                        return Err(CompactionError::ApiError(last_error));
+                    }
+                    if attempt < MAX_COMPACT_RETRIES && is_retryable_error(&last_error) {
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(CompactionError::ApiError(last_error));
+                }
+            }
+        }
+        return Err(CompactionError::ApiError(last_error));
+    };
 
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
@@ -829,6 +1057,25 @@ mod tests {
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
     use crate::usage::{TokenUsage, UsageCostCurrency};
+
+    #[test]
+    fn autocompact_buffer_scales_with_context_window() {
+        // Small model (200K context) → base 13K buffer
+        let small = super::autocompact_buffer_tokens("claude-sonnet-4-6");
+        assert_eq!(small, 13_000);
+
+        // Medium model (400K context) → 30K buffer
+        let medium = super::autocompact_buffer_tokens("gpt-5.4-mini");
+        assert_eq!(medium, 30_000);
+
+        // Large model (1M context) → 50K buffer
+        let large = super::autocompact_buffer_tokens("claude-opus-4-8");
+        assert_eq!(large, 50_000);
+
+        // Unknown model falls back to SSOT default (200K) → 13K
+        let unknown = super::autocompact_buffer_tokens("unknown-model-xyz");
+        assert_eq!(unknown, 13_000);
+    }
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -1808,5 +2055,354 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens, 4);
         assert_eq!(usage.cache_read_input_tokens, 2);
         assert_eq!(usage.cost_units, Some(300));
+    }
+
+    #[test]
+    fn extract_file_path_from_tool_input_parses_variants() {
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"file_path":"/tmp/a.rs"}"#),
+            Some("/tmp/a.rs".to_string()),
+        );
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"filePath":"/tmp/b.rs"}"#),
+            Some("/tmp/b.rs".to_string()),
+        );
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"path":"/tmp/c.rs"}"#),
+            Some("/tmp/c.rs".to_string()),
+        );
+        assert_eq!(super::extract_file_path_from_tool_input("not json"), None,);
+    }
+
+    #[test]
+    fn read_file_tracker_builds_post_compact_messages() {
+        use std::io::Write;
+
+        // Create temp files
+        let dir = std::env::temp_dir().join(format!(
+            "scode-compact-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file_a = dir.join("alpha.rs");
+        let file_b = dir.join("beta.rs");
+        let file_c = dir.join("gamma.rs");
+        std::fs::write(&file_a, "fn alpha() {}").unwrap();
+        std::fs::write(&file_b, "fn beta() {}").unwrap();
+        // gamma is tracked but also in preserved messages — should be skipped
+        std::fs::write(&file_c, "fn gamma() {}").unwrap();
+
+        let mut tracker = super::ReadFileTracker::default();
+        tracker.record(file_a.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.record(file_b.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.record(file_c.clone());
+
+        // Simulate preserved messages containing a read_file tool use for gamma.
+        // Use serde_json to properly escape backslashes on Windows paths.
+        let gamma_path_json = serde_json::to_string(&file_c.display().to_string()).unwrap();
+        let preserved = vec![ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: format!(r#"{{"file_path":{gamma_path_json}}}"#),
+                thought_signature: None,
+            },
+        ])];
+
+        let messages = tracker.build_post_compact_file_messages(&preserved);
+
+        // gamma should be skipped (already in preserved)
+        assert_eq!(
+            messages.len(),
+            2,
+            "should restore alpha and beta, skip gamma"
+        );
+
+        // Most recent first: beta before alpha
+        let first_text = match &messages[0].blocks[0] {
+            ContentBlock::Text { text } => text,
+            _ => panic!("expected text block"),
+        };
+        assert!(first_text.contains("fn beta()"), "most recent file first");
+        assert!(first_text.contains("beta.rs"), "should mention filename");
+
+        let second_text = match &messages[1].blocks[0] {
+            ContentBlock::Text { text } => text,
+            _ => panic!("expected text block"),
+        };
+        assert!(second_text.contains("fn alpha()"), "second file");
+
+        // Clear should empty the tracker
+        let _ = Write::write(&mut std::io::sink(), b"");
+        tracker.clear();
+        assert!(tracker.build_post_compact_file_messages(&[]).is_empty());
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_tracker_respects_file_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "scode-compact-limit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tracker = super::ReadFileTracker::default();
+        for i in 0..10 {
+            let path = dir.join(format!("file{i}.txt"));
+            std::fs::write(&path, format!("content {i}")).unwrap();
+            tracker.record(path);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let messages = tracker.build_post_compact_file_messages(&[]);
+        assert!(
+            messages.len() <= super::POST_COMPACT_MAX_FILES,
+            "should respect max files limit, got {}",
+            messages.len()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn compact_session_retries_transient_failures() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static ATTEMPT: AtomicU8 = AtomicU8::new(0);
+
+        struct FailThenSucceedClient;
+
+        #[async_trait]
+        impl ApiClient for FailThenSucceedClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+                if attempt < 2 {
+                    Err(RuntimeError::new("503 server error: overloaded"))
+                } else {
+                    Ok("<summary>Recovered after retry.</summary>".to_string())
+                }
+            }
+        }
+
+        ATTEMPT.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = FailThenSucceedClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None)
+            .await
+            .expect("should succeed after retries");
+
+        assert!(result.removed_message_count > 0);
+        assert!(result.formatted_summary.contains("Recovered after retry"));
+        assert!(
+            ATTEMPT.load(Ordering::Relaxed) == 3,
+            "should have made 3 attempts (2 failures + 1 success)"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_session_retries_ptl_with_truncation() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static PTL_ATTEMPT: AtomicU8 = AtomicU8::new(0);
+
+        struct PtlThenSucceedClient;
+
+        #[async_trait]
+        impl ApiClient for PtlThenSucceedClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                let attempt = PTL_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+                if attempt == 0 {
+                    Err(RuntimeError::new(
+                        "prompt_too_long: exceeds maximum context length",
+                    ))
+                } else {
+                    // After truncation, message count should be smaller
+                    Ok(format!(
+                        "<summary>PTL recovered with {} messages.</summary>",
+                        messages.len()
+                    ))
+                }
+            }
+        }
+
+        PTL_ATTEMPT.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = PtlThenSucceedClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None)
+            .await
+            .expect("should succeed after PTL truncation");
+
+        assert!(result.removed_message_count > 0);
+        assert!(result.formatted_summary.contains("PTL recovered"));
+        assert!(
+            PTL_ATTEMPT.load(Ordering::Relaxed) >= 2,
+            "should have made at least 2 attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_session_gives_up_on_permanent_failure() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+
+        struct AlwaysFailClient;
+
+        #[async_trait]
+        impl ApiClient for AlwaysFailClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                Err(RuntimeError::new("authentication failed"))
+            }
+        }
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = AlwaysFailClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(super::CompactionError::ApiError(msg)) => {
+                assert!(msg.contains("authentication failed"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncate_head_for_ptl_drops_oldest_messages() {
+        let messages = vec![
+            ConversationMessage::user_text("a"),
+            ConversationMessage::user_text("b"),
+            ConversationMessage::user_text("c"),
+            ConversationMessage::user_text("d"),
+            ConversationMessage::user_text("e"),
+            ConversationMessage::user_text("prompt"),
+        ];
+
+        let truncated = super::truncate_head_for_ptl(&messages).expect("should truncate");
+        // 6 messages, drop ~20% = 1 → 5 remaining
+        assert_eq!(truncated.len(), 5);
+        // First dropped message was "a"
+        assert!(matches!(
+            &truncated[0].blocks[0],
+            ContentBlock::Text { text } if text == "b"
+        ));
+    }
+
+    #[test]
+    fn truncate_head_for_ptl_returns_none_for_tiny_input() {
+        let messages = vec![
+            ConversationMessage::user_text("only"),
+            ConversationMessage::user_text("two"),
+        ];
+        assert!(super::truncate_head_for_ptl(&messages).is_none());
     }
 }

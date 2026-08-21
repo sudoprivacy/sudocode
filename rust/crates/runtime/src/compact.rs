@@ -529,10 +529,61 @@ fn build_compaction_messages(
     messages
 }
 
+/// Maximum retries for the compaction streaming call.
+/// Matches CC's `MAX_COMPACT_STREAMING_RETRIES`.
+const MAX_COMPACT_RETRIES: u32 = 2;
+
+/// Maximum PTL (prompt-too-long) truncation retries.
+/// Matches CC's `MAX_PTL_RETRIES`.
+const MAX_PTL_RETRIES: u32 = 3;
+
+/// Check if an error is retryable (transient failures, not permanent ones).
+fn is_retryable_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("server error")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("529")
+        || lower.contains("overloaded")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+}
+
+/// Check if an error indicates prompt-too-long.
+fn is_prompt_too_long(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    lower.contains("prompt is too long")
+        || lower.contains("prompt_too_long")
+        || lower.contains("maximum context length")
+        || lower.contains("token limit")
+}
+
+/// Drop the oldest ~20% of message groups from compaction input to make
+/// room for a PTL retry. Returns `None` if nothing can be dropped.
+fn truncate_head_for_ptl(messages: &[ConversationMessage]) -> Option<Vec<ConversationMessage>> {
+    if messages.len() <= 2 {
+        return None;
+    }
+    // Drop ~20% of messages from the front (excluding the final compaction prompt)
+    let drop_count = std::cmp::max(1, (messages.len() - 1) / 5);
+    let remaining = &messages[drop_count..];
+    if remaining.len() < 2 {
+        return None;
+    }
+    Some(remaining.to_vec())
+}
+
 /// Compacts a session using an LLM to produce a high-quality summary.
 ///
-/// This is the primary compaction path. Falls back to local heuristic
-/// compaction when the API client doesn't support `send_compaction`.
+/// Retries transient failures up to [`MAX_COMPACT_RETRIES`] times with
+/// exponential backoff. On prompt-too-long errors, truncates the oldest
+/// messages and retries up to [`MAX_PTL_RETRIES`] times.
+///
+/// Falls back to local heuristic compaction when the API client doesn't
+/// support `send_compaction`.
 pub async fn compact_session<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
@@ -578,16 +629,40 @@ pub async fn compact_session<C: ApiClient>(
         crate::model_capabilities::max_output_tokens_or_default(model),
     );
 
-    // Call the LLM
-    let llm_summary = api_client
-        .send_compaction(
-            model,
-            COMPACTION_SYSTEM_PROMPT,
-            compaction_messages,
-            max_tokens,
-        )
-        .await
-        .map_err(|e| CompactionError::ApiError(e.to_string()))?;
+    // Call the LLM with retry logic
+    let mut current_messages = compaction_messages;
+    let mut ptl_attempts = 0u32;
+    let mut last_error = String::new();
+
+    let llm_summary = 'outer: loop {
+        for attempt in 0..=MAX_COMPACT_RETRIES {
+            match api_client
+                .send_compaction(model, COMPACTION_SYSTEM_PROMPT, current_messages.clone(), max_tokens)
+                .await
+            {
+                Ok(summary) => break 'outer summary,
+                Err(e) => {
+                    last_error = e.to_string();
+                    if is_prompt_too_long(&last_error) {
+                        ptl_attempts += 1;
+                        if ptl_attempts <= MAX_PTL_RETRIES {
+                            if let Some(truncated) = truncate_head_for_ptl(&current_messages) {
+                                current_messages = truncated;
+                                continue 'outer;
+                            }
+                        }
+                        return Err(CompactionError::ApiError(last_error));
+                    }
+                    if attempt < MAX_COMPACT_RETRIES && is_retryable_error(&last_error) {
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        continue;
+                    }
+                    return Err(CompactionError::ApiError(last_error));
+                }
+            }
+        }
+        return Err(CompactionError::ApiError(last_error));
+    };
 
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
@@ -2089,5 +2164,233 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn compact_session_retries_transient_failures() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static ATTEMPT: AtomicU8 = AtomicU8::new(0);
+
+        struct FailThenSucceedClient;
+
+        #[async_trait]
+        impl ApiClient for FailThenSucceedClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+                if attempt < 2 {
+                    Err(RuntimeError::new("503 server error: overloaded"))
+                } else {
+                    Ok("<summary>Recovered after retry.</summary>".to_string())
+                }
+            }
+        }
+
+        ATTEMPT.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = FailThenSucceedClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None)
+            .await
+            .expect("should succeed after retries");
+
+        assert!(result.removed_message_count > 0);
+        assert!(result.formatted_summary.contains("Recovered after retry"));
+        assert!(
+            ATTEMPT.load(Ordering::Relaxed) == 3,
+            "should have made 3 attempts (2 failures + 1 success)"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_session_retries_ptl_with_truncation() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static PTL_ATTEMPT: AtomicU8 = AtomicU8::new(0);
+
+        struct PtlThenSucceedClient;
+
+        #[async_trait]
+        impl ApiClient for PtlThenSucceedClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                let attempt = PTL_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+                if attempt == 0 {
+                    Err(RuntimeError::new("prompt_too_long: exceeds maximum context length"))
+                } else {
+                    // After truncation, message count should be smaller
+                    Ok(format!(
+                        "<summary>PTL recovered with {} messages.</summary>",
+                        messages.len()
+                    ))
+                }
+            }
+        }
+
+        PTL_ATTEMPT.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = PtlThenSucceedClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None)
+            .await
+            .expect("should succeed after PTL truncation");
+
+        assert!(result.removed_message_count > 0);
+        assert!(result.formatted_summary.contains("PTL recovered"));
+        assert!(
+            PTL_ATTEMPT.load(Ordering::Relaxed) >= 2,
+            "should have made at least 2 attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_session_gives_up_on_permanent_failure() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+
+        struct AlwaysFailClient;
+
+        #[async_trait]
+        impl ApiClient for AlwaysFailClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                Err(RuntimeError::new("authentication failed"))
+            }
+        }
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut client = AlwaysFailClient;
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(super::CompactionError::ApiError(msg)) => {
+                assert!(msg.contains("authentication failed"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncate_head_for_ptl_drops_oldest_messages() {
+        let messages = vec![
+            ConversationMessage::user_text("a"),
+            ConversationMessage::user_text("b"),
+            ConversationMessage::user_text("c"),
+            ConversationMessage::user_text("d"),
+            ConversationMessage::user_text("e"),
+            ConversationMessage::user_text("prompt"),
+        ];
+
+        let truncated = super::truncate_head_for_ptl(&messages).expect("should truncate");
+        // 6 messages, drop ~20% = 1 → 5 remaining
+        assert_eq!(truncated.len(), 5);
+        // First dropped message was "a"
+        assert!(matches!(
+            &truncated[0].blocks[0],
+            ContentBlock::Text { text } if text == "b"
+        ));
+    }
+
+    #[test]
+    fn truncate_head_for_ptl_returns_none_for_tiny_input() {
+        let messages = vec![
+            ConversationMessage::user_text("only"),
+            ConversationMessage::user_text("two"),
+        ];
+        assert!(super::truncate_head_for_ptl(&messages).is_none());
     }
 }

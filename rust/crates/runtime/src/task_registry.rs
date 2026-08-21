@@ -51,6 +51,8 @@ pub struct Task {
         skip_serializing_if = "Option::is_none"
     )]
     pub active_form: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
     pub task_packet: Option<TaskPacket>,
     pub status: TaskStatus,
     pub created_at: u64,
@@ -157,6 +159,7 @@ impl TaskRegistry {
         subject: &str,
         description: Option<&str>,
         active_form: Option<&str>,
+        dependencies: Vec<String>,
     ) -> Task {
         self.create_task_full(
             subject.to_owned(),
@@ -165,6 +168,7 @@ impl TaskRegistry {
             active_form.map(str::to_owned),
             None,
             TaskStatus::Pending,
+            dependencies,
         )
     }
 
@@ -176,6 +180,7 @@ impl TaskRegistry {
             None,
             None,
             TaskStatus::Created,
+            Vec::new(),
         )
     }
 
@@ -195,6 +200,7 @@ impl TaskRegistry {
             None,
             Some(packet),
             TaskStatus::Created,
+            Vec::new(),
         ))
     }
 
@@ -206,6 +212,7 @@ impl TaskRegistry {
         active_form: Option<String>,
         task_packet: Option<TaskPacket>,
         initial_status: TaskStatus,
+        dependencies: Vec<String>,
     ) -> Task {
         let mut inner = self.inner.lock().expect("registry lock poisoned");
         inner.counter += 1;
@@ -217,6 +224,7 @@ impl TaskRegistry {
             prompt,
             description,
             active_form,
+            dependencies,
             task_packet,
             status: initial_status,
             created_at: ts,
@@ -321,7 +329,7 @@ impl TaskRegistry {
         Ok(())
     }
 
-    /// Update structured fields on a task (subject, description, active_form, status).
+    /// Update structured fields on a task (subject, description, active_form, status, dependencies).
     /// Returns the updated task.
     pub fn update_fields(
         &self,
@@ -330,6 +338,7 @@ impl TaskRegistry {
         description: Option<&str>,
         active_form: Option<&str>,
         status: Option<TaskStatus>,
+        dependencies: Option<Vec<String>>,
     ) -> Result<Task, String> {
         let mut inner = self.inner.lock().expect("registry lock poisoned");
         let task = inner
@@ -348,10 +357,23 @@ impl TaskRegistry {
         if let Some(st) = status {
             task.status = st;
         }
+        if let Some(deps) = dependencies {
+            task.dependencies = deps;
+        }
         task.updated_at = now_secs();
         let result = task.clone();
         Self::save(&inner);
         Ok(result)
+    }
+
+    pub fn validate_dependencies(&self, deps: &[String]) -> Result<(), String> {
+        let inner = self.inner.lock().expect("registry lock poisoned");
+        for dep in deps {
+            if !inner.tasks.contains_key(dep) {
+                return Err(format!("dependency task not found: {dep}"));
+            }
+        }
+        Ok(())
     }
 
     pub fn remove(&self, task_id: &str) -> Option<Task> {
@@ -400,6 +422,7 @@ mod tests {
             "Fix login bug",
             Some("Investigate auth timeout"),
             Some("Fixing login bug"),
+            Vec::new(),
         );
         assert_eq!(task.status, TaskStatus::Pending);
         assert_eq!(task.subject, "Fix login bug");
@@ -636,11 +659,11 @@ mod tests {
 
         // Create tasks with persistence
         let registry = TaskRegistry::load(&path);
-        let t1 = registry.create_with_subject("First", Some("Do first"), Some("Doing first"));
+        let t1 = registry.create_with_subject("First", Some("Do first"), Some("Doing first"), Vec::new());
         registry
             .set_status(&t1.task_id, TaskStatus::InProgress)
             .unwrap();
-        let _t2 = registry.create_with_subject("Second", None, None);
+        let _t2 = registry.create_with_subject("Second", None, None, Vec::new());
 
         // Load into a new registry
         let registry2 = TaskRegistry::load(&path);
@@ -660,7 +683,7 @@ mod tests {
     #[test]
     fn update_fields_changes_subject_and_status() {
         let registry = TaskRegistry::new();
-        let task = registry.create_with_subject("Original", Some("desc"), None);
+        let task = registry.create_with_subject("Original", Some("desc"), None, Vec::new());
 
         let updated = registry
             .update_fields(
@@ -669,6 +692,7 @@ mod tests {
                 None,
                 Some("Renaming"),
                 Some(TaskStatus::Completed),
+                None,
             )
             .unwrap();
 
@@ -681,7 +705,7 @@ mod tests {
     #[test]
     fn pending_and_in_progress_statuses() {
         let registry = TaskRegistry::new();
-        let task = registry.create_with_subject("My task", None, None);
+        let task = registry.create_with_subject("My task", None, None, Vec::new());
         assert_eq!(task.status, TaskStatus::Pending);
 
         registry
@@ -689,5 +713,51 @@ mod tests {
             .unwrap();
         let fetched = registry.get(&task.task_id).unwrap();
         assert_eq!(fetched.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn creates_task_with_dependencies() {
+        let registry = TaskRegistry::new();
+        let t1 = registry.create_with_subject("First", None, None, Vec::new());
+        let t2 = registry.create_with_subject("Second", None, None, vec![t1.task_id.clone()]);
+        assert_eq!(t2.dependencies, vec![t1.task_id]);
+    }
+
+    #[test]
+    fn update_fields_sets_dependencies() {
+        let registry = TaskRegistry::new();
+        let t1 = registry.create_with_subject("A", None, None, Vec::new());
+        let t2 = registry.create_with_subject("B", None, None, Vec::new());
+        let updated = registry.update_fields(
+            &t2.task_id, None, None, None, None,
+            Some(vec![t1.task_id.clone()]),
+        ).unwrap();
+        assert_eq!(updated.dependencies, vec![t1.task_id]);
+    }
+
+    #[test]
+    fn validate_dependencies_rejects_missing() {
+        let registry = TaskRegistry::new();
+        let result = registry.validate_dependencies(&["nonexistent".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn persistence_preserves_dependencies() {
+        let dir = std::env::temp_dir().join(format!("task_dep_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tasks.json");
+        let _ = std::fs::remove_file(&path);
+
+        let registry = TaskRegistry::load(&path);
+        let t1 = registry.create_with_subject("First", None, None, Vec::new());
+        let _t2 = registry.create_with_subject("Second", None, None, vec![t1.task_id.clone()]);
+
+        let registry2 = TaskRegistry::load(&path);
+        let tasks = registry2.list(None);
+        let t2_reloaded = tasks.iter().find(|t| t.subject == "Second").unwrap();
+        assert_eq!(t2_reloaded.dependencies, vec![t1.task_id]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

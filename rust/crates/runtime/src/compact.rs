@@ -637,7 +637,12 @@ pub async fn compact_session<C: ApiClient>(
     let llm_summary = 'outer: loop {
         for attempt in 0..=MAX_COMPACT_RETRIES {
             match api_client
-                .send_compaction(model, COMPACTION_SYSTEM_PROMPT, current_messages.clone(), max_tokens)
+                .send_compaction(
+                    model,
+                    COMPACTION_SYSTEM_PROMPT,
+                    current_messages.clone(),
+                    max_tokens,
+                )
                 .await
             {
                 Ok(summary) => break 'outer summary,
@@ -2066,10 +2071,7 @@ mod tests {
             super::extract_file_path_from_tool_input(r#"{"path":"/tmp/c.rs"}"#),
             Some("/tmp/c.rs".to_string()),
         );
-        assert_eq!(
-            super::extract_file_path_from_tool_input("not json"),
-            None,
-        );
+        assert_eq!(super::extract_file_path_from_tool_input("not json"), None,);
     }
 
     #[test]
@@ -2102,17 +2104,23 @@ mod tests {
         tracker.record(file_c.clone());
 
         // Simulate preserved messages containing a read_file tool use for gamma
-        let preserved = vec![ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-            id: "t1".to_string(),
-            name: "read_file".to_string(),
-            input: format!(r#"{{"file_path":"{}"}}"#, file_c.display()),
-            thought_signature: None,
-        }])];
+        let preserved = vec![ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: format!(r#"{{"file_path":"{}"}}"#, file_c.display()),
+                thought_signature: None,
+            },
+        ])];
 
         let messages = tracker.build_post_compact_file_messages(&preserved);
 
         // gamma should be skipped (already in preserved)
-        assert_eq!(messages.len(), 2, "should restore alpha and beta, skip gamma");
+        assert_eq!(
+            messages.len(),
+            2,
+            "should restore alpha and beta, skip gamma"
+        );
 
         // Most recent first: beta before alpha
         let first_text = match &messages[0].blocks[0] {
@@ -2261,7 +2269,9 @@ mod tests {
             ) -> Result<String, RuntimeError> {
                 let attempt = PTL_ATTEMPT.fetch_add(1, Ordering::Relaxed);
                 if attempt == 0 {
-                    Err(RuntimeError::new("prompt_too_long: exceeds maximum context length"))
+                    Err(RuntimeError::new(
+                        "prompt_too_long: exceeds maximum context length",
+                    ))
                 } else {
                     // After truncation, message count should be smaller
                     Ok(format!(

@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::conversation::ApiClient;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
@@ -132,6 +135,131 @@ pub fn autocompact_buffer_tokens(model: &str) -> u32 {
     } else {
         AUTOCOMPACT_BUFFER_TOKENS
     }
+}
+
+// ---------------------------------------------------------------------------
+// Post-compact file restore (CC parity)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of recently-read files to re-inject after compaction.
+/// Matches CC's `POST_COMPACT_MAX_FILES_TO_RESTORE`.
+const POST_COMPACT_MAX_FILES: usize = 5;
+
+/// Total token budget for all re-injected file content.
+/// Matches CC's `POST_COMPACT_TOKEN_BUDGET`.
+const POST_COMPACT_TOKEN_BUDGET: usize = 50_000;
+
+/// Per-file token cap. Matches CC's `POST_COMPACT_MAX_TOKENS_PER_FILE`.
+const POST_COMPACT_MAX_TOKENS_PER_FILE: usize = 5_000;
+
+/// Tracks the most recent read_file tool result for each path.
+/// Populated by `ConversationRuntime` each time a `read_file` tool
+/// succeeds; consumed after compaction to restore file context.
+#[derive(Debug, Default)]
+pub struct ReadFileTracker {
+    entries: BTreeMap<PathBuf, Instant>,
+}
+
+impl ReadFileTracker {
+    /// Record that a file was read at the current instant.
+    pub fn record(&mut self, path: PathBuf) {
+        self.entries.insert(path, Instant::now());
+    }
+
+    /// Clear all tracked entries (called after file restore messages are built).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Build user messages re-injecting recently-read file content.
+    ///
+    /// Files already visible in `preserved_messages` (the tail kept after
+    /// compaction) are skipped — they're already in the model's context.
+    /// Returns messages ordered most-recent-first, constrained by both
+    /// file count and token budget.
+    #[must_use]
+    pub fn build_post_compact_file_messages(
+        &self,
+        preserved_messages: &[ConversationMessage],
+    ) -> Vec<ConversationMessage> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect read_file paths already in the preserved tail.
+        let preserved_paths = collect_read_file_paths(preserved_messages);
+
+        // Sort by timestamp (most recent first), skip preserved.
+        let mut candidates: Vec<(&PathBuf, &Instant)> = self
+            .entries
+            .iter()
+            .filter(|(path, _)| !preserved_paths.iter().any(|pp| pp == *path))
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(a.1));
+        candidates.truncate(POST_COMPACT_MAX_FILES);
+
+        let mut messages = Vec::new();
+        let mut total_tokens = 0usize;
+
+        for (path, _) in candidates {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Estimate tokens and enforce per-file + total budget
+            let token_estimate = content.len() / 4 + 1;
+            let capped = if token_estimate > POST_COMPACT_MAX_TOKENS_PER_FILE {
+                // Truncate to fit the per-file budget (conservative char estimate)
+                let max_chars = POST_COMPACT_MAX_TOKENS_PER_FILE * 4;
+                &content[..content.floor_char_boundary(max_chars.min(content.len()))]
+            } else {
+                content.as_str()
+            };
+
+            let capped_tokens = capped.len() / 4 + 1;
+            if total_tokens + capped_tokens > POST_COMPACT_TOKEN_BUDGET {
+                break;
+            }
+            total_tokens += capped_tokens;
+
+            let display_path = path.display();
+            messages.push(ConversationMessage::user_text(format!(
+                "[Post-compact file restore: {display_path}]\n{capped}"
+            )));
+        }
+
+        messages
+    }
+}
+
+/// Extract `read_file` tool-use paths from a message slice.
+fn collect_read_file_paths(messages: &[ConversationMessage]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for msg in messages {
+        for block in &msg.blocks {
+            if let ContentBlock::ToolUse { name, input, .. } = block {
+                if name == "read_file" || name == "Read" {
+                    if let Some(p) = extract_file_path_from_tool_input(input) {
+                        paths.push(PathBuf::from(&p));
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Parse the `file_path` field from a tool-use input JSON string.
+/// Public for use by `ConversationRuntime::find_tool_use_file_path`.
+pub fn extract_file_path_from_tool_input(input: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
+    parsed
+        .get("file_path")
+        .or_else(|| parsed.get("filePath"))
+        .or_else(|| parsed.get("path"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,5 +1975,119 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens, 4);
         assert_eq!(usage.cache_read_input_tokens, 2);
         assert_eq!(usage.cost_units, Some(300));
+    }
+
+    #[test]
+    fn extract_file_path_from_tool_input_parses_variants() {
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"file_path":"/tmp/a.rs"}"#),
+            Some("/tmp/a.rs".to_string()),
+        );
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"filePath":"/tmp/b.rs"}"#),
+            Some("/tmp/b.rs".to_string()),
+        );
+        assert_eq!(
+            super::extract_file_path_from_tool_input(r#"{"path":"/tmp/c.rs"}"#),
+            Some("/tmp/c.rs".to_string()),
+        );
+        assert_eq!(
+            super::extract_file_path_from_tool_input("not json"),
+            None,
+        );
+    }
+
+    #[test]
+    fn read_file_tracker_builds_post_compact_messages() {
+        use std::io::Write;
+
+        // Create temp files
+        let dir = std::env::temp_dir().join(format!(
+            "scode-compact-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file_a = dir.join("alpha.rs");
+        let file_b = dir.join("beta.rs");
+        let file_c = dir.join("gamma.rs");
+        std::fs::write(&file_a, "fn alpha() {}").unwrap();
+        std::fs::write(&file_b, "fn beta() {}").unwrap();
+        // gamma is tracked but also in preserved messages — should be skipped
+        std::fs::write(&file_c, "fn gamma() {}").unwrap();
+
+        let mut tracker = super::ReadFileTracker::default();
+        tracker.record(file_a.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.record(file_b.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.record(file_c.clone());
+
+        // Simulate preserved messages containing a read_file tool use for gamma
+        let preserved = vec![ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "read_file".to_string(),
+            input: format!(r#"{{"file_path":"{}"}}"#, file_c.display()),
+            thought_signature: None,
+        }])];
+
+        let messages = tracker.build_post_compact_file_messages(&preserved);
+
+        // gamma should be skipped (already in preserved)
+        assert_eq!(messages.len(), 2, "should restore alpha and beta, skip gamma");
+
+        // Most recent first: beta before alpha
+        let first_text = match &messages[0].blocks[0] {
+            ContentBlock::Text { text } => text,
+            _ => panic!("expected text block"),
+        };
+        assert!(first_text.contains("fn beta()"), "most recent file first");
+        assert!(first_text.contains("beta.rs"), "should mention filename");
+
+        let second_text = match &messages[1].blocks[0] {
+            ContentBlock::Text { text } => text,
+            _ => panic!("expected text block"),
+        };
+        assert!(second_text.contains("fn alpha()"), "second file");
+
+        // Clear should empty the tracker
+        let _ = Write::write(&mut std::io::sink(), b"");
+        tracker.clear();
+        assert!(tracker.build_post_compact_file_messages(&[]).is_empty());
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_tracker_respects_file_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "scode-compact-limit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut tracker = super::ReadFileTracker::default();
+        for i in 0..10 {
+            let path = dir.join(format!("file{i}.txt"));
+            std::fs::write(&path, format!("content {i}")).unwrap();
+            tracker.record(path);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let messages = tracker.build_post_compact_file_messages(&[]);
+        assert!(
+            messages.len() <= super::POST_COMPACT_MAX_FILES,
+            "should respect max files limit, got {}",
+            messages.len()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

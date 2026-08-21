@@ -10,7 +10,7 @@ use telemetry::SessionTracer;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync, estimate_session_tokens,
-    CompactionConfig, CompactionResult,
+    CompactionConfig, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -352,6 +352,8 @@ pub struct ConversationRuntime<C, T> {
     session_tracer: Option<SessionTracer>,
     /// File operation tracker for the current turn.
     file_tracker: crate::file_tracker::TurnFileTracker,
+    /// Tracks recently-read files for post-compact restoration (CC parity).
+    read_file_tracker: ReadFileTracker,
     /// Current turn ID for file tracking.
     current_turn_id: Option<String>,
     /// User request intent for the current turn.
@@ -415,6 +417,7 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
             file_tracker: crate::file_tracker::TurnFileTracker::new(workspace_root),
+            read_file_tracker: ReadFileTracker::default(),
             current_turn_id: None,
             user_request_intent: None,
             trace_id: None,
@@ -777,12 +780,55 @@ where
         result_message: ConversationMessage,
     ) -> Result<(), RuntimeError> {
         notify_tool_result(runtime_observer_mut(observer), &result_message);
+        // Track read_file results for post-compact restoration.
+        self.track_read_file_if_applicable(&result_message);
         self.session
             .push_message(result_message.clone())
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         self.record_tool_finished(iterations, &result_message);
         tool_results.push(result_message);
         Ok(())
+    }
+
+    /// If this tool result is a successful `read_file` / `Read`, record the
+    /// file path in `read_file_tracker` for post-compact restoration.
+    fn track_read_file_if_applicable(&mut self, result_message: &ConversationMessage) {
+        for block in &result_message.blocks {
+            if let ContentBlock::ToolResult {
+                tool_name,
+                tool_use_id,
+                is_error,
+                ..
+            } = block
+            {
+                if *is_error {
+                    continue;
+                }
+                if tool_name != "read_file" && tool_name != "Read" {
+                    continue;
+                }
+                // Find the matching ToolUse in the session to extract file_path
+                if let Some(path) = self.find_tool_use_file_path(tool_use_id) {
+                    self.read_file_tracker.record(path);
+                }
+            }
+        }
+    }
+
+    /// Search session messages for a ToolUse block with the given id and
+    /// extract its `file_path` parameter.
+    fn find_tool_use_file_path(&self, tool_use_id: &str) -> Option<std::path::PathBuf> {
+        for msg in self.session.messages.iter().rev() {
+            for block in &msg.blocks {
+                if let ContentBlock::ToolUse { id, input, .. } = block {
+                    if id == tool_use_id {
+                        return crate::compact::extract_file_path_from_tool_input(input)
+                            .map(|s| std::path::PathBuf::from(&s));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// If a tool output exceeds the offload threshold, spill the full bytes to
@@ -1791,7 +1837,25 @@ where
         // Success → reset the noop counter so the breaker only trips on
         // SUSTAINED inability to shrink, not on transient threshold dance.
         self.consecutive_auto_compact_noops = 0;
-        self.session = result.compacted_session;
+
+        // Post-compact file restore: re-inject recently-read file content
+        // so the model doesn't lose knowledge of files it just worked with.
+        // Messages are inserted after the summary but before preserved tail.
+        let preserved = &result.compacted_session.messages[1..];
+        let file_messages = self
+            .read_file_tracker
+            .build_post_compact_file_messages(preserved);
+        self.read_file_tracker.clear();
+
+        let mut session = result.compacted_session;
+        if !file_messages.is_empty() {
+            let insert_at = 1; // After summary, before preserved
+            for (i, msg) in file_messages.into_iter().enumerate() {
+                session.messages.insert(insert_at + i, msg);
+            }
+        }
+        self.session = session;
+
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,
         })

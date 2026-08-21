@@ -160,13 +160,13 @@
   <td class="item">Transcript file</td>
   <td class="cc"><div class="el"><span class="path">~/.claude/projects/&lt;key&gt;/&lt;uuid&gt;.jsonl</span> — JSONL, up to multi-GB, parentUuid DAG</div></td>
   <td>
-    <div class="el"><span class="was"><span class="path">.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span> — records <code>session_meta</code>/<code>compaction</code>/<code>prompt_history</code>/<code>message</code>; rotate 256 KiB × 3</span> <span class="arw">→</span> <span class="to"><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span> (KernelFsBackend; drop the fp dir)</span></div>
+    <div class="el"><span class="was"><span class="path">.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span> — records <code>session_meta</code>/<code>compaction</code>/<code>prompt_history</code>/<code>message</code>; rotate 256 KiB × 3</span> <span class="arw">→</span> <span class="to"><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span> = <b>one keep-forever DT_STREAM</b> (nexus <a href="https://github.com/nexi-lab/nexus-vfs/issues/229">#229</a>): O(1) append (<code>sys_write</code>) · tail-read (<code>sys_stat.size</code>) · transparent cold-read (segments auto-spill out of raft → object store, invisible above) · searchable (grep/FTS/semantic over streams). <b>Rotation is subsumed by the stream's internal cold-spill</b> — no fp dir, no manual seq, no 256 KiB rotation. Path literals via one SSOT builder (<code>session_transcript_path(session_id)</code>).</span></div>
     <span class="b ok">done (local)</span></td>
   <td>
     <div class="el"><b>→ sudocode:</b> <code>messages</code> table = full copy of the engine transcript → collapse to a <i>view</i> over <span class="path">/sessions/&lt;sid&gt;/transcript.jsonl</span> <span class="b dup">dup — primary</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><b><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span></b> — flat; session-id is the <b>sole structural key</b> (no workspace_hash, no agent nesting)</div>
+    <div class="el"><b><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span></b> — a single <b>keep-forever DT_STREAM</b> (retention=0); cold segments auto-spill out of raft → object store, invisible to callers (nexus <a href="https://github.com/nexi-lab/nexus-vfs/issues/229">#229</a>/<a href="https://github.com/nexi-lab/nexus-vfs/issues/230">#230</a>/<a href="https://github.com/nexi-lab/nexus-vfs/issues/233">#233</a>); session-id is the <b>sole structural key</b> (no workspace_hash, no agent nesting)</div>
     <div class="el"><code>owner</code> attribute records ownership</div>
     <div class="el">repos the session touched = DT_LINKs on it (0..N)</div>
     <div class="el"><span class="path">/agents/{name}/sessions/&lt;sid&gt;</span> = DT_LINK enum index — <b>not SSOT</b> (<code>list(prefix)</code>=readdir)</div>

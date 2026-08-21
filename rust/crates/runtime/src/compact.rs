@@ -2103,12 +2103,14 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         tracker.record(file_c.clone());
 
-        // Simulate preserved messages containing a read_file tool use for gamma
+        // Simulate preserved messages containing a read_file tool use for gamma.
+        // Use serde_json to properly escape backslashes on Windows paths.
+        let gamma_path_json = serde_json::to_string(&file_c.display().to_string()).unwrap();
         let preserved = vec![ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: "t1".to_string(),
                 name: "read_file".to_string(),
-                input: format!(r#"{{"file_path":"{}"}}"#, file_c.display()),
+                input: format!(r#"{{"file_path":{gamma_path_json}}}"#),
                 thought_signature: None,
             },
         ])];

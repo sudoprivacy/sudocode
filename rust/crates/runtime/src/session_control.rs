@@ -112,9 +112,7 @@ impl SessionStore {
     #[must_use]
     pub fn create_handle(&self, session_id: &str) -> SessionHandle {
         let id = session_id.to_string();
-        let path = self
-            .sessions_root
-            .join(format!("{id}.{PRIMARY_SESSION_EXTENSION}"));
+        let path = session_transcript_path(&self.sessions_root, &id);
         SessionHandle { id, path }
     }
 
@@ -152,7 +150,7 @@ impl SessionStore {
 
     pub fn resolve_managed_path(&self, session_id: &str) -> Result<PathBuf, SessionControlError> {
         for extension in [PRIMARY_SESSION_EXTENSION, LEGACY_SESSION_EXTENSION] {
-            let path = self.sessions_root.join(format!("{session_id}.{extension}"));
+            let path = session_path_with_ext(&self.sessions_root, session_id, extension);
             if path.exists() {
                 return Ok(path);
             }
@@ -320,6 +318,23 @@ pub fn workspace_fingerprint(workspace_root: &Path) -> String {
 pub const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 pub const LEGACY_SESSION_EXTENSION: &str = "json";
 pub const LATEST_SESSION_REFERENCE: &str = "latest";
+
+/// Join a managed session's transcript filename onto `sessions_root` for a
+/// given extension. The one place the `<session_id>.<ext>` on-disk name is
+/// formed.
+#[must_use]
+fn session_path_with_ext(sessions_root: &Path, session_id: &str, extension: &str) -> PathBuf {
+    sessions_root.join(format!("{session_id}.{extension}"))
+}
+
+/// The single source of truth for a managed session's transcript path:
+/// `<sessions_root>/<session_id>.<PRIMARY_SESSION_EXTENSION>`. Handle
+/// creation and primary-extension resolution route through this so the
+/// on-disk name is defined in exactly one place.
+#[must_use]
+pub fn session_transcript_path(sessions_root: &Path, session_id: &str) -> PathBuf {
+    session_path_with_ext(sessions_root, session_id, PRIMARY_SESSION_EXTENSION)
+}
 
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 

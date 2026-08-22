@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
 use kernel::kernel::OperationContext;
+use kernel::meta_store::DT_STREAM;
 
 // ---------------------------------------------------------------------------
 // Metadata types
@@ -69,6 +70,32 @@ pub trait FsBackend: Send + Sync + 'static {
         let temp = format!("{path}.tmp.{}", std::process::id());
         self.write(&temp, data)?;
         self.rename(&temp, path)
+    }
+
+    /// Create `path` as an append-only log, ready for [`FsBackend::append`].
+    ///
+    /// The default creates an empty regular file (host FS / VFS DT_REG),
+    /// which `append` then extends. Backends with a native append-log
+    /// primitive override this — [`KernelFsBackend`] creates a durable
+    /// DT_STREAM so `append` becomes an O(1) frame write. `retention` is the
+    /// cold-storage budget in bytes for backends that spill cold segments
+    /// out of the hot tier (`0` = keep-forever); regular-file backends
+    /// ignore it.
+    fn create_append_log(&self, path: &str, _retention: u64) -> io::Result<()> {
+        if !self.exists(path)? {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                let _ = self.create_dir_all(&parent.to_string_lossy());
+            }
+            self.write(path, b"")?;
+        }
+        Ok(())
+    }
+
+    /// True when `path` is a native append-log (e.g. a VFS DT_STREAM) for
+    /// which `append` is an O(1) frame write and snapshot rewrite / rotation
+    /// do not apply. Regular-file backends return `false`.
+    fn is_append_stream(&self, _path: &str) -> io::Result<bool> {
+        Ok(false)
     }
 
     /// The absolute working root that relative paths resolve against and
@@ -178,6 +205,12 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
         (**self).write_atomic(path, data)
+    }
+    fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        (**self).create_append_log(path, retention)
+    }
+    fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        (**self).is_append_stream(path)
     }
     fn working_root(&self) -> io::Result<String> {
         (**self).working_root()
@@ -374,6 +407,44 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), true);
         Self::new(kernel, ctx, workspace_root)
     }
+
+    /// True when the entry at `path` is a DT_STREAM (native append-log).
+    fn is_stream_entry(&self, path: &str) -> bool {
+        self.kernel
+            .sys_stat(path, &self.ctx.zone_id)
+            .is_some_and(|s| s.entry_type == DT_STREAM)
+    }
+
+    /// Read an entire DT_STREAM as the concatenation of its record payloads.
+    ///
+    /// Each [`FsBackend::append`] wrote one framed record; `sys_read` returns
+    /// one *deframed* payload plus the next offset, so walking from offset 0
+    /// to the live tail and concatenating reproduces the original append
+    /// stream byte-for-byte. Cold segments spilled out of the hot tier are
+    /// fetched transparently by the kernel. Non-blocking (`timeout_ms = 0`):
+    /// the walk stops at the tail rather than parking for new data.
+    fn read_stream_all(&self, path: &str) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let result = self
+                .kernel
+                .sys_read(path, &self.ctx, 0, offset)
+                .map_err(kernel_err)?;
+            match result.data {
+                Some(payload) if !payload.is_empty() => {
+                    out.extend_from_slice(&payload);
+                    match result.stream_next_offset {
+                        Some(next) if next as u64 > offset => offset = next as u64,
+                        // No forward progress (tail reached / unknown) — stop.
+                        _ => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Map a kernel error to an `io::Error`.
@@ -383,6 +454,11 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        // A DT_STREAM is read by walking its framed records to the tail; a
+        // single `sys_read` would return only the first record's payload.
+        if self.is_stream_entry(path) {
+            return self.read_stream_all(path);
+        }
         self.kernel
             .sys_read(path, &self.ctx, 0, 0)
             .map_err(kernel_err)
@@ -401,13 +477,75 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        // Compose: read existing content, concatenate, write back.
-        // Kernel pipes/streams have append semantics at offset != 0 but
-        // regular files don't, so the read-concat-write path is safest.
+        // A DT_STREAM appends `data` as one framed record in O(1): `sys_write`
+        // pushes to the log tail (the offset arg is ignored for streams).
+        // Regular files have no O(1) append, so fall back to read-concat-write
+        // (kernel `sys_write` is a whole-object replace, not an OS append).
+        if self.is_stream_entry(path) {
+            return self
+                .kernel
+                .sys_write(path, &self.ctx, data, 0)
+                .map_err(kernel_err)
+                .map(|_| ());
+        }
         let existing = self.read(path).unwrap_or_default();
         let mut combined = existing;
         combined.extend_from_slice(data);
         self.write(path, &combined)
+    }
+
+    fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        // Idempotent: an existing entry (DT_STREAM to append to, or a DT_REG
+        // from a prior degraded run) is left as-is.
+        if self.kernel.sys_stat(path, &self.ctx.zone_id).is_some() {
+            return Ok(());
+        }
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = self.create_dir_all(&parent.to_string_lossy());
+        }
+        // Prefer a durable, raft-replicated WAL DT_STREAM: O(1) frame append,
+        // tail-read via `sys_stat.size`, unbounded via cold-segment auto-spill
+        // (`capacity` == retention budget in bytes; 0 = keep-forever). The
+        // "wal" profile requires federation (NEXUS_PEERS); when it is
+        // unavailable we degrade to a DT_REG so the transcript stays durable
+        // on the local metastore — never a bounded, node-local "memory"
+        // stream that would silently lose history on restart.
+        let created_stream = self
+            .kernel
+            .sys_setattr(
+                path,
+                DT_STREAM as i32,
+                "",    // backend_name
+                None,  // backend
+                None,  // metastore
+                None,  // raft_backend
+                "wal", // io_profile — durable raft-replicated stream
+                &self.ctx.zone_id,
+                false,              // is_external
+                retention as usize, // capacity == cold-storage retention budget
+                None,               // read_fd
+                None,               // write_fd
+                None,               // mime_type
+                None,               // modified_at_ms
+                None,               // content_id
+                None,               // size
+                None,               // version
+                None,               // created_at_ms
+                None,               // link_target
+                None,               // source
+                None,               // remote_metastore
+            )
+            .is_ok();
+        if !created_stream {
+            // Degrade to a durable regular file; `append` detects the
+            // non-stream entry and uses read-concat-write.
+            self.write(path, b"")?;
+        }
+        Ok(())
+    }
+
+    fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        Ok(self.is_stream_entry(path))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

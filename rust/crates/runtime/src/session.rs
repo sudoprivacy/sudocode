@@ -12,6 +12,11 @@ use crate::usage::{parse_usage_cost_currency, TokenUsage};
 const SESSION_VERSION: u32 = 1;
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
 const MAX_ROTATED_FILES: usize = 3;
+/// Cold-storage retention budget (bytes) for a transcript backed by a native
+/// append-log (nexus DT_STREAM). `0` = keep-forever: cold segments spill out
+/// of the hot tier but are never dropped, so the whole transcript stays
+/// readable. Ignored by regular-file backends.
+const TRANSCRIPT_RETENTION_BYTES: u64 = 0;
 static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -675,7 +680,12 @@ impl Session {
         self.append_persisted_prompt_entry(entry_ref)
     }
 
-    fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
+    /// The full session rendered as an ordered list of JSONL record lines
+    /// (no trailing newlines): meta → compaction → prompts → messages. The
+    /// single source for both the snapshot writer ([`Self::render_jsonl_snapshot`])
+    /// and the append-log bootstrap ([`Self::bootstrap_append_log`]) so the
+    /// two never drift in record order or content.
+    fn snapshot_lines(&self) -> Result<Vec<String>, SessionError> {
         let mut lines = vec![self.meta_record()?.render()];
         if let Some(compaction) = &self.compaction {
             lines.push(compaction.to_jsonl_record()?.render());
@@ -690,9 +700,34 @@ impl Session {
                 .iter()
                 .map(|message| message_record(message).render()),
         );
-        let mut rendered = lines.join("\n");
+        Ok(lines)
+    }
+
+    fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
+        let mut rendered = self.snapshot_lines()?.join("\n");
         rendered.push('\n');
         Ok(rendered)
+    }
+
+    /// Bootstrap an empty/missing transcript to the full in-memory snapshot.
+    ///
+    /// On a backend with a native append-log ([`FsBackend::is_append_stream`]
+    /// — the nexus DT_STREAM), each record is written as one framed
+    /// [`FsBackend::append`]; snapshot rewrite and size rotation do not apply
+    /// (the stream's internal cold-spill subsumes rotation). On a regular-file
+    /// backend it stays the atomic snapshot rewrite + rotation via
+    /// [`Self::save_to_path`].
+    fn bootstrap_append_log(&self, path: &Path) -> Result<(), SessionError> {
+        let backend = self.backend();
+        let path_str = path.to_string_lossy();
+        backend.create_append_log(&path_str, TRANSCRIPT_RETENTION_BYTES)?;
+        if backend.is_append_stream(&path_str)? {
+            for line in self.snapshot_lines()? {
+                backend.append(&path_str, format!("{line}\n").as_bytes())?;
+            }
+            return Ok(());
+        }
+        self.save_to_path(path)
     }
 
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
@@ -705,7 +740,7 @@ impl Session {
         let needs_bootstrap = !backend.exists(&path_str)?
             || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
-            self.save_to_path(path)?;
+            self.bootstrap_append_log(path)?;
             return Ok(());
         }
 
@@ -727,7 +762,7 @@ impl Session {
         let needs_bootstrap = !backend.exists(&path_str)?
             || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
-            self.save_to_path(path)?;
+            self.bootstrap_append_log(path)?;
             return Ok(());
         }
 

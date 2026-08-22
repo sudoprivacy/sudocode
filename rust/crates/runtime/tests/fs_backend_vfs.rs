@@ -201,6 +201,57 @@ fn oversized_tool_output_offloads_onto_the_vfs() {
 }
 
 #[test]
+fn create_append_log_without_federation_yields_a_durable_regular_file() {
+    // A durable "wal" DT_STREAM needs federation (NEXUS_PEERS), absent on a
+    // bare test kernel. `create_append_log` must then degrade to a DT_REG —
+    // durable on the local metastore — and NEVER a bounded, node-local
+    // "memory" stream that would silently lose the transcript on restart.
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    let path = "/ws/sessions/sid-2.jsonl";
+
+    fs.create_append_log(path, 0)
+        .expect("create_append_log should succeed");
+    assert!(
+        !fs.is_append_stream(path).unwrap(),
+        "no federation → transcript degrades to a regular file, not a stream"
+    );
+
+    // The regular-file append path (read-concat-write) round-trips unchanged.
+    fs.append(path, b"line-1\n").unwrap();
+    fs.append(path, b"line-2\n").unwrap();
+    assert_eq!(fs.read(path).unwrap(), b"line-1\nline-2\n");
+}
+
+#[test]
+fn dt_stream_append_frames_read_back_deframed() {
+    // A DT_STREAM created directly on the kernel (node-local, federation-free)
+    // stands in for the durable wal stream: the framing contract that
+    // `KernelFsBackend` append/read relies on is identical. Each append is one
+    // framed record; read walks every frame to the tail and concatenates the
+    // deframed payloads back into the original append byte stream.
+    let kernel = kernel_with_root_backend();
+    let path = "/ws/transcript-stream.jsonl";
+    kernel
+        .create_stream(path, 64 * 1024)
+        .expect("create DT_STREAM");
+
+    let fs = vfs_backend(&kernel);
+    assert!(
+        fs.is_append_stream(path).unwrap(),
+        "an entry created as a DT_STREAM reports as an append-log"
+    );
+
+    fs.append(path, b"{\"a\":1}\n").unwrap();
+    fs.append(path, b"{\"b\":2}\n").unwrap();
+    assert_eq!(
+        fs.read(path).unwrap(),
+        b"{\"a\":1}\n{\"b\":2}\n",
+        "reading a DT_STREAM reproduces the appended records in order"
+    );
+}
+
+#[test]
 fn glob_and_grep_walk_the_vfs_trie() {
     let kernel = kernel_with_root_backend();
     let fs = vfs_backend(&kernel);

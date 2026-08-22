@@ -233,12 +233,13 @@
 
 <!-- MEMORY -->
 <tr>
-  <td class="mega" rowspan="8">Memory</td>
+  <td class="mega" rowspan="9">Memory</td>
   <td class="item">Auto-memory (4 types)</td>
   <td class="cc"><div class="el"><span class="path">projects/&lt;git-root&gt;/memory/</span> — user/feedback/project/reference + <code>MEMORY.md</code> (keyed by git root)</div></td>
   <td>
-    <div class="el"><span class="was"><span class="path">~/.scode/projects/&lt;slug&gt;/memory/</span> + <code>MEMORY.md</code>, 4 types, prompt-driven Write</span> <span class="arw">→</span> <span class="to"><span class="path">/agents/{name}/memory/</span></span></div>
-    <span class="b ok">done</span></td>
+    <div class="el"><span class="was"><span class="path">~/.scode/projects/&lt;slug&gt;/memory/</span> + <code>MEMORY.md</code>, 4 types, prompt-driven Write</span> <span class="arw">→</span> <span class="to"><span class="path">/agents/{name}/memory/topics/&lt;topic&gt;.md</span> (4 types via frontmatter) + <b>derived</b> <code>MEMORY.md</code></span></div>
+    <div class="el"><b>SSOT risk:</b> <code>MEMORY.md</code> is today <b>hand-maintained</b> (prompt-driven <code>- [Title](file.md) — hook</code>), <i>not</i> derived from topic frontmatter → the index can drift from the entries (orphan pointer / unindexed file). Target: <code>MEMORY.md</code> = a <b>derived projection</b> regenerated from topic frontmatter (or computed at render, never a separate persisted SSOT); move the hook into a frontmatter field so <span class="path">topics/</span> stays the sole SSOT (co-exist, co-vanish).</div>
+    <span class="b partial">storage done · index-SSOT to fix</span></td>
   <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el"><span class="path">/agents/{name}/memory/</span> (agent-keyed)</div> <span class="b ok">design</span></td>
 </tr>
@@ -304,6 +305,17 @@
     <span class="b partial">partial</span></td>
   <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
   <td><div class="el">repo-mounted under <span class="path">/proc/{pid}/workspace/{repo}/</span></div> <span class="b ok">design</span></td>
+</tr>
+<tr>
+  <td class="item">Recall / retrieval
+    <span class="tip">?<span class="tipbox">The eight rows above are storage-centric — WHERE each memory kind lives. This row is the missing retrieval dimension: how memory (and transcripts) are searched back INTO context. It is what makes a finite window survivable — past the injection budget you recall by relevance instead of front-loading everything.</span></span>
+  </td>
+  <td class="cc"><div class="el"><code>MEMORY.md</code> index injected each session; <b>full entries surfaced on-demand by relevance</b> (recall in <code>&lt;system-reminder&gt;</code>); nightly <code>/dream</code> keeps the set small — so the finite window is patched by <i>recall + consolidation</i>, not full injection</div></td>
+  <td>
+    <div class="el"><span class="was"><b>missing</b> — memory injected in full up to a char cap (<code>RENDERED_CHAR_CAP</code>); overflow dropped by <b>render order, not relevance</b>; no semantic recall over memory or transcripts</span> <span class="arw">→</span> <span class="tbd">? semantic/hybrid + recency recall via nexus search-plugin (DT_STREAM-index FR pending)</span></div>
+    <span class="b miss">gap</span></td>
+  <td><div class="el"><b>→ sudocode:</b> memory is the agent's — sudowork has none</div> <span class="b na">n/a</span></td>
+  <td><div class="el">semantic/hybrid + recency over <span class="path">/agents/{name}/memory/</span> + <span class="path">/sessions/</span> (nexus search-plugin: FTS/ANN/fusion; needs the DT_STREAM-index FR)</div> <span class="b q">open?</span></td>
 </tr>
 
 <!-- RESUME -->

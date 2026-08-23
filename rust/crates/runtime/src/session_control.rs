@@ -49,10 +49,18 @@ impl SessionStore {
             .canonicalize(&cwd.to_string_lossy())
             .map(PathBuf::from)
             .unwrap_or_else(|_| cwd.to_path_buf());
-        let sessions_root = canonical_cwd
-            .join(".scode")
-            .join("sessions")
-            .join(workspace_fingerprint(&canonical_cwd));
+        // The session root swaps WITH the backend: nexus imposes a flat
+        // `/sessions/` namespace (no workspace_hash); host backends use the
+        // workspace-fingerprinted local partition. Asking the backend (rather
+        // than hardcoding) means pointing sessions at nexus is a backend swap,
+        // not a code change to remember here.
+        let sessions_root = match fs.managed_sessions_root() {
+            Some(root) => PathBuf::from(root),
+            None => canonical_cwd
+                .join(".scode")
+                .join("sessions")
+                .join(workspace_fingerprint(&canonical_cwd)),
+        };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,
@@ -85,10 +93,15 @@ impl SessionStore {
             .canonicalize(&workspace_root.to_string_lossy())
             .map(PathBuf::from)
             .unwrap_or_else(|_| workspace_root.to_path_buf());
-        let sessions_root = data_dir
-            .as_ref()
-            .join("sessions")
-            .join(workspace_fingerprint(&canonical_workspace));
+        // Backend-imposed session namespace (nexus /sessions/) wins; else the
+        // data-dir's workspace-fingerprinted partition.
+        let sessions_root = match fs.managed_sessions_root() {
+            Some(root) => PathBuf::from(root),
+            None => data_dir
+                .as_ref()
+                .join("sessions")
+                .join(workspace_fingerprint(&canonical_workspace)),
+        };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,

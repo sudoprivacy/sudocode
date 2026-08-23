@@ -36,8 +36,8 @@ use agent_client_protocol_schema::{
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
     SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
-    StopReason, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    ToolKind, Usage,
+    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -378,10 +378,28 @@ impl RuntimeObserver for SdkSessionObserver {
         } else {
             ToolCallStatus::Completed
         };
+        // `content` is the field ACP clients render; `rawOutput` is an optional
+        // machine-readable payload they are free to ignore. Emit both: the text
+        // block carries the *raw* `output` string (exactly the ToolResult text
+        // the model saw), not the parsed `raw_output` Value — re-serialising a
+        // parsed Value would reformat JSON output and turn plain text into a
+        // quoted JSON string.
+        //
+        // Empty output emits no content field at all rather than an empty text
+        // block: `content` replaces the collection wholesale, so `Some(vec![])`
+        // would tell the client to clear whatever it has, and a `""` text block
+        // renders as a stray blank line. Omitting leaves the client's existing
+        // rendering alone while `rawOutput` still records the empty result.
+        let content = (!output.is_empty()).then(|| {
+            vec![ToolCallContent::from(ContentBlock::Text(TextContent::new(
+                output,
+            )))]
+        });
         self.push(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             id_owned,
             ToolCallUpdateFields::new()
                 .status(status)
+                .content(content)
                 .raw_output(raw_output),
         )));
     }

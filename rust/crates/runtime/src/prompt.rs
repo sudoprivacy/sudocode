@@ -346,10 +346,12 @@ impl SystemPromptBuilder {
             |context| context.cwd.display().to_string(),
         );
         let mut lines = vec!["# Environment context".to_string()];
+        // The model is deliberately absent. A model does not need to be told
+        // which model it is, and naming it here made the one line in the
+        // dynamic block that changes mid-session — `/model` and
+        // `session/setModel` rebuild the prompt, so every turn after a switch
+        // re-sent the whole dynamic block instead of reusing its cache.
         let mut env_bullets = Vec::new();
-        if let Some(identity) = self.model_family.as_ref() {
-            env_bullets.push(format!("Model: {}", identity.family_label()));
-        }
         env_bullets.push(format!("Working directory: {cwd}"));
         env_bullets.push(format!(
             "Platform: {} {}",

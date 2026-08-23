@@ -926,12 +926,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Skill",
-            description: "Invoke a skill by name.\n\nA skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills are listed in the `# Available skills` section of the system prompt; when the task at hand is one a listed skill covers, call this tool first and follow the instructions it returns in place of your default approach.\n\n- `skill`: the exact name from that listing. A leading `/` or `$` is accepted and ignored; a filesystem path is not a valid value.\n- `args`: optional arguments to pass through to the skill.\n\nThe result carries the skill's `path`. When the instructions reference supporting files, read them from that directory.",
+            description: "Invoke a skill by name, loading its instructions for the current turn. Valid names are listed in the `# Available skills` section of the system prompt.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "skill": { "type": "string" },
-                    "args": { "type": "string" }
+                    "skill": {
+                        "type": "string",
+                        "description": "Exact name from that listing. A leading `/` or `$` is ignored; a filesystem path is not a valid value."
+                    },
+                    "args": {
+                        "type": "string",
+                        "description": "Optional arguments passed through to the skill."
+                    }
                 },
                 "required": ["skill"],
                 "additionalProperties": false

@@ -926,12 +926,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Skill",
-            description: "Load a local skill definition and its instructions.",
+            description: "Invoke a skill by name, loading its instructions for the current turn. Valid names are listed in the `# Available skills` section of the system prompt.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "skill": { "type": "string" },
-                    "args": { "type": "string" }
+                    "skill": {
+                        "type": "string",
+                        "description": "Exact name from that listing. A leading `/` or `$` is ignored; a filesystem path is not a valid value."
+                    },
+                    "args": {
+                        "type": "string",
+                        "description": "Optional arguments passed through to the skill."
+                    }
                 },
                 "required": ["skill"],
                 "additionalProperties": false

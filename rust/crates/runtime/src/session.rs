@@ -277,6 +277,17 @@ impl Session {
     #[must_use]
     pub fn tool_results_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
         let parent = session_file.parent()?;
+        // Per-session-directory layout (`<id>/transcript.jsonl`): the parent IS
+        // the session dir, so tool-results lives directly under it — the whole
+        // session (transcript + tool-results) is one GC-able subtree.
+        if session_file.file_name().and_then(|name| name.to_str())
+            == Some(crate::session_control::TRANSCRIPT_FILE)
+        {
+            return Some(parent.join("tool-results"));
+        }
+        // Legacy flat layout (`<id>.jsonl`): namespace under a shared
+        // `tool-results/<id>/` so managed session files sharing one dir don't
+        // collide.
         Some(
             parent
                 .join("tool-results")

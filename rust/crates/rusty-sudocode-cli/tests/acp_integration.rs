@@ -335,8 +335,16 @@ fn base_command(workspace: &TestWorkspace) -> Command {
 }
 
 fn spawn_stdio_client(workspace: &TestWorkspace) -> AcpTestClient {
+    spawn_stdio_client_with_args(workspace, &[])
+}
+
+/// Like [`spawn_stdio_client`] but passes extra flags to the `scode acp`
+/// process, so a test can exercise the process-wide prompt flags a session's
+/// `_meta` overrides layer on top of.
+fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> AcpTestClient {
     let mut cmd = base_command(workspace);
     cmd.arg("acp")
+        .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2345,16 +2353,78 @@ async fn assert_bad_prompt_meta_rejected(
     }
 }
 
+/// A session `systemPrompt` must replace the built-in blocks *without*
+/// discarding what the process-wide `--append-system-prompt` added.
+///
+/// Regression: the append used to be a dynamic section, so a session override —
+/// which only replaces static ones — could not touch it. Moving the append into
+/// the static block to get it into the cacheable prefix made the two collide,
+/// and `docs/acp.md` promises they layer.
+#[tokio::test]
+async fn acp_session_override_keeps_process_level_append() {
+    const PROCESS_APPEND: &str = "Process-wide rule append-9d1c04.";
+    const SESSION_OVERRIDE: &str = "You are session-persona-5e8b72.";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("sysprompt-layering");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client =
+        spawn_stdio_client_with_args(&workspace, &["--append-system-prompt", PROCESS_APPEND]);
+    scenario_initialize(&mut client).await;
+    let root = workspace.root.clone();
+
+    // Without a session override the process-level append is simply present.
+    let plain = scenario_session_new(&mut client, &root).await;
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "l1").await;
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "process-level append must reach the model; body: {body}"
+    );
+
+    // With one, it must survive alongside the replacement.
+    let resp = session_new_with_meta(
+        &mut client,
+        &root,
+        json!({"systemPrompt": SESSION_OVERRIDE}),
+    )
+    .await;
+    let overridden = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &overridden, "l2").await;
+    assert!(
+        body.contains(SESSION_OVERRIDE),
+        "session override must reach the model; body: {body}"
+    );
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "session override must not discard the process-level append; body: {body}"
+    );
+    assert!(
+        !body.contains(DEFAULT_IDENTITY),
+        "session override must still replace the built-in identity; body: {body}"
+    );
+    assert!(
+        body.find(SESSION_OVERRIDE) < body.find(PROCESS_APPEND),
+        "the replacement comes first, the append stays after it; body: {body}"
+    );
+}
+
 /// Built-in identity block: present on the default prompt, gone under override.
 const DEFAULT_IDENTITY: &str = "You are Sudo Code";
-/// The dynamic block every session carries; the append must land after it.
+/// The first dynamic block every session carries. The append is a *static*
+/// section, so it must land before this — that ordering is what proves it
+/// sits in the cacheable prefix rather than the per-turn block.
 const MEMORY_HEADING: &str = "# auto memory";
 
 /// `_meta.sudocode.systemPrompt` (replace the built-in static blocks) and
-/// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block) on
+/// `_meta.sudocode.appendSystemPrompt` (append a trailing static block) on
 /// `session/new`, checked on the wire body the model receives:
 ///  - neither → the default prompt (regression guard),
-///  - append only → appended after the auto-memory block, identity kept,
+///  - append only → appended at the end of the static block (before the
+///    dynamic auto-memory block), identity kept,
 ///  - override only → identity replaced, nothing appended,
 ///  - both → both take effect (the two are orthogonal),
 ///  - other sessions in the process are unaffected,
@@ -2394,10 +2464,20 @@ async fn acp_session_new_system_prompt_override_and_append_reach_model() {
         body.contains(DEFAULT_IDENTITY) && body.contains(APPEND),
         "append must reach the model with the identity block intact; body: {body}"
     );
-    let (memory_at, append_at) = (body.find(MEMORY_HEADING), body.find(APPEND));
+    let (identity_at, memory_at, append_at) = (
+        body.find(DEFAULT_IDENTITY),
+        body.find(MEMORY_HEADING),
+        body.find(APPEND),
+    );
     assert!(
-        memory_at.is_some() && append_at > memory_at,
-        "append must land after the auto-memory block: memory@{memory_at:?} append@{append_at:?}"
+        memory_at.is_some() && append_at.is_some() && append_at < memory_at,
+        "append is a static section, so it must precede the dynamic auto-memory \
+         block: append@{append_at:?} memory@{memory_at:?}"
+    );
+    assert!(
+        append_at > identity_at,
+        "append must come after the built-in identity block, i.e. last within \
+         the static block: identity@{identity_at:?} append@{append_at:?}"
     );
 
     // override only.

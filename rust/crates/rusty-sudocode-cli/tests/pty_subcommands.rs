@@ -167,29 +167,40 @@ fn system_prompt_renders() {
     assert_eq!(exit, 0, "scode system-prompt should exit 0; got {exit}");
 }
 
-/// System prompt must use dynamic "Model:" (not hardcoded "Model family: Claude Opus 4.6").
-/// The identity is resolved from sudocode.json at runtime and rebuilt on /model switch.
+/// The system prompt carries no model identity at all — neither the legacy
+/// hardcoded "Model family: Claude Opus 4.6" label nor the dynamic "Model:"
+/// line that replaced it. A model does not need to be told which model it is,
+/// and the line was the only part of the dynamic block that changed
+/// mid-session, so a `/model` switch re-sent the whole block.
+///
+/// Rendering under two different `--model` values must therefore produce
+/// byte-identical output.
 #[test]
-fn system_prompt_dynamic_model_identity() {
+fn system_prompt_carries_no_model_identity() {
     let bin = common::scode_bin();
-    let output = std::process::Command::new(&bin)
-        .args(["system-prompt"])
-        .output()
-        .expect("spawn scode system-prompt");
-    assert!(output.status.success(), "scode system-prompt should exit 0");
+    let render = |model: &str| {
+        let output = std::process::Command::new(&bin)
+            .args(["system-prompt", "--model", model])
+            .output()
+            .expect("spawn scode system-prompt");
+        assert!(output.status.success(), "scode system-prompt should exit 0");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("Model family:"),
-        "system prompt must not use legacy 'Model family:' label.\n\
-         First 500 chars:\n{}",
-        &stdout[..stdout.len().min(500)]
-    );
-    assert!(
-        stdout.contains("Model:"),
-        "system prompt should contain dynamic 'Model:' line.\n\
-         First 500 chars:\n{}",
-        &stdout[..stdout.len().min(500)]
+    let sonnet = render("sonnet");
+    for needle in ["Model family:", "Model:", "claude-sonnet"] {
+        assert!(
+            !sonnet.contains(needle),
+            "system prompt must not name the model ({needle:?}).\n\
+             First 500 chars:\n{}",
+            &sonnet[..sonnet.len().min(500)]
+        );
+    }
+
+    assert_eq!(
+        sonnet,
+        render("opus"),
+        "system prompt must not vary with the selected model"
     );
 }
 

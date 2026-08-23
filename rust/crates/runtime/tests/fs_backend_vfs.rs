@@ -13,9 +13,10 @@ use std::sync::{Arc, Mutex};
 
 use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
 use kernel::kernel::{Kernel, OperationContext};
+use kernel::meta_store::DT_LINK;
 use runtime::{
     edit_file, glob_search, grep_search, read_file, write_file, FsBackend, GrepSearchInput,
-    KernelFsBackend, Session,
+    KernelFsBackend, Session, SessionStore,
 };
 
 /// Minimal in-memory content backend so a fresh `Kernel` can round-trip
@@ -249,6 +250,38 @@ fn dt_stream_append_frames_read_back_deframed() {
         b"{\"a\":1}\n{\"b\":2}\n",
         "reading a DT_STREAM reproduces the appended records in order"
     );
+}
+
+#[test]
+fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+
+    // nexus imposes the flat, session-id-keyed /sessions/ namespace.
+    assert_eq!(fs.managed_sessions_root().as_deref(), Some("/sessions"));
+
+    // link() creates a DT_LINK pointer (the /agents/{name}/sessions/<sid> index).
+    fs.link("/agents/alice/sessions/sid-1", "/sessions/sid-1")
+        .expect("link should create a DT_LINK");
+    let st = kernel
+        .sys_stat("/agents/alice/sessions/sid-1", "root")
+        .expect("linked path should stat");
+    assert_eq!(st.entry_type, DT_LINK, "alias is a DT_LINK");
+    assert_eq!(st.link_target.as_deref(), Some("/sessions/sid-1"));
+}
+
+#[test]
+fn session_store_roots_at_vfs_sessions_over_kernel_backend() {
+    // The anti-forget property: a SessionStore over KernelFsBackend roots
+    // sessions at /sessions/ automatically — no code change, just the backend.
+    let kernel = kernel_with_root_backend();
+    let fs: Arc<dyn FsBackend> = Arc::new(vfs_backend(&kernel));
+    let store = SessionStore::from_cwd_with("/ws", Arc::clone(&fs)).expect("store");
+
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(norm(store.sessions_dir()), "/sessions"); // no .scode, no workspace_hash
+    let handle = store.create_handle("sid-42");
+    assert_eq!(norm(&handle.path), "/sessions/sid-42/transcript.jsonl");
 }
 
 #[test]

@@ -40,7 +40,7 @@ examples ship under
 | `scode mcp` | List configured MCP servers, including plugin-provided ones |
 | `scode mcp show <server>` | Detailed view, including the owning plugin |
 | `scode skills` | List skills; plugin-provided ones appear under `SudoCode plugin roots:` |
-| `scode system-prompt` | Render the system prompt; includes the plugin capability summary block |
+| `scode system-prompt` | Render the system prompt; includes the `# Available skills` listing, and no plugin section of its own (§5.2) |
 
 Both `scode plugins` and `scode mcp` accept `--output-format json` and
 emit structured payloads (`plugins[]`, `servers[]`) for scripting.
@@ -189,6 +189,26 @@ The body becomes the prompt content when the model invokes
 (`.nexus/sudocode/skills/`) and user skills. If a plugin skill shadows
 one of those, `scode skills` will tag it as
 `(shadowed by Project roots)`.
+
+**The system prompt advertises them.** Every skill that wins its name —
+plugin-provided ones included — is listed in a `# Available skills`
+section as `- name: description`, so the model can call
+`Skill(skill="<name>")` without the user naming it first. Shadowed
+entries are omitted, so the listing always agrees with what the `Skill`
+tool resolves.
+
+The `SKILL.md` path is **not** in the listing: it is decision-irrelevant
+until a skill has been chosen, and the `Skill` tool returns it on
+invocation. Read supporting files from that directory after invoking.
+
+The listing is sized by a character budget — 1% of an assumed 200k-token
+window (8000 characters), overridable with
+`SUDO_CODE_SKILL_LISTING_CHAR_BUDGET`. Over budget, entries degrade to
+`- name` rather than every description being clipped, because a clipped
+description usually loses the trailing "use this when …" clause that
+makes a skill selectable. Descriptions are restored in discovery order,
+so project roots keep theirs before user roots, and user roots before
+plugin roots.
 
 ### 2.5 MCP servers
 
@@ -355,25 +375,42 @@ user, with the current user's filesystem and network access.
 > on your machine. Inspect the manifest and hook scripts before
 > `scode plugins install`.
 
-### 5.2 Manifest metadata stays out of the system prompt
+### 5.2 Plugins contribute nothing to the system prompt
 
-To defend against prompt-injection authored into manifest fields, the
-plugin capability section in the system prompt lists plugins
-anonymously:
+No plugin metadata reaches the model. There is no plugin section at all:
+`name`, `display_name` and `description` surface only in the CLI
+(`scode plugins`, `scode mcp`).
 
-```
-# Available SudoCode plugins
-…
- - Plugin 1; provides 2 tools, 1 hook, MCP servers
-```
-
-Plugin `name`, `display_name`, and `description` surface only in the
-CLI (`scode plugins`, `scode mcp`); the model-facing system prompt sees
-only the anonymous capability summary.
+Earlier versions carried an anonymised inventory
+(`- Plugin 1; provides 2 tools, 1 hook, MCP servers`) as a
+prompt-injection defence — capabilities without the untrusted manifest
+text. It was removed once every capability had a channel that names it
+properly: plugin tools and MCP tools appear in the tool list with their
+own names and descriptions, and skills appear by name in
+`# Available skills`. What remained was a token cost restating them.
 
 > MCP tool names like `everything_add` are visible to the model — those
 > are contracts published by the MCP server itself, separate from the
 > manifest. Tool descriptions are the server's responsibility.
+
+> Hooks stay invisible until one fires, which is the right time to learn
+> of them: the tool result names the owning plugin (§2.6), and the
+> generic hook contract is already in the prompt's `# System` block.
+
+**A plugin's skills are the one thing it can say to the model**, and they
+go through the skill channel, not the manifest one: a skill's `name` and
+`description` *are* injected, because a listing the model cannot read is
+a listing it cannot use (§2.4). They are treated as untrusted data rather
+than withheld:
+
+- newlines and control characters are folded to spaces, so a crafted
+  description or directory name cannot forge an extra list entry or a
+  fake section header;
+- a single description is capped at 1536 characters on a `char` boundary
+  as a runaway guard, and the listing as a whole is bounded by the
+  budget described in §2.4;
+- the section header tells the model the text is author-controlled data,
+  not instructions.
 
 ### 5.3 Hook script paths are constrained to the plugin root
 

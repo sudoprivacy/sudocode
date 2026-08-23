@@ -82,6 +82,14 @@ impl ModelFamilyIdentity {
 pub struct SystemPrompt {
     pub static_sections: Vec<String>,
     pub dynamic_sections: Vec<String>,
+    /// How many leading `static_sections` came from the built-in blocks.
+    ///
+    /// [`Self::override_static_sections`] replaces exactly those, so text a
+    /// caller appended survives an override applied afterwards. ACP needs this:
+    /// the process-wide `--append-system-prompt` and a session's `_meta`
+    /// overrides are two separate applications, and the session one must not
+    /// silently drop what the process appended.
+    builtin_static_sections: usize,
 }
 
 impl SystemPrompt {
@@ -122,17 +130,26 @@ impl SystemPrompt {
     /// still sees the workspace it is operating in. Callers that want a
     /// blank-slate prompt can clear `dynamic_sections` themselves.
     pub fn override_static_sections(&mut self, text: impl Into<String>) {
-        self.static_sections = vec![text.into()];
+        let split = self.builtin_static_sections.min(self.static_sections.len());
+        let appended = self.static_sections.split_off(split);
+        self.static_sections = std::iter::once(text.into()).chain(appended).collect();
+        self.builtin_static_sections = 1;
     }
 
-    /// Append `text` as the last dynamic section.
+    /// Append `text` as the last static section.
     ///
-    /// Being last puts it closest to the conversation, so it outranks the
-    /// workspace-discovered `AGENTS.md` instructions and the auto-memory
-    /// instructions that precede it. Orthogonal to
-    /// [`Self::override_static_sections`]: the two compose.
-    pub fn append_dynamic_section(&mut self, text: impl Into<String>) {
-        self.dynamic_sections.push(text.into());
+    /// Caller-supplied instructions are stable for as long as the caller is
+    /// — a per-tenant preamble does not change between turns — so they belong
+    /// in the aggressively cached static block rather than the per-turn
+    /// dynamic one. Orthogonal to [`Self::override_static_sections`]: the two
+    /// compose, and appending after an override puts the appended text last
+    /// within the replacement block.
+    ///
+    /// The trade-off is ordering: the workspace-discovered `AGENTS.md`
+    /// instructions, the auto-memory block and the skill listing are all
+    /// dynamic, so they now follow this text rather than precede it.
+    pub fn append_static_section(&mut self, text: impl Into<String>) {
+        self.static_sections.push(text.into());
     }
 }
 
@@ -142,14 +159,15 @@ impl SystemPrompt {
 ///
 /// The two fields are orthogonal and may be combined: `system_prompt`
 /// replaces the static blocks, `append_system_prompt` adds a trailing
-/// dynamic block. Neither is truncated or escaped.
+/// static block. Both therefore land in the cacheable prefix. Neither is
+/// truncated or escaped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptOverrides {
     /// Replaces every static section (see
     /// [`SystemPrompt::override_static_sections`]).
     pub system_prompt: Option<String>,
-    /// Appended as the last dynamic section (see
-    /// [`SystemPrompt::append_dynamic_section`]).
+    /// Appended as the last static section (see
+    /// [`SystemPrompt::append_static_section`]).
     pub append_system_prompt: Option<String>,
 }
 
@@ -165,7 +183,7 @@ impl SystemPromptOverrides {
             prompt.override_static_sections(text.clone());
         }
         if let Some(text) = &self.append_system_prompt {
-            prompt.append_dynamic_section(text.clone());
+            prompt.append_static_section(text.clone());
         }
     }
 }
@@ -309,19 +327,21 @@ impl SystemPromptBuilder {
         static_sections.push(get_output_efficiency_section());
 
         let mut dynamic_sections = Vec::new();
+        // `# Environment context` absorbed the two sections that used to follow
+        // it. `# Project context` restated the working directory verbatim and
+        // added a count of discovered instruction files, which the files
+        // themselves make redundant; `# Runtime config` named the settings file
+        // that had been loaded, which the model can neither read nor change.
         dynamic_sections.push(self.environment_section());
         if let Some(project_context) = &self.project_context {
-            dynamic_sections.push(render_project_context(project_context));
             if !project_context.instruction_files.is_empty() {
                 dynamic_sections.push(render_instruction_files(&project_context.instruction_files));
             }
         }
-        if let Some(config) = &self.config {
-            dynamic_sections.push(render_config_section(config));
-        }
         dynamic_sections.extend(self.append_sections.iter().cloned());
 
         SystemPrompt {
+            builtin_static_sections: static_sections.len(),
             static_sections,
             dynamic_sections,
         }
@@ -333,22 +353,52 @@ impl SystemPromptBuilder {
         self.build().render()
     }
 
+    /// The single facts-about-the-world section: working directory, platform,
+    /// whether this is a git repository, and today's date.
+    ///
+    /// The model is deliberately absent. A model does not need to be told which
+    /// model it is, and naming it here made the one line in the dynamic block
+    /// that changes mid-session — `/model` and `session/setModel` rebuild the
+    /// prompt, so every turn after a switch re-sent the whole dynamic block
+    /// instead of reusing its cache.
+    ///
+    /// The date stays out on purpose: it is the one per-day field, so carrying
+    /// it here would break the cache prefix every midnight. `ConversationRuntime`
+    /// announces it as a `<system-reminder>` on the first user turn instead,
+    /// with rollover and post-compaction re-injection.
     fn environment_section(&self) -> String {
-        let cwd = self.project_context.as_ref().map_or_else(
-            || "unknown".to_string(),
-            |context| context.cwd.display().to_string(),
-        );
-        let mut lines = vec!["# Environment context".to_string()];
         let mut env_bullets = Vec::new();
-        if let Some(identity) = self.model_family.as_ref() {
-            env_bullets.push(format!("Model: {}", identity.family_label()));
-        }
-        env_bullets.push(format!("Working directory: {cwd}"));
         env_bullets.push(format!(
-            "Platform: {} {}",
-            self.os_name.as_deref().unwrap_or("unknown"),
-            self.os_version.as_deref().unwrap_or("unknown")
+            "Working directory: {}",
+            self.project_context.as_ref().map_or_else(
+                || "unknown".to_string(),
+                |context| context.cwd.display().to_string(),
+            )
         ));
+
+        // `os_version` is threaded through the builder but production passes a
+        // literal "unknown", so render the bare platform rather than a bullet
+        // that reads `macos unknown`. A real version, once wired, shows up.
+        let os_name = self.os_name.as_deref().unwrap_or("unknown");
+        env_bullets.push(match self.os_version.as_deref() {
+            Some(version) if !version.is_empty() && version != "unknown" => {
+                format!("Platform: {os_name} {version}")
+            }
+            _ => format!("Platform: {os_name}"),
+        });
+
+        if let Some(context) = self.project_context.as_ref() {
+            env_bullets.push(format!(
+                "Is a git repository: {}",
+                if context.git_context.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ));
+        }
+
+        let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(env_bullets));
         lines.join("\n")
     }
@@ -445,32 +495,6 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     String::from_utf8(output.stdout).ok()
-}
-
-// The current date is deliberately NOT rendered here (or anywhere in the
-// system prompt): a per-day field in the dynamic system block would break
-// the prompt-cache prefix for every session started on a new day.
-// `ConversationRuntime` announces the date as a `<system-reminder>` content
-// block on the first user turn instead, and fires a rollover reminder when
-// the local date changes mid-session (see `inject_date_context`).
-fn render_project_context(project_context: &ProjectContext) -> String {
-    let mut lines = vec!["# Project context".to_string()];
-    let is_git_repo = project_context.git_context.is_some();
-    let mut bullets = vec![
-        format!("Working directory: {}", project_context.cwd.display()),
-        format!(
-            "Is a git repository: {}",
-            if is_git_repo { "yes" } else { "no" }
-        ),
-    ];
-    if !project_context.instruction_files.is_empty() {
-        bullets.push(format!(
-            "Project instruction files discovered: {}.",
-            project_context.instruction_files.len()
-        ));
-    }
-    lines.extend(prepend_bullets(bullets));
-    lines.join("\n")
 }
 
 fn render_instruction_files(files: &[ContextFile]) -> String {
@@ -689,25 +713,6 @@ fn memory_prompt_variant_for_agent(
     }
 }
 
-fn render_config_section(config: &RuntimeConfig) -> String {
-    let mut lines = vec!["# Runtime config".to_string()];
-    if config.loaded_entries().is_empty() {
-        lines.extend(prepend_bullets(vec![
-            "No Sudo Code settings files loaded.".to_string()
-        ]));
-        return lines.join("\n");
-    }
-
-    lines.extend(prepend_bullets(
-        config
-            .loaded_entries()
-            .iter()
-            .map(|entry| format!("Loaded {:?}: {}", entry.source, entry.path.display()))
-            .collect(),
-    ));
-    lines.join("\n")
-}
-
 fn get_simple_intro_section(has_output_style: bool) -> String {
     let role = if has_output_style {
         "according to your \"Output Style\" below, which describes how you should respond to user queries."
@@ -820,7 +825,8 @@ fn get_output_efficiency_section() -> String {
      - Decisions that need the user's input\n\
      - High-level status updates at natural milestones\n\
      - Errors or blockers that change the plan\n\n\
-     If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls."
+     If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.\n\n\
+     When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey."
         .to_string()
 }
 
@@ -1158,10 +1164,10 @@ mod tests {
         }
 
         assert!(prompt.contains("Project rules"));
-        // The full settings JSON body is no longer inlined into the prompt;
-        // only the loaded config paths should appear.
+        // `# Runtime config` is gone: the loaded settings file is not named and
+        // its body was never inlined, so neither may appear.
         assert!(!prompt.contains("permissionMode"));
-        assert!(prompt.contains("settings.json"));
+        assert!(!prompt.contains("settings.json"));
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -1194,11 +1200,16 @@ mod tests {
         assert!(prompt.contains("# Using your tools"));
         assert!(prompt.contains("# Tone and style"));
         assert!(prompt.contains("# Output efficiency"));
-        assert!(prompt.contains("# Project context"));
+        assert!(prompt.contains("# Environment context"));
         assert!(prompt.contains("# Project instructions"));
         assert!(prompt.contains("Project rules"));
-        // Loaded settings paths appear, but the full JSON body does not.
-        assert!(prompt.contains("settings.json"));
+        // `# Project context` and `# Runtime config` were folded into
+        // `# Environment context`: the working directory is stated once, and
+        // the loaded settings file is no longer named at all. Settings content
+        // must not leak by either route.
+        assert!(!prompt.contains("# Project context"));
+        assert!(!prompt.contains("# Runtime config"));
+        assert!(!prompt.contains("settings.json"));
         assert!(!prompt.contains("permissionMode"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
@@ -1333,32 +1344,6 @@ mod tests {
             MemoryPromptVariant::Compact,
             "built-in sub-agents stay compact"
         );
-
-        fs::remove_dir_all(root).expect("cleanup temp dir");
-    }
-
-    #[test]
-    fn config_section_lists_paths_without_inlining_json_body() {
-        let root = temp_dir();
-        fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
-        fs::write(
-            root.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"permissionMode":"acceptEdits"}"#,
-        )
-        .expect("write settings");
-
-        let config = ConfigLoader::new(&root, root.join("missing-home"))
-            .load()
-            .expect("config should load");
-        let rendered = super::render_config_section(&config);
-
-        assert!(rendered.contains("# Runtime config"));
-        assert!(rendered.contains("settings.json"));
-        // The settings JSON body must not be inlined.
-        assert!(!rendered.contains("permissionMode"));
-        assert!(!rendered.contains("acceptEdits"));
-        assert!(!rendered.contains('{'));
-        assert!(!rendered.contains('}'));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

@@ -61,67 +61,43 @@ fn install_and_enable_plugin(config_home: &Path, plugin_name: &str, description:
 }
 
 #[test]
-fn system_prompt_includes_active_plugin_capabilities() {
-    let root = unique_temp_dir("sp-plugin-caps");
+fn system_prompt_carries_no_plugin_section_and_no_manifest_metadata() {
+    // The anonymised `# Available SudoCode plugins` inventory was removed: every
+    // capability it summarised now reaches the model through a channel that
+    // names it (plugin tools and MCP tools appear in the tool list, skills in
+    // the skill listing), so the section only spent tokens restating them.
+    //
+    // The property it was protecting still matters and is asserted directly:
+    // an enabled plugin's manifest name and description must not appear
+    // anywhere in the prompt, in either output format.
+    let root = unique_temp_dir("sp-plugin-none");
     let config_home = root.join("config-home");
     fs::create_dir_all(&config_home).expect("config home");
     fs::create_dir_all(&root).expect("cwd");
 
     install_and_enable_plugin(&config_home, "greet-plugin", "A greeting SudoCode plugin");
+    let env = [("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))];
 
-    let output = run_system_prompt(
-        &root,
-        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
-        &[],
-    );
+    let output = run_system_prompt(&root, &env, &[]);
     assert!(
         output.status.success(),
         "system-prompt should exit 0; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(
-        text.contains("# Available SudoCode plugins"),
-        "system-prompt missing 'Available SudoCode plugins' section;\nfull output:\n{text}"
-    );
-    let plugin_section = text
-        .split("# Available SudoCode plugins")
-        .nth(1)
-        .expect("plugin section");
-    assert!(
-        plugin_section.contains("Plugin 1"),
-        "system-prompt missing plugin capability entry;\nfull output:\n{text}"
-    );
-    assert!(
-        plugin_section.contains("manifest metadata is untrusted"),
-        "system-prompt missing plugin metadata omission note;\nfull output:\n{text}"
-    );
-    assert!(
-        !plugin_section.contains("greet-plugin"),
-        "system-prompt should not include plugin manifest ids;\nfull output:\n{text}"
-    );
-    assert!(
-        !plugin_section.contains("A greeting SudoCode plugin"),
-        "system-prompt should not include plugin manifest descriptions;\nfull output:\n{text}"
-    );
+    for needle in [
+        "# Available SudoCode plugins",
+        "greet-plugin",
+        "A greeting SudoCode plugin",
+        "manifest metadata is untrusted",
+    ] {
+        assert!(
+            !text.contains(needle),
+            "system-prompt should not contain {needle:?};\nfull output:\n{text}"
+        );
+    }
 
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn system_prompt_json_sections_include_plugin_section() {
-    let root = unique_temp_dir("sp-plugin-json");
-    let config_home = root.join("config-home");
-    fs::create_dir_all(&config_home).expect("config home");
-    fs::create_dir_all(&root).expect("cwd");
-
-    install_and_enable_plugin(&config_home, "json-test-plugin", "JSON output test plugin");
-
-    let output = run_system_prompt(
-        &root,
-        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
-        &["--output-format", "json"],
-    );
+    let output = run_system_prompt(&root, &env, &["--output-format", "json"]);
     assert!(
         output.status.success(),
         "system-prompt --output-format json should exit 0; stderr: {}",
@@ -130,79 +106,21 @@ fn system_prompt_json_sections_include_plugin_section() {
     let parsed: Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     let message = parsed["message"].as_str().expect("message field");
-    assert!(
-        message.contains("# Available SudoCode plugins"),
-        "JSON message missing plugin section"
-    );
-    let plugin_message_section = message
-        .split("# Available SudoCode plugins")
-        .nth(1)
-        .expect("plugin message section");
-    assert!(
-        plugin_message_section.contains("Plugin 1"),
-        "JSON message missing plugin capability entry"
-    );
-    assert!(
-        !plugin_message_section.contains("json-test-plugin"),
-        "JSON message should not include plugin manifest ids"
-    );
     let sections = parsed["sections"].as_array().expect("sections field");
-    assert!(
-        sections.iter().any(|section| section
-            .as_str()
-            .is_some_and(|text| text.contains("# Available SudoCode plugins"))),
-        "JSON sections missing plugin section"
-    );
-    assert!(
-        sections.iter().any(|section| section
-            .as_str()
-            .is_some_and(|text| text.contains("Plugin 1"))),
-        "JSON sections missing plugin capability entry"
-    );
-    let plugin_section = sections
-        .iter()
-        .filter_map(Value::as_str)
-        .find(|text| text.contains("# Available SudoCode plugins"))
-        .expect("JSON sections missing plugin section");
-    assert!(
-        !plugin_section.contains("json-test-plugin"),
-        "JSON plugin section should not include plugin manifest ids"
-    );
-
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn system_prompt_omits_plugin_section_when_no_plugins_installed() {
-    let root = unique_temp_dir("sp-no-plugins");
-    let config_home = root.join("config-home");
-    fs::create_dir_all(&config_home).expect("config home");
-    fs::create_dir_all(&root).expect("cwd");
-
-    // The bundled `browser` plugin ships with `defaultEnabled: true`, so an
-    // empty config home is not "no enabled plugins". Disable it explicitly to
-    // exercise the path where nothing is enabled and the section is omitted.
-    fs::write(
-        config_home.join("settings.json"),
-        r#"{"plugins":{"enabled":{"browser@bundled":{"enabled":false}}}}"#,
-    )
-    .expect("settings.json write");
-
-    let output = run_system_prompt(
-        &root,
-        &[("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))],
-        &[],
-    );
-    assert!(
-        output.status.success(),
-        "system-prompt should succeed without plugins; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(
-        !text.contains("# Available SudoCode plugins"),
-        "no plugin section expected when no plugins installed"
-    );
+    for needle in [
+        "# Available SudoCode plugins",
+        "greet-plugin",
+        "A greeting SudoCode plugin",
+    ] {
+        assert!(!message.contains(needle), "JSON message leaked {needle:?}");
+        assert!(
+            !sections
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|section| section.contains(needle)),
+            "JSON sections leaked {needle:?}"
+        );
+    }
 
     fs::remove_dir_all(root).ok();
 }

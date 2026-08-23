@@ -49,10 +49,18 @@ impl SessionStore {
             .canonicalize(&cwd.to_string_lossy())
             .map(PathBuf::from)
             .unwrap_or_else(|_| cwd.to_path_buf());
-        let sessions_root = canonical_cwd
-            .join(".scode")
-            .join("sessions")
-            .join(workspace_fingerprint(&canonical_cwd));
+        // The session root swaps WITH the backend: nexus imposes a flat
+        // `/sessions/` namespace (no workspace_hash); host backends use the
+        // workspace-fingerprinted local partition. Asking the backend (rather
+        // than hardcoding) means pointing sessions at nexus is a backend swap,
+        // not a code change to remember here.
+        let sessions_root = match fs.managed_sessions_root() {
+            Some(root) => PathBuf::from(root),
+            None => canonical_cwd
+                .join(".scode")
+                .join("sessions")
+                .join(workspace_fingerprint(&canonical_cwd)),
+        };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,
@@ -85,10 +93,15 @@ impl SessionStore {
             .canonicalize(&workspace_root.to_string_lossy())
             .map(PathBuf::from)
             .unwrap_or_else(|_| workspace_root.to_path_buf());
-        let sessions_root = data_dir
-            .as_ref()
-            .join("sessions")
-            .join(workspace_fingerprint(&canonical_workspace));
+        // Backend-imposed session namespace (nexus /sessions/) wins; else the
+        // data-dir's workspace-fingerprinted partition.
+        let sessions_root = match fs.managed_sessions_root() {
+            Some(root) => PathBuf::from(root),
+            None => data_dir
+                .as_ref()
+                .join("sessions")
+                .join(workspace_fingerprint(&canonical_workspace)),
+        };
         fs.create_dir_all(&sessions_root.to_string_lossy())?;
         Ok(Self {
             sessions_root,
@@ -132,7 +145,19 @@ impl SessionStore {
             self.workspace_root.join(&direct)
         };
         let looks_like_path = direct.extension().is_some() || direct.components().count() > 1;
-        let path = if candidate.exists() {
+        let candidate_transcript = candidate.join(TRANSCRIPT_FILE);
+        let path = if self
+            .fs
+            .exists(&candidate_transcript.to_string_lossy())
+            .unwrap_or(false)
+        {
+            // Caller pointed at a session directory — resolve to its transcript.
+            candidate_transcript
+        } else if self
+            .fs
+            .exists(&candidate.to_string_lossy())
+            .unwrap_or(false)
+        {
             candidate
         } else if looks_like_path {
             return Err(SessionControlError::Format(
@@ -149,9 +174,15 @@ impl SessionStore {
     }
 
     pub fn resolve_managed_path(&self, session_id: &str) -> Result<PathBuf, SessionControlError> {
+        // Current per-session-directory layout first.
+        let dir_path = session_transcript_path(&self.sessions_root, session_id);
+        if self.fs.exists(&dir_path.to_string_lossy()).unwrap_or(false) {
+            return Ok(dir_path);
+        }
+        // Legacy flat layout — never broken for sessions created before the migration.
         for extension in [PRIMARY_SESSION_EXTENSION, LEGACY_SESSION_EXTENSION] {
-            let path = session_path_with_ext(&self.sessions_root, session_id, extension);
-            if path.exists() {
+            let path = legacy_session_path_with_ext(&self.sessions_root, session_id, extension);
+            if self.fs.exists(&path.to_string_lossy()).unwrap_or(false) {
                 return Ok(path);
             }
         }
@@ -247,10 +278,25 @@ impl SessionStore {
             Err(err) => return Err(err.into()),
         };
         for entry in entries {
-            let path = directory.join(&entry.name);
-            if !is_managed_session_file(&path) {
+            let entry_path = directory.join(&entry.name);
+            // Current layout: a per-session directory holding transcript.jsonl.
+            // Legacy layout: a flat <id>.jsonl / <id>.json file. Read both.
+            let path = if entry.is_dir {
+                let transcript = entry_path.join(TRANSCRIPT_FILE);
+                if self
+                    .fs
+                    .exists(&transcript.to_string_lossy())
+                    .unwrap_or(false)
+                {
+                    transcript
+                } else {
+                    continue;
+                }
+            } else if is_managed_session_file(&entry_path) {
+                entry_path
+            } else {
                 continue;
-            }
+            };
             let modified_epoch_millis = self
                 .fs
                 .stat(&path.to_string_lossy())
@@ -319,21 +365,31 @@ pub const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 pub const LEGACY_SESSION_EXTENSION: &str = "json";
 pub const LATEST_SESSION_REFERENCE: &str = "latest";
 
-/// Join a managed session's transcript filename onto `sessions_root` for a
-/// given extension. The one place the `<session_id>.<ext>` on-disk name is
-/// formed.
+/// Fixed transcript member name inside a per-session directory.
+pub const TRANSCRIPT_FILE: &str = "transcript.jsonl";
+
+/// Join the LEGACY flat on-disk name `<sessions_root>/<session_id>.<ext>`.
+/// Retained only for backward-compatible reads of sessions created before the
+/// per-session-directory layout.
 #[must_use]
-fn session_path_with_ext(sessions_root: &Path, session_id: &str, extension: &str) -> PathBuf {
+fn legacy_session_path_with_ext(
+    sessions_root: &Path,
+    session_id: &str,
+    extension: &str,
+) -> PathBuf {
     sessions_root.join(format!("{session_id}.{extension}"))
 }
 
 /// The single source of truth for a managed session's transcript path:
-/// `<sessions_root>/<session_id>.<PRIMARY_SESSION_EXTENSION>`. Handle
-/// creation and primary-extension resolution route through this so the
-/// on-disk name is defined in exactly one place.
+/// `<sessions_root>/<session_id>/transcript.jsonl` — a per-session directory
+/// that groups the transcript with its `tool-results/` subtree so a session is
+/// created, listed, resumed, and GC'd as one subtree. Backend-agnostic:
+/// computed once here, identical across every `FsBackend` (only the root
+/// differs). New sessions write here; [`SessionStore::resolve_managed_path`]
+/// still reads the legacy flat layout for older sessions.
 #[must_use]
 pub fn session_transcript_path(sessions_root: &Path, session_id: &str) -> PathBuf {
-    session_path_with_ext(sessions_root, session_id, PRIMARY_SESSION_EXTENSION)
+    sessions_root.join(session_id).join(TRANSCRIPT_FILE)
 }
 
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
@@ -533,6 +589,15 @@ pub fn is_session_reference_alias(reference: &str) -> bool {
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {
+    // Per-session-directory layout: <id>/transcript.jsonl → id is the dir name.
+    if path.file_name().and_then(|n| n.to_str()) == Some(TRANSCRIPT_FILE) {
+        return path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned);
+    }
+    // Legacy flat layout: <id>.jsonl / <id>.json → id is the file stem.
     path.file_name()
         .and_then(|value| value.to_str())
         .and_then(|name| {
@@ -618,6 +683,64 @@ mod tests {
             .save_to_path(&handle.path)
             .expect("session should persist");
         session
+    }
+
+    #[test]
+    fn new_session_uses_per_session_directory_layout() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir should exist");
+        let session = persist_session(&root, "hello");
+        let handle = create_managed_session_handle_for(&root, &session.session_id)
+            .expect("handle should build");
+
+        // Path is <sessions-dir>/<id>/transcript.jsonl.
+        assert_eq!(
+            handle.path.file_name().and_then(|n| n.to_str()),
+            Some("transcript.jsonl")
+        );
+        assert_eq!(
+            handle
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some(session.session_id.as_str())
+        );
+        assert!(handle.path.exists(), "transcript file should exist on disk");
+
+        // tool-results lives under the per-session dir, not a shared sibling.
+        let tr = Session::tool_results_dir_for(&handle.path, &session.session_id)
+            .expect("tool-results dir");
+        assert_eq!(tr, handle.path.parent().unwrap().join("tool-results"));
+
+        // Listing derives the id from the directory name.
+        let listed = list_managed_sessions_for(&root).expect("list");
+        assert!(listed.iter().any(|s| s.id == session.session_id));
+    }
+
+    #[test]
+    fn legacy_flat_session_is_still_listed_and_resolved() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir should exist");
+        let store = SessionStore::from_cwd(&root).expect("store");
+        let sessions_root = store.sessions_dir().to_path_buf();
+        fs::create_dir_all(&sessions_root).expect("create sessions root");
+
+        // Write a session at the LEGACY flat path (pre-migration layout).
+        let mut session = Session::new().with_workspace_root(root.clone());
+        session.push_user_text("legacy").expect("push");
+        let id = session.session_id.clone();
+        let flat_path = sessions_root.join(format!("{id}.jsonl"));
+        session.save_to_path(&flat_path).expect("save legacy flat");
+
+        // Enumeration still finds it, and resolution returns the flat path.
+        let listed = list_managed_sessions_for(&root).expect("list");
+        assert!(
+            listed.iter().any(|s| s.id == id),
+            "legacy flat session must still be listed"
+        );
+        let handle = resolve_session_reference_for(&root, &id).expect("resolve legacy");
+        assert_eq!(handle.path, flat_path, "resolves to the legacy flat path");
     }
 
     fn wait_for_next_millisecond() {

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
 use kernel::kernel::OperationContext;
-use kernel::meta_store::DT_STREAM;
+use kernel::meta_store::{DT_LINK, DT_STREAM};
 
 // ---------------------------------------------------------------------------
 // Metadata types
@@ -96,6 +96,26 @@ pub trait FsBackend: Send + Sync + 'static {
     /// do not apply. Regular-file backends return `false`.
     fn is_append_stream(&self, _path: &str) -> io::Result<bool> {
         Ok(false)
+    }
+
+    /// The root under which managed sessions live **when the backend imposes
+    /// its own namespace**. nexus (`KernelFsBackend`) → `Some("/sessions")` —
+    /// the flat, session-id-keyed byte-SSOT (no `workspace_hash`). `None`
+    /// (host backends) → the caller uses its own computed root
+    /// (`<cwd>/.scode/sessions/<workspace_hash>/`).
+    ///
+    /// This is what makes the session root swap **with the backend**: callers
+    /// ask the backend rather than hardcoding, so pointing sessions at nexus
+    /// is a backend swap, not a code change to remember.
+    fn managed_sessions_root(&self) -> Option<String> {
+        None
+    }
+
+    /// Create a link `alias` → `target` (a pointer, not a byte-copy). On the
+    /// VFS this is a `DT_LINK` (e.g. the `/agents/{name}/sessions/<sid>` enum
+    /// index); on a host FS there is no equivalent, so it is a no-op.
+    fn link(&self, _alias: &str, _target: &str) -> io::Result<()> {
+        Ok(())
     }
 
     /// The absolute working root that relative paths resolve against and
@@ -211,6 +231,12 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         (**self).is_append_stream(path)
+    }
+    fn managed_sessions_root(&self) -> Option<String> {
+        (**self).managed_sessions_root()
+    }
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        (**self).link(alias, target)
     }
     fn working_root(&self) -> io::Result<String> {
         (**self).working_root()
@@ -546,6 +572,48 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         Ok(self.is_stream_entry(path))
+    }
+
+    fn managed_sessions_root(&self) -> Option<String> {
+        // nexus keeps sessions as a flat, session-id-keyed byte-SSOT at the
+        // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
+        // `owner`, not path). So a `SessionStore` over this backend roots
+        // sessions here automatically.
+        Some("/sessions".to_string())
+    }
+
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        // DT_LINK: a VFS-internal pointer alias → target (e.g. the
+        // `/agents/{name}/sessions/<sid>` enum index → `/sessions/<sid>`).
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            let _ = self.create_dir_all(&parent.to_string_lossy());
+        }
+        self.kernel
+            .sys_setattr(
+                alias,
+                DT_LINK as i32,
+                "",   // backend_name
+                None, // backend
+                None, // metastore
+                None, // raft_backend
+                "",   // io_profile
+                &self.ctx.zone_id,
+                false,        // is_external
+                0,            // capacity
+                None,         // read_fd
+                None,         // write_fd
+                None,         // mime_type
+                None,         // modified_at_ms
+                None,         // content_id
+                None,         // size
+                None,         // version
+                None,         // created_at_ms
+                Some(target), // link_target
+                None,         // source
+                None,         // remote_metastore
+            )
+            .map_err(kernel_err)
+            .map(|_| ())
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

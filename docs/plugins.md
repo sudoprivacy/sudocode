@@ -40,7 +40,7 @@ examples ship under
 | `scode mcp` | List configured MCP servers, including plugin-provided ones |
 | `scode mcp show <server>` | Detailed view, including the owning plugin |
 | `scode skills` | List skills; plugin-provided ones appear under `SudoCode plugin roots:` |
-| `scode system-prompt` | Render the system prompt; includes the plugin capability summary block |
+| `scode system-prompt` | Render the system prompt; includes the plugin capability summary block and the `# Available skills` listing |
 
 Both `scode plugins` and `scode mcp` accept `--output-format json` and
 emit structured payloads (`plugins[]`, `servers[]`) for scripting.
@@ -189,6 +189,14 @@ The body becomes the prompt content when the model invokes
 (`.nexus/sudocode/skills/`) and user skills. If a plugin skill shadows
 one of those, `scode skills` will tag it as
 `(shadowed by Project roots)`.
+
+**The system prompt advertises them.** Every skill that wins its name —
+plugin-provided ones included — is listed in a `# Available skills`
+section as `name · description · /abs/path/to/SKILL.md`, so the model
+can call `Skill(skill="<name>")` without the user naming it first.
+Shadowed entries are omitted, so the listing always agrees with what
+the `Skill` tool resolves. Descriptions are flattened to one line and
+truncated; see §5.2.
 
 ### 2.5 MCP servers
 
@@ -374,6 +382,22 @@ only the anonymous capability summary.
 > MCP tool names like `everything_add` are visible to the model — those
 > are contracts published by the MCP server itself, separate from the
 > manifest. Tool descriptions are the server's responsibility.
+
+**Skill metadata is a deliberate exception.** A skill's `name` and
+`description` *are* injected, because a listing the model cannot read is
+a listing it cannot use (§2.4). They are treated as untrusted data
+rather than withheld:
+
+- newlines and control characters are folded to spaces, so a crafted
+  description or directory name cannot forge an extra list entry or a
+  fake section header;
+- descriptions are truncated to 150 characters on a `char` boundary;
+- the section header tells the model the text is author-controlled data,
+  not instructions.
+
+The plugin *manifest* fields above stay anonymous either way — a plugin
+that wants to say something to the model does it through a skill it
+ships, which is subject to the treatment above.
 
 ### 5.3 Hook script paths are constrained to the plugin root
 

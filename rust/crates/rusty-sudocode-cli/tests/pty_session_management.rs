@@ -126,11 +126,20 @@ fn session_auto_save_creates_jsonl() {
         sessions_dir.exists(),
         ".scode/sessions/ should exist after a turn"
     );
+    // Per-session-directory layout: .scode/sessions/<workspace_hash>/<id>/transcript.jsonl.
+    // Descend workspace_hash dir → per-session dir → transcript.jsonl.
     let jsonl_files: Vec<_> = fs::read_dir(&sessions_dir)
         .into_iter()
         .flat_map(|rd| rd.into_iter())
-        .flat_map(|dir| {
-            fs::read_dir(dir.expect("entry").path())
+        .filter_map(|e| e.ok())
+        .flat_map(|hash_dir| {
+            fs::read_dir(hash_dir.path())
+                .into_iter()
+                .flat_map(|rd| rd.into_iter())
+        })
+        .filter_map(|e| e.ok())
+        .flat_map(|session_dir| {
+            fs::read_dir(session_dir.path())
                 .into_iter()
                 .flat_map(|rd| rd.into_iter())
         })
@@ -139,7 +148,7 @@ fn session_auto_save_creates_jsonl() {
         .collect();
     assert!(
         !jsonl_files.is_empty(),
-        "should find at least one .jsonl session file in {sessions_dir:?}"
+        "should find at least one transcript.jsonl under a per-session dir in {sessions_dir:?}"
     );
 }
 

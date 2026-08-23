@@ -3737,35 +3737,142 @@ fn parse_toml_string(contents: &str, key: &str) -> Option<String> {
     None
 }
 
-fn parse_skill_frontmatter(contents: &str) -> (Option<String>, Option<String>) {
-    let mut lines = contents.lines();
-    if lines.next().map(str::trim) != Some("---") {
+/// Reads `name` and `description` out of a `SKILL.md` frontmatter block.
+///
+/// This is a deliberately small YAML subset, not a YAML parser: scalar values
+/// on the key's own line, plus block scalars (`|`, `>`, and their `-`/`+`
+/// chomping variants), which authors reach for as soon as a description runs
+/// past one line. Before block scalars were understood, `description: >-`
+/// yielded the literal `>-` and the real text was skipped — which matters now
+/// that the description is what the model selects a skill on.
+pub fn parse_skill_frontmatter(contents: &str) -> (Option<String>, Option<String>) {
+    let lines = contents.lines().collect::<Vec<_>>();
+    if lines.first().map(|line| line.trim()) != Some("---") {
         return (None, None);
     }
 
     let mut name = None;
     let mut description = None;
-    for line in lines {
+    let mut index = 1;
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim();
+        index += 1;
         if trimmed == "---" {
             break;
         }
-        if let Some(value) = trimmed.strip_prefix("name:") {
-            let value = unquote_frontmatter_value(value.trim());
-            if !value.is_empty() {
-                name = Some(value);
-            }
+
+        // Only top-level keys count. An indented `description:` belongs to a
+        // nested mapping (`metadata:` blocks are common), and matching it made
+        // the winner depend on which appeared last in the file.
+        if line.starts_with(char::is_whitespace) {
             continue;
         }
-        if let Some(value) = trimmed.strip_prefix("description:") {
-            let value = unquote_frontmatter_value(value.trim());
-            if !value.is_empty() {
-                description = Some(value);
-            }
+
+        let Some((key, rest)) = trimmed
+            .strip_prefix("name:")
+            .map(|rest| ("name", rest))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("description:")
+                    .map(|rest| ("description", rest))
+            })
+        else {
+            continue;
+        };
+
+        let rest = rest.trim();
+        let value = if let Some(style) = BlockScalarStyle::parse(rest) {
+            let indent = line.len() - line.trim_start().len();
+            let (block, consumed) = read_block_scalar(&lines[index..], indent, style);
+            index += consumed;
+            block
+        } else {
+            unquote_frontmatter_value(rest)
+        };
+
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "name" => name = Some(value),
+            _ => description = Some(value),
         }
     }
 
     (name, description)
+}
+
+/// The two block-scalar forms YAML offers. Chomping (`-`/`+`) only affects
+/// trailing newlines, which are trimmed either way here, so it is accepted and
+/// ignored rather than modelled.
+#[derive(Clone, Copy)]
+enum BlockScalarStyle {
+    /// `|` — newlines are preserved.
+    Literal,
+    /// `>` — newlines fold into spaces.
+    Folded,
+}
+
+impl BlockScalarStyle {
+    fn parse(rest: &str) -> Option<Self> {
+        let marker = rest.split('#').next().unwrap_or(rest).trim();
+        let (style, indicators) = match marker.split_at(marker.chars().next()?.len_utf8()) {
+            ("|", indicators) => (Self::Literal, indicators),
+            (">", indicators) => (Self::Folded, indicators),
+            _ => return None,
+        };
+        // Only chomping and explicit-indent indicators may follow.
+        indicators
+            .chars()
+            .all(|ch| matches!(ch, '-' | '+') || ch.is_ascii_digit())
+            .then_some(style)
+    }
+}
+
+/// Collects the body of a block scalar: the run of following lines indented
+/// deeper than the key, plus any blank lines inside it. Returns the joined text
+/// and how many lines were consumed.
+fn read_block_scalar(
+    lines: &[&str],
+    key_indent: usize,
+    style: BlockScalarStyle,
+) -> (String, usize) {
+    let mut body: Vec<&str> = Vec::new();
+    let mut consumed = 0;
+    for line in lines {
+        let indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indent <= key_indent {
+            break;
+        }
+        body.push(line.trim());
+        consumed += 1;
+    }
+    while body.last().is_some_and(|line| line.is_empty()) {
+        body.pop();
+    }
+
+    let joined = match style {
+        BlockScalarStyle::Literal => body.join("\n"),
+        // A blank line inside a folded scalar is a paragraph break, which YAML
+        // renders as a newline; everything else folds to a single space.
+        BlockScalarStyle::Folded => {
+            let mut out = String::new();
+            for line in body {
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push(' ');
+                    }
+                    out.push_str(line);
+                }
+            }
+            out
+        }
+    };
+
+    (joined.trim().to_string(), consumed)
 }
 
 fn unquote_frontmatter_value(value: &str) -> String {

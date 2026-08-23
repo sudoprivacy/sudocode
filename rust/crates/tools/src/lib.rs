@@ -4577,7 +4577,11 @@ fn dedupe_hits(hits: &mut Vec<SearchHit>) {
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let skill_path = resolve_skill_path(&input.skill)?;
     let prompt = std::fs::read_to_string(&skill_path).map_err(|error| error.to_string())?;
-    let description = parse_skill_description(&prompt);
+    // Reuse the loader's parser rather than a second, looser one: this used to
+    // scan for any line starting with `description:`, which meant a block
+    // scalar surfaced as the literal `>-` and a `description:` inside the body
+    // could win over the frontmatter.
+    let description = commands::parse_skill_frontmatter(&prompt).1;
 
     Ok(SkillOutput {
         skill: input.skill,
@@ -8562,18 +8566,6 @@ fn format_notebook_edit_mode(mode: NotebookEditMode) -> String {
 
 fn make_cell_id(index: usize) -> String {
     format!("cell-{}", index + 1)
-}
-
-fn parse_skill_description(contents: &str) -> Option<String> {
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("description:") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

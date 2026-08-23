@@ -79,10 +79,11 @@ caller's (e.g. a multi-tenant service's) decision.
 | Key | Effect |
 |---|---|
 | `systemPrompt` | **Override.** Replaces the built-in static system-prompt blocks (the `You are Sudo Code…` identity, `# System`, `# Doing tasks`, `# Executing actions with care`, `# Using your tools`, `# Tone and style`, `# Output efficiency`) with this text as the single static block. |
-| `appendSystemPrompt` | **Append.** Added as the last dynamic block — after the environment / project context, the discovered `AGENTS.md` instructions, the runtime-config summary and the auto-memory instructions (only the short plugin-capability inventory, when plugins are enabled, follows it). Being last gives it the highest recency weight, so it outranks workspace files such as `AGENTS.md`. |
+| `appendSystemPrompt` | **Append.** Added as the last **static** block, after the built-in identity and behaviour blocks and before every dynamic block (environment / project context, `AGENTS.md` instructions, runtime-config summary, auto-memory, plugin inventory, skill listing). A caller preamble is stable for the life of the session, so it belongs in the aggressively cached prefix; the cost is that the workspace-derived dynamic blocks now follow it rather than precede it. |
 
 The two compose: set both and the static blocks are replaced *and* the
-extra block is appended. Workspace-derived dynamic blocks (environment,
+extra block is appended after the replacement, still inside the static
+prefix. Workspace-derived dynamic blocks (environment,
 `AGENTS.md`, memory) are always kept, so an overridden prompt still knows
 which directory it is operating in.
 

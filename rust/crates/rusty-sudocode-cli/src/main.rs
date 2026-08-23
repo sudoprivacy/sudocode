@@ -110,9 +110,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{
-    render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
-};
+use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use render::{
     ansi_bold_fg, ansi_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET,
 };
@@ -868,16 +866,13 @@ fn print_system_prompt(
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     // Same order as a live session (`build_system_prompt_for` →
     // `build_runtime_with_plugin_state`): CLI prompt flags first, then the
-    // plugin capability summary, then the available-skills listing.
+    // available-skills listing.
     apply_cli_prompt_overrides(&mut prompt);
-    // Mirror what build_runtime_with_plugin_state does for live sessions:
-    // append active SudoCode plugin capabilities so system-prompt output
-    // matches what the runtime actually sends.  Load failures captured inside
-    // PluginLoadOutcome are excluded naturally; Result errors propagate.
+    // Mirror what build_runtime_with_plugin_state does for live sessions.
+    // Load failures captured inside PluginLoadOutcome are excluded naturally;
+    // Result errors propagate, so a broken plugin install fails this preview
+    // exactly as it fails a live session.
     let outcome = plugin_load_outcome_for_cwd(&cwd)?;
-    if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
-        prompt.dynamic_sections.push(section);
-    }
     if let Some(section) = render_skills_prompt_section(&cwd, Some(&outcome)) {
         prompt.dynamic_sections.push(section);
     }
@@ -6328,14 +6323,11 @@ fn build_runtime_with_plugin_state(
             }
         };
     let mut system_prompt = config.system_prompt.clone();
-    if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
-        system_prompt.dynamic_sections.push(section);
-    }
-    // Skills are listed after the plugin summary so the model can name and load
-    // one without the user having to know it exists. Plugin-provided skill roots
-    // are included via `plugin_load_outcome`, so a plugin can inject skills that
-    // the prompt then advertises. This runs for the REPL, `--print`, and ACP
-    // sessions alike: they all land in this function via `build_runtime_for_cwd`.
+    // Skills are listed so the model can name and load one without the user
+    // having to know it exists. Plugin-provided skill roots are included via
+    // `plugin_load_outcome`, so a plugin can inject skills that the prompt then
+    // advertises. This runs for the REPL, `--print`, and ACP sessions alike:
+    // they all land in this function via `build_runtime_for_cwd`.
     if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
         system_prompt.dynamic_sections.push(section);
     }

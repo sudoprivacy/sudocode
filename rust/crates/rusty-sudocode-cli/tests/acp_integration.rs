@@ -335,8 +335,16 @@ fn base_command(workspace: &TestWorkspace) -> Command {
 }
 
 fn spawn_stdio_client(workspace: &TestWorkspace) -> AcpTestClient {
+    spawn_stdio_client_with_args(workspace, &[])
+}
+
+/// Like [`spawn_stdio_client`] but passes extra flags to the `scode acp`
+/// process, so a test can exercise the process-wide prompt flags a session's
+/// `_meta` overrides layer on top of.
+fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> AcpTestClient {
     let mut cmd = base_command(workspace);
     cmd.arg("acp")
+        .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2343,6 +2351,65 @@ async fn assert_bad_prompt_meta_rejected(
             "bad _meta.sudocode {bad_meta} must be rejected with invalid_params; got: {resp}"
         );
     }
+}
+
+/// A session `systemPrompt` must replace the built-in blocks *without*
+/// discarding what the process-wide `--append-system-prompt` added.
+///
+/// Regression: the append used to be a dynamic section, so a session override —
+/// which only replaces static ones — could not touch it. Moving the append into
+/// the static block to get it into the cacheable prefix made the two collide,
+/// and `docs/acp.md` promises they layer.
+#[tokio::test]
+async fn acp_session_override_keeps_process_level_append() {
+    const PROCESS_APPEND: &str = "Process-wide rule append-9d1c04.";
+    const SESSION_OVERRIDE: &str = "You are session-persona-5e8b72.";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("sysprompt-layering");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client =
+        spawn_stdio_client_with_args(&workspace, &["--append-system-prompt", PROCESS_APPEND]);
+    scenario_initialize(&mut client).await;
+    let root = workspace.root.clone();
+
+    // Without a session override the process-level append is simply present.
+    let plain = scenario_session_new(&mut client, &root).await;
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "l1").await;
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "process-level append must reach the model; body: {body}"
+    );
+
+    // With one, it must survive alongside the replacement.
+    let resp = session_new_with_meta(
+        &mut client,
+        &root,
+        json!({"systemPrompt": SESSION_OVERRIDE}),
+    )
+    .await;
+    let overridden = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &overridden, "l2").await;
+    assert!(
+        body.contains(SESSION_OVERRIDE),
+        "session override must reach the model; body: {body}"
+    );
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "session override must not discard the process-level append; body: {body}"
+    );
+    assert!(
+        !body.contains(DEFAULT_IDENTITY),
+        "session override must still replace the built-in identity; body: {body}"
+    );
+    assert!(
+        body.find(SESSION_OVERRIDE) < body.find(PROCESS_APPEND),
+        "the replacement comes first, the append stays after it; body: {body}"
+    );
 }
 
 /// Built-in identity block: present on the default prompt, gone under override.

@@ -82,6 +82,14 @@ impl ModelFamilyIdentity {
 pub struct SystemPrompt {
     pub static_sections: Vec<String>,
     pub dynamic_sections: Vec<String>,
+    /// How many leading `static_sections` came from the built-in blocks.
+    ///
+    /// [`Self::override_static_sections`] replaces exactly those, so text a
+    /// caller appended survives an override applied afterwards. ACP needs this:
+    /// the process-wide `--append-system-prompt` and a session's `_meta`
+    /// overrides are two separate applications, and the session one must not
+    /// silently drop what the process appended.
+    builtin_static_sections: usize,
 }
 
 impl SystemPrompt {
@@ -122,7 +130,10 @@ impl SystemPrompt {
     /// still sees the workspace it is operating in. Callers that want a
     /// blank-slate prompt can clear `dynamic_sections` themselves.
     pub fn override_static_sections(&mut self, text: impl Into<String>) {
-        self.static_sections = vec![text.into()];
+        let split = self.builtin_static_sections.min(self.static_sections.len());
+        let appended = self.static_sections.split_off(split);
+        self.static_sections = std::iter::once(text.into()).chain(appended).collect();
+        self.builtin_static_sections = 1;
     }
 
     /// Append `text` as the last static section.
@@ -330,6 +341,7 @@ impl SystemPromptBuilder {
         dynamic_sections.extend(self.append_sections.iter().cloned());
 
         SystemPrompt {
+            builtin_static_sections: static_sections.len(),
             static_sections,
             dynamic_sections,
         }

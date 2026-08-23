@@ -38,7 +38,7 @@ servers / skills / hooks 会被投影到 `scode` runtime。
 | `scode mcp` | 列出已配置的 MCP servers，**含插件投影来的** |
 | `scode mcp show <server>` | 单个 MCP server 详情，含归属哪个插件 |
 | `scode skills` | 列出 skills，插件提供的归在「SudoCode plugin roots:」段 |
-| `scode system-prompt` | 查看注入给模型的 system prompt，含插件能力摘要与 `# Available skills` 清单 |
+| `scode system-prompt` | 查看注入给模型的 system prompt，含 `# Available skills` 清单；插件自身不再贡献任何段落（见 §5.2）|
 
 `scode plugins` 和 `scode mcp` 都支持 `--output-format json`，返回结构化的
 `plugins[]` / `servers[]` 数组，可供脚本/CI 消费。
@@ -358,33 +358,32 @@ scode 把 tool 调用上下文以 JSON 形式从 **stdin** 喂给 hook：
 > 装陌生人的插件等同在你机器上跑陌生人的代码。`scode plugins install`
 > 之前，检查 manifest 和 hook 脚本。
 
-### 5.2 Manifest 元数据不进 system prompt
+### 5.2 插件不向 system prompt 贡献任何内容
 
-为了防止恶意作者通过 manifest 字段做 prompt injection，system prompt
-里的插件能力摘要段是**匿名化**的：
+模型看不到任何插件元数据 —— 现在**根本没有插件段落**。`name`、
+`display_name`、`description` 只出现在 CLI 里（`scode plugins`、`scode mcp`）。
 
-```
-# Available SudoCode plugins
-…
- - Plugin 1; provides 2 tools, 1 hook, MCP servers
-```
-
-`name`、`display_name`、`description` 故意不出现在模型可见通道里。
-CLI 里能看到（`scode plugins`、`scode mcp`），但模型从 system prompt 看不到。
+早期版本会放一段匿名化的能力清单
+（`- Plugin 1; provides 2 tools, 1 hook, MCP servers`）作为防注入手段 ——
+只报能力、不报不可信的 manifest 文本。后来每一类能力都有了会具名的通道，
+这段就被删掉了：插件工具和 MCP 工具带着自己的名字和描述进工具列表，
+skill 在 `# Available skills` 里逐个具名。剩下的只是复述它们的 token 开销。
 
 > 模型**仍然能看到** `everything_add` 这种 MCP 工具名 —— 那是 MCP server
 > 自己签的契约，不归 manifest 管。工具描述由 server 负责。
 
-**skill 元数据是刻意的例外。** skill 的 `name` 和 `description` **会**被注入 ——
-模型读不到的清单等于没有清单（见 §2.4）。做法是当作不可信数据处理，而不是一律不给：
+> hook 在触发之前对模型不可见，而触发的那一刻才是该知道它的时候：
+> tool result 里会带上归属插件（§2.6），而 hook 的通用契约本来就写在
+> prompt 的 `# System` 段里。
+
+**插件唯一能对模型说话的通道是它自带的 skill**，而那条通道走的是 skill 机制、
+不是 manifest：skill 的 `name` 和 `description` **会**被注入 —— 模型读不到的
+清单等于没有清单（见 §2.4）。做法是当作不可信数据处理，而不是一律不给：
 
 - 换行与控制字符折叠为空格，构造过的 description 或目录名无法伪造出多余条目或假段落头；
 - 单条 description 按 `char` 边界封顶 1536 字符（失控兜底），整段清单则由
   §2.4 描述的预算约束；
 - 段落抬头明确告诉模型这些是作者可控的数据，不是指令。
-
-插件 **manifest** 字段依然匿名。插件想对模型说话，就通过它自带的 skill 说，
-而那条通道受上面这套处理约束。
 
 ### 5.3 Hook 脚本路径强制在插件根内
 

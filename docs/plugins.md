@@ -40,7 +40,7 @@ examples ship under
 | `scode mcp` | List configured MCP servers, including plugin-provided ones |
 | `scode mcp show <server>` | Detailed view, including the owning plugin |
 | `scode skills` | List skills; plugin-provided ones appear under `SudoCode plugin roots:` |
-| `scode system-prompt` | Render the system prompt; includes the plugin capability summary block and the `# Available skills` listing |
+| `scode system-prompt` | Render the system prompt; includes the `# Available skills` listing, and no plugin section of its own (§5.2) |
 
 Both `scode plugins` and `scode mcp` accept `--output-format json` and
 emit structured payloads (`plugins[]`, `servers[]`) for scripting.
@@ -375,30 +375,33 @@ user, with the current user's filesystem and network access.
 > on your machine. Inspect the manifest and hook scripts before
 > `scode plugins install`.
 
-### 5.2 Manifest metadata stays out of the system prompt
+### 5.2 Plugins contribute nothing to the system prompt
 
-To defend against prompt-injection authored into manifest fields, the
-plugin capability section in the system prompt lists plugins
-anonymously:
+No plugin metadata reaches the model. There is no plugin section at all:
+`name`, `display_name` and `description` surface only in the CLI
+(`scode plugins`, `scode mcp`).
 
-```
-# Available SudoCode plugins
-…
- - Plugin 1; provides 2 tools, 1 hook, MCP servers
-```
-
-Plugin `name`, `display_name`, and `description` surface only in the
-CLI (`scode plugins`, `scode mcp`); the model-facing system prompt sees
-only the anonymous capability summary.
+Earlier versions carried an anonymised inventory
+(`- Plugin 1; provides 2 tools, 1 hook, MCP servers`) as a
+prompt-injection defence — capabilities without the untrusted manifest
+text. It was removed once every capability had a channel that names it
+properly: plugin tools and MCP tools appear in the tool list with their
+own names and descriptions, and skills appear by name in
+`# Available skills`. What remained was a token cost restating them.
 
 > MCP tool names like `everything_add` are visible to the model — those
 > are contracts published by the MCP server itself, separate from the
 > manifest. Tool descriptions are the server's responsibility.
 
-**Skill metadata is a deliberate exception.** A skill's `name` and
+> Hooks stay invisible until one fires, which is the right time to learn
+> of them: the tool result names the owning plugin (§2.6), and the
+> generic hook contract is already in the prompt's `# System` block.
+
+**A plugin's skills are the one thing it can say to the model**, and they
+go through the skill channel, not the manifest one: a skill's `name` and
 `description` *are* injected, because a listing the model cannot read is
-a listing it cannot use (§2.4). They are treated as untrusted data
-rather than withheld:
+a listing it cannot use (§2.4). They are treated as untrusted data rather
+than withheld:
 
 - newlines and control characters are folded to spaces, so a crafted
   description or directory name cannot forge an extra list entry or a
@@ -408,10 +411,6 @@ rather than withheld:
   budget described in §2.4;
 - the section header tells the model the text is author-controlled data,
   not instructions.
-
-The plugin *manifest* fields above stay anonymous either way — a plugin
-that wants to say something to the model does it through a skill it
-ships, which is subject to the treatment above.
 
 ### 5.3 Hook script paths are constrained to the plugin root
 

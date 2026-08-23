@@ -822,7 +822,7 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  --append-system-prompt TEXT  Append TEXT as the final system-prompt block; combines with"
+        "  --append-system-prompt TEXT  Append TEXT as the final static system-prompt block; combines with"
     )?;
     writeln!(out, "                              --system-prompt")?;
     writeln!(

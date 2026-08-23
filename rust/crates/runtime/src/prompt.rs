@@ -125,14 +125,20 @@ impl SystemPrompt {
         self.static_sections = vec![text.into()];
     }
 
-    /// Append `text` as the last dynamic section.
+    /// Append `text` as the last static section.
     ///
-    /// Being last puts it closest to the conversation, so it outranks the
-    /// workspace-discovered `AGENTS.md` instructions and the auto-memory
-    /// instructions that precede it. Orthogonal to
-    /// [`Self::override_static_sections`]: the two compose.
-    pub fn append_dynamic_section(&mut self, text: impl Into<String>) {
-        self.dynamic_sections.push(text.into());
+    /// Caller-supplied instructions are stable for as long as the caller is
+    /// — a per-tenant preamble does not change between turns — so they belong
+    /// in the aggressively cached static block rather than the per-turn
+    /// dynamic one. Orthogonal to [`Self::override_static_sections`]: the two
+    /// compose, and appending after an override puts the appended text last
+    /// within the replacement block.
+    ///
+    /// The trade-off is ordering: the workspace-discovered `AGENTS.md`
+    /// instructions, the auto-memory block and the skill listing are all
+    /// dynamic, so they now follow this text rather than precede it.
+    pub fn append_static_section(&mut self, text: impl Into<String>) {
+        self.static_sections.push(text.into());
     }
 }
 
@@ -142,14 +148,15 @@ impl SystemPrompt {
 ///
 /// The two fields are orthogonal and may be combined: `system_prompt`
 /// replaces the static blocks, `append_system_prompt` adds a trailing
-/// dynamic block. Neither is truncated or escaped.
+/// static block. Both therefore land in the cacheable prefix. Neither is
+/// truncated or escaped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptOverrides {
     /// Replaces every static section (see
     /// [`SystemPrompt::override_static_sections`]).
     pub system_prompt: Option<String>,
-    /// Appended as the last dynamic section (see
-    /// [`SystemPrompt::append_dynamic_section`]).
+    /// Appended as the last static section (see
+    /// [`SystemPrompt::append_static_section`]).
     pub append_system_prompt: Option<String>,
 }
 
@@ -165,7 +172,7 @@ impl SystemPromptOverrides {
             prompt.override_static_sections(text.clone());
         }
         if let Some(text) = &self.append_system_prompt {
-            prompt.append_dynamic_section(text.clone());
+            prompt.append_static_section(text.clone());
         }
     }
 }

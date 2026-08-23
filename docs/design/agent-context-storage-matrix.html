@@ -32,7 +32,7 @@
   .b.dup{background:rgba(251,146,60,.15);color:var(--dup)}
   .b.na{background:rgba(148,163,184,.12);color:var(--muted)}
   .b.ref{background:rgba(96,165,250,.14);color:var(--accent)}
-  table{border-collapse:collapse;width:100%;margin:6px 0 6px;font-size:13px}
+  table{border-collapse:collapse;width:100%;margin:6px 0 6px;font-size:13px;table-layout:fixed}
   th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left;overflow-wrap:anywhere}
   th{background:var(--panel2);color:#cbd5e1;position:sticky;top:0;z-index:2;font-weight:600}
   th .h2{display:block;font-weight:400;color:var(--muted);font-size:11px;margin-top:2px}
@@ -105,11 +105,11 @@
 <table>
 <thead><tr>
   <th style="width:6%">mega-type</th>
-  <th style="width:11%">item</th>
+  <th style="width:13%">item</th>
   <th style="width:21%">Claude Code <span class="h2">current — reference model</span></th>
   <th style="width:21%">sudocode <span class="h2">current → maps to</span></th>
   <th style="width:18%">sudowork <span class="h2">a UI — stays / → sudocode</span></th>
-  <th style="width:23%">Nexus end-state <span class="h2">target — all converge here</span></th>
+  <th style="width:21%">Nexus end-state <span class="h2">target — all converge here</span></th>
 </tr></thead>
 <tbody>
 

@@ -192,11 +192,23 @@ one of those, `scode skills` will tag it as
 
 **The system prompt advertises them.** Every skill that wins its name —
 plugin-provided ones included — is listed in a `# Available skills`
-section as `name · description · /abs/path/to/SKILL.md`, so the model
-can call `Skill(skill="<name>")` without the user naming it first.
-Shadowed entries are omitted, so the listing always agrees with what
-the `Skill` tool resolves. Descriptions are flattened to one line and
-truncated; see §5.2.
+section as `- name: description`, so the model can call
+`Skill(skill="<name>")` without the user naming it first. Shadowed
+entries are omitted, so the listing always agrees with what the `Skill`
+tool resolves.
+
+The `SKILL.md` path is **not** in the listing: it is decision-irrelevant
+until a skill has been chosen, and the `Skill` tool returns it on
+invocation. Read supporting files from that directory after invoking.
+
+The listing is sized by a character budget — 1% of an assumed 200k-token
+window (8000 characters), overridable with
+`SUDO_CODE_SKILL_LISTING_CHAR_BUDGET`. Over budget, entries degrade to
+`- name` rather than every description being clipped, because a clipped
+description usually loses the trailing "use this when …" clause that
+makes a skill selectable. Descriptions are restored in discovery order,
+so project roots keep theirs before user roots, and user roots before
+plugin roots.
 
 ### 2.5 MCP servers
 
@@ -391,7 +403,9 @@ rather than withheld:
 - newlines and control characters are folded to spaces, so a crafted
   description or directory name cannot forge an extra list entry or a
   fake section header;
-- descriptions are truncated to 150 characters on a `char` boundary;
+- a single description is capped at 1536 characters on a `char` boundary
+  as a runaway guard, and the listing as a whole is bounded by the
+  budget described in §2.4;
 - the section header tells the model the text is author-controlled data,
   not instructions.
 

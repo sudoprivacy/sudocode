@@ -185,9 +185,18 @@ description: One-line summary of what this skill does
 `(shadowed by Project roots)`。
 
 **system prompt 会列出它们。** 每个赢得名字的 skill（包括插件提供的）都会出现在
-`# Available skills` 段里，格式为 `name · description · /SKILL.md 绝对路径`，
-模型无需用户先点名就能 `Skill(skill="<name>")` 调用。被 shadow 的条目不会列出，
-所以清单与 `Skill` 工具的解析结果永远一致。description 会被压成单行并截断，见 §5.2。
+`# Available skills` 段里，格式为 `- name: description`，模型无需用户先点名
+就能 `Skill(skill="<name>")` 调用。被 shadow 的条目不会列出，所以清单与
+`Skill` 工具的解析结果永远一致。
+
+清单里**不含** `SKILL.md` 路径：路径在技能被选中之前对决策没有意义，而 `Skill`
+工具在调用时就会返回它。需要读技能目录下的其他文件时，调用后按该路径读。
+
+清单有字符预算 —— 默认取 200k token 上下文的 1%（8000 字符），可用
+`SUDO_CODE_SKILL_LISTING_CHAR_BUDGET` 覆盖。超预算时条目**整条降级为 `- name`**，
+而不是把每条描述都截半：截断通常正好切掉尾部那句「什么时候该用」，
+而那句才是模型据以选择的依据。描述按发现顺序恢复，因此项目级先于用户级，
+用户级先于插件。
 
 ### 2.5 MCP servers
 
@@ -370,7 +379,8 @@ CLI 里能看到（`scode plugins`、`scode mcp`），但模型从 system prompt
 模型读不到的清单等于没有清单（见 §2.4）。做法是当作不可信数据处理，而不是一律不给：
 
 - 换行与控制字符折叠为空格，构造过的 description 或目录名无法伪造出多余条目或假段落头；
-- description 按 `char` 边界截断到 150 字符；
+- 单条 description 按 `char` 边界封顶 1536 字符（失控兜底），整段清单则由
+  §2.4 描述的预算约束；
 - 段落抬头明确告诉模型这些是作者可控的数据，不是指令。
 
 插件 **manifest** 字段依然匿名。插件想对模型说话，就通过它自带的 skill 说，

@@ -61,7 +61,8 @@ mode, and the tool / skill inventory.
 # Replace the built-in identity + behaviour blocks
 scode --system-prompt "You are a terse release bot." "cut a release"
 
-# Keep the defaults, add house rules as the final system-prompt block
+# Keep the defaults, add house rules as the final *static* block
+# (cached with the built-ins; dynamic workspace context still follows it)
 scode --append-system-prompt "Never push to main." "cut a release"
 
 # Both at once — they compose

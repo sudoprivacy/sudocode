@@ -2347,14 +2347,17 @@ async fn assert_bad_prompt_meta_rejected(
 
 /// Built-in identity block: present on the default prompt, gone under override.
 const DEFAULT_IDENTITY: &str = "You are Sudo Code";
-/// The dynamic block every session carries; the append must land after it.
+/// The first dynamic block every session carries. The append is a *static*
+/// section, so it must land before this — that ordering is what proves it
+/// sits in the cacheable prefix rather than the per-turn block.
 const MEMORY_HEADING: &str = "# auto memory";
 
 /// `_meta.sudocode.systemPrompt` (replace the built-in static blocks) and
-/// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block) on
+/// `_meta.sudocode.appendSystemPrompt` (append a trailing static block) on
 /// `session/new`, checked on the wire body the model receives:
 ///  - neither → the default prompt (regression guard),
-///  - append only → appended after the auto-memory block, identity kept,
+///  - append only → appended at the end of the static block (before the
+///    dynamic auto-memory block), identity kept,
 ///  - override only → identity replaced, nothing appended,
 ///  - both → both take effect (the two are orthogonal),
 ///  - other sessions in the process are unaffected,
@@ -2394,10 +2397,20 @@ async fn acp_session_new_system_prompt_override_and_append_reach_model() {
         body.contains(DEFAULT_IDENTITY) && body.contains(APPEND),
         "append must reach the model with the identity block intact; body: {body}"
     );
-    let (memory_at, append_at) = (body.find(MEMORY_HEADING), body.find(APPEND));
+    let (identity_at, memory_at, append_at) = (
+        body.find(DEFAULT_IDENTITY),
+        body.find(MEMORY_HEADING),
+        body.find(APPEND),
+    );
     assert!(
-        memory_at.is_some() && append_at > memory_at,
-        "append must land after the auto-memory block: memory@{memory_at:?} append@{append_at:?}"
+        memory_at.is_some() && append_at.is_some() && append_at < memory_at,
+        "append is a static section, so it must precede the dynamic auto-memory \
+         block: append@{append_at:?} memory@{memory_at:?}"
+    );
+    assert!(
+        append_at > identity_at,
+        "append must come after the built-in identity block, i.e. last within \
+         the static block: identity@{identity_at:?} append@{append_at:?}"
     );
 
     // override only.

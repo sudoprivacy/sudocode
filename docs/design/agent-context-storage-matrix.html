@@ -66,6 +66,13 @@
   .qbox .qn{color:var(--q);font-weight:700;margin-right:6px}
   small{color:var(--muted)}
   .note{color:var(--muted);font-size:12px;margin-top:2px}
+  .layout{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0 10px;align-items:stretch}
+  .tree{flex:1 1 340px;min-width:300px;background:var(--panel);border:1px solid var(--line);
+    border-left:3px solid var(--accent2);border-radius:8px;padding:10px 12px}
+  .tree h3{margin:0 0 8px;font-size:13px;color:var(--accent2);font-weight:600}
+  .tree pre{margin:0;background:var(--code);border-radius:6px;padding:10px 12px;overflow-x:auto;
+    font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;
+    color:#cbd5e1;white-space:pre;tab-size:2}
 </style>
 </head>
 <body>
@@ -79,7 +86,7 @@
 <b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> — persistent, Metastore, the addressable identity; its <code>sessions/</code> is a DT_LINK index into the flat <code>/sessions/</code> store, <i>not</i> the bytes) vs
 <b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)).
 <br><br>
-<b>Three IDs</b> (nexus Q1, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, spans many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Sessions are a flat byte-SSOT at <span class="path">/sessions/&lt;session-id&gt;</span> (no <code>workspace_hash</code>, no agent nesting); per-repo &amp; per-agent ties are DT_LINKs + an <code>owner</code> field, isolation by policy not path. This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
+<b>Three IDs</b> (nexus Q1, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, spans many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Each session is a flat byte-SSOT <b>directory</b> <span class="path">/sessions/&lt;session-id&gt;/</span> (holding <code>transcript.jsonl</code> + <code>tool-results/</code>), keyed by session-id alone (no <code>workspace_hash</code>, no agent nesting); per-repo &amp; per-agent ties are DT_LINKs + an <code>owner</code> field, isolation by policy not path. This is the distinction from CC/scode, whose primary key <i>is</i> the cwd.
 <br><br>
 <b>This table's job:</b> put CC's flat <code>~/.claude/projects/&lt;cwd&gt;/</code> model on each row, then read across — (1) does the Nexus end-state <i>cover</i> it? (2) how do sudocode &amp; sudowork store it today, and what's <span class="b dup">dup</span> to merge? CC is the <span class="b ref">reference</span> we map from; Nexus is the target all three converge to.
 <br><br>
@@ -100,6 +107,48 @@
 </div>
 <p class="note"><b>Badges compare each system to the target, per row.</b> <b>gap</b> — this system lacks a capability CC has / the end-state needs; on the burndown it advances <span class="b miss">gap</span> → <span class="b partial">partial</span> → <span class="b ok">done</span> (what's missing is the <span class="was">left</span> side of that cell). <b>dup</b> — it keeps its <i>own</i> copy of data the <b>engine</b> (scode's session jsonl, ultimately the nexus <code>/sessions/</code> SSOT) already owns; <b>"merge long-term"</b> = that copy collapses into a <i>view</i> over the one SSOT — one store, not two. Example: sudowork's <code>messages</code> table is a full duplicate of the engine transcript → becomes a view (see the Migration row).</p>
 <p class="note"><b>The sudowork column reads in 3 buckets.</b> <b>stays (SQLite)</b> = UI-unique, kept · <b>→ sudocode</b> = delegate to the engine — read its store; this is where the <i>agent</i> identity lives (<code>session-id</code> · <code>agent-name</code> · zones), since sudowork is a UI and sudocode is the agent · <b>→ nexus (direct)</b> = only what sudowork does <i>without</i> the engine (rare for a UI — e.g. multi-user ACL, Q9c). Chain: <code>sudowork → sudocode → nexus</code>, each hop written once. <b>Single writer (why delegate, not both-read):</b> sudocode is the <i>sole writer</i> of the agent's state (engine store → nexus); sudowork is <b>read-only</b> on it and writes only its own <code>stays</code> fields — one writer, no write-conflict even over the one SSOT path. <b>Consistency check (read a row left-to-right):</b> whatever sudowork delegates <code>→ sudocode</code> must appear in the sudocode cell, and be provided by the Nexus end-state. <small>(swept 2026-08 — all rows check out.)</small></p>
+
+<h2>Directory layout <span style="font-size:13px;font-weight:400;color:var(--muted)">— the root of each system, and how the items nest</span></h2>
+<p class="sub">The matrix below is <i>per-item</i>; this is the <i>spatial</i> view — each system's root and how every item sits relative to the others. <b>Standalone sudocode is scattered across three roots</b> (sessions · memory · config, three different keys); <b>nexus unifies everything under one VFS tree</b> keyed by <code>session-id</code> + <code>agent-name</code>, with DT_LINKs (pointers, not byte-copies). Read reference → current → target.</p>
+<div class="layout">
+  <div class="tree">
+    <h3>Claude Code — reference · <code>~/.claude/</code></h3>
+<pre>projects/&lt;cwd-slug&gt;/
+  &lt;session-uuid&gt;.jsonl        transcript (flat, 1 file/session)
+  memory/  MEMORY.md · &lt;type&gt;_&lt;slug&gt;.md
+  &lt;uuid&gt;/subagents/agent-&lt;id&gt;.jsonl
+agent-memory/&lt;type&gt;/           per-agent-type memory
+&lt;mem&gt;/team/ · &lt;mem&gt;/logs/YYYY/MM/DD.md</pre>
+  </div>
+  <div class="tree">
+    <h3>sudocode — standalone (host FS) · <b>3 roots</b></h3>
+<pre>&lt;cwd&gt;/.scode/sessions/&lt;workspace_hash&gt;/   [sessions · hash-keyed]
+  &lt;sid&gt;/
+    transcript.jsonl        the transcript (#479)
+    tool-results/&lt;id&gt;       offloaded tool outputs
+  &lt;sid&gt;.jsonl              legacy flat (dual-read)
+~/.scode/projects/&lt;git-root-slug&gt;/memory/ [memory · slug-keyed]
+  MEMORY.md · &lt;type&gt;_&lt;slug&gt;.md
+~/.nexus/sudocode/                        [config · NOT the VFS]
+  settings.json · sudocode.json
+  &lt;cache&gt;/&lt;sid&gt;/ session-state.json · stats.json</pre>
+  </div>
+  <div class="tree">
+    <h3>nexus — end-state · VFS root <code>/</code> · <b>one tree</b></h3>
+<pre>/sessions/&lt;sid&gt;/            session SSOT dir · sid-only key
+  transcript.jsonl         keep-forever DT_STREAM
+  tool-results/&lt;id&gt;        offloaded outputs (DT_FILE)
+/agents/{name}/            image layer (persistent identity)
+  config.toml · prompts/ · skills/
+  memory/ MEMORY.md · topics/&lt;type&gt;_&lt;slug&gt;.md
+  sessions/&lt;sid&gt; → /sessions/&lt;sid&gt;/  (DT_LINK, not bytes)
+/proc/{pid}/               runtime layer (ephemeral, reaped)
+  agent     → /agents/{name}/         (DT_LINK)
+  session   → /sessions/&lt;sid&gt;/        (DT_LINK)
+  workspace/ → /repos/{owner}/{repo}/ (DT_LINK)
+/repos/{owner}/{repo}/     persistent worktrees (agent-owned)</pre>
+  </div>
+</div>
 
 <h2>The matrix</h2>
 <table>
@@ -160,7 +209,7 @@
   <td class="item">Transcript file</td>
   <td class="cc"><div class="el"><span class="path">~/.claude/projects/&lt;key&gt;/&lt;uuid&gt;.jsonl</span> — JSONL, up to multi-GB, parentUuid DAG</div></td>
   <td>
-    <div class="el"><span class="was"><span class="path">.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span> — records <code>session_meta</code>/<code>compaction</code>/<code>prompt_history</code>/<code>message</code>; rotate 256 KiB × 3</span> <span class="arw">→</span> <span class="to"><span class="path">&lt;sessions-dir&gt;/&lt;session-id&gt;.jsonl</span> = <b>one keep-forever DT_STREAM</b> — <b>storage SHIPPED</b> (sudocode <a href="https://github.com/sudoprivacy/sudocode/pull/467">#467</a>, on nexus <a href="https://github.com/nexi-lab/nexus-vfs/issues/229">#229</a>): O(1) framed append (<code>sys_write</code>) · tail-read (<code>sys_stat.size</code>) · transparent cold-read (segments auto-spill out of raft → object store) · searchable (grep/FTS/semantic over streams). Durable <b>wal</b> stream when federated; <b>degrades to a durable DT_REG</b> without federation (never an ephemeral memory stream). Standalone host jsonl unchanged (OS append already O(1)). Rotation subsumed by the stream's cold-spill. SSOT builder <code>session_transcript_path(sessions_root, session_id)</code>. <b>Layout SHIPPED: per-session dir <span class="path">&lt;sessions-dir&gt;/&lt;session-id&gt;/transcript.jsonl</span></b> (sudocode <a href="https://github.com/sudoprivacy/sudocode/pull/479">#479</a>) — groups transcript + <span class="path">tool-results/</span> under one <span class="path">&lt;id&gt;/</span> subtree (atomic GC/export), <b>backend-agnostic</b> (decided once in the builder, identical across <code>StdFsBackend</code>/<code>KernelFsBackend</code> — only the root differs; a per-backend layout would break the abstraction). <b>Dual-read backward-compat</b>: existing flat <span class="path">&lt;id&gt;.jsonl</span>/<code>.json</code> sessions are still listed + resolved + resumed (never moved). Matches the nexus end-state (col 6).</span></div>
+    <div class="el"><span class="was"><span class="path">.scode/sessions/&lt;fp16&gt;/&lt;session-id&gt;.jsonl</span> — records <code>session_meta</code>/<code>compaction</code>/<code>prompt_history</code>/<code>message</code>; rotate 256 KiB × 3</span> <span class="arw">→</span> <span class="to"><span class="path">&lt;sessions-dir&gt;/&lt;session-id&gt;.jsonl</span> = <b>one keep-forever DT_STREAM</b> — <b>storage SHIPPED</b> (sudocode <a href="https://github.com/sudoprivacy/sudocode/pull/467">#467</a>, on nexus <a href="https://github.com/nexi-lab/nexus-vfs/issues/229">#229</a>): O(1) framed append (<code>sys_write</code>) · tail-read (<code>sys_stat.size</code>) · transparent cold-read (segments auto-spill out of raft → object store) · searchable (grep/FTS/semantic over streams). Durable <b>wal</b> stream when federated; <b>degrades to a durable DT_REG</b> without federation (never an ephemeral memory stream). Standalone host jsonl unchanged (OS append already O(1)). Rotation subsumed by the stream's cold-spill. SSOT builder <code>session_transcript_path(sessions_root, session_id)</code>. <b>Layout SHIPPED: per-session dir <span class="path">&lt;sessions-dir&gt;/&lt;session-id&gt;/transcript.jsonl</span></b> (sudocode <a href="https://github.com/sudoprivacy/sudocode/pull/479">#479</a>) — groups transcript + <span class="path">tool-results/</span> under one <span class="path">&lt;id&gt;/</span> subtree (atomic GC/export), <b>backend-agnostic</b> (decided once in the builder, identical across <code>StdFsBackend</code>/<code>KernelFsBackend</code> — only the root differs; a per-backend layout would break the abstraction). <b>Dual-read backward-compat</b>: existing flat <span class="path">&lt;id&gt;.jsonl</span>/<code>.json</code> sessions are still listed + resolved + resumed (never moved). The per-session-dir <b>structure</b> now matches the nexus end-state (col 6); the <b>rooting still differs</b> — standalone <span class="path">.scode/sessions/&lt;workspace_hash&gt;/</span> vs nexus flat <span class="path">/sessions/&lt;sid&gt;/</span> + <span class="path">/agents/{name}/sessions/&lt;sid&gt;</span> DT_LINK — that root/DT_LINK convergence is the <b>dormant seam</b> (Migration row), wired when the co-host session flow lands. See the Directory layout above.</span></div>
     <span class="b ok">done</span></td>
   <td>
     <div class="el"><b>→ sudocode:</b> <code>messages</code> table = full copy of the engine transcript → collapse to a <i>view</i> over <span class="path">/sessions/&lt;sid&gt;/transcript.jsonl</span> <span class="b dup">dup — primary</span></div>

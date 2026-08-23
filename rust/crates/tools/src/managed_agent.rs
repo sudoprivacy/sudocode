@@ -19,8 +19,8 @@ use runtime::spawn_task::{
     SpawnHandle,
 };
 use runtime::{
-    FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
-    SystemPromptBuilder, ToolError, ToolExecutor,
+    FsBackend, KernelFsBackend, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
+    ToolExecutor,
 };
 
 use crate::{execute_tool_with_backend, ProviderRuntimeClient};
@@ -100,9 +100,7 @@ where
     let tool_executor = ManagedToolExecutor { fs, send };
 
     // -- SystemPrompt: minimal prompt for managed-agent context --
-    let system_prompt = SystemPromptBuilder::new()
-        .with_model_family(ModelFamilyIdentity::Claude)
-        .build();
+    let system_prompt = SystemPromptBuilder::new().build();
 
     // -- PermissionPolicy: managed agents run with full access --
     // Nexus enforces permissions at the VFS layer (ReBAC +

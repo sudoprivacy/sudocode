@@ -3,7 +3,8 @@
 //! Constructs the `ApiClient`, `ToolExecutor`, `SystemPrompt`, and
 //! `PermissionPolicy` dependencies from the `AgentDescriptor` metadata
 //! and calls `runtime::spawn_task::spawn_task` to launch the full LLM
-//! loop. The nexus cdylib's `SudoCodeSpawnAdapter` calls this.
+//! loop. The co-located [`SudoCodeSpawnAdapter`] (this file) wraps it as a
+//! `managed_agent::SpawnTask` that nexus injects at boot.
 //!
 //! Lives in the `tools` crate because it needs both the `api` crate
 //! (for `ProviderClient` / `resolve_provider_from_config`) and the
@@ -14,9 +15,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::spawn_task::{
-    mailbox_sender, AgentDescriptor, AgentLoopState, KernelSyscall, Mailbox, MailboxSender,
-    SpawnHandle,
+    mailbox_sender, AgentDescriptor, AgentState, KernelSyscall, Mailbox, MailboxSender, SpawnHandle,
 };
 use runtime::{
     FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
@@ -34,7 +35,7 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Spawn a managed-agent loop with the full ConversationRuntime.
 ///
-/// The caller (nexus cdylib `SudoCodeSpawnAdapter`) invokes this after
+/// The caller ([`SudoCodeSpawnAdapter`], below) invokes this after
 /// `register_proc_entry` stamps the per-pid procfs subtree.
 ///
 /// # Arguments
@@ -54,7 +55,7 @@ pub fn spawn_managed_agent<K, F>(
 ) -> SpawnHandle
 where
     K: KernelSyscall + Send + Sync + 'static,
-    F: Fn(AgentLoopState) + Send + 'static,
+    F: Fn(AgentState) + Send + 'static,
 {
     let model = desc
         .labels
@@ -169,5 +170,60 @@ impl ToolExecutor for ManagedToolExecutor {
         })
         .await
         .map_err(|e| ToolError::new(format!("tool task join error: {e}")))?
+    }
+}
+
+/// The `SpawnTask` provider that hosts a `sudocode` agent loop as a nexus
+/// managed-agent runtime body — the co-host seam.
+///
+/// `ManagedAgentService` (nexus-vfs) calls [`SpawnTask::spawn`] after planting
+/// the per-pid procfs subtree; this impl builds the sudocode
+/// `ConversationRuntime` loop via [`spawn_managed_agent`] and binds it to the
+/// agent's REPLICATED A2A inbox `/agents/<name>/chat-with-me` (raft-replicated
+/// when federated), so two co-hosted agents on different hosts converse over
+/// A2A with no bridge/relay.
+///
+/// Lives here — next to [`spawn_managed_agent`], the loop it wraps — rather
+/// than at the nexus binary edge: the adapter IS sudocode's. nexus only injects
+/// `Arc::new(SudoCodeSpawnAdapter)` at boot via
+/// `managed_agent::install_managed_agent_with_spawn`. There is NO enum map:
+/// both `spawn_managed_agent`'s `state_callback` and `SpawnTask`'s observer
+/// speak `kernel::AgentState` directly (the SSOT).
+pub struct SudoCodeSpawnAdapter;
+
+impl<K> SpawnTask<K> for SudoCodeSpawnAdapter
+where
+    K: KernelSyscall + Send + Sync + 'static,
+{
+    fn spawn(
+        &self,
+        kernel: Arc<K>,
+        desc: AgentDescriptor,
+        state_observer: Arc<dyn Fn(AgentState) + Send + Sync>,
+    ) -> Box<dyn ManagedSpawnHandle> {
+        // The co-host agent's mailbox is its persistent, cross-machine A2A
+        // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
+        // host addresses it by name; raft replicates the reply back.
+        let mailbox = Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: desc.name.clone(),
+        };
+        let handle = spawn_managed_agent(kernel, desc, mailbox, move |state| state_observer(state));
+        Box::new(SudoCodeSpawnHandle { inner: handle })
+    }
+}
+
+/// Wraps sudocode's [`SpawnHandle`] so the managed-agent service sees only the
+/// abort capability its `on_terminate` observer needs. `abort` signals the
+/// loop's shared `HookAbortSignal`; the worker thread observes it and exits on
+/// its next poll (idempotent — the observer may fire concurrently with an
+/// in-flight `cancel(Session)`).
+struct SudoCodeSpawnHandle {
+    inner: SpawnHandle,
+}
+
+impl ManagedSpawnHandle for SudoCodeSpawnHandle {
+    fn abort(&self) {
+        self.inner.abort_signal.abort();
     }
 }

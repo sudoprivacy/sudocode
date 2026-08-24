@@ -14,6 +14,12 @@ flate2 = "1"
 futures = "0.3"
 plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }
+# The managed-agent DI seam (`SpawnTask` + `SpawnHandle`) that
+# `SudoCodeSpawnAdapter` implements to host this crate's `spawn_managed_agent`
+# loop as a nexus managed-agent runtime body. Same nexus-vfs rev the runtime
+# crate pins (transitive `kernel` unifies). default-features = false → no
+# subprocess-host (that's the raw-ACP path, not the in-process co-host).
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "578f7ad7fa859d1ab66f14a48e9662ef5a9531b3", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
@@ -23,7 +29,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 # For the in-process co-host live proof (tests/cohost_live_llm.rs): builds a
 # real Kernel, plants the /proc mailbox stream, and drives spawn_managed_agent
 # through a real LLM turn. Same nexus-vfs rev the runtime crate pins.
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "dcee3e5d1959099e8a57ffa06444ed7204719f42", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "578f7ad7fa859d1ab66f14a48e9662ef5a9531b3", default-features = false }
 
 [lints]
 workspace = true

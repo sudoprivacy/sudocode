@@ -285,6 +285,45 @@ fn session_store_roots_at_vfs_sessions_over_kernel_backend() {
 }
 
 #[test]
+fn create_handle_plants_agent_dt_link_when_agent_name_is_set() {
+    // The anti-forget property, end to end: a nexus-backed store bound to an
+    // agent name plants the /agents/{name}/sessions/<sid> DT_LINK enum-index
+    // automatically on session create — so swapping std → nexus + supplying
+    // the agent name is all it takes; no separate link wiring to remember.
+    let kernel = kernel_with_root_backend();
+    let fs: Arc<dyn FsBackend> = Arc::new(vfs_backend(&kernel));
+    let store = SessionStore::from_cwd_with("/ws", Arc::clone(&fs))
+        .expect("store")
+        .with_agent_name("alice");
+
+    let _ = store.create_handle("sid-9");
+
+    let st = kernel
+        .sys_stat("/agents/alice/sessions/sid-9", "root")
+        .expect("agent enum-index DT_LINK should exist after create");
+    assert_eq!(st.entry_type, DT_LINK);
+    assert_eq!(st.link_target.as_deref(), Some("/sessions/sid-9"));
+}
+
+#[test]
+fn create_handle_without_agent_name_plants_no_link() {
+    // Standalone (no agent name) creates no DT_LINK — the /agents/ index is a
+    // co-host concern, not a standalone one.
+    let kernel = kernel_with_root_backend();
+    let fs: Arc<dyn FsBackend> = Arc::new(vfs_backend(&kernel));
+    let store = SessionStore::from_cwd_with("/ws", Arc::clone(&fs)).expect("store");
+
+    let _ = store.create_handle("sid-10");
+
+    assert!(
+        kernel
+            .sys_stat("/agents/alice/sessions/sid-10", "root")
+            .is_none(),
+        "no agent name → no enum-index link"
+    );
+}
+
+#[test]
 fn glob_and_grep_walk_the_vfs_trie() {
     let kernel = kernel_with_root_backend();
     let fs = vfs_backend(&kernel);

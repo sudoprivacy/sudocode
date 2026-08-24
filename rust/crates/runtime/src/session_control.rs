@@ -25,6 +25,12 @@ pub struct SessionStore {
     workspace_root: PathBuf,
     /// Filesystem backend for all I/O.
     fs: Arc<dyn FsBackend>,
+    /// The owning agent's name, when known (co-hosted / managed agents). When
+    /// set, creating a session also plants the `/agents/{name}/sessions/<sid>`
+    /// DT_LINK enum-index via [`FsBackend::link`]. `None` for standalone
+    /// (single implicit profile, no agent namespace). Left unset, the link
+    /// step is skipped; on a host backend `link` is a no-op anyway.
+    agent_name: Option<String>,
 }
 
 impl SessionStore {
@@ -66,6 +72,7 @@ impl SessionStore {
             sessions_root,
             workspace_root: canonical_cwd,
             fs,
+            agent_name: None,
         })
     }
 
@@ -107,7 +114,19 @@ impl SessionStore {
             sessions_root,
             workspace_root: canonical_workspace,
             fs,
+            agent_name: None,
         })
+    }
+
+    /// Bind this store to an owning agent name. New sessions then plant the
+    /// `/agents/{name}/sessions/<sid>` DT_LINK enum-index (via
+    /// [`FsBackend::link`]) so a nexus-backed co-host gets cross-agent
+    /// enumeration automatically — no separate wiring to remember when the
+    /// backend is swapped. No-op effect on host backends (`link` is a no-op).
+    #[must_use]
+    pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
+        self.agent_name = Some(agent_name.into());
+        self
     }
 
     /// The fully resolved sessions directory for this namespace.
@@ -126,6 +145,21 @@ impl SessionStore {
     pub fn create_handle(&self, session_id: &str) -> SessionHandle {
         let id = session_id.to_string();
         let path = session_transcript_path(&self.sessions_root, &id);
+        // Plant the per-agent enum-index DT_LINK for a known agent name:
+        // /agents/{name}/sessions/<sid> → the session dir. Best-effort — the
+        // link is an INDEX, not the SSOT (the session bytes always live at the
+        // sessions root), so a failure degrades cross-agent enumeration but
+        // never loses data; `link` is idempotent and a no-op on host backends.
+        // Wiring it here means a backend swap (std → nexus) plants the index
+        // automatically, with nothing to remember later.
+        if let Some(agent_name) = self.agent_name.as_deref() {
+            let alias = format!("/agents/{agent_name}/sessions/{id}");
+            // Forward-slash VFS path (not PathBuf::join, which would emit
+            // backslashes on Windows for the kernel backend).
+            let root = self.sessions_root.to_string_lossy();
+            let target = format!("{}/{id}", root.trim_end_matches(['/', '\\']));
+            let _ = self.fs.link(&alias, &target);
+        }
         SessionHandle { id, path }
     }
 

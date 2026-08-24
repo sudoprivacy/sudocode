@@ -43,7 +43,7 @@ use std::thread;
 
 // Re-export kernel types so downstream crates (e.g. `tools`) can
 // reference them without adding a direct `kernel` dependency.
-pub use kernel::core::agents::registry::AgentDescriptor;
+pub use kernel::core::agents::registry::{AgentDescriptor, AgentState};
 pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
@@ -69,14 +69,6 @@ const WATCH_TIMEOUT_MS: u64 = 500;
 /// Per-call `sys_read` blocking timeout. `0` keeps the call
 /// non-blocking — data is already present because `sys_watch` woke us.
 const READ_TIMEOUT_MS: u64 = 0;
-
-/// Agent-state values surfaced via `state_callback`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentLoopState {
-    WarmingUp,
-    Ready,
-    Busy,
-}
 
 /// Where the co-hosted agent's chat mailbox lives — determines the path the
 /// loop reads for inbound messages and where each reply is written.
@@ -201,7 +193,7 @@ where
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentLoopState) + Send + 'static,
+    F: Fn(AgentState) + Send + 'static,
 {
     let abort_signal = HookAbortSignal::default();
     let abort_for_thread = abort_signal.clone();
@@ -245,7 +237,7 @@ fn run_loop<K, C, T, F>(
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentLoopState),
+    F: Fn(AgentState),
 {
     // Build a tokio runtime for async run_turn calls.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -254,7 +246,7 @@ fn run_loop<K, C, T, F>(
         .expect("managed-agent tokio runtime");
 
     // -- WARMING_UP --
-    state_cb(AgentLoopState::WarmingUp);
+    state_cb(AgentState::WarmingUp);
 
     // The VFS-backed file tools are constructed by the spawn factory
     // (`tools::managed_agent::spawn_managed_agent`), which injects a
@@ -273,7 +265,7 @@ fn run_loop<K, C, T, F>(
     .with_hook_abort_signal(abort.clone());
 
     // -- READY --
-    state_cb(AgentLoopState::Ready);
+    state_cb(AgentState::Ready);
 
     // Inbox the loop reads/watches, and the id it filters its own writes by.
     // For A2A this is the replicated `/agents/<self>/chat-with-me`; replies
@@ -290,7 +282,7 @@ fn run_loop<K, C, T, F>(
                     if !bytes.is_empty() {
                         if let Some((sender, body)) = parse_inbound(bytes, &self_id) {
                             // -- BUSY --
-                            state_cb(AgentLoopState::Busy);
+                            state_cb(AgentState::Busy);
 
                             // Drive ONE turn on the inbound message. The sender is
                             // surfaced in the prompt so the agent can address a reply.
@@ -306,7 +298,7 @@ fn run_loop<K, C, T, F>(
                             }
 
                             // -- READY --
-                            state_cb(AgentLoopState::Ready);
+                            state_cb(AgentState::Ready);
                         }
                     }
                 }

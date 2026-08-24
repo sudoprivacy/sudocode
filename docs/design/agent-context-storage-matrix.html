@@ -214,6 +214,7 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
     <span class="b ok">done</span></td>
   <td>
     <div class="el"><b>→ sudocode:</b> <code>messages</code> table = full copy of the engine transcript → collapse to a <i>view</i> over <span class="path">/sessions/&lt;sid&gt;/transcript.jsonl</span> <span class="b dup">dup — primary</span></div>
+    <div class="el"><b>Cross-repo coupling (fixed):</b> sudowork's usage late-reconciliation reads scode's transcript on prompt-timeout to recover token usage. The per-session-dir rename (<a href="https://github.com/sudoprivacy/sudocode/pull/479">#479</a>) would have broken its path guesser; <code>findScodeSessionFile</code> now resolves both layouts, fingerprint-agnostic (sudowork <a href="https://github.com/sudoprivacy/sudowork/pull/1084">sw#1084</a>). This file-read coupling is subsumed by the <code>messages</code>→view collapse (nexus-2 #84).</div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b><span class="path">/sessions/&lt;session-id&gt;/transcript.jsonl</span></b> — a single <b>keep-forever DT_STREAM</b> (retention=0); cold segments auto-spill out of raft → object store, invisible to callers (nexus <a href="https://github.com/nexi-lab/nexus-vfs/issues/229">#229</a>/<a href="https://github.com/nexi-lab/nexus-vfs/issues/230">#230</a>/<a href="https://github.com/nexi-lab/nexus-vfs/issues/233">#233</a>); session-id is the <b>sole structural key</b> (no workspace_hash, no agent nesting)</div>

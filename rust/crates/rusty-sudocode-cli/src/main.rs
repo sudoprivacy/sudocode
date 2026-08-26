@@ -131,7 +131,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// #148: Model provenance for `scode status` JSON/text output. Records where
 /// the resolved model string came from so consumers don't have to re-read argv

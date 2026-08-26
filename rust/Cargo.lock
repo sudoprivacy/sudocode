@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2a"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 dependencies = [
  "contracts",
  "kernel",
@@ -163,7 +163,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -174,7 +174,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -860,7 +860,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1380,7 +1380,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1958,7 +1958,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2189,7 +2189,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2290,7 +2290,7 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2352,7 +2352,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2473,7 +2473,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "managed-agent"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 dependencies = [
  "a2a",
  "contracts",
@@ -2570,7 +2570,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=08460a7909fa600baba3922a4f8852e351aeee42#08460a7909fa600baba3922a4f8852e351aeee42"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95b8aba5cb20848e3b#601c2af20b85a324496a7c95b8aba5cb20848e3b"
 
 [[package]]
 name = "nexus-vfs-client"
@@ -3381,7 +3381,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3419,9 +3419,9 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3810,7 +3810,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4333,7 +4333,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4492,7 +4492,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

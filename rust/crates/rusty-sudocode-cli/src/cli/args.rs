@@ -1204,12 +1204,20 @@ pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
 
 pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> api::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().unwrap_or_default()
+    let config = loader.load_sudocode_config().unwrap_or_default();
+    runtime::model_capabilities::apply_config_limits(&config);
+    config
 }
 
 pub(crate) fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<api::SudoCodeConfig, String> {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().map_err(|e| e.to_string())
+    let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
+    // Seed the capability overrides here rather than at each startup site:
+    // every entry point (REPL, --print, acp, subagents) reaches the config
+    // through this pair, and a forgotten seeding call is invisible until a
+    // provider rejects `max_tokens` at request time.
+    runtime::model_capabilities::apply_config_limits(&config);
+    Ok(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1346,7 @@ mod tests {
                 name: "custom-openai/gpt-5.4".to_string(),
                 input: vec!["text".to_string()],
                 providers,
+                ..Default::default()
             },
         );
 

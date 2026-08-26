@@ -71,7 +71,12 @@ struct Cli {
     base_commit: Option<String>,
 
     /// Reasoning effort level
-    #[arg(long, global = true, value_parser = ["low", "medium", "high"])]
+    ///
+    /// `none` / `minimal` are part of the OpenAI reasoning-effort ladder and
+    /// are what several OpenAI-compatible backends accept to turn reasoning
+    /// off entirely (DashScope Qwen3.x, for one); keeping them out of the
+    /// allow-list blocked a capability the wire already supports.
+    #[arg(long, global = true, value_parser = ["none", "minimal", "low", "medium", "high"])]
     reasoning_effort: Option<String>,
 
     /// Allow running in a broad (non-project) working directory

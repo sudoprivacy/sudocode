@@ -122,8 +122,12 @@ impl AnthropicRequestProfile {
                 "request body must serialize to a JSON object",
             ))
         })?;
+        // Additive: extra body params never clobber a field the serialized
+        // request itself carries (`model`, `messages`, `max_tokens`, …).
         for (key, value) in &self.extra_body {
-            object.insert(key.clone(), value.clone());
+            if !object.contains_key(key) {
+                object.insert(key.clone(), value.clone());
+            }
         }
         if !self.betas.is_empty() {
             object.insert(

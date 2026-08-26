@@ -166,63 +166,27 @@ pub fn execute_bash_with_progress(
         });
     }
 
-    // Pick async implementation: streaming when a progress callback is
-    // provided, the original `command.output()` path otherwise.
-    let run_async = |handle_or_runtime: AsyncRunner| -> io::Result<BashCommandOutput> {
-        if on_progress.is_some() {
-            handle_or_runtime.block_on(execute_bash_streaming(
-                input,
-                sandbox_status,
-                cwd,
-                abort_signal.cloned(),
-                on_progress,
-            ))
-        } else {
-            handle_or_runtime.block_on_dyn(Box::pin(execute_bash_async(
-                input,
-                sandbox_status,
-                cwd,
-                abort_signal.cloned(),
-            )))
-        }
-    };
-
-    // If we are already inside a tokio runtime (e.g. when run_turn is
-    // driven by an outer block_on), use the current handle instead of
-    // creating a nested runtime which would panic.
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        run_async(AsyncRunner::Handle(handle))
+    // Run the command's async implementation to completion, correct for ANY
+    // ambient runtime flavor. The bespoke Handle-vs-Runtime split used to
+    // `block_in_place` on the ambient handle — correct under ACP's multi-thread
+    // runtime, but a PANIC under the co-host managed-agent's current-thread
+    // runtime (`spawn_task`). `lib::rt::block_on_portable` is the SSOT that
+    // handles all three contexts (see the nexus-vfs `lib::rt` module).
+    if on_progress.is_some() {
+        lib::rt::block_on_portable(execute_bash_streaming(
+            input,
+            sandbox_status,
+            cwd,
+            abort_signal.cloned(),
+            on_progress,
+        ))
     } else {
-        let runtime = Builder::new_current_thread().enable_all().build()?;
-        run_async(AsyncRunner::Runtime(runtime))
-    }
-}
-
-/// Helper to abstract over `tokio::runtime::Handle` vs owned `Runtime`.
-enum AsyncRunner {
-    Handle(tokio::runtime::Handle),
-    Runtime(tokio::runtime::Runtime),
-}
-
-impl AsyncRunner {
-    fn block_on<F: std::future::Future<Output = io::Result<BashCommandOutput>>>(
-        self,
-        future: F,
-    ) -> io::Result<BashCommandOutput> {
-        match self {
-            Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
-            Self::Runtime(runtime) => runtime.block_on(future),
-        }
-    }
-
-    fn block_on_dyn(
-        self,
-        future: std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<BashCommandOutput>>>>,
-    ) -> io::Result<BashCommandOutput> {
-        match self {
-            Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
-            Self::Runtime(runtime) => runtime.block_on(future),
-        }
+        lib::rt::block_on_portable(execute_bash_async(
+            input,
+            sandbox_status,
+            cwd,
+            abort_signal.cloned(),
+        ))
     }
 }
 

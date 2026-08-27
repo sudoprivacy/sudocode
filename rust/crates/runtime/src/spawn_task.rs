@@ -274,7 +274,19 @@ fn run_loop<K, C, T, F>(
     let self_id = mailbox.self_id().to_string();
     let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&self_id), true);
 
-    let mut next_offset: u64 = 0;
+    // Durable per-agent read cursor (node-local). A (re)spawned agent RESUMES
+    // from the offset it last PROCESSED instead of replaying its whole inbox and
+    // re-answering every historical message — the #81 re-reply storm, observed
+    // live in the Win↔Mac duet when a respawned agent re-answered the entire
+    // conversation. First spawn (no cursor yet) loads 0 and delivers all waiting
+    // messages, so there is NO seek-to-tail delivery race. The cursor is a
+    // node-local DT_REG (`sys_write` create-or-overwrites it; it lives in the
+    // node's durable metastore, so it survives a daemon restart); each node's
+    // agent owns its own cursor. All cursor I/O degrades GRACEFULLY (load → 0,
+    // save ignored) so a missing / unmounted cursor path never wedges the agent —
+    // only the no-replay guarantee weakens to "replay from 0".
+    let cursor_path = cursor_path_for(&self_id);
+    let mut next_offset: u64 = load_cursor(kernel.as_ref(), &cursor_path, &ctx);
     while !abort.is_aborted() {
         match kernel.sys_read(&inbox_path, &ctx, READ_TIMEOUT_MS, next_offset) {
             Ok(result) => {
@@ -303,7 +315,16 @@ fn run_loop<K, C, T, F>(
                     }
                 }
                 if let Some(advanced) = result.stream_next_offset {
-                    next_offset = advanced as u64;
+                    let advanced = advanced as u64;
+                    // Persist the cursor only on REAL forward progress (a message
+                    // was consumed) — never on idle no-op reads, which would
+                    // rewrite the same offset every watch tick. Saving here (after
+                    // the turn ran) makes a crash mid-turn re-process only that one
+                    // message on respawn (at-least-once), never the whole history.
+                    if advanced > next_offset {
+                        next_offset = advanced;
+                        save_cursor(kernel.as_ref(), &cursor_path, &ctx, next_offset);
+                    }
                 }
             }
             Err(e) => {
@@ -343,6 +364,45 @@ fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> 
         return None;
     }
     Some((env.from, env.body))
+}
+
+/// Node-local path holding a co-host agent's durable inbox read cursor. Keyed by
+/// the agent's stable identity (NOT its pid) so it survives respawn; sanitised to
+/// a flat, path-safe leaf so `sys_write` auto-creates the DT_REG without needing
+/// intermediate directories.
+fn cursor_path_for(agent_id: &str) -> String {
+    let safe: String = agent_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("/.cohost-cursor-{safe}")
+}
+
+/// Read the persisted cursor (a decimal offset). Any failure — path unmounted,
+/// not-yet-created, or unparsable — yields 0, i.e. start from the inbox head.
+fn load_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext) -> u64 {
+    kernel
+        .sys_read(path, ctx, 0, 0)
+        .ok()
+        .and_then(|r| r.data)
+        .and_then(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Overwrite the persisted cursor with `offset`. Best-effort: a write failure
+/// only weakens the no-replay guarantee (never correctness), so it is ignored.
+fn save_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext, offset: u64) {
+    let _ = kernel.sys_write(path, ctx, offset.to_string().as_bytes(), 0);
 }
 
 // Loop tests live under `runtime/tests/spawn_task.rs` as an integration

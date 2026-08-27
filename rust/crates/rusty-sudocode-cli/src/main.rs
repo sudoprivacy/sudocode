@@ -2871,6 +2871,7 @@ impl AcpCliAgent {
             &session_mcp,
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
+        runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
         if let Some(rt) = runtime.runtime.as_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.reasoning_effort.clone());

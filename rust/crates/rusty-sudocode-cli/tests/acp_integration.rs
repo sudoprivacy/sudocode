@@ -2108,6 +2108,88 @@ fn spawn_stdio_client_danger_with_allowed(
     }
 }
 
+/// A model switch rebuilds the session runtime. Cancellation must keep using
+/// the same abort signal registered by `session/new`, otherwise the rebuilt
+/// runtime waits on a fresh signal and the prompt runs to its natural end.
+#[tokio::test]
+async fn acp_session_cancel_survives_model_switch() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("cancel-after-model-switch");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    // The process starts on sonnet. A different model is required to enter
+    // handle_acp_model_switch's runtime-rebuild branch.
+    let (_, set_resp) = client
+        .send_request(
+            "session/set_model",
+            json!({ "sessionId": session_id, "modelId": "haiku" }),
+        )
+        .await;
+    assert!(
+        set_resp.get("error").is_none(),
+        "session/setModel should succeed: {set_resp}"
+    );
+
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_interrupt_long_running")
+                }]
+            }),
+        )
+        .await;
+
+    // Wait until the long-running tool has been announced so cancellation is
+    // exercised mid-turn rather than before prompt dispatch.
+    client
+        .recv_until(Duration::from_secs(20), |message| {
+            message["method"].as_str() == Some("session/update")
+                && message["params"]["sessionId"].as_str() == Some(session_id.as_str())
+                && message["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call")
+                && message["params"]["update"]["toolCallId"].as_str()
+                    == Some("toolu_bash_interrupt")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("long-running tool never started; saw: {seen:?}"));
+
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_id }
+        }))
+        .await;
+
+    let (_, prompt_resp) = client
+        .recv_until(Duration::from_secs(2), |message| {
+            is_response_to(message, prompt_id)
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "prompt did not stop within 2s after cancel following model switch; saw: {seen:?}"
+            )
+        });
+    assert!(
+        prompt_resp.get("result").is_some() || prompt_resp.get("error").is_some(),
+        "cancelled prompt should receive a response: {prompt_resp}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
 /// runtime build (proof written) and its `echo` tool round-trips through the
 /// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).

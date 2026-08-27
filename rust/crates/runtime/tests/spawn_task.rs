@@ -386,6 +386,57 @@ fn count_from(kernel: &Kernel, path: &str, ctx: &OperationContext, from: &str) -
     count
 }
 
+/// Read the durable inbox cursor for `agent`, or 0 if unset. White-box: the
+/// co-host cursor is a node-local DT_REG at `/.cohost-cursor-<agent>`, written
+/// with the agent's own ctx (owner `test-owner`, per [`make_desc`]); read it
+/// back the same way so ownership matches regardless of any perm enforcement.
+fn read_cursor(kernel: &Kernel, agent: &str) -> u64 {
+    let ctx = OperationContext::new("test-owner", "root", false, Some(agent), true);
+    let path = format!("/.cohost-cursor-{agent}");
+    kernel
+        .sys_read(
+            &[ReadRequest {
+                path,
+                offset: 0,
+                len: None,
+                timeout_ms: 0,
+            }],
+            &ctx,
+        )
+        .pop()
+        .and_then(|r| r.ok())
+        .and_then(|r| r.data)
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// The tail (next unread offset) of stream `path` — walk to the end and return
+/// the final `stream_next_offset`, so a test can gate on "fully drained" without
+/// depending on whether offsets count messages or bytes.
+fn tail_offset(kernel: &Kernel, path: &str, ctx: &OperationContext) -> u64 {
+    let mut offset = 0u64;
+    loop {
+        let reqs = [ReadRequest {
+            path: path.to_string(),
+            offset,
+            len: None,
+            timeout_ms: 0,
+        }];
+        match kernel.sys_read(&reqs, ctx).pop() {
+            Some(Ok(result)) => {
+                let next = result.stream_next_offset.map_or(offset, |o| o as u64);
+                if next == offset {
+                    break;
+                }
+                offset = next;
+            }
+            _ => break,
+        }
+    }
+    offset
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -782,5 +833,121 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
         count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
         2,
         "exactly two replies total ('first' + 'second'); the respawn replayed NONE"
+    );
+}
+
+#[test]
+fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
+    // Deepens the #81 fix past a single REPLIED message: a co-host agent usually
+    // reads a message and stays SILENT (the ping-pong fix — it only replies when
+    // it calls `send_message`). Those silently-processed messages must ALSO
+    // advance the durable cursor; if the cursor advanced only on messages that
+    // produced a reply, a respawn would re-read every silent one and re-answer it.
+    let kernel = Arc::new(Kernel::new());
+    mount_with_backend(&kernel, "/"); // durable cursor at /.cohost-cursor-win-ai
+    mount(&kernel, "/agents");
+    plant_stream(&kernel, "/agents/win-ai/chat-with-me");
+    plant_stream(&kernel, "/agents/user-test/chat-with-me");
+    let ctx = user_ctx();
+
+    // Three inbound messages. `SendsReply` replies to the FIRST only (its `sent`
+    // latch), so m1 and m2 are processed SILENTLY — the case under test.
+    for body in ["m0", "m1", "m2"] {
+        write_envelope(
+            &kernel,
+            "/agents/win-ai/chat-with-me",
+            &ctx,
+            "user-test",
+            "win-ai",
+            body,
+        );
+    }
+    let h1 = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai-1", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
+
+    // Deterministically wait for spawn #1 to DRAIN all three. The silent ones
+    // leave no observable reply, so gate on the cursor reaching the inbox tail.
+    // (Aborting early would leave m1/m2 genuinely unprocessed, and the respawn
+    // then handling them would be CORRECT, not a replay — a flaky false failure.)
+    let tail = tail_offset(&kernel, "/agents/win-ai/chat-with-me", &ctx);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while read_cursor(&kernel, "win-ai") < tail && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        read_cursor(&kernel, "win-ai"),
+        tail,
+        "spawn #1 did not drain all three inbound messages before respawn"
+    );
+    h1.abort_signal.abort();
+    let _ = h1.join.join();
+    assert_eq!(
+        count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
+        1,
+        "spawn #1 should reply exactly once (m0); m1/m2 are processed silently"
+    );
+
+    // Respawn: the cursor sits PAST all three, incl. the two silent ones. A fresh
+    // `SendsReply` (sent=false) would re-answer anything it re-reads.
+    let h2 = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai-2", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
+    thread::sleep(Duration::from_millis(700)); // ample time to (wrongly) replay
+    h2.abort_signal.abort();
+    let _ = h2.join.join();
+    assert_eq!(
+        count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
+        1,
+        "respawn re-answered a silently-processed message — the cursor advanced \
+         only on replies, not on every processed message (#81)"
+    );
+
+    // Liveness: a message AFTER the three IS answered → the cursor resumed at the
+    // true tail, not over-skipped the way a naive seek-to-tail would.
+    write_envelope(
+        &kernel,
+        "/agents/win-ai/chat-with-me",
+        &ctx,
+        "user-test",
+        "win-ai",
+        "m3",
+    );
+    let h3 = spawn_sending(
+        Arc::clone(&kernel),
+        make_desc("cohost-win-ai-3", "win-ai"),
+        Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: "win-ai".to_string(),
+        },
+        "user-test",
+        REPLY_TEXT,
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai") < 2
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    h3.abort_signal.abort();
+    let _ = h3.join.join();
+    assert_eq!(
+        count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
+        2,
+        "the post-respawn message m3 was not answered — cursor over-skipped the live tail"
     );
 }

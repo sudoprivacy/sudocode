@@ -185,7 +185,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "base64",
  "criterion",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "plugins",
  "runtime",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "commands",
  "runtime",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "api",
  "serde_json",
@@ -2574,7 +2574,7 @@ source = "git+https://github.com/nexi-lab/nexus-vfs?rev=601c2af20b85a324496a7c95
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3027,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "serde",
  "serde_json",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -3869,7 +3869,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "api",
  "arboard",
@@ -4473,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "chrono",
  "dirs",
@@ -4826,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "api",
  "async-trait",

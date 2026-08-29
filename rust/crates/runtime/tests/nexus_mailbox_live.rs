@@ -47,3 +47,31 @@ fn live_inbox_roundtrip() {
         "expected the sent envelope back, got {msgs:?}"
     );
 }
+
+/// Read every message in an inbox and print it — the receive-side verify tool
+/// (the analog of the nexus-vfs `mailbox_cli collect`). Point it at another
+/// agent's inbox to confirm a *separate* writer's envelope actually landed on
+/// the wire, e.g. after a real `scode` turn calls `send_message`:
+///
+/// ```text
+/// NEXUS_A2A_TEST_ENDPOINT=127.0.0.1:12055 NEXUS_A2A_TEST_INBOX=scode-probe \
+///   cargo test -p runtime --test nexus_mailbox_live live_collect_inbox -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_INBOX"]
+fn live_collect_inbox() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+
+    // poll_new reads inbox_path(self_agent), so pass the target inbox name.
+    // Its self-filter only drops the inbox owner's OWN writes (none here) —
+    // a peer's stamped envelope (e.g. from a real scode send) still surfaces.
+    let (msgs, next) = poll_new(&client, &inbox, 0, &auth).expect("collect");
+    println!("inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}", msgs.len());
+    for m in &msgs {
+        println!("  from={:?} body={:?}", m.from, m.body);
+    }
+}

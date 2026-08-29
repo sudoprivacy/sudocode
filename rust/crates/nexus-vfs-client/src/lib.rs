@@ -70,7 +70,13 @@ enum VfsOp {
 /// and can be called from any synchronous context, including outside of
 /// an async runtime.
 pub struct NexusVfsClient {
-    tx: tokio::sync::mpsc::Sender<VfsOp>,
+    // Unbounded so the sync public methods can enqueue an op from ANY context
+    // — including from within a tokio runtime (scode's async tool executor).
+    // `UnboundedSender::send` is synchronous and never blocks the caller, so it
+    // cannot trigger tokio's "block the current thread from within a runtime"
+    // panic the way the bounded channel's `blocking_send` did. The caller then
+    // blocks on the per-op std channel until the background thread replies.
+    tx: tokio::sync::mpsc::UnboundedSender<VfsOp>,
 }
 
 /// mTLS material for [`NexusVfsClient::connect_tls`].
@@ -126,7 +132,7 @@ impl NexusVfsClient {
         } else {
             format!("http://{endpoint}")
         };
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<VfsOp>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VfsOp>();
 
         std::thread::Builder::new()
             .name("nexus-vfs-client".into())
@@ -323,7 +329,7 @@ impl NexusVfsClient {
     pub fn read(&self, path: &str, auth_token: &str) -> io::Result<Vec<u8>> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Read {
+            .send(VfsOp::Read {
                 path: path.to_owned(),
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
@@ -335,7 +341,7 @@ impl NexusVfsClient {
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Write {
+            .send(VfsOp::Write {
                 path: path.to_owned(),
                 content,
                 auth_token: auth_token.to_owned(),
@@ -348,7 +354,7 @@ impl NexusVfsClient {
     pub fn delete(&self, path: &str, auth_token: &str) -> io::Result<()> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Delete {
+            .send(VfsOp::Delete {
                 path: path.to_owned(),
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
@@ -364,7 +370,7 @@ impl NexusVfsClient {
     pub fn stream_write(&self, path: &str, data: Vec<u8>, auth_token: &str) -> io::Result<u64> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::StreamWrite {
+            .send(VfsOp::StreamWrite {
                 path: path.to_owned(),
                 data,
                 auth_token: auth_token.to_owned(),
@@ -386,7 +392,7 @@ impl NexusVfsClient {
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::StreamReadAt {
+            .send(VfsOp::StreamReadAt {
                 path: path.to_owned(),
                 offset,
                 auth_token: auth_token.to_owned(),
@@ -411,7 +417,7 @@ impl NexusVfsClient {
     ) -> io::Result<bool> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::EnsureStream {
+            .send(VfsOp::EnsureStream {
                 path: path.to_owned(),
                 io_profile: io_profile.to_owned(),
                 capacity,
@@ -427,7 +433,7 @@ impl NexusVfsClient {
     pub fn call(&self, method: &str, payload: &[u8], auth_token: &str) -> io::Result<Vec<u8>> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Call {
+            .send(VfsOp::Call {
                 method: method.to_owned(),
                 payload: payload.to_vec(),
                 auth_token: auth_token.to_owned(),

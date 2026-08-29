@@ -103,6 +103,12 @@ pub(crate) struct CliToolExecutor {
     output_writer: Option<OutputSender>,
     /// Optional UI command sender for ContextSlot updates (Task* → UI).
     ui_sender: Option<crate::repl_ui::UiCommandSender>,
+    /// Optional nexus A2A send capability. When set (nexus-A2A configured),
+    /// `send_message` writes to the peer's `/agents/<to>/chat-with-me`
+    /// DT_STREAM over gRPC (the node stamps `from`) via the SAME shared
+    /// `handle_send_message` the co-host uses — only the transport differs.
+    /// Held here like the other per-session capabilities.
+    mailbox_sender: Option<runtime::spawn_task::MailboxSender>,
 }
 
 impl CliToolExecutor {
@@ -124,11 +130,20 @@ impl CliToolExecutor {
             abort_signal: None,
             output_writer: None,
             ui_sender: None,
+            mailbox_sender: None,
         }
     }
 
     pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
         self.spinner = Some(ref_);
+    }
+
+    /// Enable nexus A2A: `send_message` now routes to the peer's replicated
+    /// DT_STREAM inbox over gRPC (via the shared `handle_send_message`).
+    /// Set at startup only when nexus-A2A is configured; absent it,
+    /// `send_message` is not advertised to the model.
+    pub(crate) fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
+        self.mailbox_sender = Some(sender);
     }
 
     pub(crate) fn set_output_writer(&mut self, writer: OutputSender) {
@@ -342,6 +357,16 @@ impl ToolExecutor for CliToolExecutor {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
+        }
+        // nexus A2A: when configured, `send_message` routes to the peer's
+        // replicated DT_STREAM inbox over gRPC — the SAME shared handler the
+        // co-host's `ManagedToolExecutor` uses (only the transport differs).
+        // Absent config the tool is never advertised, so this is unreachable.
+        if tool_name == "send_message" {
+            if let Some(sender) = &self.mailbox_sender {
+                return runtime::spawn_task::handle_send_message(sender, input)
+                    .map_err(ToolError::new);
+            }
         }
         let value = parse_tool_call_input(input)?;
         if tool_name == "AskUserQuestion" && self.question_prompter.borrow().is_some() {

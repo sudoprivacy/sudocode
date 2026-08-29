@@ -134,6 +134,29 @@ impl Mailbox {
 /// hook overwrites `from` with the authenticated caller when auth is armed.
 pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
+/// Shared handler for the `send_message` A2A tool: parse `{to, body}` from the
+/// raw tool input and hand it to `sender`. BOTH the co-host
+/// (`ManagedToolExecutor`) and the standalone CLI executor route their
+/// `send_message` here, so the parse + delivery contract is defined ONCE — only
+/// the `sender` differs by deployment (in-process [`mailbox_sender`] vs gRPC
+/// `crate::nexus_mailbox::grpc_sender`).
+///
+/// # Errors
+/// Returns a `String` error when the input is not `{to, body}` or the send fails.
+pub fn handle_send_message(sender: &MailboxSender, input: &str) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_str(input).map_err(|e| e.to_string())?;
+    let to = v
+        .get("to")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "send_message requires a string 'to'".to_string())?;
+    let body = v
+        .get("body")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "send_message requires a string 'body'".to_string())?;
+    (sender)(to, body)?;
+    Ok(format!("message delivered to {to}"))
+}
+
 /// Build the [`MailboxSender`] for a co-hosted agent (its kernel + mailbox +
 /// operation identity). Lives here, next to `Mailbox::reply_path`, so the
 /// envelope build + reply-path + `sys_write` stay in one place.

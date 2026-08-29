@@ -49,6 +49,7 @@ pub mod mcp_tool_bridge;
 mod mcp_ws;
 pub mod memory;
 pub mod model_capabilities;
+pub mod nexus_mailbox;
 mod oauth;
 pub mod permission_enforcer;
 mod permissions;

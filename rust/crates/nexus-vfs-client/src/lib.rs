@@ -3,9 +3,16 @@ pub mod proto {
 }
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
-use proto::{CallRequest, DeleteRequest, ReadRequest, WriteRequest};
+use proto::{
+    CallRequest, DeleteRequest, ReadRequest, SetattrRequest, StreamReadAtRequest,
+    StreamWriteRequest, WriteRequest,
+};
 use std::io;
 use std::sync::mpsc;
+
+/// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
+/// `Setattr` when provisioning a mailbox DT_STREAM.
+const DT_STREAM: i32 = 4;
 
 enum VfsOp {
     Read {
@@ -31,6 +38,30 @@ enum VfsOp {
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
     },
+    /// Append one frame to a DT_STREAM; returns the offset it landed at.
+    StreamWrite {
+        path: String,
+        data: Vec<u8>,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<u64>>,
+    },
+    /// Non-blocking read of a DT_STREAM at `offset`; returns
+    /// `(data, next_offset, eof)`.
+    StreamReadAt {
+        path: String,
+        offset: u64,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
+    },
+    /// `sys_setattr(DT_STREAM)` — create (or no-op if present) a DT_STREAM
+    /// container at `path`. Returns whether it was freshly created.
+    EnsureStream {
+        path: String,
+        io_profile: String,
+        capacity: u64,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<bool>>,
+    },
 }
 
 /// Sync wrapper around the nexus VFS gRPC client.
@@ -39,18 +70,69 @@ enum VfsOp {
 /// and can be called from any synchronous context, including outside of
 /// an async runtime.
 pub struct NexusVfsClient {
-    tx: tokio::sync::mpsc::Sender<VfsOp>,
+    // Unbounded so the sync public methods can enqueue an op from ANY context
+    // — including from within a tokio runtime (scode's async tool executor).
+    // `UnboundedSender::send` is synchronous and never blocks the caller, so it
+    // cannot trigger tokio's "block the current thread from within a runtime"
+    // panic the way the bounded channel's `blocking_send` did. The caller then
+    // blocks on the per-op std channel until the background thread replies.
+    tx: tokio::sync::mpsc::UnboundedSender<VfsOp>,
+}
+
+/// mTLS material for [`NexusVfsClient::connect_tls`].
+struct TlsMaterial {
+    ca_pem: Vec<u8>,
+    client_cert_pem: Vec<u8>,
+    client_key_pem: Vec<u8>,
+    server_name: String,
 }
 
 impl NexusVfsClient {
-    /// Connect to a nexus VFS gRPC server at `endpoint`.
+    /// Connect to a nexus VFS gRPC server at `endpoint` over PLAINTEXT.
     ///
     /// The channel is lazy — the actual TCP/UDS connection is deferred
     /// until the first RPC. Returns an error only if the background
     /// thread cannot be spawned or the endpoint URI is invalid.
     pub fn connect(endpoint: &str) -> io::Result<Self> {
-        let endpoint = endpoint.to_owned();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<VfsOp>(64);
+        Self::connect_inner(endpoint, None)
+    }
+
+    /// Connect over mTLS: pin `ca_pem`, present the client cert
+    /// (`client_cert_pem` + `client_key_pem`), and validate the server
+    /// against `server_name` (the cluster's fixed SAN, e.g. `nexus-node`).
+    /// Required to reach an auth-on `nexusd-cluster` (which serves MUTUAL
+    /// TLS — a plaintext client is rejected). Caller identity still rides
+    /// the per-request `auth_token`, not the client cert.
+    pub fn connect_tls(
+        endpoint: &str,
+        ca_pem: Vec<u8>,
+        client_cert_pem: Vec<u8>,
+        client_key_pem: Vec<u8>,
+        server_name: &str,
+    ) -> io::Result<Self> {
+        Self::connect_inner(
+            endpoint,
+            Some(TlsMaterial {
+                ca_pem,
+                client_cert_pem,
+                client_key_pem,
+                server_name: server_name.to_owned(),
+            }),
+        )
+    }
+
+    fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
+        // tonic's `Channel::from_shared` requires a URI scheme; accept a bare
+        // `host:port` for ergonomics and supply the scheme the transport
+        // implies (https under mTLS, http otherwise).
+        let endpoint = if endpoint.contains("://") {
+            endpoint.to_owned()
+        } else if tls.is_some() {
+            format!("https://{endpoint}")
+        } else {
+            format!("http://{endpoint}")
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VfsOp>();
 
         std::thread::Builder::new()
             .name("nexus-vfs-client".into())
@@ -60,9 +142,24 @@ impl NexusVfsClient {
                     .build()
                     .expect("nexus-vfs tokio runtime");
                 rt.block_on(async move {
-                    let ch = tonic::transport::Channel::from_shared(endpoint)
-                        .expect("invalid vfs endpoint URI")
-                        .connect_lazy();
+                    let builder = tonic::transport::Channel::from_shared(endpoint)
+                        .expect("invalid vfs endpoint URI");
+                    let ch = match tls {
+                        None => builder.connect_lazy(),
+                        Some(t) => {
+                            let cfg = tonic::transport::ClientTlsConfig::new()
+                                .ca_certificate(tonic::transport::Certificate::from_pem(t.ca_pem))
+                                .identity(tonic::transport::Identity::from_pem(
+                                    t.client_cert_pem,
+                                    t.client_key_pem,
+                                ))
+                                .domain_name(t.server_name);
+                            builder
+                                .tls_config(cfg)
+                                .expect("vfs client TLS config")
+                                .connect_lazy()
+                        }
+                    };
                     let mut client = NexusVfsServiceClient::new(ch);
                     while let Some(op) = rx.recv().await {
                         match op {
@@ -151,6 +248,75 @@ impl NexusVfsClient {
                                     }
                                 }));
                             }
+                            VfsOp::StreamWrite {
+                                path,
+                                data,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .stream_write_nowait(StreamWriteRequest {
+                                        path,
+                                        data,
+                                        auth_token,
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok(r.offset)
+                                    }
+                                }));
+                            }
+                            VfsOp::StreamReadAt {
+                                path,
+                                offset,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .stream_read_at(StreamReadAtRequest {
+                                        path,
+                                        offset,
+                                        blocking: false,
+                                        timeout_ms: 0,
+                                        auth_token,
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok((r.data, r.next_offset, r.eof))
+                                    }
+                                }));
+                            }
+                            VfsOp::EnsureStream {
+                                path,
+                                io_profile,
+                                capacity,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .setattr(SetattrRequest {
+                                        path,
+                                        auth_token,
+                                        entry_type: DT_STREAM,
+                                        io_profile,
+                                        capacity,
+                                        ..Default::default()
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok(r.created)
+                                    }
+                                }));
+                            }
                         }
                     }
                 });
@@ -163,7 +329,7 @@ impl NexusVfsClient {
     pub fn read(&self, path: &str, auth_token: &str) -> io::Result<Vec<u8>> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Read {
+            .send(VfsOp::Read {
                 path: path.to_owned(),
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
@@ -175,7 +341,7 @@ impl NexusVfsClient {
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Write {
+            .send(VfsOp::Write {
                 path: path.to_owned(),
                 content,
                 auth_token: auth_token.to_owned(),
@@ -188,8 +354,73 @@ impl NexusVfsClient {
     pub fn delete(&self, path: &str, auth_token: &str) -> io::Result<()> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Delete {
+            .send(VfsOp::Delete {
                 path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// Append one frame to a DT_STREAM at `path`; returns the byte offset
+    /// the frame landed at. This is the A2A mailbox SEND path — one message
+    /// is one framed append to `/agents/<recipient>/chat-with-me` (the node
+    /// stamps an unforgeable `from` under auth-on).
+    pub fn stream_write(&self, path: &str, data: Vec<u8>, auth_token: &str) -> io::Result<u64> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::StreamWrite {
+                path: path.to_owned(),
+                data,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// Non-blocking read of a DT_STREAM at `offset`. Returns
+    /// `(data, next_offset, eof)` — `eof == true` means no frame was
+    /// available at `offset` yet. This is the A2A inbox POLL path (advance
+    /// the caller's cursor to `next_offset` after each delivered frame).
+    pub fn stream_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+        auth_token: &str,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::StreamReadAt {
+                path: path.to_owned(),
+                offset,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// `sys_setattr(DT_STREAM)` on `path` — create the DT_STREAM container
+    /// with the given `io_profile` (backend waterfall) and `capacity`
+    /// (cold-storage retention budget). Idempotent: an existing stream is a
+    /// no-op. Returns whether the stream was freshly created. This is how a
+    /// standalone A2A participant provisions its own inbox, the gRPC analog
+    /// of the co-host's in-process `a2a::ensure_mailbox_stream`.
+    pub fn ensure_stream(
+        &self,
+        path: &str,
+        io_profile: &str,
+        capacity: u64,
+        auth_token: &str,
+    ) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::EnsureStream {
+                path: path.to_owned(),
+                io_profile: io_profile.to_owned(),
+                capacity,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })
@@ -202,7 +433,7 @@ impl NexusVfsClient {
     pub fn call(&self, method: &str, payload: &[u8], auth_token: &str) -> io::Result<Vec<u8>> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .blocking_send(VfsOp::Call {
+            .send(VfsOp::Call {
                 method: method.to_owned(),
                 payload: payload.to_vec(),
                 auth_token: auth_token.to_owned(),

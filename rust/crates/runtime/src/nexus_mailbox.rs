@@ -225,6 +225,28 @@ pub fn grpc_sender(client: Arc<NexusVfsClient>, from: String, auth_token: String
     Arc::new(move |to: &str, body: &str| send(&client, &from, to, body, &auth_token).map(|_| ()))
 }
 
+/// Provision this agent's own A2A inbox (idempotent) — the standalone analog
+/// of the co-host's in-process [`a2a::ensure_mailbox_stream`]. A terminal
+/// `scode` is not a managed agent, so nothing registers its inbox for it; it
+/// must ensure its own `/agents/<self>/chat-with-me` DT_STREAM exists before
+/// the poller can read it. Uses the a2a SSOT io_profile + capacity so a
+/// standalone-created inbox is byte-identical to a co-host-created one.
+///
+/// # Errors
+/// Returns a `String` error if the `setattr(DT_STREAM)` RPC fails.
+pub fn ensure_inbox(client: &NexusVfsClient, agent: &str, auth_token: &str) -> Result<(), String> {
+    let path = inbox_path(agent);
+    client
+        .ensure_stream(
+            &path,
+            a2a::MAILBOX_IO_PROFILE,
+            a2a::mailbox_stamping_policy::MAILBOX_STREAM_CAPACITY as u64,
+            auth_token,
+        )
+        .map(|_created| ())
+        .map_err(|e| format!("ensure A2A inbox {path}: {e}"))
+}
+
 /// One inbound A2A message (self-writes and empty bodies already filtered).
 #[derive(Debug, Clone)]
 pub struct Inbound {

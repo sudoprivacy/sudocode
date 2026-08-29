@@ -64,6 +64,9 @@ pub(crate) fn session() -> Result<Option<&'static Session>, String> {
             None => Ok(None),
             Some(config) => {
                 let client = config.connect()?;
+                // Provision our own inbox before anyone polls it — a terminal
+                // scode is not a managed agent, so nothing else creates it.
+                nexus_mailbox::ensure_inbox(&client, &config.agent, &config.api_key)?;
                 let sender = nexus_mailbox::grpc_sender(
                     Arc::clone(&client),
                     config.agent.clone(),

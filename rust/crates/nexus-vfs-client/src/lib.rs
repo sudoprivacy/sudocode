@@ -4,10 +4,15 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, ReadRequest, StreamReadAtRequest, StreamWriteRequest, WriteRequest,
+    CallRequest, DeleteRequest, ReadRequest, SetattrRequest, StreamReadAtRequest,
+    StreamWriteRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
+
+/// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
+/// `Setattr` when provisioning a mailbox DT_STREAM.
+const DT_STREAM: i32 = 4;
 
 enum VfsOp {
     Read {
@@ -47,6 +52,15 @@ enum VfsOp {
         offset: u64,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
+    },
+    /// `sys_setattr(DT_STREAM)` — create (or no-op if present) a DT_STREAM
+    /// container at `path`. Returns whether it was freshly created.
+    EnsureStream {
+        path: String,
+        io_profile: String,
+        capacity: u64,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<bool>>,
     },
 }
 
@@ -263,6 +277,31 @@ impl NexusVfsClient {
                                     }
                                 }));
                             }
+                            VfsOp::EnsureStream {
+                                path,
+                                io_profile,
+                                capacity,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .setattr(SetattrRequest {
+                                        path,
+                                        auth_token,
+                                        entry_type: DT_STREAM,
+                                        io_profile,
+                                        capacity,
+                                        ..Default::default()
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok(r.created)
+                                    }
+                                }));
+                            }
                         }
                     }
                 });
@@ -341,6 +380,32 @@ impl NexusVfsClient {
             .blocking_send(VfsOp::StreamReadAt {
                 path: path.to_owned(),
                 offset,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// `sys_setattr(DT_STREAM)` on `path` — create the DT_STREAM container
+    /// with the given `io_profile` (backend waterfall) and `capacity`
+    /// (cold-storage retention budget). Idempotent: an existing stream is a
+    /// no-op. Returns whether the stream was freshly created. This is how a
+    /// standalone A2A participant provisions its own inbox, the gRPC analog
+    /// of the co-host's in-process `a2a::ensure_mailbox_stream`.
+    pub fn ensure_stream(
+        &self,
+        path: &str,
+        io_profile: &str,
+        capacity: u64,
+        auth_token: &str,
+    ) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .blocking_send(VfsOp::EnsureStream {
+                path: path.to_owned(),
+                io_profile: io_profile.to_owned(),
+                capacity,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })

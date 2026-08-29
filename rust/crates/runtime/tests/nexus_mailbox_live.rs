@@ -87,9 +87,8 @@ fn live_spawn_cohost() {
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
 
     // String-only params -> rpc_codec is plain JSON, so a raw JSON payload works.
-    let payload = format!(
-        r#"{{"agent_id":"{agent}","model":"{model}","owner_id":"root","zone_id":"root"}}"#
-    );
+    let payload =
+        format!(r#"{{"agent_id":"{agent}","model":"{model}","owner_id":"root","zone_id":"root"}}"#);
     let resp = client
         .call("managed_agent.start_session_v1", payload.as_bytes(), &auth)
         .expect("start_session_v1 call");
@@ -123,7 +122,10 @@ fn live_collect_inbox() {
     // Its self-filter only drops the inbox owner's OWN writes (none here) —
     // a peer's stamped envelope (e.g. from a real scode send) still surfaces.
     let (msgs, next) = poll_new(&client, &inbox, 0, &auth).expect("collect");
-    println!("inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}", msgs.len());
+    println!(
+        "inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}",
+        msgs.len()
+    );
     for m in &msgs {
         println!("  from={:?} body={:?}", m.from, m.body);
     }

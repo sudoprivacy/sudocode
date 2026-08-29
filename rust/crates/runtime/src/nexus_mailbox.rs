@@ -168,7 +168,10 @@ impl Config {
             self.agent
         );
         if !self.peers.is_empty() {
-            s.push_str(&format!("\n\nKnown peers you can address: {}.", self.peers.join(", ")));
+            s.push_str(&format!(
+                "\n\nKnown peers you can address: {}.",
+                self.peers.join(", ")
+            ));
         }
         s
     }
@@ -176,7 +179,10 @@ impl Config {
 
 /// Read an env var, treating unset OR empty/whitespace as absent.
 fn non_empty_env(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// VFS path of an agent's replicated A2A inbox.
@@ -371,7 +377,10 @@ mod tests {
         };
         let p = cfg.peer_system_prompt();
         assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(p.contains("send_message"), "prompt must teach the tool: {p}");
+        assert!(
+            p.contains("send_message"),
+            "prompt must teach the tool: {p}"
+        );
         assert!(
             p.contains("win-ai, mac-ai"),
             "prompt must list known peers: {p}"

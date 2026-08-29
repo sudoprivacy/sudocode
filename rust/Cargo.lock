@@ -3886,6 +3886,7 @@ dependencies = [
  "indicatif",
  "iocraft",
  "mock-anthropic-service",
+ "nexus-vfs-client",
  "nix 0.29.0",
  "plugins",
  "pty-expect",

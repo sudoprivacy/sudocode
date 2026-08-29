@@ -2098,6 +2098,23 @@ fn run_repl_iocraft_dispatch(
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
+    // nexus A2A receive-half: when configured, surface peer messages into the
+    // REPL as they arrive. The poller runs for the whole interactive session;
+    // its daemon thread is reaped by the `process::exit(0)` at the end of this
+    // dispatch (the render-loop thread is left the same way), so it needs no
+    // explicit shutdown. The session was already dialed in
+    // `build_runtime_for_cwd`, so this just reuses the cached handle.
+    if let Ok(Some(a2a_session)) = cli::nexus_a2a::session() {
+        let output = repl.output.clone();
+        let _poller = cli::nexus_a2a::spawn_poller(
+            a2a_session,
+            runtime::HookAbortSignal::new(),
+            move |msg| {
+                output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+            },
+        );
+    }
+
     // Coordinator loop on the current thread. Reads InputEvents from the
     // iocraft UI and dispatches turns via the same TurnInputCoordinator +
     // runner-thread pattern as the rustyline-based coordinator.
@@ -6298,6 +6315,17 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // Resolve the standalone nexus-A2A session once (fail loud on a partial
+    // config or a dial failure). `None` when A2A is off — the fast path that
+    // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
+    // (Copy) and reused below to advertise, prompt, and wire the send half.
+    let a2a = match cli::nexus_a2a::session() {
+        Ok(a2a) => a2a,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     // per-session injected MCP tools bypass the global --allowed-tools gate:
     // they are explicitly requested for this session and their names are only
     // known at runtime, so add their qualified names to the allow-list when
@@ -6313,6 +6341,15 @@ fn build_runtime_with_plugin_state(
                 .manager
                 .tools_with_server();
             allowed.extend(session_mcp_tool_names(tools, session_mcp));
+        }
+    }
+    // nexus A2A: when configured, keep the peer-reply tool available even under
+    // an explicit --allowedTools restriction (absent a restriction it is
+    // already advertised). Its handler is the CliToolExecutor intercept wired
+    // below; the co-host advertises the same tool the same way.
+    if a2a.is_some() {
+        if let Some(allowed) = config.allowed_tools.as_mut() {
+            allowed.extend(["send_message".to_string()]);
         }
     }
     let policy =
@@ -6331,6 +6368,13 @@ fn build_runtime_with_plugin_state(
     // they all land in this function via `build_runtime_for_cwd`.
     if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
         system_prompt.dynamic_sections.push(section);
+    }
+    // nexus A2A: teach the model its A2A identity + how to reach peers, so the
+    // standalone loop knows it can `send_message` to a named peer.
+    if let Some(session) = a2a {
+        system_prompt
+            .dynamic_sections
+            .push(session.peer_system_prompt());
     }
     let emit_output = config.emit_output;
     let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
@@ -6354,6 +6398,14 @@ fn build_runtime_with_plugin_state(
         &feature_config,
     )
     .with_session_known_date(runtime::today_local());
+    // nexus A2A: give the CLI executor the send half so `send_message` routes
+    // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
+    // uses). Set only when configured; absent it the tool is never advertised.
+    if let Some(session) = a2a {
+        runtime
+            .tool_executor_mut()
+            .set_mailbox_sender(session.sender());
+    }
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }

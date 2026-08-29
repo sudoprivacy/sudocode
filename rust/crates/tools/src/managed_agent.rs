@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::spawn_task::{
-    mailbox_sender, AgentDescriptor, AgentState, KernelSyscall, Mailbox, MailboxSender, SpawnHandle,
+    handle_send_message, mailbox_sender, AgentDescriptor, AgentState, KernelSyscall, Mailbox,
+    MailboxSender, SpawnHandle,
 };
 use runtime::{
     FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
@@ -142,20 +143,13 @@ impl ToolExecutor for ManagedToolExecutor {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
 
-        // `send_message` is the co-host's deliberate-reply path — a quick
-        // in-process mailbox write bound to THIS agent's identity, not a file
-        // op, so it routes through the mailbox sender, not the fs backend.
+        // `send_message` is the deliberate-reply path — an in-process mailbox
+        // write bound to THIS agent's identity, not a file op. Routed through
+        // the SHARED handler the standalone CLI executor also uses; only the
+        // sender differs (this is the in-process kernel sender, standalone is
+        // the gRPC sender).
         if tool_name == "send_message" {
-            let to = input_value
-                .get("to")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::new("send_message requires a string 'to'"))?;
-            let body = input_value
-                .get("body")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::new("send_message requires a string 'body'"))?;
-            (self.send)(to, body).map_err(ToolError::new)?;
-            return Ok(format!("message delivered to {to}"));
+            return handle_send_message(&self.send, input).map_err(ToolError::new);
         }
 
         // Offload the blocking in-process syscall to the blocking pool so a

@@ -13,8 +13,12 @@
 //! `stream_read_at` loop. Cursor persistence + REPL surfacing live in the
 //! caller (the cursor is ephemeral read position, never persisted here).
 
+use std::sync::Arc;
+
 use a2a::MailboxEnvelope;
 use nexus_vfs_client::NexusVfsClient;
+
+use crate::spawn_task::MailboxSender;
 
 /// VFS path of an agent's replicated A2A inbox.
 #[must_use]
@@ -46,6 +50,20 @@ pub fn send(
     client
         .stream_write(&path, env.to_bytes(), auth_token)
         .map_err(|e| format!("A2A stream_write to {path}: {e}"))
+}
+
+/// Build a [`MailboxSender`] backed by a gRPC [`NexusVfsClient`] — the
+/// standalone counterpart to [`crate::spawn_task::mailbox_sender`] (which is
+/// backed by the in-process kernel). Both feed the SAME shared
+/// [`crate::spawn_task::handle_send_message`], so co-host and standalone
+/// `send_message` share every line except this transport closure.
+///
+/// `from` is the standalone agent's own name (advisory — the node stamps the
+/// authenticated identity under auth-on). `client` is shared (constructed
+/// once at startup, held by the CLI executor).
+#[must_use]
+pub fn grpc_sender(client: Arc<NexusVfsClient>, from: String, auth_token: String) -> MailboxSender {
+    Arc::new(move |to: &str, body: &str| send(&client, &from, to, body, &auth_token).map(|_| ()))
 }
 
 /// One inbound A2A message (self-writes and empty bodies already filtered).

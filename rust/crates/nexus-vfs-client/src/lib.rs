@@ -116,7 +116,16 @@ impl NexusVfsClient {
     }
 
     fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
-        let endpoint = endpoint.to_owned();
+        // tonic's `Channel::from_shared` requires a URI scheme; accept a bare
+        // `host:port` for ergonomics and supply the scheme the transport
+        // implies (https under mTLS, http otherwise).
+        let endpoint = if endpoint.contains("://") {
+            endpoint.to_owned()
+        } else if tls.is_some() {
+            format!("https://{endpoint}")
+        } else {
+            format!("http://{endpoint}")
+        };
         let (tx, mut rx) = tokio::sync::mpsc::channel::<VfsOp>(64);
 
         std::thread::Builder::new()

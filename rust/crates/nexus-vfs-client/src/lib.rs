@@ -3,7 +3,9 @@ pub mod proto {
 }
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
-use proto::{CallRequest, DeleteRequest, ReadRequest, WriteRequest};
+use proto::{
+    CallRequest, DeleteRequest, ReadRequest, StreamReadAtRequest, StreamWriteRequest, WriteRequest,
+};
 use std::io;
 use std::sync::mpsc;
 
@@ -30,6 +32,21 @@ enum VfsOp {
         payload: Vec<u8>,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
+    },
+    /// Append one frame to a DT_STREAM; returns the offset it landed at.
+    StreamWrite {
+        path: String,
+        data: Vec<u8>,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<u64>>,
+    },
+    /// Non-blocking read of a DT_STREAM at `offset`; returns
+    /// `(data, next_offset, eof)`.
+    StreamReadAt {
+        path: String,
+        offset: u64,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
     },
 }
 
@@ -151,6 +168,50 @@ impl NexusVfsClient {
                                     }
                                 }));
                             }
+                            VfsOp::StreamWrite {
+                                path,
+                                data,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .stream_write_nowait(StreamWriteRequest {
+                                        path,
+                                        data,
+                                        auth_token,
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok(r.offset)
+                                    }
+                                }));
+                            }
+                            VfsOp::StreamReadAt {
+                                path,
+                                offset,
+                                auth_token,
+                                resp,
+                            } => {
+                                let r = client
+                                    .stream_read_at(StreamReadAtRequest {
+                                        path,
+                                        offset,
+                                        blocking: false,
+                                        timeout_ms: 0,
+                                        auth_token,
+                                    })
+                                    .await;
+                                let _ = resp.send(grpc_result(r, |r| {
+                                    if r.is_error {
+                                        Err(vfs_err(&r.error_payload))
+                                    } else {
+                                        Ok((r.data, r.next_offset, r.eof))
+                                    }
+                                }));
+                            }
                         }
                     }
                 });
@@ -190,6 +251,45 @@ impl NexusVfsClient {
         self.tx
             .blocking_send(VfsOp::Delete {
                 path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// Append one frame to a DT_STREAM at `path`; returns the byte offset
+    /// the frame landed at. This is the A2A mailbox SEND path — one message
+    /// is one framed append to `/agents/<recipient>/chat-with-me` (the node
+    /// stamps an unforgeable `from` under auth-on).
+    pub fn stream_write(&self, path: &str, data: Vec<u8>, auth_token: &str) -> io::Result<u64> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .blocking_send(VfsOp::StreamWrite {
+                path: path.to_owned(),
+                data,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        resp_rx.recv().map_err(|_| broken_pipe())?
+    }
+
+    /// Non-blocking read of a DT_STREAM at `offset`. Returns
+    /// `(data, next_offset, eof)` — `eof == true` means no frame was
+    /// available at `offset` yet. This is the A2A inbox POLL path (advance
+    /// the caller's cursor to `next_offset` after each delivered frame).
+    pub fn stream_read_at(
+        &self,
+        path: &str,
+        offset: u64,
+        auth_token: &str,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .blocking_send(VfsOp::StreamReadAt {
+                path: path.to_owned(),
+                offset,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })

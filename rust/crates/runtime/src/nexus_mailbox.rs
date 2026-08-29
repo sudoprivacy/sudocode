@@ -286,6 +286,59 @@ mod tests {
     }
 
     #[test]
+    fn from_env_off_partial_and_full() {
+        // All env cases run in ONE test fn: these NEXUS_A2A_* / NEXUS_* vars
+        // are read by no other test, so sequential mutation here is race-free
+        // even under the parallel test harness.
+        let keys = [
+            ENDPOINT_ENV,
+            AGENT_ENV,
+            PEERS_ENV,
+            API_KEY_ENV,
+            CA_PEM_ENV,
+            CLIENT_CERT_ENV,
+            CLIENT_KEY_ENV,
+            TLS_SERVER_NAME_ENV,
+        ];
+        let clear = || {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+        };
+
+        clear();
+        // Off: no endpoint -> the fast Ok(None) path.
+        assert!(Config::from_env().unwrap().is_none());
+
+        // Partial: endpoint set but no self-name -> fail loud.
+        std::env::set_var(ENDPOINT_ENV, "127.0.0.1:2126");
+        assert!(Config::from_env().is_err());
+
+        // Enabled plaintext (loopback / auth-off): no TLS.
+        std::env::set_var(AGENT_ENV, "operator");
+        std::env::set_var(PEERS_ENV, "win-ai, mac-ai");
+        let cfg = Config::from_env().unwrap().unwrap();
+        assert_eq!(cfg.agent, "operator");
+        assert_eq!(cfg.peers, vec!["win-ai".to_string(), "mac-ai".to_string()]);
+        assert!(cfg.tls.is_none());
+
+        // Partial mTLS: a CA without the client cert/key the cluster's mutual
+        // TLS mandates -> fail loud (never a silent server-auth-only downgrade).
+        std::env::set_var(CA_PEM_ENV, "/tmp/ca.pem");
+        assert!(Config::from_env().is_err());
+        std::env::set_var(CLIENT_CERT_ENV, "/tmp/client.pem");
+        assert!(Config::from_env().is_err());
+
+        // Full mTLS: server name defaults to the cluster SAN.
+        std::env::set_var(CLIENT_KEY_ENV, "/tmp/client.key");
+        let tls = Config::from_env().unwrap().unwrap().tls.unwrap();
+        assert_eq!(tls.ca_pem, "/tmp/ca.pem");
+        assert_eq!(tls.server_name, DEFAULT_TLS_SERVER_NAME);
+
+        clear();
+    }
+
+    #[test]
     fn peer_prompt_names_self_and_lists_known_peers() {
         let cfg = Config {
             endpoint: "127.0.0.1:2126".into(),

@@ -59,13 +59,49 @@ pub struct NexusVfsClient {
     tx: tokio::sync::mpsc::Sender<VfsOp>,
 }
 
+/// mTLS material for [`NexusVfsClient::connect_tls`].
+struct TlsMaterial {
+    ca_pem: Vec<u8>,
+    client_cert_pem: Vec<u8>,
+    client_key_pem: Vec<u8>,
+    server_name: String,
+}
+
 impl NexusVfsClient {
-    /// Connect to a nexus VFS gRPC server at `endpoint`.
+    /// Connect to a nexus VFS gRPC server at `endpoint` over PLAINTEXT.
     ///
     /// The channel is lazy — the actual TCP/UDS connection is deferred
     /// until the first RPC. Returns an error only if the background
     /// thread cannot be spawned or the endpoint URI is invalid.
     pub fn connect(endpoint: &str) -> io::Result<Self> {
+        Self::connect_inner(endpoint, None)
+    }
+
+    /// Connect over mTLS: pin `ca_pem`, present the client cert
+    /// (`client_cert_pem` + `client_key_pem`), and validate the server
+    /// against `server_name` (the cluster's fixed SAN, e.g. `nexus-node`).
+    /// Required to reach an auth-on `nexusd-cluster` (which serves MUTUAL
+    /// TLS — a plaintext client is rejected). Caller identity still rides
+    /// the per-request `auth_token`, not the client cert.
+    pub fn connect_tls(
+        endpoint: &str,
+        ca_pem: Vec<u8>,
+        client_cert_pem: Vec<u8>,
+        client_key_pem: Vec<u8>,
+        server_name: &str,
+    ) -> io::Result<Self> {
+        Self::connect_inner(
+            endpoint,
+            Some(TlsMaterial {
+                ca_pem,
+                client_cert_pem,
+                client_key_pem,
+                server_name: server_name.to_owned(),
+            }),
+        )
+    }
+
+    fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
         let endpoint = endpoint.to_owned();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<VfsOp>(64);
 
@@ -77,9 +113,24 @@ impl NexusVfsClient {
                     .build()
                     .expect("nexus-vfs tokio runtime");
                 rt.block_on(async move {
-                    let ch = tonic::transport::Channel::from_shared(endpoint)
-                        .expect("invalid vfs endpoint URI")
-                        .connect_lazy();
+                    let builder = tonic::transport::Channel::from_shared(endpoint)
+                        .expect("invalid vfs endpoint URI");
+                    let ch = match tls {
+                        None => builder.connect_lazy(),
+                        Some(t) => {
+                            let cfg = tonic::transport::ClientTlsConfig::new()
+                                .ca_certificate(tonic::transport::Certificate::from_pem(t.ca_pem))
+                                .identity(tonic::transport::Identity::from_pem(
+                                    t.client_cert_pem,
+                                    t.client_key_pem,
+                                ))
+                                .domain_name(t.server_name);
+                            builder
+                                .tls_config(cfg)
+                                .expect("vfs client TLS config")
+                                .connect_lazy()
+                        }
+                    };
                     let mut client = NexusVfsServiceClient::new(ch);
                     while let Some(op) = rx.recv().await {
                         match op {

@@ -2,17 +2,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::error::ApiError;
 use crate::http_transport::{
     parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
 };
 use crate::types::{
-    ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
-    InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
-    MessageResponse, MessageStartEvent, MessageStopEvent, OutputContentBlock, StreamEvent,
-    ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
+    is_reserved_request_body_key, ContentBlockDelta, ContentBlockDeltaEvent,
+    ContentBlockStartEvent, ContentBlockStopEvent, InputContentBlock, InputMessage, MessageDelta,
+    MessageDeltaEvent, MessageRequest, MessageResponse, MessageStartEvent, MessageStopEvent,
+    OutputContentBlock, StreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
 use super::registry::{preflight_message_request, ApiFormat};
@@ -101,6 +101,8 @@ pub struct OpenAiCompatClient {
     base_url: String,
     api_format: ApiFormat,
     retry_policy: RetryPolicy,
+    /// Per-model extra request-body fields (`models.<alias>.extraBody`).
+    extra_body: Map<String, Value>,
 }
 
 impl OpenAiCompatClient {
@@ -121,6 +123,7 @@ impl OpenAiCompatClient {
             base_url: read_base_url(config),
             api_format: ApiFormat::OpenAiCompletions,
             retry_policy: RetryPolicy::DEFAULT,
+            extra_body: Map::new(),
         }
     }
 
@@ -143,6 +146,16 @@ impl OpenAiCompatClient {
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Attach per-model extra request-body fields (`models.<alias>.extraBody`).
+    ///
+    /// The fields are merged into every outbound payload built by this client.
+    /// The merge is additive: see [`merge_extra_body`] for the precedence rule.
+    #[must_use]
+    pub fn with_extra_body(mut self, extra_body: Map<String, Value>) -> Self {
+        self.extra_body = extra_body;
         self
     }
 
@@ -316,11 +329,12 @@ impl OpenAiCompatClient {
         }
 
         let url = endpoint_for_format(&self.base_url, self.api_format);
-        let body = match self.api_format {
+        let mut body = match self.api_format {
             ApiFormat::OpenAiCompletions => build_chat_completion_request(request, self.config()),
             ApiFormat::OpenAiResponses => build_responses_request(request),
             _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
         };
+        merge_extra_body(&mut body, &self.extra_body);
 
         let headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -1605,6 +1619,33 @@ pub fn check_request_body_size(
         })
     } else {
         Ok(())
+    }
+}
+
+/// Merges configured extra body fields into a built request payload.
+///
+/// Precedence rule (also documented in `docs/models.md`): **additive only**.
+/// A key is skipped when the payload builder already set it (`model`,
+/// `messages`, `stream`, `tools`, `max_tokens`, or any tuning parameter the
+/// caller explicitly requested) or when it is in
+/// [`RESERVED_REQUEST_BODY_KEYS`](crate::types::RESERVED_REQUEST_BODY_KEYS),
+/// so `extraBody` can never corrupt a request sudocode computed. Keys the
+/// builder did not emit (`enable_thinking`, `thinking_budget`, `top_k`, …)
+/// are inserted as-is, with their JSON value preserved verbatim.
+///
+/// A non-object payload (never produced by the builders) is left alone.
+pub fn merge_extra_body(payload: &mut Value, extra_body: &Map<String, Value>) {
+    if extra_body.is_empty() {
+        return;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    for (key, value) in extra_body {
+        if object.contains_key(key) || is_reserved_request_body_key(key) {
+            continue;
+        }
+        object.insert(key.clone(), value.clone());
     }
 }
 

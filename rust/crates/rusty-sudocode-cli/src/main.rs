@@ -6893,6 +6893,7 @@ mod auth_mode_tests {
             name: alias.to_string(),
             input: vec!["text".to_string()],
             providers,
+            ..Default::default()
         }
     }
 

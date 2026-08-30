@@ -2120,10 +2120,7 @@ fn message_has_generation_tool_use(message: &ConversationMessage) -> bool {
 }
 
 fn is_generation_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "write_file" | "edit_file" | "bash" | "PowerShell"
-    )
+    matches!(name, "write_file" | "edit_file" | "bash" | "PowerShell")
 }
 
 fn tool_results_include_requested_deliverable(

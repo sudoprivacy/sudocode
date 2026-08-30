@@ -10791,8 +10791,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-
-
     // `#[cfg(unix)]` because every command in this test (`printf 'hello'`,
     // `false`, `sleep`, etc.) is POSIX shell vocabulary; the bash tool
     // routes through `runtime::execute_bash` which calls `sh -c "..."`.
@@ -11137,7 +11135,6 @@ mod tests {
         assert_eq!(output["duration_ms"], 0);
     }
 
-
     #[test]
     fn ask_user_question_v2_returns_structured_answers() {
         use std::io::Cursor;
@@ -11479,10 +11476,6 @@ mod tests {
     // skip branch covers. Tracked alongside the bash tool's
     // cross-platform refactor.
     #[cfg(unix)]
-
-
-
-
     // `#[cfg(unix)]` because the test builds a `pwsh` stub by writing
     // a `#!/bin/sh` script, marking it executable via the hardcoded
     // `/bin/chmod` binary, and prepending its directory to PATH with

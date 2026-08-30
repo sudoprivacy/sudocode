@@ -645,6 +645,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Help { output_format } => print_help(output_format)?,
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
+        CliAction::Update {
+            version,
+            check,
+            yes,
+        } => cli::update::run(version, check, yes)?,
     }
     Ok(())
 }

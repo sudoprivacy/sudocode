@@ -151,6 +151,18 @@ enum Cmd {
     Login,
     /// Log out from the service
     Logout,
+    /// Update scode to the latest release and restart
+    Update {
+        /// Pin a release tag (e.g. v0.1.27); defaults to the latest release
+        #[arg(long)]
+        version: Option<String>,
+        /// Only report the current and latest versions; download nothing
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Export a session transcript
     Export {
         /// Session reference (defaults to latest)
@@ -357,6 +369,11 @@ pub(crate) enum CliAction {
     },
     Login,
     Logout,
+    Update {
+        version: Option<String>,
+        check: bool,
+        yes: bool,
+    },
 }
 
 impl CliAction {
@@ -373,6 +390,7 @@ impl CliAction {
                 | CliAction::Config { .. }
                 | CliAction::Login
                 | CliAction::Logout
+                | CliAction::Update { .. }
         )
     }
 }
@@ -546,6 +564,15 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             }),
             Cmd::Diff => Ok(CliAction::Diff { output_format }),
             Cmd::Login => Ok(CliAction::Login),
+            Cmd::Update {
+                version,
+                check,
+                yes,
+            } => Ok(CliAction::Update {
+                version,
+                check,
+                yes,
+            }),
             Cmd::Logout => Ok(CliAction::Logout),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,

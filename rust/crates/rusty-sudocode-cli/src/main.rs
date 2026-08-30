@@ -4516,7 +4516,11 @@ impl LiveCli {
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    ui.set_turn_result(&format_turn_status_line_with_branch(
+                    // The status line is part of the transcript: printed
+                    // once, in order, above the next prompt. Keeping a copy
+                    // in the sticky footer as well meant it showed twice
+                    // whenever the footer was redrawn under new scrollback.
+                    output.println(&format_turn_status_line_with_branch(
                         &self.config.model,
                         turns,
                         &usage,
@@ -4876,11 +4880,11 @@ impl LiveCli {
             | SlashCommand::OutputStyle { .. }
             | SlashCommand::AddDir { .. } => {
                 let cmd_name = command.slash_name();
-                eprintln!("{cmd_name} is not yet implemented in this build.");
+                self.out_println(format!("{cmd_name} is not yet implemented in this build."));
                 false
             }
             SlashCommand::Unknown(name) => {
-                eprintln!("{}", format_unknown_slash_command(&name));
+                self.out_println(format_unknown_slash_command(&name));
                 false
             }
         })
@@ -4931,7 +4935,7 @@ impl LiveCli {
         let limit = match parse_history_count(count) {
             Ok(limit) => limit,
             Err(message) => {
-                eprintln!("{message}");
+                self.out_println(message);
                 return;
             }
         };
@@ -5190,7 +5194,7 @@ impl LiveCli {
         match key {
             "auto-interrupt" | "autoInterrupt" => {
                 let Some(on) = parse_on_off(value) else {
-                    eprintln!("Usage: /config set auto-interrupt on|off");
+                    self.out_println("Usage: /config set auto-interrupt on|off");
                     return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {

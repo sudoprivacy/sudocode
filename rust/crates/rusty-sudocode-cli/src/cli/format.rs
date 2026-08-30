@@ -1020,7 +1020,6 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
             "bash" | "Bash" => format_bash_result(&icon, &parsed),
-            "repl" | "REPL" => format_repl_result(&icon, &parsed),
             "read_file" | "Read" => format_read_result(&icon, &parsed),
             "write_file" | "Write" => format_write_result(&icon, &parsed),
             "edit_file" | "Edit" => format_edit_result(&icon, &parsed),
@@ -1142,51 +1141,8 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
     render_stdout_stderr_block(header, stdout_text, stderr_text)
 }
 
-/// #182 item 4: the REPL tool returns `{language, stdout, stderr, exitCode,
-/// durationMs}`. Going through `format_generic_tool_result` would
-/// pretty-print the whole object as JSON, embedding stdout as a single
-/// string with literal `\n` escapes — the per-tool truncation cap added in
-/// #179 §2 #7 never triggered for it. Mirror `format_bash_result`'s
-/// stdout/stderr unwrap so the line cap applies and the output looks like
-/// the other shell-style tools.
-pub(crate) fn format_repl_result(icon: &str, parsed: &serde_json::Value) -> String {
-    use std::fmt::Write as _;
-
-    let language = parsed
-        .get("language")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-
-    let muted = ansi_fg(theme().muted);
-    let mut header = if language.is_empty() {
-        format!("{icon} {muted}REPL{RESET}")
-    } else {
-        format!("{icon} {muted}REPL{RESET}({language})")
-    };
-
-    if let Some(exit_code) = parsed
-        .get("exitCode")
-        .or_else(|| parsed.get("exit_code"))
-        .and_then(serde_json::Value::as_i64)
-        .filter(|code| *code != 0)
-    {
-        write!(&mut header, " exit {exit_code}").expect("write to string");
-    }
-
-    let stdout_text = parsed
-        .get("stdout")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let stderr_text = parsed
-        .get("stderr")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-
-    render_stdout_stderr_block(header, stdout_text, stderr_text)
-}
-
-/// Shared stdout/stderr rendering used by `format_bash_result` and
-/// `format_repl_result`. Combines the two streams, drops blank lines, and
+/// Shared stdout/stderr rendering used by `format_bash_result`.
+/// Combines the two streams, drops blank lines, and
 /// applies the per-tool line cap from `TOOL_OUTPUT_DISPLAY_MAX_LINES`.
 fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> String {
     use std::fmt::Write as _;

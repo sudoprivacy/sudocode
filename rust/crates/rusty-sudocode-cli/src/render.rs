@@ -727,6 +727,12 @@ impl TableState {
     }
 }
 
+/// Columns a top-level list is set in from the paragraph edge. At 0 the
+/// bullet sat flush with the surrounding prose and the narrow `•` glyph
+/// made the left edge look ragged; two columns hangs the list inside the
+/// paragraph the way GitHub / CC render it.
+const TOP_LEVEL_LIST_INDENT: usize = 2;
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RenderState {
     emphasis: usize,
@@ -965,7 +971,7 @@ impl TerminalRenderer {
                     if state.bind_top_level_list && output.ends_with("\n\n") {
                         output.truncate(output.len() - 1);
                     }
-                    0
+                    TOP_LEVEL_LIST_INDENT
                 } else {
                     // A nested list opens while its parent item's text is
                     // still on the current line, and only `End(Item)` emits a

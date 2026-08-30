@@ -17,9 +17,10 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, RESET};
+use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
 use crate::repl_ui::OutputSender;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     AllowedToolSet, InternalPromptProgressReporter, RuntimeConfig, POST_TOOL_STALL_TIMEOUT,
@@ -280,6 +281,11 @@ struct CliStreamState {
     spinner: Option<SpinnerRef>,
     pending_tool: Option<(String, String, String, Option<String>)>,
     block_has_thinking_summary: bool,
+    /// Set at the first streamed thinking delta; consumed at the block's
+    /// stop event to print the one-line `Thought for Ns` summary. Streamed
+    /// thinking blocks arrive with empty content at `ContentBlockStart`,
+    /// so the header can only be written once we know how long it ran.
+    thinking_started_at: Option<Instant>,
     markdown_stream: MarkdownStreamState,
     renderer: TerminalRenderer,
     glyph_state: ResponseGlyphState,
@@ -397,16 +403,12 @@ impl CliStreamState {
                         s.add_response_bytes(thinking.len() as u32);
                     }
                     if !self.block_has_thinking_summary {
-                        self.pause_output();
-                        render_thinking_block_summary(out, None, false)?;
+                        // No header yet: the spinner's "Reasoning..." mode is
+                        // the live indicator, and the summary line is written
+                        // at ContentBlockStop once the duration is known.
                         self.block_has_thinking_summary = true;
-                        self.glyph_state.visible_col = 0;
-                        // Switch the spinner to its "Reasoning..." mode for
-                        // the remainder of this thinking block and let it
-                        // run, so the user sees a live indicator instead of
-                        // a silent stall.
+                        self.thinking_started_at = Some(Instant::now());
                         self.set_thinking_indicator(true);
-                        self.resume_output();
                     }
                     push_thinking_event(&mut self.buffer, thinking, None);
                 }
@@ -417,6 +419,15 @@ impl CliStreamState {
                     // Coming out of a thinking block — restore the default
                     // spinner state for whatever comes next.
                     self.set_thinking_indicator(false);
+                }
+                if let Some(started) = self.thinking_started_at.take() {
+                    self.pause_output();
+                    render_thinking_summary(
+                        out,
+                        &format!("Thought for {:.1}s", started.elapsed().as_secs_f64()),
+                    )?;
+                    self.glyph_state.visible_col = 0;
+                    self.resume_output();
                 }
                 self.block_has_thinking_summary = false;
                 if let Some(rendered) = self.markdown_stream.flush(&self.renderer) {
@@ -520,6 +531,7 @@ impl AnthropicRuntimeClient {
             spinner: self.spinner.clone(),
             pending_tool: None,
             block_has_thinking_summary: false,
+            thinking_started_at: None,
             markdown_stream: MarkdownStreamState::default(),
             renderer: TerminalRenderer::new(),
             glyph_state: ResponseGlyphState::new(query_terminal_width()),
@@ -743,18 +755,16 @@ pub(crate) fn max_tokens_for_model(model: &str) -> u32 {
     api::max_tokens_for_model(model)
 }
 
-pub(crate) fn render_thinking_block_summary(
+/// One dim line standing in for a thinking block the user does not see:
+/// `Thought for 3.2s` (streamed), `Thought (812 chars hidden)` (complete
+/// block), `Thinking redacted by provider`. Never printed for an empty
+/// block — a streamed block's `ContentBlockStart` carries no text, and
+/// "0 chars hidden" is noise, not information.
+pub(crate) fn render_thinking_summary(
     out: &mut (impl Write + ?Sized),
-    char_count: Option<usize>,
-    redacted: bool,
+    label: &str,
 ) -> Result<(), RuntimeError> {
-    let summary = if redacted {
-        "\n  ▼ Thinking block hidden by provider\n".to_string()
-    } else if let Some(char_count) = char_count {
-        format!("\n  ▼ Thinking ({char_count} chars hidden)\n")
-    } else {
-        "\n  ▼ Thinking hidden\n".to_string()
-    };
+    let summary = format!("\n  {DIM}▸ {label}{RESET}\n");
     write!(out, "{summary}")
         .and_then(|()| out.flush())
         .map_err(|error| RuntimeError::new(error.to_string()))
@@ -890,13 +900,20 @@ pub(crate) fn push_output_block(
             thinking,
             signature,
         } => {
-            render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
-            *block_has_thinking_summary = true;
-            glyph_state.visible_col = 0;
+            // Empty = a streamed block opening (text follows as deltas, the
+            // stop event prints the summary) — say nothing here.
+            if !thinking.is_empty() {
+                render_thinking_summary(
+                    out,
+                    &format!("Thought ({} chars hidden)", thinking.chars().count()),
+                )?;
+                *block_has_thinking_summary = true;
+                glyph_state.visible_col = 0;
+            }
             push_thinking_event(events, thinking, signature);
         }
         OutputContentBlock::RedactedThinking { .. } => {
-            render_thinking_block_summary(out, None, true)?;
+            render_thinking_summary(out, "Thinking redacted by provider")?;
             *block_has_thinking_summary = true;
             glyph_state.visible_col = 0;
         }

@@ -1034,6 +1034,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(OutputMsg::Raw(text)) => (text, false),
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
+                    // New scrollback is arriving: the previous turn's status
+                    // line leaves the sticky StatusSlot and is committed to
+                    // history exactly once, above the new output — otherwise
+                    // it lingers in the footer under (and duplicating) what a
+                    // local command just printed.
+                    let previous = turn_result.read().clone();
+                    if let Some(previous) = previous {
+                        stdout_for_future.println(previous);
+                        turn_result.set(None);
+                    }
                     split_for_iocraft(&text, terminated, |op| match op {
                         OutputOp::Println(line) => stdout_for_future.println(line),
                         OutputOp::Print(chunk) => stdout_for_future.print(chunk),
@@ -1201,6 +1211,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                 if h.last().map_or(true, |last| last != trimmed) {
                                                     h.push(trimmed.to_string());
                                                 }
+                                            }
+                                            // The previous turn's status line
+                                            // leaves the sticky footer and is
+                                            // committed to history once, above
+                                            // the echoed prompt (see the same
+                                            // guard on the output channel).
+                                            let previous = turn_result.read().clone();
+                                            if let Some(previous) = previous {
+                                                stdout_for_events.println(previous);
+                                                turn_result.set(None);
                                             }
                                             stdout_for_events.println(format!("{}\u{276f} {val}{}", crate::render::BOLD, crate::render::RESET));
                                             let _ = input_tx_for_events.send(InputEvent::Submit(text));

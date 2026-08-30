@@ -3100,11 +3100,17 @@ fn run_read_tool_output(
     }))
 }
 
-/// Seek mode of `read_tool_output`: locate lines matching `pattern` in the
+/// Seek mode of `read_tool_output`: locate `pattern` matches in the
 /// offloaded result and return their line numbers + byte offsets, so the
 /// model can window-read exactly the region it needs instead of walking the
 /// whole blob from offset 0. Bodies stay out of the payload: each hit is
 /// capped at a short excerpt.
+///
+/// Tool results are usually JSON-wrapped (`{"stdout": "...\n..."}`), so the
+/// whole of a bash log is one physical line with escaped `\n`s inside it.
+/// Line boundaries therefore count both a real newline and the two-char
+/// escape `\n`; the excerpt is the segment between the nearest such
+/// boundaries around the match.
 fn seek_tool_output(
     content: &str,
     pattern: &str,
@@ -3124,32 +3130,45 @@ fn seek_tool_output(
     let max = input.limit.unwrap_or(DEFAULT_MATCHES).clamp(1, MAX_MATCHES);
     let start_at = input.offset.unwrap_or(0);
 
+    // Byte offsets of every line boundary (real or escaped), ascending.
+    let boundaries: Vec<(usize, usize)> = regex::Regex::new(r"\n|\\n")
+        .expect("static regex")
+        .find_iter(content)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let total_lines = boundaries.len() + 1;
+
     let mut matches = Vec::new();
     let mut total_matches = 0usize;
-    let mut offset = 0usize;
-    for (idx, line) in content.split_inclusive('\n').enumerate() {
-        let line_start = offset;
-        offset += line.len();
-        if line_start < start_at || !re.is_match(line) {
+    let mut last_segment: Option<usize> = None;
+    for m in re.find_iter(content) {
+        if m.start() < start_at {
             continue;
         }
+        // Segment index = number of boundaries strictly before the match.
+        let seg = boundaries.partition_point(|&(b, _)| b < m.start());
+        if last_segment == Some(seg) {
+            continue; // one hit per line
+        }
+        last_segment = Some(seg);
         total_matches += 1;
         if matches.len() >= max {
             continue;
         }
-        let text = line.trim_end_matches(['\n', '\r']);
+        let seg_start = if seg == 0 { 0 } else { boundaries[seg - 1].1 };
+        let seg_end = boundaries.get(seg).map_or(content.len(), |&(b, _)| b);
+        let text = content[seg_start..seg_end].trim_end_matches(['\r']);
         let mut cut = EXCERPT_BYTES.min(text.len());
         while cut > 0 && !text.is_char_boundary(cut) {
             cut -= 1;
         }
         matches.push(json!({
-            "line": idx + 1,
-            "byteOffset": line_start,
+            "line": seg + 1,
+            "byteOffset": seg_start,
             "text": &text[..cut],
             "truncated": cut < text.len(),
         }));
     }
-    let total_lines = content.split_inclusive('\n').count();
 
     to_pretty_json(json!({
         "id": input.id,

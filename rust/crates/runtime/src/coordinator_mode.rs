@@ -15,10 +15,13 @@
 //! `getCoordinatorUserContext` in coordinatorMode.ts). A hard gate can
 //! be layered on later if analytics show model drift.
 //!
-//! ## Environment
+//! ## Enabling
 //!
-//! - `SUDOCODE_COORDINATOR_MODE` — set to `1`, `true`, `on`, or `yes`
-//!   (case-insensitive) to enable. Anything else, or unset, disables.
+//! Coordinator mode is an experimental feature flag (see
+//! [`crate::experiments`]): enable via
+//! `"experimental": {"coordinatorMode": true}` in settings, or the
+//! `SUDOCODE_COORDINATOR_MODE` / `SUDOCODE_EXPERIMENT_COORDINATOR_MODE`
+//! env vars (truthy: `1`, `true`, `on`, `yes`, case-insensitive).
 
 use std::collections::BTreeSet;
 
@@ -89,20 +92,14 @@ pub fn is_tool_allowed_in_coordinator_mode(tool_name: &str) -> bool {
     coordinator_allowed_tools().contains(tool_name)
 }
 
-/// Return `true` when coordinator mode is enabled via env var.
-///
-/// Recognized truthy values (case-insensitive): `1`, `true`, `on`,
-/// `yes`. Empty / unset / anything else is `false` — same shape as
-/// CC-fork's `isEnvTruthy()`.
+/// Return `true` when the `coordinatorMode` experiment is enabled —
+/// via the legacy `SUDOCODE_COORDINATOR_MODE` env var, the generic
+/// `SUDOCODE_EXPERIMENT_COORDINATOR_MODE` env var, or
+/// `"experimental": {"coordinatorMode": true}` in settings. See
+/// [`crate::experiments`] for the precedence order.
 #[must_use]
 pub fn is_coordinator_mode() -> bool {
-    match std::env::var(COORDINATOR_ENV_VAR) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        ),
-        Err(_) => false,
-    }
+    crate::experiments::is_enabled(crate::experiments::Experiment::CoordinatorMode)
 }
 
 /// The coordinator role + workflow system prompt. Ported near-verbatim

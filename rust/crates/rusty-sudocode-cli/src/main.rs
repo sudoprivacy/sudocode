@@ -5952,6 +5952,11 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     runtime_config: &runtime::RuntimeConfig,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
+    // Surface the settings `experimental` section to the process-global
+    // experiments registry BEFORE anything consults a flag (the MCP gate
+    // below is one consumer). First call wins; ACP session rebuilds
+    // against the same config are no-ops.
+    runtime::experiments::init_config_flags(runtime_config.experiments().clone());
     let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
     let plugin_registry_report = plugin_manager.plugin_registry_report()?;
     let plugin_load_outcome = plugin_registry_report.load_outcome();

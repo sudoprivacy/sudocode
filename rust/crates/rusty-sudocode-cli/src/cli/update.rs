@@ -49,7 +49,14 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
 
     let up_to_date = !is_newer(&latest, &current_tag);
     if check {
-        println!("{}", if up_to_date { "up to date" } else { "update available" });
+        println!(
+            "{}",
+            if up_to_date {
+                "up to date"
+            } else {
+                "update available"
+            }
+        );
         return Ok(());
     }
     // An explicit --version may pin an older tag on purpose; only short-circuit
@@ -184,7 +191,9 @@ fn verify_checksum(bytes: &[u8], sums: &str, archive: &str) -> R<()> {
         .ok_or_else(|| format!("no checksum entry for {archive} in {CHECKSUM_FILE}"))?;
     let actual = hex(&Sha256::digest(bytes));
     if !actual.eq_ignore_ascii_case(expected) {
-        return Err(format!("checksum mismatch for {archive}: expected {expected}, got {actual}").into());
+        return Err(
+            format!("checksum mismatch for {archive}: expected {expected}, got {actual}").into(),
+        );
     }
     Ok(())
 }
@@ -208,8 +217,7 @@ fn extract_binary(archive: &[u8], target: &str) -> R<Vec<u8>> {
         let path = entry.path()?.to_path_buf();
         // Match the documented path, but also accept a bare `scode` file name
         // in case the archive layout is flattened.
-        let is_match =
-            path == Path::new(&want) || path.file_name().is_some_and(|n| n == BIN_NAME);
+        let is_match = path == Path::new(&want) || path.file_name().is_some_and(|n| n == BIN_NAME);
         if is_match {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
@@ -350,7 +358,9 @@ mod tests {
             header.set_size(content.len() as u64);
             header.set_mode(0o755);
             header.set_cksum();
-            builder.append_data(&mut header, inner_path, content).unwrap();
+            builder
+                .append_data(&mut header, inner_path, content)
+                .unwrap();
             builder.finish().unwrap();
         }
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

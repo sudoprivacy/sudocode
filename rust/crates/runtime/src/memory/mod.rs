@@ -219,33 +219,26 @@ pub fn append_from_provider(
 fn build_compact_memory_instructions(memory_dir: &Path) -> String {
     let dir_display = memory_dir.display();
     format!(
-        r#"# auto memory
+        r"# auto memory
 
-You have a persistent, file-based memory system at `{dir_display}`. The directory already exists — write files into it directly with the Write tool (do not run mkdir or check for its existence). Use it to carry durable context across conversations: who the user is, how they want you to work, and the background behind the work they give you.
-
-Each memory is one `.md` file holding one fact, using this frontmatter format:
+You have a persistent memory directory at `{dir_display}` (it exists; write into it directly). One `.md` file per fact, with this frontmatter — all three fields required, `type` exactly one of `user`, `feedback`, `project`, `reference`:
 
 ```markdown
 ---
 name: {{{{short name}}}}
-description: {{{{one-line summary — used to decide relevance in future conversations, so be specific}}}}
-type: {{{{user, feedback, project, reference}}}}
+description: {{{{one-line summary, specific enough to judge relevance later}}}}
+type: {{{{user | feedback | project | reference}}}}
 ---
-
-{{{{memory content — for feedback/project types: the rule/fact first, then **Why:** and **How to apply:** lines}}}}
+{{{{the fact; for feedback/project add **Why:** and **How to apply:** lines}}}}
 ```
 
-The file must begin with the `---` line. All three fields are required (single line each) and `type` must be exactly one of the four lowercase values — a file that fails to parse is skipped silently, so keep the format exact. Bodies render up to 2,000 chars; the whole section caps at 16,000.
+A file that fails to parse is skipped silently. Bodies render up to 2,000 chars; the whole section up to 16,000.
 
-Types: `user` — the user's role, expertise, and preferences. `feedback` — guidance on how to approach work: corrections AND confirmed approaches, with the reason. `project` — ongoing work, goals, deadlines, and constraints not derivable from the code or git history (convert relative dates to absolute when saving). `reference` — pointers to information in external systems (dashboards, trackers, channels).
+`user` = who the user is and how they work; `feedback` = corrections and confirmed approaches, with the reason; `project` = goals, constraints, deadlines not derivable from the code (use absolute dates); `reference` = pointers to external systems.
 
-After writing a memory file, add a pointer line to `MEMORY.md` (exact uppercase name): `- [Title](file.md) — one-line hook`. `MEMORY.md` is an index, not a memory — one bullet line per entry, under ~150 characters, no frontmatter. Never write memory content directly into it.
+After writing a file, add one line to `MEMORY.md`: `- [Title](file.md) — one-line hook`. That file is only an index.
 
-When to save: immediately when the user explicitly asks you to remember something (and remove the entry when asked to forget). Otherwise, save when you learn something durable — a preference, a correction, a validated approach, project context, or an external resource. Before writing, check whether an existing memory already covers it and update that file instead of duplicating. Update or remove memories that turn out to be wrong or outdated.
-
-Do NOT save what the current project state already records: code structure and conventions, git history, debugging fixes (the fix is in the code), anything documented in AGENTS.md, or ephemeral task details. This applies even when the user explicitly asks to save — ask what was surprising or non-obvious, and save that instead.
-
-Memories are observations from the past, not guarantees about the present. Before answering from memory or recommending something a memory names (a file, function, or flag), verify it against the current state of the code or resource — "the memory says X exists" is not the same as "X exists now". If memory conflicts with what you observe, trust the current state and update or remove the stale entry. If the user says to ignore memory, proceed as if it were empty."#
+Save immediately when asked to remember (remove when asked to forget); otherwise save anything durable you learn. Update an existing memory instead of duplicating; remove ones that turn out wrong. Don't save what the repo already records (code structure, git history, fixes, AGENTS.md) — if asked to, save what was non-obvious instead. Memories are past observations: verify a file, function, or flag a memory names still exists before relying on it, and trust the current state over the memory."
     )
 }
 
@@ -572,11 +565,11 @@ mod tests {
             "one-line index format"
         );
         assert!(
-            compact.contains("update that file instead of duplicating"),
+            compact.contains("Update an existing memory instead of duplicating"),
             "dedupe-before-write rule"
         );
         assert!(
-            compact.contains("not guarantees about the present"),
+            compact.contains("Memories are past observations"),
             "staleness-verification rule"
         );
         // Parser-derived warnings and the real budget constants.

@@ -52,9 +52,10 @@ fn task_list_on_empty_registry_returns_zero_count() {
     sess.expect("TaskList")
         .expect("model must invoke TaskList (agent trigger)");
 
-    // The tool serializes the response as a JSON object with a `count`
-    // field. An empty registry means count = 0.
-    sess.expect(r#""count":\s*0"#)
+    // The tool serializes `count` in its JSON response; the TUI digests
+    // that object to one `key: value` line per field, so the screen shows
+    // `count: 0` (no JSON quotes). An empty registry means count = 0.
+    sess.expect(r"count:\s*0")
         .expect("TaskList on an empty registry must report count: 0");
 
     let exit = sess.expect_eof().expect("scode should exit");

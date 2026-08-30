@@ -647,10 +647,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Logout => run_logout()?,
         CliAction::Update {
             version,
-            channel,
             check,
             yes,
-        } => cli::update::run(version, channel.as_deref(), check, yes)?,
+        } => cli::update::run(version, check, yes)?,
     }
     Ok(())
 }

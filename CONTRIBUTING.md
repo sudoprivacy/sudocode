@@ -202,9 +202,10 @@ cargo build --release
 Three channels, one build path (`release.yml` builds whatever tag lands):
 
 - **nightly** — `nightly.yml` moves the rolling `nightly` tag to main's
-  HEAD every day at 18:00 UTC (02:00 Beijing) when main advanced; the tag
-  push rebuilds the full matrix and overwrites the single `nightly`
-  prerelease. Install with `scode update --channel nightly`.
+  HEAD every day at midnight CST (16:00 UTC) when main advanced; the tag
+  push rebuilds the full platform matrix (Linux x64/arm64, macOS
+  arm64/x64, Windows x64/arm64) and overwrites the single `nightly`
+  prerelease on GitHub.
 - **release candidate** — promote a soaked nightly by tagging **the same
   commit** it was built from: `git tag v0.2.0-rc.1 <nightly-commit> &&
   git push origin v0.2.0-rc.1`. Any tag containing `-` publishes as a

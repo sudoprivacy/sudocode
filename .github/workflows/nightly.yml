@@ -1,8 +1,8 @@
 name: Nightly channel
 
-# Moves the rolling `nightly` tag to the current main HEAD once a day (18:00
-# UTC = 02:00 Beijing), but only when main actually moved since the last
-# nightly. The tag push triggers `release.yml`, which builds the full platform
+# Moves the rolling `nightly` tag to the current main HEAD once a day at
+# midnight China Standard Time (16:00 UTC), but only when main actually moved
+# since the last nightly. The tag push triggers `release.yml`, which builds the full platform
 # matrix and publishes/overwrites the single rolling `nightly` prerelease —
 # one build path for stable, RC, and nightly alike.
 #
@@ -13,7 +13,7 @@ name: Nightly channel
 
 on:
   schedule:
-    - cron: '0 18 * * *'
+    - cron: '0 16 * * *'  # 00:00 CST (UTC+8)
   workflow_dispatch:
 
 permissions:

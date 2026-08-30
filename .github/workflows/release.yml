@@ -146,7 +146,11 @@ jobs:
       matrix:
         include:
           - name: linux-arm64
-            os: ubuntu-24.04-arm
+            # Oldest hosted arm64 runner: the arm64 binary links glibc
+            # dynamically, so the build machine's glibc is the floor the
+            # binary demands at runtime — 22.04 = glibc 2.35. (linux-x64 is
+            # static musl; its runner version does not matter.)
+            os: ubuntu-22.04-arm
             bin: scode
             package_dir: scode-linux-arm64
             archive_name: scode-linux-arm64.tar.gz

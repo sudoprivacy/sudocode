@@ -31,7 +31,12 @@ type R<T> = Result<T, Box<dyn Error>>;
 /// * `version` — pin a release tag (`v0.1.27` or `0.1.27`); `None` = latest.
 /// * `check`   — only report current vs. latest, download nothing.
 /// * `yes`     — skip the interactive confirmation.
-pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
+pub(crate) fn run(
+    version: Option<String>,
+    channel: Option<&str>,
+    check: bool,
+    yes: bool,
+) -> R<()> {
     let target = detect_target()?;
     let current_tag = format!("v{CURRENT}");
 
@@ -39,15 +44,36 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
     // spins up runtimes on demand, so there is no ambient one to nest inside.
     let rt = tokio::runtime::Runtime::new()?;
 
+    let nightly = match channel {
+        None | Some("stable") => false,
+        Some("nightly") => true,
+        Some(other) => return Err(format!("unknown channel `{other}` (stable|nightly)").into()),
+    };
+    if nightly && version.is_some() {
+        return Err("--version pins a tag; it cannot combine with --channel nightly".into());
+    }
+
     let pinned = version.is_some();
-    let latest = match version {
-        Some(v) => normalize_tag(&v),
-        None => rt.block_on(resolve_latest_tag())?,
+    let (latest, latest_label) = if nightly {
+        // The rolling `nightly` tag moves every night; the release *name*
+        // (date + short sha) is the only thing that identifies the build.
+        let (tag, name) = rt
+            .block_on(resolve_release_by_tag("nightly"))
+            .map_err(|e| format!("no nightly release available: {e}"))?;
+        (tag, name)
+    } else {
+        let tag = match version {
+            Some(v) => normalize_tag(&v),
+            None => rt.block_on(resolve_latest_tag())?,
+        };
+        (tag.clone(), tag)
     };
 
-    println!("scode {current_tag} → {latest}  ({target})");
+    println!("scode {current_tag} → {latest_label}  ({target})");
 
-    let up_to_date = !is_newer(&latest, &current_tag);
+    // A nightly cannot be version-compared against a semver binary — the tag
+    // never changes and the payload does. Treat it as always updatable.
+    let up_to_date = !nightly && !is_newer(&latest, &current_tag);
     if check {
         println!(
             "{}",
@@ -65,7 +91,7 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
         println!("already up to date");
         return Ok(());
     }
-    if !yes && !confirm(&format!("update {current_tag} → {latest}?"))? {
+    if !yes && !confirm(&format!("update {current_tag} → {latest_label}?"))? {
         println!("aborted");
         return Ok(());
     }
@@ -92,7 +118,7 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
 
     let exe = current_exe()?;
     install_over(&exe, &new_binary)?;
-    println!("installed {latest} → {}", exe.display());
+    println!("installed {latest_label} → {}", exe.display());
 
     restart(&exe)
 }
@@ -165,6 +191,31 @@ async fn resolve_latest_tag() -> R<String> {
         .and_then(|t| t.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "could not read tag_name from GitHub API response".into())
+}
+
+/// Resolve a release by exact tag; returns `(tag_name, release name)`.
+/// The name matters for `nightly`, whose tag is constant while the release
+/// name carries the build date + commit.
+async fn resolve_release_by_tag(tag: &str) -> R<(String, String)> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}");
+    let value: serde_json::Value = client()?
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let tag_name = value
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .map(str::to_owned)
+        .ok_or("could not read tag_name from GitHub API response")?;
+    let name = value
+        .get("name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| tag_name.clone(), str::to_owned);
+    Ok((tag_name, name))
 }
 
 async fn fetch_bytes(url: &str) -> R<Vec<u8>> {

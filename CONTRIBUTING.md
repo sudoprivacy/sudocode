@@ -197,6 +197,23 @@ cargo build --workspace
 cargo build --release
 ```
 
+## Release channels
+
+Three channels, one build path (`release.yml` builds whatever tag lands):
+
+- **nightly** — `nightly.yml` moves the rolling `nightly` tag to main's
+  HEAD every day at 18:00 UTC (02:00 Beijing) when main advanced; the tag
+  push rebuilds the full matrix and overwrites the single `nightly`
+  prerelease. Install with `scode update --channel nightly`.
+- **release candidate** — promote a soaked nightly by tagging **the same
+  commit** it was built from: `git tag v0.2.0-rc.1 <nightly-commit> &&
+  git push origin v0.2.0-rc.1`. Any tag containing `-` publishes as a
+  prerelease. Promotion is by commit, not by copying artifacts — the
+  rebuild keeps one publish path and the commit is what soaked.
+- **stable** — tag `vX.Y.Z` on the RC's commit once it has soaked.
+  Stable tags also mirror to the Tencent COS `release/latest/` bucket;
+  nightly and RC stay on GitHub only.
+
 Sudo Code forbids `unsafe_code` workspace-wide (`unsafe_code = "forbid"`
 in `rust/Cargo.toml`). Relaxing this for a single crate goes through
 the PR description first.

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - nightly
   workflow_dispatch:
     inputs:
       build_scope:
@@ -241,9 +242,33 @@ jobs:
           cd dist
           sha256sum scode-* scode_*.deb > SHA256SUMS.txt
 
+      # `nightly` is a rolling prerelease: same tag every night, assets
+      # overwritten in place, name carries the date + short sha so `scode
+      # update --check --channel nightly` can show what it points at. Tags
+      # containing `-` (v0.2.0-rc.1) publish as prereleases too.
+      - name: Compute release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          short="$(git rev-parse --short "$GITHUB_SHA")"
+          if [[ "$tag" == "nightly" ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "name=nightly $(date -u +%Y-%m-%d) (${short})" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "name=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "name=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           files: |
             dist/scode-*
             dist/scode_*.deb
@@ -251,7 +276,9 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Upload to Tencent COS
-        if: env.TENCENT_SECRET_ID != '' && env.TENCENT_SECRET_KEY != ''
+        # `release/latest/` mirrors the newest *stable* only — nightly and RC
+        # prereleases stay on GitHub.
+        if: github.ref_name != 'nightly' && !contains(github.ref_name, '-') && env.TENCENT_SECRET_ID != '' && env.TENCENT_SECRET_KEY != ''
         env:
           TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
           TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}

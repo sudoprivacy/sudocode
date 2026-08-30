@@ -156,6 +156,9 @@ enum Cmd {
         /// Pin a release tag (e.g. v0.1.27); defaults to the latest release
         #[arg(long)]
         version: Option<String>,
+        /// Release channel: stable (default) or nightly (rolling main build)
+        #[arg(long)]
+        channel: Option<String>,
         /// Only report the current and latest versions; download nothing
         #[arg(long)]
         check: bool,
@@ -371,6 +374,7 @@ pub(crate) enum CliAction {
     Logout,
     Update {
         version: Option<String>,
+        channel: Option<String>,
         check: bool,
         yes: bool,
     },
@@ -566,10 +570,12 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             Cmd::Login => Ok(CliAction::Login),
             Cmd::Update {
                 version,
+                channel,
                 check,
                 yes,
             } => Ok(CliAction::Update {
                 version,
+                channel,
                 check,
                 yes,
             }),

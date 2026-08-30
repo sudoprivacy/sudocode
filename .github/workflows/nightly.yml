@@ -1,0 +1,45 @@
+name: Nightly channel
+
+# Moves the rolling `nightly` tag to the current main HEAD once a day (18:00
+# UTC = 02:00 Beijing), but only when main actually moved since the last
+# nightly. The tag push triggers `release.yml`, which builds the full platform
+# matrix and publishes/overwrites the single rolling `nightly` prerelease —
+# one build path for stable, RC, and nightly alike.
+#
+# Promotion flow (documented in CONTRIBUTING.md § Release channels):
+# nightly soaks → tag `vX.Y.Z-rc.N` on that nightly's commit → soak →
+# tag `vX.Y.Z` on the same commit. The RC/stable tags rebuild via the same
+# workflow, so what was tested is what ships, commit-for-commit.
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  roll-nightly-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Move nightly tag if main advanced
+        shell: bash
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          prev="$(git rev-parse -q --verify refs/tags/nightly^{commit} || true)"
+          git fetch -q origin 'refs/tags/nightly:refs/tags/nightly' 2>/dev/null || true
+          prev="$(git rev-parse -q --verify refs/tags/nightly^{commit} || true)"
+          if [[ "$head" == "$prev" ]]; then
+            echo "main unchanged since last nightly ($head); nothing to do"
+            exit 0
+          fi
+          echo "rolling nightly: ${prev:-<none>} -> $head"
+          git tag -f nightly "$head"
+          git push -f origin refs/tags/nightly

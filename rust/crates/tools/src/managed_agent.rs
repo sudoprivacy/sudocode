@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::spawn_task::{
-    handle_send_message, mailbox_sender, AgentDescriptor, AgentState, KernelSyscall, Mailbox,
-    MailboxSender, SpawnHandle,
+    cohost_a2a_prompt_section, handle_send_message, mailbox_sender, AgentDescriptor, AgentState,
+    KernelSyscall, Mailbox, MailboxSender, SpawnHandle,
 };
 use runtime::{
     FsBackend, KernelFsBackend, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
@@ -101,8 +101,14 @@ where
     // routes through the mailbox sender. --
     let tool_executor = ManagedToolExecutor { fs, send };
 
-    // -- SystemPrompt: minimal prompt for managed-agent context --
-    let system_prompt = SystemPromptBuilder::new().build();
+    // -- SystemPrompt: base managed-agent prompt + the A2A reply contract, so
+    // the co-hosted model addresses its reply to the message's `<sender>` via
+    // `send_message` instead of guessing a recipient from the message text. The
+    // contract text lives in `spawn_task` next to the `[message from …]` framing
+    // and the `send_message` reply path it describes. --
+    let system_prompt = SystemPromptBuilder::new()
+        .append_section(cohost_a2a_prompt_section(&desc.name))
+        .build();
 
     // -- PermissionPolicy: managed agents run with full access --
     // Nexus enforces permissions at the VFS layer (ReBAC +

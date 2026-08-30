@@ -49,6 +49,7 @@ pub mod mcp_tool_bridge;
 mod mcp_ws;
 pub mod memory;
 pub mod model_capabilities;
+pub mod nexus_mailbox;
 mod oauth;
 pub mod permission_enforcer;
 mod permissions;
@@ -189,9 +190,8 @@ pub use policy_engine::{
 };
 pub use prompt::{
     load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with, prepend_bullets,
-    ContextFile, ModelFamilyIdentity, ProjectContext, PromptBuildError, SystemPrompt,
-    SystemPromptBuilder, SystemPromptOverrides, FRONTIER_MODEL_NAME,
-    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    ContextFile, ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder,
+    SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,

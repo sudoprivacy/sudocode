@@ -37,11 +37,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
-    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
-    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    base_url_for_mode, resolve_startup_auth_source, AnthropicClient, AuthMode, AuthSource,
+    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
+    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -102,16 +101,15 @@ use commands::{
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
     handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_slash_command_help, render_slash_command_help_filtered, resolve_skill_invocation,
-    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
-    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
+    render_skills_prompt_section, render_slash_command_help, render_slash_command_help_filtered,
+    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
+    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
+    SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use init::initialize_repo;
-use plugins::{
-    render_plugin_capabilities_section, PluginLoadOutcome, PluginManager, PluginRegistry,
-};
+use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use render::{
     ansi_bold_fg, ansi_fg, theme, MarkdownStreamState, SpinnerHandle, TerminalRenderer, DIM, RESET,
 };
@@ -131,7 +129,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// #148: Model provenance for `scode status` JSON/text output. Records where
 /// the resolved model string came from so consumers don't have to re-read argv
@@ -469,9 +467,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::PrintSystemPrompt {
             cwd,
             date,
-            model,
             output_format,
-        } => print_system_prompt(cwd, date, &model, output_format)?,
+        } => print_system_prompt(cwd, date, output_format)?,
         CliAction::Version { output_format } => print_version(output_format)?,
         CliAction::ResumeSession {
             session_path,
@@ -856,30 +853,23 @@ fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn st
 fn print_system_prompt(
     cwd: PathBuf,
     date: String,
-    model: &str,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut prompt = load_system_prompt(
-        cwd.clone(),
-        date,
-        env::consts::OS,
-        "unknown",
-        resolve_model_identity(model),
-    )?;
+    let mut prompt = load_system_prompt(cwd.clone(), date, env::consts::OS, "unknown")?;
     // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
     // prepend the CC-fork coordinator role prompt so `scode
     // print-system-prompt` reflects what the runtime would send.
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     // Same order as a live session (`build_system_prompt_for` →
-    // `build_runtime_with_plugin_state`): CLI prompt flags first, plugin
-    // capability summary last.
+    // `build_runtime_with_plugin_state`): CLI prompt flags first, then the
+    // available-skills listing.
     apply_cli_prompt_overrides(&mut prompt);
-    // Mirror what build_runtime_with_plugin_state does for live sessions:
-    // append active SudoCode plugin capabilities so system-prompt output
-    // matches what the runtime actually sends.  Load failures captured inside
-    // PluginLoadOutcome are excluded naturally; Result errors propagate.
+    // Mirror what build_runtime_with_plugin_state does for live sessions.
+    // Load failures captured inside PluginLoadOutcome are excluded naturally;
+    // Result errors propagate, so a broken plugin install fails this preview
+    // exactly as it fails a live session.
     let outcome = plugin_load_outcome_for_cwd(&cwd)?;
-    if let Some(section) = render_plugin_capabilities_section(&outcome.loaded_plugins) {
+    if let Some(section) = render_skills_prompt_section(&cwd, Some(&outcome)) {
         prompt.dynamic_sections.push(section);
     }
     let message = prompt.render();
@@ -2104,6 +2094,23 @@ fn run_repl_iocraft_dispatch(
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
+    // nexus A2A receive-half: when configured, surface peer messages into the
+    // REPL as they arrive. The poller runs for the whole interactive session;
+    // its daemon thread is reaped by the `process::exit(0)` at the end of this
+    // dispatch (the render-loop thread is left the same way), so it needs no
+    // explicit shutdown. The session was already dialed in
+    // `build_runtime_for_cwd`, so this just reuses the cached handle.
+    if let Ok(Some(a2a_session)) = cli::nexus_a2a::session() {
+        let output = repl.output.clone();
+        let _poller = cli::nexus_a2a::spawn_poller(
+            a2a_session,
+            runtime::HookAbortSignal::new(),
+            move |msg| {
+                output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+            },
+        );
+    }
+
     // Coordinator loop on the current thread. Reads InputEvents from the
     // iocraft UI and dispatches turns via the same TurnInputCoordinator +
     // runner-thread pattern as the rustyline-based coordinator.
@@ -2724,7 +2731,7 @@ impl AcpCliAgent {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let session_state = new_cli_session_for(&cwd)
             .map_err(|error| AcpError::internal(format!("failed to create session: {error}")))?;
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id).map_err(
@@ -2858,7 +2865,7 @@ impl AcpCliAgent {
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
         let auth_mode = resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-        let system_prompt = build_acp_system_prompt(&cwd, &resolved, &session.prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
         let mut runtime = build_runtime_for_cwd(
             &cwd,
             cloned_session,
@@ -2877,6 +2884,7 @@ impl AcpCliAgent {
             &session_mcp,
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
+        runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
         if let Some(rt) = runtime.runtime.as_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.reasoning_effort.clone());
@@ -3473,7 +3481,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let sudocode_config =
             require_sudocode_config_for_cwd(&cwd).map_err(runtime::AcpError::internal)?;
         let auth_mode =
@@ -4047,7 +4055,7 @@ impl LiveCli {
         permission_mode: PermissionMode,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let system_prompt = build_system_prompt(&model)?;
+        let system_prompt = build_system_prompt()?;
         let session_state = new_cli_session()?;
         let session = create_managed_session_handle(&session_state.session_id)?;
         let cwd = env::current_dir()?;
@@ -5005,9 +5013,8 @@ impl LiveCli {
         session.model = Some(model.clone());
         let session_id = self.session.id.clone();
         let message_count = session.messages.len();
-        // Rebuild system prompt so the model identity line reflects the new model.
         let cwd = env::current_dir().unwrap_or_default();
-        let system_prompt = build_system_prompt_for(&cwd, &model)?;
+        let system_prompt = build_system_prompt_for(&cwd)?;
         let runtime = self.build_replacement_runtime(
             session,
             session_id,
@@ -5862,8 +5869,8 @@ fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_jso
     })
 }
 
-fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
-    build_system_prompt_for(&env::current_dir()?, model)
+fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+    build_system_prompt_for(&env::current_dir()?)
 }
 
 /// ACP variant of [`build_system_prompt_for`]: builds the process-default
@@ -5875,10 +5882,9 @@ fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::
 /// plugins) stay, so the caller's prompt still knows where it is running.
 fn build_acp_system_prompt(
     cwd: &Path,
-    model: &str,
     prompt_overrides: &runtime::SystemPromptOverrides,
 ) -> Result<SystemPrompt, AcpError> {
-    let mut prompt = build_system_prompt_for(cwd, model)
+    let mut prompt = build_system_prompt_for(cwd)
         .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
     prompt_overrides.apply(&mut prompt);
     Ok(prompt)
@@ -5897,10 +5903,7 @@ fn apply_cli_prompt_overrides(prompt: &mut SystemPrompt) {
     }
 }
 
-fn build_system_prompt_for(
-    cwd: &Path,
-    model: &str,
-) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     // Use the local date at session-start time (not the build date baked
     // into DEFAULT_DATE) so the cacheable system prompt reflects when the
     // user actually started talking. ConversationRuntime separately tracks
@@ -5911,7 +5914,6 @@ fn build_system_prompt_for(
         runtime::today_local(),
         env::consts::OS,
         "unknown",
-        resolve_model_identity(model),
     )?;
     // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
     // set, prepend the ported CC-fork coordinator role prompt so it
@@ -5920,27 +5922,6 @@ fn build_system_prompt_for(
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     apply_cli_prompt_overrides(&mut prompt);
     Ok(prompt)
-}
-
-/// Resolve model identity for the system prompt from sudocode.json SSOT.
-///
-/// Looks up `models.<id>.name` in the loaded config; falls back to the
-/// provider-based enum identity if no entry exists.
-fn resolve_model_identity(model: &str) -> runtime::ModelFamilyIdentity {
-    let config = load_sudocode_config_for_current_dir();
-    // Try exact match by alias key.
-    if let Some(entry) = config.models.get(model) {
-        return runtime::ModelFamilyIdentity::Named(entry.name.clone());
-    }
-    // Case-insensitive alias search.
-    let lower = model.to_ascii_lowercase();
-    for entry in config.models.values() {
-        if entry.alias.eq_ignore_ascii_case(model) || entry.name.to_ascii_lowercase() == lower {
-            return runtime::ModelFamilyIdentity::Named(entry.name.clone());
-        }
-    }
-    // Fallback: use model ID as display name (better than a generic label).
-    runtime::ModelFamilyIdentity::Named(model.to_string())
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
@@ -6303,6 +6284,17 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // Resolve the standalone nexus-A2A session once (fail loud on a partial
+    // config or a dial failure). `None` when A2A is off — the fast path that
+    // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
+    // (Copy) and reused below to advertise, prompt, and wire the send half.
+    let a2a = match cli::nexus_a2a::session() {
+        Ok(a2a) => a2a,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     // per-session injected MCP tools bypass the global --allowed-tools gate:
     // they are explicitly requested for this session and their names are only
     // known at runtime, so add their qualified names to the allow-list when
@@ -6320,6 +6312,15 @@ fn build_runtime_with_plugin_state(
             allowed.extend(session_mcp_tool_names(tools, session_mcp));
         }
     }
+    // nexus A2A: when configured, keep the peer-reply tool available even under
+    // an explicit --allowedTools restriction (absent a restriction it is
+    // already advertised). Its handler is the CliToolExecutor intercept wired
+    // below; the co-host advertises the same tool the same way.
+    if a2a.is_some() {
+        if let Some(allowed) = config.allowed_tools.as_mut() {
+            allowed.extend(["send_message".to_string()]);
+        }
+    }
     let policy =
         match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
             Ok(policy) => policy,
@@ -6329,8 +6330,20 @@ fn build_runtime_with_plugin_state(
             }
         };
     let mut system_prompt = config.system_prompt.clone();
-    if let Some(section) = render_plugin_capabilities_section(&plugin_load_outcome.loaded_plugins) {
+    // Skills are listed so the model can name and load one without the user
+    // having to know it exists. Plugin-provided skill roots are included via
+    // `plugin_load_outcome`, so a plugin can inject skills that the prompt then
+    // advertises. This runs for the REPL, `--print`, and ACP sessions alike:
+    // they all land in this function via `build_runtime_for_cwd`.
+    if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
         system_prompt.dynamic_sections.push(section);
+    }
+    // nexus A2A: teach the model its A2A identity + how to reach peers, so the
+    // standalone loop knows it can `send_message` to a named peer.
+    if let Some(session) = a2a {
+        system_prompt
+            .dynamic_sections
+            .push(session.peer_system_prompt());
     }
     let emit_output = config.emit_output;
     let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
@@ -6354,6 +6367,14 @@ fn build_runtime_with_plugin_state(
         &feature_config,
     )
     .with_session_known_date(runtime::today_local());
+    // nexus A2A: give the CLI executor the send half so `send_message` routes
+    // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
+    // uses). Set only when configured; absent it the tool is never advertised.
+    if let Some(session) = a2a {
+        runtime
+            .tool_executor_mut()
+            .set_mailbox_sender(session.sender());
+    }
     if emit_output {
         runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
     }
@@ -6877,6 +6898,7 @@ mod auth_mode_tests {
             name: alias.to_string(),
             input: vec!["text".to_string()],
             providers,
+            ..Default::default()
         }
     }
 

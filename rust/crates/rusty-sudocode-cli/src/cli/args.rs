@@ -71,7 +71,12 @@ struct Cli {
     base_commit: Option<String>,
 
     /// Reasoning effort level
-    #[arg(long, global = true, value_parser = ["low", "medium", "high"])]
+    ///
+    /// `none` / `minimal` are part of the OpenAI reasoning-effort ladder and
+    /// are what several OpenAI-compatible backends accept to turn reasoning
+    /// off entirely (DashScope Qwen3.x, for one); keeping them out of the
+    /// allow-list blocked a capability the wire already supports.
+    #[arg(long, global = true, value_parser = ["none", "minimal", "low", "medium", "high"])]
     reasoning_effort: Option<String>,
 
     /// Allow running in a broad (non-project) working directory
@@ -279,7 +284,6 @@ pub(crate) enum CliAction {
     PrintSystemPrompt {
         cwd: PathBuf,
         date: String,
-        model: String,
         output_format: CliOutputFormat,
     },
     Version {
@@ -628,7 +632,6 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 Ok(CliAction::PrintSystemPrompt {
                     cwd: resolved_cwd,
                     date: resolved_date,
-                    model: model.clone(),
                     output_format,
                 })
             }
@@ -1231,12 +1234,20 @@ pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
 
 pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> api::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().unwrap_or_default()
+    let config = loader.load_sudocode_config().unwrap_or_default();
+    runtime::model_capabilities::apply_config_limits(&config);
+    config
 }
 
 pub(crate) fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<api::SudoCodeConfig, String> {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().map_err(|e| e.to_string())
+    let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
+    // Seed the capability overrides here rather than at each startup site:
+    // every entry point (REPL, --print, acp, subagents) reaches the config
+    // through this pair, and a forgotten seeding call is invisible until a
+    // provider rejects `max_tokens` at request time.
+    runtime::model_capabilities::apply_config_limits(&config);
+    Ok(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,6 +1376,7 @@ mod tests {
                 name: "custom-openai/gpt-5.4".to_string(),
                 input: vec!["text".to_string()],
                 providers,
+                ..Default::default()
             },
         );
 

@@ -43,10 +43,7 @@ pub use providers::registry::{
     ModelConfigEntry, ModelProviderMapping, ModelTokenLimit, ProviderConnectionConfig,
     ResolvedProvider, SudoCodeConfig,
 };
-pub use providers::{
-    detect_provider_kind, model_family_identity_for, model_family_identity_for_kind, AuthMode,
-    ProviderKind,
-};
+pub use providers::{detect_provider_kind, AuthMode, ProviderKind};
 pub use sse::{parse_frame, SseParser};
 pub use types::{
     CacheHints, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,

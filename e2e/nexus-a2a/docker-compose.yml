@@ -1,0 +1,31 @@
+# Standalone nexus-A2A E2E substrate — a single-node auth-off `nexusd-cluster`
+# founder that a standalone `scode` (this repo) dials as a plain gRPC client to
+# send/receive over the replicated `/agents/<name>/chat-with-me` DT_STREAM.
+#
+# The daemon image is a nexus artifact (built from `nexus/rust/nexusd`), so it
+# is a PREREQ, not built here — override `NEXUS_DAEMON_IMAGE` or build it once:
+#
+#   # slim pure-VFS daemon (enough for the deterministic client tests):
+#   #   nexus$ DOCKER_BUILDKIT=1 docker build -f dockerfiles/Dockerfile.nexusd-cluster \
+#   #            --secret id=ghtoken,env=GH_TOKEN -t nexusd-cluster:latest .
+#   # co-host daemon (adds the in-process agent runtime for the LLM duet):
+#   #   nexus$ ... -f dockerfiles/Dockerfile.nexusd-cohost -t nexusd-cluster-cohost:latest .
+#
+# Fresh `--data-dir` + `--identity-dir` each run → a clean single-voter founder
+# (no stale peers). `--no-tls --insecure-no-auth` is the simplest posture for
+# the local/CI substrate; the mTLS/stamped path is exercised separately.
+services:
+  nexusd:
+    image: ${NEXUS_DAEMON_IMAGE:-nexusd-cluster-cohost:latest}
+    container_name: scode-a2a-nexusd
+    command:
+      - --bind-addr
+      - 0.0.0.0:2126
+      - --data-dir
+      - /tmp/nexus-data
+      - --identity-dir
+      - /tmp/nexus-identity
+      - --no-tls
+      - --insecure-no-auth
+    ports:
+      - "${NEXUS_A2A_HOST_PORT:-2126}:2126"

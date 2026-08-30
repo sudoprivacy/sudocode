@@ -335,8 +335,16 @@ fn base_command(workspace: &TestWorkspace) -> Command {
 }
 
 fn spawn_stdio_client(workspace: &TestWorkspace) -> AcpTestClient {
+    spawn_stdio_client_with_args(workspace, &[])
+}
+
+/// Like [`spawn_stdio_client`] but passes extra flags to the `scode acp`
+/// process, so a test can exercise the process-wide prompt flags a session's
+/// `_meta` overrides layer on top of.
+fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> AcpTestClient {
     let mut cmd = base_command(workspace);
     cmd.arg("acp")
+        .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2100,6 +2108,88 @@ fn spawn_stdio_client_danger_with_allowed(
     }
 }
 
+/// A model switch rebuilds the session runtime. Cancellation must keep using
+/// the same abort signal registered by `session/new`, otherwise the rebuilt
+/// runtime waits on a fresh signal and the prompt runs to its natural end.
+#[tokio::test]
+async fn acp_session_cancel_survives_model_switch() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("cancel-after-model-switch");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    // The process starts on sonnet. A different model is required to enter
+    // handle_acp_model_switch's runtime-rebuild branch.
+    let (_, set_resp) = client
+        .send_request(
+            "session/set_model",
+            json!({ "sessionId": session_id, "modelId": "haiku" }),
+        )
+        .await;
+    assert!(
+        set_resp.get("error").is_none(),
+        "session/setModel should succeed: {set_resp}"
+    );
+
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_interrupt_long_running")
+                }]
+            }),
+        )
+        .await;
+
+    // Wait until the long-running tool has been announced so cancellation is
+    // exercised mid-turn rather than before prompt dispatch.
+    client
+        .recv_until(Duration::from_secs(20), |message| {
+            message["method"].as_str() == Some("session/update")
+                && message["params"]["sessionId"].as_str() == Some(session_id.as_str())
+                && message["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call")
+                && message["params"]["update"]["toolCallId"].as_str()
+                    == Some("toolu_bash_interrupt")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("long-running tool never started; saw: {seen:?}"));
+
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_id }
+        }))
+        .await;
+
+    let (_, prompt_resp) = client
+        .recv_until(Duration::from_secs(2), |message| {
+            is_response_to(message, prompt_id)
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!(
+                "prompt did not stop within 2s after cancel following model switch; saw: {seen:?}"
+            )
+        });
+    assert!(
+        prompt_resp.get("result").is_some() || prompt_resp.get("error").is_some(),
+        "cancelled prompt should receive a response: {prompt_resp}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
 /// runtime build (proof written) and its `echo` tool round-trips through the
 /// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).
@@ -2345,16 +2435,78 @@ async fn assert_bad_prompt_meta_rejected(
     }
 }
 
+/// A session `systemPrompt` must replace the built-in blocks *without*
+/// discarding what the process-wide `--append-system-prompt` added.
+///
+/// Regression: the append used to be a dynamic section, so a session override —
+/// which only replaces static ones — could not touch it. Moving the append into
+/// the static block to get it into the cacheable prefix made the two collide,
+/// and `docs/acp.md` promises they layer.
+#[tokio::test]
+async fn acp_session_override_keeps_process_level_append() {
+    const PROCESS_APPEND: &str = "Process-wide rule append-9d1c04.";
+    const SESSION_OVERRIDE: &str = "You are session-persona-5e8b72.";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("sysprompt-layering");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client =
+        spawn_stdio_client_with_args(&workspace, &["--append-system-prompt", PROCESS_APPEND]);
+    scenario_initialize(&mut client).await;
+    let root = workspace.root.clone();
+
+    // Without a session override the process-level append is simply present.
+    let plain = scenario_session_new(&mut client, &root).await;
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "l1").await;
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "process-level append must reach the model; body: {body}"
+    );
+
+    // With one, it must survive alongside the replacement.
+    let resp = session_new_with_meta(
+        &mut client,
+        &root,
+        json!({"systemPrompt": SESSION_OVERRIDE}),
+    )
+    .await;
+    let overridden = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &overridden, "l2").await;
+    assert!(
+        body.contains(SESSION_OVERRIDE),
+        "session override must reach the model; body: {body}"
+    );
+    assert!(
+        body.contains(PROCESS_APPEND),
+        "session override must not discard the process-level append; body: {body}"
+    );
+    assert!(
+        !body.contains(DEFAULT_IDENTITY),
+        "session override must still replace the built-in identity; body: {body}"
+    );
+    assert!(
+        body.find(SESSION_OVERRIDE) < body.find(PROCESS_APPEND),
+        "the replacement comes first, the append stays after it; body: {body}"
+    );
+}
+
 /// Built-in identity block: present on the default prompt, gone under override.
 const DEFAULT_IDENTITY: &str = "You are Sudo Code";
-/// The dynamic block every session carries; the append must land after it.
+/// The first dynamic block every session carries. The append is a *static*
+/// section, so it must land before this — that ordering is what proves it
+/// sits in the cacheable prefix rather than the per-turn block.
 const MEMORY_HEADING: &str = "# auto memory";
 
 /// `_meta.sudocode.systemPrompt` (replace the built-in static blocks) and
-/// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block) on
+/// `_meta.sudocode.appendSystemPrompt` (append a trailing static block) on
 /// `session/new`, checked on the wire body the model receives:
 ///  - neither → the default prompt (regression guard),
-///  - append only → appended after the auto-memory block, identity kept,
+///  - append only → appended at the end of the static block (before the
+///    dynamic auto-memory block), identity kept,
 ///  - override only → identity replaced, nothing appended,
 ///  - both → both take effect (the two are orthogonal),
 ///  - other sessions in the process are unaffected,
@@ -2394,10 +2546,20 @@ async fn acp_session_new_system_prompt_override_and_append_reach_model() {
         body.contains(DEFAULT_IDENTITY) && body.contains(APPEND),
         "append must reach the model with the identity block intact; body: {body}"
     );
-    let (memory_at, append_at) = (body.find(MEMORY_HEADING), body.find(APPEND));
+    let (identity_at, memory_at, append_at) = (
+        body.find(DEFAULT_IDENTITY),
+        body.find(MEMORY_HEADING),
+        body.find(APPEND),
+    );
     assert!(
-        memory_at.is_some() && append_at > memory_at,
-        "append must land after the auto-memory block: memory@{memory_at:?} append@{append_at:?}"
+        memory_at.is_some() && append_at.is_some() && append_at < memory_at,
+        "append is a static section, so it must precede the dynamic auto-memory \
+         block: append@{append_at:?} memory@{memory_at:?}"
+    );
+    assert!(
+        append_at > identity_at,
+        "append must come after the built-in identity block, i.e. last within \
+         the static block: identity@{identity_at:?} append@{append_at:?}"
     );
 
     // override only.
@@ -2643,6 +2805,115 @@ async fn acp_session_new_mcp_available_under_allowed_tools() {
     assert!(
         blob.contains("echo:hello from mcp parity"),
         "session mcp tool must remain available under --allowedTools; got: {blob}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// ACP spec compliance: `tool_call_update` must carry `content` — the field
+/// clients render — and not `rawOutput` alone, which the spec marks as an
+/// optional machine-readable payload. From v0.1.21 through the shipped
+/// v0.1.25 `on_tool_result` filled `rawOutput` only, so every standard ACP
+/// client (Zed, and the downstream apeiron layer, which reads `content` per
+/// spec) saw tool calls complete with no visible output at all.
+///
+/// Asserts both fields ride the same notification and that the content text
+/// is the *verbatim* tool-result string — i.e. re-deriving `rawOutput` from
+/// the content text with the same parse-or-wrap rule the server uses
+/// reproduces `rawOutput` exactly.
+#[tokio::test]
+async fn acp_stdio_tool_call_update_carries_content_and_raw_output() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-tool-call-content");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    // `allow` so bash runs instead of parking the turn on a permission prompt.
+    set_permission_mode(&mut client, &session, "allow").await;
+
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_stdout_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let (notifs, resp) = client
+        .recv_until(Duration::from_secs(60), |m| is_response_to(m, prompt_id))
+        .await
+        .unwrap_or_else(|seen| panic!("bash_stdout_roundtrip did not finish; seen: {seen:?}"));
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "turn should complete normally: {resp}"
+    );
+
+    let updates = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session.as_str())
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call_update")
+        })
+        .map(|m| m["params"]["update"].clone())
+        .collect::<Vec<_>>();
+    assert!(
+        !updates.is_empty(),
+        "scenario should emit at least one tool_call_update; notifs: {notifs:?}"
+    );
+
+    let completed = updates
+        .iter()
+        .find(|u| u["status"].as_str() == Some("completed"))
+        .unwrap_or_else(|| panic!("no completed tool_call_update; updates: {updates:?}"));
+
+    let raw_output = &completed["rawOutput"];
+    assert!(
+        !raw_output.is_null(),
+        "rawOutput must stay populated for backward compatibility: {completed}"
+    );
+
+    let content = completed["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool_call_update must carry ACP `content`: {completed}"));
+    assert_eq!(
+        content.len(),
+        1,
+        "one text block per tool result: {completed}"
+    );
+    assert_eq!(
+        content[0]["type"].as_str(),
+        Some("content"),
+        "content block must use the ACP `content` variant: {completed}"
+    );
+    assert_eq!(
+        content[0]["content"]["type"].as_str(),
+        Some("text"),
+        "tool output is emitted as a text content block: {completed}"
+    );
+    let text = content[0]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("text content block must carry `text`: {completed}"));
+    assert!(
+        text.contains("alpha from bash"),
+        "content text should be the bash stdout the model saw, got: {text}"
+    );
+    // Same parse-or-wrap rule the server applies to build rawOutput; equality
+    // proves `text` is the original tool-result string, unreformatted.
+    let rederived: Value =
+        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
+    assert_eq!(
+        &rederived, raw_output,
+        "content text must be the verbatim tool output that rawOutput was built from"
     );
 
     client.shutdown().await;

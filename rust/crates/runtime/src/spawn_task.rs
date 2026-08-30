@@ -43,7 +43,7 @@ use std::thread;
 
 // Re-export kernel types so downstream crates (e.g. `tools`) can
 // reference them without adding a direct `kernel` dependency.
-pub use kernel::core::agents::registry::AgentDescriptor;
+pub use kernel::core::agents::registry::{AgentDescriptor, AgentState};
 pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
@@ -69,14 +69,6 @@ const WATCH_TIMEOUT_MS: u64 = 500;
 /// Per-call `sys_read` blocking timeout. `0` keeps the call
 /// non-blocking — data is already present because `sys_watch` woke us.
 const READ_TIMEOUT_MS: u64 = 0;
-
-/// Agent-state values surfaced via `state_callback`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentLoopState {
-    WarmingUp,
-    Ready,
-    Busy,
-}
 
 /// Where the co-hosted agent's chat mailbox lives — determines the path the
 /// loop reads for inbound messages and where each reply is written.
@@ -142,6 +134,29 @@ impl Mailbox {
 /// hook overwrites `from` with the authenticated caller when auth is armed.
 pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
+/// Shared handler for the `send_message` A2A tool: parse `{to, body}` from the
+/// raw tool input and hand it to `sender`. BOTH the co-host
+/// (`ManagedToolExecutor`) and the standalone CLI executor route their
+/// `send_message` here, so the parse + delivery contract is defined ONCE — only
+/// the `sender` differs by deployment (in-process [`mailbox_sender`] vs gRPC
+/// `crate::nexus_mailbox::grpc_sender`).
+///
+/// # Errors
+/// Returns a `String` error when the input is not `{to, body}` or the send fails.
+pub fn handle_send_message(sender: &MailboxSender, input: &str) -> Result<String, String> {
+    let v: serde_json::Value = serde_json::from_str(input).map_err(|e| e.to_string())?;
+    let to = v
+        .get("to")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "send_message requires a string 'to'".to_string())?;
+    let body = v
+        .get("body")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "send_message requires a string 'body'".to_string())?;
+    (sender)(to, body)?;
+    Ok(format!("message delivered to {to}"))
+}
+
 /// Build the [`MailboxSender`] for a co-hosted agent (its kernel + mailbox +
 /// operation identity). Lives here, next to `Mailbox::reply_path`, so the
 /// envelope build + reply-path + `sys_write` stay in one place.
@@ -165,6 +180,33 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
             .map(|_| ())
             .map_err(|e| format!("{e:?}"))
     })
+}
+
+/// The system-prompt section that teaches a co-hosted agent the A2A reply
+/// contract it runs under, so the model addresses its reply correctly instead
+/// of guessing a recipient from the message text.
+///
+/// It is the prose counterpart of two mechanisms this module owns and MUST stay
+/// in step with them:
+/// * inbound framing — `run_loop` hands each message to the turn as
+///   `[message from <sender>]\n\n<body>`, so `<sender>` is the reply target;
+/// * the reply path — [`mailbox_sender`] wires the `send_message` tool as the
+///   ONLY way a co-hosted agent replies (writing to the sender's inbox).
+///
+/// Kept next to those two so the wording cannot drift from the framing/tool it
+/// describes. `self_id` is the agent's own name (`Mailbox::self_id`).
+#[must_use]
+pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
+    format!(
+        "# Agent-to-agent messaging\n\
+         You are the agent \"{self_id}\", conversing with other agents by message. \
+         Each message you receive is shown as `[message from <sender>]` followed by \
+         its text. To reply, call the `send_message` tool with `to` set to that \
+         exact `<sender>` name — the agent that messaged you, never a word copied \
+         from the message text — and `body` set to your reply. Calling \
+         `send_message` is the only way to reply; if you do not call it you stay \
+         silent and the conversation ends."
+    )
 }
 
 /// Handle returned by [`spawn_task`].
@@ -201,7 +243,7 @@ where
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentLoopState) + Send + 'static,
+    F: Fn(AgentState) + Send + 'static,
 {
     let abort_signal = HookAbortSignal::default();
     let abort_for_thread = abort_signal.clone();
@@ -245,7 +287,7 @@ fn run_loop<K, C, T, F>(
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentLoopState),
+    F: Fn(AgentState),
 {
     // Build a tokio runtime for async run_turn calls.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -254,7 +296,7 @@ fn run_loop<K, C, T, F>(
         .expect("managed-agent tokio runtime");
 
     // -- WARMING_UP --
-    state_cb(AgentLoopState::WarmingUp);
+    state_cb(AgentState::WarmingUp);
 
     // The VFS-backed file tools are constructed by the spawn factory
     // (`tools::managed_agent::spawn_managed_agent`), which injects a
@@ -273,7 +315,7 @@ fn run_loop<K, C, T, F>(
     .with_hook_abort_signal(abort.clone());
 
     // -- READY --
-    state_cb(AgentLoopState::Ready);
+    state_cb(AgentState::Ready);
 
     // Inbox the loop reads/watches, and the id it filters its own writes by.
     // For A2A this is the replicated `/agents/<self>/chat-with-me`; replies
@@ -282,7 +324,19 @@ fn run_loop<K, C, T, F>(
     let self_id = mailbox.self_id().to_string();
     let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&self_id), true);
 
-    let mut next_offset: u64 = 0;
+    // Durable per-agent read cursor (node-local). A (re)spawned agent RESUMES
+    // from the offset it last PROCESSED instead of replaying its whole inbox and
+    // re-answering every historical message — the #81 re-reply storm, observed
+    // live in the Win↔Mac duet when a respawned agent re-answered the entire
+    // conversation. First spawn (no cursor yet) loads 0 and delivers all waiting
+    // messages, so there is NO seek-to-tail delivery race. The cursor is a
+    // node-local DT_REG (`sys_write` create-or-overwrites it; it lives in the
+    // node's durable metastore, so it survives a daemon restart); each node's
+    // agent owns its own cursor. All cursor I/O degrades GRACEFULLY (load → 0,
+    // save ignored) so a missing / unmounted cursor path never wedges the agent —
+    // only the no-replay guarantee weakens to "replay from 0".
+    let cursor_path = cursor_path_for(&self_id);
+    let mut next_offset: u64 = load_cursor(kernel.as_ref(), &cursor_path, &ctx);
     while !abort.is_aborted() {
         match kernel.sys_read(&inbox_path, &ctx, READ_TIMEOUT_MS, next_offset) {
             Ok(result) => {
@@ -290,7 +344,7 @@ fn run_loop<K, C, T, F>(
                     if !bytes.is_empty() {
                         if let Some((sender, body)) = parse_inbound(bytes, &self_id) {
                             // -- BUSY --
-                            state_cb(AgentLoopState::Busy);
+                            state_cb(AgentState::Busy);
 
                             // Drive ONE turn on the inbound message. The sender is
                             // surfaced in the prompt so the agent can address a reply.
@@ -306,12 +360,21 @@ fn run_loop<K, C, T, F>(
                             }
 
                             // -- READY --
-                            state_cb(AgentLoopState::Ready);
+                            state_cb(AgentState::Ready);
                         }
                     }
                 }
                 if let Some(advanced) = result.stream_next_offset {
-                    next_offset = advanced as u64;
+                    let advanced = advanced as u64;
+                    // Persist the cursor only on REAL forward progress (a message
+                    // was consumed) — never on idle no-op reads, which would
+                    // rewrite the same offset every watch tick. Saving here (after
+                    // the turn ran) makes a crash mid-turn re-process only that one
+                    // message on respawn (at-least-once), never the whole history.
+                    if advanced > next_offset {
+                        next_offset = advanced;
+                        save_cursor(kernel.as_ref(), &cursor_path, &ctx, next_offset);
+                    }
                 }
             }
             Err(e) => {
@@ -353,6 +416,45 @@ fn parse_inbound(bytes: &[u8], self_agent_id: &str) -> Option<(String, String)> 
     Some((env.from, env.body))
 }
 
+/// Node-local path holding a co-host agent's durable inbox read cursor. Keyed by
+/// the agent's stable identity (NOT its pid) so it survives respawn; sanitised to
+/// a flat, path-safe leaf so `sys_write` auto-creates the DT_REG without needing
+/// intermediate directories.
+fn cursor_path_for(agent_id: &str) -> String {
+    let safe: String = agent_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("/.cohost-cursor-{safe}")
+}
+
+/// Read the persisted cursor (a decimal offset). Any failure — path unmounted,
+/// not-yet-created, or unparsable — yields 0, i.e. start from the inbox head.
+fn load_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext) -> u64 {
+    kernel
+        .sys_read(path, ctx, 0, 0)
+        .ok()
+        .and_then(|r| r.data)
+        .and_then(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Overwrite the persisted cursor with `offset`. Best-effort: a write failure
+/// only weakens the no-replay guarantee (never correctness), so it is ignored.
+fn save_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext, offset: u64) {
+    let _ = kernel.sys_write(path, ctx, offset.to_string().as_bytes(), 0);
+}
+
 // Loop tests live under `runtime/tests/spawn_task.rs` as an integration
 // test binary so they can compile without bringing in the rest of the
 // lib's test target. The pure `Mailbox` routing is unit-tested inline.
@@ -391,5 +493,19 @@ mod tests {
         assert_eq!(mb.self_id(), "scode");
         // LocalStream replies on the shared stream regardless of sender.
         assert_eq!(mb.reply_path("anyone"), "/proc/7/chat-with-me");
+    }
+
+    #[test]
+    fn cohost_prompt_teaches_reply_to_sender_via_send_message() {
+        let section = super::cohost_a2a_prompt_section("chatbot");
+        // Names the agent so the model knows its own identity …
+        assert!(section.contains("chatbot"));
+        // … names the ONLY reply path …
+        assert!(section.contains("send_message"));
+        // … mirrors the `[message from <sender>]` framing `run_loop` emits …
+        assert!(section.contains("[message from <sender>]"));
+        // … and encodes the fix: reply target is the sender, never a word
+        // lifted from the message body (the exact mistake this prevents).
+        assert!(section.contains("never a word copied"));
     }
 }

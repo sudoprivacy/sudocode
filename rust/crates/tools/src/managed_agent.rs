@@ -3,7 +3,8 @@
 //! Constructs the `ApiClient`, `ToolExecutor`, `SystemPrompt`, and
 //! `PermissionPolicy` dependencies from the `AgentDescriptor` metadata
 //! and calls `runtime::spawn_task::spawn_task` to launch the full LLM
-//! loop. The nexus cdylib's `SudoCodeSpawnAdapter` calls this.
+//! loop. The co-located [`SudoCodeSpawnAdapter`] (this file) wraps it as a
+//! `managed_agent::SpawnTask` that nexus injects at boot.
 //!
 //! Lives in the `tools` crate because it needs both the `api` crate
 //! (for `ProviderClient` / `resolve_provider_from_config`) and the
@@ -14,13 +15,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::spawn_task::{
-    mailbox_sender, AgentDescriptor, AgentLoopState, KernelSyscall, Mailbox, MailboxSender,
-    SpawnHandle,
+    cohost_a2a_prompt_section, handle_send_message, mailbox_sender, AgentDescriptor, AgentState,
+    KernelSyscall, Mailbox, MailboxSender, SpawnHandle,
 };
 use runtime::{
-    FsBackend, KernelFsBackend, ModelFamilyIdentity, PermissionMode, PermissionPolicy,
-    SystemPromptBuilder, ToolError, ToolExecutor,
+    FsBackend, KernelFsBackend, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
+    ToolExecutor,
 };
 
 use crate::{execute_tool_with_backend, ProviderRuntimeClient};
@@ -34,7 +36,7 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Spawn a managed-agent loop with the full ConversationRuntime.
 ///
-/// The caller (nexus cdylib `SudoCodeSpawnAdapter`) invokes this after
+/// The caller ([`SudoCodeSpawnAdapter`], below) invokes this after
 /// `register_proc_entry` stamps the per-pid procfs subtree.
 ///
 /// # Arguments
@@ -54,7 +56,7 @@ pub fn spawn_managed_agent<K, F>(
 ) -> SpawnHandle
 where
     K: KernelSyscall + Send + Sync + 'static,
-    F: Fn(AgentLoopState) + Send + 'static,
+    F: Fn(AgentState) + Send + 'static,
 {
     let model = desc
         .labels
@@ -99,9 +101,13 @@ where
     // routes through the mailbox sender. --
     let tool_executor = ManagedToolExecutor { fs, send };
 
-    // -- SystemPrompt: minimal prompt for managed-agent context --
+    // -- SystemPrompt: base managed-agent prompt + the A2A reply contract, so
+    // the co-hosted model addresses its reply to the message's `<sender>` via
+    // `send_message` instead of guessing a recipient from the message text. The
+    // contract text lives in `spawn_task` next to the `[message from …]` framing
+    // and the `send_message` reply path it describes. --
     let system_prompt = SystemPromptBuilder::new()
-        .with_model_family(ModelFamilyIdentity::Claude)
+        .append_section(cohost_a2a_prompt_section(&desc.name))
         .build();
 
     // -- PermissionPolicy: managed agents run with full access --
@@ -141,20 +147,13 @@ impl ToolExecutor for ManagedToolExecutor {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
 
-        // `send_message` is the co-host's deliberate-reply path — a quick
-        // in-process mailbox write bound to THIS agent's identity, not a file
-        // op, so it routes through the mailbox sender, not the fs backend.
+        // `send_message` is the deliberate-reply path — an in-process mailbox
+        // write bound to THIS agent's identity, not a file op. Routed through
+        // the SHARED handler the standalone CLI executor also uses; only the
+        // sender differs (this is the in-process kernel sender, standalone is
+        // the gRPC sender).
         if tool_name == "send_message" {
-            let to = input_value
-                .get("to")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::new("send_message requires a string 'to'"))?;
-            let body = input_value
-                .get("body")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::new("send_message requires a string 'body'"))?;
-            (self.send)(to, body).map_err(ToolError::new)?;
-            return Ok(format!("message delivered to {to}"));
+            return handle_send_message(&self.send, input).map_err(ToolError::new);
         }
 
         // Offload the blocking in-process syscall to the blocking pool so a
@@ -169,5 +168,60 @@ impl ToolExecutor for ManagedToolExecutor {
         })
         .await
         .map_err(|e| ToolError::new(format!("tool task join error: {e}")))?
+    }
+}
+
+/// The `SpawnTask` provider that hosts a `sudocode` agent loop as a nexus
+/// managed-agent runtime body — the co-host seam.
+///
+/// `ManagedAgentService` (nexus-vfs) calls [`SpawnTask::spawn`] after planting
+/// the per-pid procfs subtree; this impl builds the sudocode
+/// `ConversationRuntime` loop via [`spawn_managed_agent`] and binds it to the
+/// agent's REPLICATED A2A inbox `/agents/<name>/chat-with-me` (raft-replicated
+/// when federated), so two co-hosted agents on different hosts converse over
+/// A2A with no bridge/relay.
+///
+/// Lives here — next to [`spawn_managed_agent`], the loop it wraps — rather
+/// than at the nexus binary edge: the adapter IS sudocode's. nexus only injects
+/// `Arc::new(SudoCodeSpawnAdapter)` at boot via
+/// `managed_agent::install_managed_agent_with_spawn`. There is NO enum map:
+/// both `spawn_managed_agent`'s `state_callback` and `SpawnTask`'s observer
+/// speak `kernel::AgentState` directly (the SSOT).
+pub struct SudoCodeSpawnAdapter;
+
+impl<K> SpawnTask<K> for SudoCodeSpawnAdapter
+where
+    K: KernelSyscall + Send + Sync + 'static,
+{
+    fn spawn(
+        &self,
+        kernel: Arc<K>,
+        desc: AgentDescriptor,
+        state_observer: Arc<dyn Fn(AgentState) + Send + Sync>,
+    ) -> Box<dyn ManagedSpawnHandle> {
+        // The co-host agent's mailbox is its persistent, cross-machine A2A
+        // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
+        // host addresses it by name; raft replicates the reply back.
+        let mailbox = Mailbox::A2aInbox {
+            base: "/agents".to_string(),
+            self_name: desc.name.clone(),
+        };
+        let handle = spawn_managed_agent(kernel, desc, mailbox, move |state| state_observer(state));
+        Box::new(SudoCodeSpawnHandle { inner: handle })
+    }
+}
+
+/// Wraps sudocode's [`SpawnHandle`] so the managed-agent service sees only the
+/// abort capability its `on_terminate` observer needs. `abort` signals the
+/// loop's shared `HookAbortSignal`; the worker thread observes it and exits on
+/// its next poll (idempotent — the observer may fire concurrently with an
+/// in-flight `cancel(Session)`).
+struct SudoCodeSpawnHandle {
+    inner: SpawnHandle,
+}
+
+impl ManagedSpawnHandle for SudoCodeSpawnHandle {
+    fn abort(&self) {
+        self.inner.abort_signal.abort();
     }
 }

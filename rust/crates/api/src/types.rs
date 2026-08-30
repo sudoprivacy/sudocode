@@ -2,6 +2,35 @@ use runtime::{parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCos
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Top-level request-body fields that sudocode computes itself.
+///
+/// Per-model `extraBody` (`models.<alias>.extraBody` in `sudocode.json`) is
+/// additive: it may add fields the payload builder did not emit, but it can
+/// never take one of these over. The list is the union across wire formats
+/// (`OpenAI` chat completions / responses, Anthropic messages) so the rule
+/// reads the same regardless of which provider a model routes to.
+pub const RESERVED_REQUEST_BODY_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "input",
+    "system",
+    "instructions",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
+];
+
+/// Whether `key` is a request-body field sudocode owns — see
+/// [`RESERVED_REQUEST_BODY_KEYS`].
+#[must_use]
+pub fn is_reserved_request_body_key(key: &str) -> bool {
+    RESERVED_REQUEST_BODY_KEYS.contains(&key)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MessageRequest {
     pub model: String,

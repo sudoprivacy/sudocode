@@ -530,6 +530,7 @@ async fn provider_client_dispatches_anthropic_requests() {
         base_url: server.base_url(),
         credential: Credential::ApiKey("test-key".to_string()),
         model_id: "claude-sonnet-4-6".to_string(),
+        extra_body: serde_json::Map::new(),
     };
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("anthropic provider client should be constructed");

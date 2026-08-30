@@ -184,7 +184,7 @@ fn oversized_tool_output_offloads_onto_the_vfs() {
         .with_fs_backend(Arc::clone(&fs));
 
     let id = "toolu_vfs_1";
-    let body = "L".repeat(40_000); // > the 16 KiB offload threshold
+    let body = "L".repeat(40_000); // > the 30 000-byte bash offload threshold
     let (path, size) = session
         .offload_tool_result(id, body.as_bytes())
         .expect("offload should write to the VFS");

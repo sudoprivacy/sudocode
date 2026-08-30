@@ -4839,6 +4839,7 @@ dependencies = [
  "kernel",
  "managed-agent",
  "plugins",
+ "regex",
  "reqwest",
  "runtime",
  "serde",

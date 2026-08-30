@@ -21,6 +21,7 @@ your first contribution.
 - [Design principles you must respect](#design-principles-you-must-respect)
 - [Test policy](#test-policy)
 - [Parity work — standing rule](#parity-work--standing-rule)
+- [Experimental features — standing rule](#experimental-features--standing-rule)
 - [Project Layout](#project-layout)
 - [Prerequisites](#prerequisites)
 - [Building](#building)
@@ -153,6 +154,40 @@ decisions follow. Design write-ups live in
 When a plan ships or is superseded, remove its content from
 `sudo-code-roadmap.html` in the same PR; ROADMAP tracks the live state, not
 history.
+
+## Experimental features — standing rule
+
+Every feature that is still experimental — not yet a committed part
+of the product surface, still being validated, or built ahead of the
+host that will use it — ships behind a **feature flag**, OFF by
+default. No hidden env-var-only switches, no "it's harmless because
+nothing triggers it": if it's experimental, it's flagged.
+
+The mechanism is `runtime::experiments`:
+
+- **Register** the flag as an `Experiment` variant (one enum, the
+  single registry) and mirror its key in `config_schema`'s
+  `EXPERIMENTAL_CHILDREN` so `settings.json` validation knows it.
+- **Enable** via `"experimental": {"<flagKey>": true}` in any
+  settings scope, or `SUDOCODE_EXPERIMENT_<UPPER_SNAKE>=1` in the
+  environment (env wins; an explicit `0`/`false` force-disables).
+  Unknown keys under `experimental` are a load error — a typo must
+  fail loud, not silently leave the experiment off.
+- **Gate** every consumer through
+  `experiments::is_enabled(Experiment::<Name>)` — never a raw
+  `std::env::var` check.
+- **Graduate** by deleting the flag and the dead branch in one PR —
+  never by flipping the default to `true`. If the experiment fails,
+  the flag's removal deletes the feature with it.
+
+This does not conflict with the "no hiding shipped features behind
+config" bright line above: that rule is about *finished* behavior;
+this rule is about features that are explicitly not finished. The
+flag is the boundary between the two — and it must be temporary.
+
+Current experiments are enumerated in
+[`rust/crates/runtime/src/experiments.rs`](./rust/crates/runtime/src/experiments.rs);
+that file is the SSOT, not this doc.
 
 ## Project Layout
 

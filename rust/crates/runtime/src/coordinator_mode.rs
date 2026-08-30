@@ -15,10 +15,13 @@
 //! `getCoordinatorUserContext` in coordinatorMode.ts). A hard gate can
 //! be layered on later if analytics show model drift.
 //!
-//! ## Environment
+//! ## Enabling
 //!
-//! - `SUDOCODE_COORDINATOR_MODE` — set to `1`, `true`, `on`, or `yes`
-//!   (case-insensitive) to enable. Anything else, or unset, disables.
+//! Coordinator mode is an experimental feature flag (see
+//! [`crate::experiments`]): enable via
+//! `"experimental": {"coordinatorMode": true}` in settings, or the
+//! `SUDOCODE_COORDINATOR_MODE` / `SUDOCODE_EXPERIMENT_COORDINATOR_MODE`
+//! env vars (truthy: `1`, `true`, `on`, `yes`, case-insensitive).
 
 use std::collections::BTreeSet;
 
@@ -33,8 +36,8 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 /// Mirrors CC-fork's `INTERNAL_WORKER_TOOLS` restriction — the
 /// coordinator's job is to orchestrate workers, not to execute
 /// write-side work itself. Every write tool (`bash`, `write_file`,
-/// `edit_file`, `PowerShell`, `REPL`, `EnterPlanMode`,
-/// `ExitPlanMode`, `NotebookEdit`) is intentionally excluded so a
+/// `edit_file`, `PowerShell`, `EnterPlanMode`,
+/// `ExitPlanMode`) is intentionally excluded so a
 /// non-compliant model that tries them gets an instructive error
 /// pointing back to `Agent(...)`. Read-only tools (`read_file`,
 /// `glob_search`, `grep_search`, `WebSearch`, `WebFetch`) remain
@@ -68,9 +71,7 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         // Coordinator's own bookkeeping
         "TaskCreate",
         "TaskUpdate",
-        "TaskList",
         "AskUserQuestion",
-        "SendUserMessage",
         "StructuredOutput",
         "ToolSearch",
     ]
@@ -91,20 +92,14 @@ pub fn is_tool_allowed_in_coordinator_mode(tool_name: &str) -> bool {
     coordinator_allowed_tools().contains(tool_name)
 }
 
-/// Return `true` when coordinator mode is enabled via env var.
-///
-/// Recognized truthy values (case-insensitive): `1`, `true`, `on`,
-/// `yes`. Empty / unset / anything else is `false` — same shape as
-/// CC-fork's `isEnvTruthy()`.
+/// Return `true` when the `coordinatorMode` experiment is enabled —
+/// via the legacy `SUDOCODE_COORDINATOR_MODE` env var, the generic
+/// `SUDOCODE_EXPERIMENT_COORDINATOR_MODE` env var, or
+/// `"experimental": {"coordinatorMode": true}` in settings. See
+/// [`crate::experiments`] for the precedence order.
 #[must_use]
 pub fn is_coordinator_mode() -> bool {
-    match std::env::var(COORDINATOR_ENV_VAR) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        ),
-        Err(_) => false,
-    }
+    crate::experiments::is_enabled(crate::experiments::Experiment::CoordinatorMode)
 }
 
 /// The coordinator role + workflow system prompt. Ported near-verbatim
@@ -145,7 +140,7 @@ Every message you send is to the user. Worker results and system notifications a
 - **TaskGet** - Fetch a running worker's metadata by `task_id`
 - **TaskOutput** - Read a running or completed worker's output by `task_id`
 
-Write tools (`bash`, `write_file`, `edit_file`, `NotebookEdit`, `PowerShell`, `REPL`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `Agent(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
+Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `Agent(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 
 When calling Agent:
 - Do not use one worker to check on another. Workers will notify you when they are done.
@@ -207,7 +202,7 @@ You:
 
 When calling Agent, use subagent_type `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
 
-Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, TaskList, ToolSearch, NotebookEdit, Sleep, StructuredOutput, REPL, PowerShell, SendUserMessage, Config), MCP tools from configured MCP servers, and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
+Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, TaskList, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
 
 ## 4. Task Workflow
 

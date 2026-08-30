@@ -177,6 +177,9 @@ pub struct RuntimeFeatureConfig {
     trusted_roots: Vec<String>,
     /// Enable extended thinking for models that support it (default: true).
     thinking: bool,
+    /// `experimental` section: feature-flag key -> enabled. Keys are
+    /// validated against `crate::experiments::Experiment` at parse time.
+    experiments: BTreeMap<String, bool>,
 }
 
 /// Ordered chain of fallback model identifiers used when the primary
@@ -449,6 +452,7 @@ impl ConfigLoader {
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
             trusted_roots: parse_optional_trusted_roots(&merged_value)?,
             thinking: parse_optional_thinking(&merged_value),
+            experiments: parse_optional_experiments(&merged_value)?,
         };
 
         Ok(RuntimeConfig {
@@ -521,6 +525,12 @@ impl RuntimeConfig {
     #[must_use]
     pub fn feature_config(&self) -> &RuntimeFeatureConfig {
         &self.feature_config
+    }
+
+    /// The parsed `experimental` settings section (flag key -> enabled).
+    /// Feed this to `crate::experiments::init_config_flags` at startup.
+    pub fn experiments(&self) -> &BTreeMap<String, bool> {
+        &self.feature_config.experiments
     }
 
     #[must_use]
@@ -1059,6 +1069,44 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
 }
 
 /// Parse `thinking` from settings. Default is `true` (enabled).
+/// Parse the `experimental` section: an object of `key: bool` pairs.
+/// Unknown keys are rejected (fail loud — a typo silently leaving an
+/// experiment off is the failure mode this exists to prevent); known
+/// keys with non-bool values are a parse error too.
+fn parse_optional_experiments(root: &JsonValue) -> Result<BTreeMap<String, bool>, ConfigError> {
+    let Some(section) = root
+        .as_object()
+        .and_then(|object| object.get("experimental"))
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(entries) = section.as_object() else {
+        return Err(ConfigError::Parse(String::from(
+            "settings `experimental` must be an object of {\"flag\": bool}",
+        )));
+    };
+    let known: Vec<&str> = crate::experiments::Experiment::ALL
+        .iter()
+        .map(|experiment| experiment.key())
+        .collect();
+    let mut flags = BTreeMap::new();
+    for (key, value) in entries {
+        if !known.contains(&key.as_str()) {
+            return Err(ConfigError::Parse(format!(
+                "settings `experimental.{key}` is not a known experiment (known: {})",
+                known.join(", ")
+            )));
+        }
+        let Some(enabled) = value.as_bool() else {
+            return Err(ConfigError::Parse(format!(
+                "settings `experimental.{key}` must be a boolean"
+            )));
+        };
+        flags.insert(key.clone(), enabled);
+    }
+    Ok(flags)
+}
+
 fn parse_optional_thinking(root: &JsonValue) -> bool {
     root.as_object()
         .and_then(|object| object.get("thinking"))

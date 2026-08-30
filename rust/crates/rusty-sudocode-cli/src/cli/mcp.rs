@@ -24,7 +24,15 @@ impl RuntimeMcpState {
         plugin_load_outcome: &PluginLoadOutcome,
         session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
     ) -> Result<Option<(Self, runtime::McpToolDiscoveryReport)>, Box<dyn std::error::Error>> {
-        let mut servers = merged_mcp_servers(runtime_config, plugin_load_outcome)?;
+        // Config/plugin MCP servers are behind the `mcpConfigServers`
+        // experiment while the MCP tool surface is re-vetted.
+        // Session-injected servers (ACP `session/new` mcpServers) are an
+        // explicit per-session request from the client, so they always apply.
+        let mut servers = if mcp_tools_enabled() {
+            merged_mcp_servers(runtime_config, plugin_load_outcome)?
+        } else {
+            BTreeMap::new()
+        };
         apply_session_mcp_servers(&mut servers, session_mcp);
         let mut manager = McpServerManager::from_servers(&servers);
         if manager.server_names().is_empty() && manager.unsupported_servers().is_empty() {
@@ -398,6 +406,16 @@ pub(crate) fn build_runtime_mcp_state(
     }
 
     Ok((Some(Arc::new(Mutex::new(mcp_state))), runtime_tools))
+}
+
+/// Whether config/plugin MCP servers are spawned and their tools advertised
+/// to the model. This is the `mcpConfigServers` experiment (default OFF):
+/// enable via `"experimental": {"mcpConfigServers": true}` in settings or
+/// the `SUDOCODE_ENABLE_MCP` / `SUDOCODE_EXPERIMENT_MCP_CONFIG_SERVERS`
+/// env vars. Session-injected MCP servers are unaffected, as is the
+/// `scode mcp` / `/mcp` config surface.
+fn mcp_tools_enabled() -> bool {
+    runtime::experiments::is_enabled(runtime::experiments::Experiment::McpConfigServers)
 }
 
 pub(crate) fn mcp_runtime_tool_definition(tool: &runtime::ManagedMcpTool) -> RuntimeToolDefinition {

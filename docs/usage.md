@@ -73,7 +73,7 @@ scode system-prompt --append-system-prompt "Never push to main."
 ```
 
 `--system-prompt` swaps out the static blocks (`You are Sudo Code…`,
-`# System`, `# Doing tasks`, …); `--append-system-prompt` adds a trailing
+`# System`, `# Working`, …); `--append-system-prompt` adds a trailing
 block after the workspace context (environment, `AGENTS.md`, auto-memory).
 Neither is truncated or escaped, and the workspace context is always kept.
 Both are global flags, so they also apply to `scode acp` as the process

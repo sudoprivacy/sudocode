@@ -390,7 +390,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "effort",
         aliases: &[],
         summary: "Set the effort level for responses",
-        argument_hint: Some("[low|medium|high]"),
+        argument_hint: Some("[none|minimal|low|medium|high]"),
         resume_supported: true,
     },
     SlashCommandSpec {

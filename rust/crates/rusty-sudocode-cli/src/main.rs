@@ -37,11 +37,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    base_url_for_mode, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
-    AuthMode, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
-    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    base_url_for_mode, resolve_startup_auth_source, AnthropicClient, AuthMode, AuthSource,
+    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
+    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 
 use cli::api_client::{
@@ -468,9 +467,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::PrintSystemPrompt {
             cwd,
             date,
-            model,
             output_format,
-        } => print_system_prompt(cwd, date, &model, output_format)?,
+        } => print_system_prompt(cwd, date, output_format)?,
         CliAction::Version { output_format } => print_version(output_format)?,
         CliAction::ResumeSession {
             session_path,
@@ -647,6 +645,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Help { output_format } => print_help(output_format)?,
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
+        CliAction::Update {
+            version,
+            check,
+            yes,
+        } => cli::update::run(version, check, yes)?,
     }
     Ok(())
 }
@@ -850,16 +853,9 @@ fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn st
 fn print_system_prompt(
     cwd: PathBuf,
     date: String,
-    model: &str,
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut prompt = load_system_prompt(
-        cwd.clone(),
-        date,
-        env::consts::OS,
-        "unknown",
-        resolve_model_identity(model),
-    )?;
+    let mut prompt = load_system_prompt(cwd.clone(), date, env::consts::OS, "unknown")?;
     // Coordinator mode: when SUDOCODE_COORDINATOR_MODE is set,
     // prepend the CC-fork coordinator role prompt so `scode
     // print-system-prompt` reflects what the runtime would send.
@@ -2735,7 +2731,7 @@ impl AcpCliAgent {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let session_state = new_cli_session_for(&cwd)
             .map_err(|error| AcpError::internal(format!("failed to create session: {error}")))?;
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id).map_err(
@@ -2869,7 +2865,7 @@ impl AcpCliAgent {
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
         let auth_mode = resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-        let system_prompt = build_acp_system_prompt(&cwd, &resolved, &session.prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
         let mut runtime = build_runtime_for_cwd(
             &cwd,
             cloned_session,
@@ -3485,7 +3481,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &model, &prompt_overrides)?;
+        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let sudocode_config =
             require_sudocode_config_for_cwd(&cwd).map_err(runtime::AcpError::internal)?;
         let auth_mode =
@@ -4059,7 +4055,7 @@ impl LiveCli {
         permission_mode: PermissionMode,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let system_prompt = build_system_prompt(&model)?;
+        let system_prompt = build_system_prompt()?;
         let session_state = new_cli_session()?;
         let session = create_managed_session_handle(&session_state.session_id)?;
         let cwd = env::current_dir()?;
@@ -4520,7 +4516,11 @@ impl LiveCli {
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    ui.set_turn_result(&format_turn_status_line_with_branch(
+                    // The status line is part of the transcript: printed
+                    // once, in order, above the next prompt. Keeping a copy
+                    // in the sticky footer as well meant it showed twice
+                    // whenever the footer was redrawn under new scrollback.
+                    output.println(&format_turn_status_line_with_branch(
                         &self.config.model,
                         turns,
                         &usage,
@@ -4880,11 +4880,11 @@ impl LiveCli {
             | SlashCommand::OutputStyle { .. }
             | SlashCommand::AddDir { .. } => {
                 let cmd_name = command.slash_name();
-                eprintln!("{cmd_name} is not yet implemented in this build.");
+                self.out_println(format!("{cmd_name} is not yet implemented in this build."));
                 false
             }
             SlashCommand::Unknown(name) => {
-                eprintln!("{}", format_unknown_slash_command(&name));
+                self.out_println(format_unknown_slash_command(&name));
                 false
             }
         })
@@ -4935,7 +4935,7 @@ impl LiveCli {
         let limit = match parse_history_count(count) {
             Ok(limit) => limit,
             Err(message) => {
-                eprintln!("{message}");
+                self.out_println(message);
                 return;
             }
         };
@@ -5017,9 +5017,8 @@ impl LiveCli {
         session.model = Some(model.clone());
         let session_id = self.session.id.clone();
         let message_count = session.messages.len();
-        // Rebuild system prompt so the model identity line reflects the new model.
         let cwd = env::current_dir().unwrap_or_default();
-        let system_prompt = build_system_prompt_for(&cwd, &model)?;
+        let system_prompt = build_system_prompt_for(&cwd)?;
         let runtime = self.build_replacement_runtime(
             session,
             session_id,
@@ -5195,7 +5194,7 @@ impl LiveCli {
         match key {
             "auto-interrupt" | "autoInterrupt" => {
                 let Some(on) = parse_on_off(value) else {
-                    eprintln!("Usage: /config set auto-interrupt on|off");
+                    self.out_println("Usage: /config set auto-interrupt on|off");
                     return Ok(());
                 };
                 if let Some(shared) = &self.shared_queue_mode {
@@ -5874,8 +5873,8 @@ fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_jso
     })
 }
 
-fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
-    build_system_prompt_for(&env::current_dir()?, model)
+fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+    build_system_prompt_for(&env::current_dir()?)
 }
 
 /// ACP variant of [`build_system_prompt_for`]: builds the process-default
@@ -5887,10 +5886,9 @@ fn build_system_prompt(model: &str) -> Result<SystemPrompt, Box<dyn std::error::
 /// plugins) stay, so the caller's prompt still knows where it is running.
 fn build_acp_system_prompt(
     cwd: &Path,
-    model: &str,
     prompt_overrides: &runtime::SystemPromptOverrides,
 ) -> Result<SystemPrompt, AcpError> {
-    let mut prompt = build_system_prompt_for(cwd, model)
+    let mut prompt = build_system_prompt_for(cwd)
         .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
     prompt_overrides.apply(&mut prompt);
     Ok(prompt)
@@ -5909,10 +5907,7 @@ fn apply_cli_prompt_overrides(prompt: &mut SystemPrompt) {
     }
 }
 
-fn build_system_prompt_for(
-    cwd: &Path,
-    model: &str,
-) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     // Use the local date at session-start time (not the build date baked
     // into DEFAULT_DATE) so the cacheable system prompt reflects when the
     // user actually started talking. ConversationRuntime separately tracks
@@ -5923,7 +5918,6 @@ fn build_system_prompt_for(
         runtime::today_local(),
         env::consts::OS,
         "unknown",
-        resolve_model_identity(model),
     )?;
     // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
     // set, prepend the ported CC-fork coordinator role prompt so it
@@ -5932,27 +5926,6 @@ fn build_system_prompt_for(
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     apply_cli_prompt_overrides(&mut prompt);
     Ok(prompt)
-}
-
-/// Resolve model identity for the system prompt from sudocode.json SSOT.
-///
-/// Looks up `models.<id>.name` in the loaded config; falls back to the
-/// provider-based enum identity if no entry exists.
-fn resolve_model_identity(model: &str) -> runtime::ModelFamilyIdentity {
-    let config = load_sudocode_config_for_current_dir();
-    // Try exact match by alias key.
-    if let Some(entry) = config.models.get(model) {
-        return runtime::ModelFamilyIdentity::Named(entry.name.clone());
-    }
-    // Case-insensitive alias search.
-    let lower = model.to_ascii_lowercase();
-    for entry in config.models.values() {
-        if entry.alias.eq_ignore_ascii_case(model) || entry.name.to_ascii_lowercase() == lower {
-            return runtime::ModelFamilyIdentity::Named(entry.name.clone());
-        }
-    }
-    // Fallback: use model ID as display name (better than a generic label).
-    runtime::ModelFamilyIdentity::Named(model.to_string())
 }
 
 fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
@@ -6929,6 +6902,7 @@ mod auth_mode_tests {
             name: alias.to_string(),
             input: vec!["text".to_string()],
             providers,
+            ..Default::default()
         }
     }
 

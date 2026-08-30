@@ -17,7 +17,7 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, RESET};
+use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
 use crate::repl_ui::OutputSender;
 use std::sync::Arc;
 
@@ -397,16 +397,10 @@ impl CliStreamState {
                         s.add_response_bytes(thinking.len() as u32);
                     }
                     if !self.block_has_thinking_summary {
-                        self.pause_output();
-                        render_thinking_block_summary(out, None, false)?;
+                        // Thinking is not surfaced in the transcript at all;
+                        // the spinner's "Reasoning..." mode is the only cue.
                         self.block_has_thinking_summary = true;
-                        self.glyph_state.visible_col = 0;
-                        // Switch the spinner to its "Reasoning..." mode for
-                        // the remainder of this thinking block and let it
-                        // run, so the user sees a live indicator instead of
-                        // a silent stall.
                         self.set_thinking_indicator(true);
-                        self.resume_output();
                     }
                     push_thinking_event(&mut self.buffer, thinking, None);
                 }
@@ -743,23 +737,6 @@ pub(crate) fn max_tokens_for_model(model: &str) -> u32 {
     api::max_tokens_for_model(model)
 }
 
-pub(crate) fn render_thinking_block_summary(
-    out: &mut (impl Write + ?Sized),
-    char_count: Option<usize>,
-    redacted: bool,
-) -> Result<(), RuntimeError> {
-    let summary = if redacted {
-        "\n  ▼ Thinking block hidden by provider\n".to_string()
-    } else if let Some(char_count) = char_count {
-        format!("\n  ▼ Thinking ({char_count} chars hidden)\n")
-    } else {
-        "\n  ▼ Thinking hidden\n".to_string()
-    };
-    write!(out, "{summary}")
-        .and_then(|()| out.flush())
-        .map_err(|error| RuntimeError::new(error.to_string()))
-}
-
 /// Stateful processor that prefixes the first line with ⏺ (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
 /// exclusively for status glyphs. Hard-wraps text at the terminal width so
@@ -890,13 +867,15 @@ pub(crate) fn push_output_block(
             thinking,
             signature,
         } => {
-            render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
-            *block_has_thinking_summary = true;
-            glyph_state.visible_col = 0;
+            // Thinking is never rendered into the transcript (a complete
+            // block, a streamed opening, or a redacted one alike); the
+            // spinner's "Reasoning..." mode is the only cue.
+            if !thinking.is_empty() {
+                *block_has_thinking_summary = true;
+            }
             push_thinking_event(events, thinking, signature);
         }
         OutputContentBlock::RedactedThinking { .. } => {
-            render_thinking_block_summary(out, None, true)?;
             *block_has_thinking_summary = true;
             glyph_state.visible_col = 0;
         }

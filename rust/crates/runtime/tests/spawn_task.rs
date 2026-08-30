@@ -23,8 +23,8 @@ use runtime::spawn_task::{
     mailbox_sender, spawn_task, Mailbox, MailboxEnvelope, MailboxSender, SpawnHandle,
 };
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ModelFamilyIdentity,
-    PermissionMode, PermissionPolicy, RuntimeError, SystemPromptBuilder, ToolError, ToolExecutor,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, PermissionMode, PermissionPolicy,
+    RuntimeError, SystemPromptBuilder, ToolError, ToolExecutor,
 };
 
 const DT_STREAM: i32 = 4;
@@ -231,9 +231,7 @@ fn make_desc(pid: &str, name: &str) -> AgentDescriptor {
 /// Spawn the REAL `run_loop` (via `spawn_task`) with the scripted mock —
 /// the exact loop the co-host runs, minus the network provider.
 fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> SpawnHandle {
-    let system_prompt = SystemPromptBuilder::new()
-        .with_model_family(ModelFamilyIdentity::Claude)
-        .build();
+    let system_prompt = SystemPromptBuilder::new().build();
     spawn_task(
         kernel,
         desc,
@@ -256,9 +254,7 @@ fn spawn_sending(
     reply_to: &str,
     reply_body: &str,
 ) -> SpawnHandle {
-    let system_prompt = SystemPromptBuilder::new()
-        .with_model_family(ModelFamilyIdentity::Claude)
-        .build();
+    let system_prompt = SystemPromptBuilder::new().build();
     let send = mailbox_sender(
         Arc::clone(&kernel),
         mailbox.clone(),

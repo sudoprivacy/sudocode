@@ -38,39 +38,9 @@ impl From<ConfigError> for PromptBuildError {
 
 /// Marker separating static prompt scaffolding from dynamic runtime context.
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
-/// Human-readable label used for the "Model family" environment bullet
-/// when the provider is Anthropic.
-/// Fallback label when no model-specific display name is available.
-pub const FRONTIER_MODEL_NAME: &str = "Claude";
 
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
-
-/// Identity for the "Model family" line in the system prompt environment section.
-///
-/// `Named(display_name)` is preferred — it carries the human-readable name
-/// from `sudocode.json` (e.g. "Claude Opus 4.8", "GPT 5.4").
-/// The legacy `Claude` / `Generic` variants are fallbacks when the caller
-/// cannot resolve a display name.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum ModelFamilyIdentity {
-    /// Model with a known display name (from sudocode.json SSOT).
-    Named(String),
-    #[default]
-    Claude,
-    Generic,
-}
-
-impl ModelFamilyIdentity {
-    #[must_use]
-    pub fn family_label(&self) -> &str {
-        match self {
-            Self::Named(name) => name.as_str(),
-            Self::Claude => FRONTIER_MODEL_NAME,
-            Self::Generic => "an AI assistant",
-        }
-    }
-}
 
 /// Structured system prompt with an explicit static/dynamic split.
 ///
@@ -259,7 +229,6 @@ pub struct SystemPromptBuilder {
     output_style_prompt: Option<String>,
     os_name: Option<String>,
     os_version: Option<String>,
-    model_family: Option<ModelFamilyIdentity>,
     append_sections: Vec<String>,
     project_context: Option<ProjectContext>,
     config: Option<RuntimeConfig>,
@@ -282,12 +251,6 @@ impl SystemPromptBuilder {
     pub fn with_os(mut self, os_name: impl Into<String>, os_version: impl Into<String>) -> Self {
         self.os_name = Some(os_name.into());
         self.os_version = Some(os_version.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_model_family(mut self, model_family: ModelFamilyIdentity) -> Self {
-        self.model_family = Some(model_family);
         self
     }
 
@@ -601,16 +564,8 @@ pub fn load_system_prompt(
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
-    model_family: ModelFamilyIdentity,
 ) -> Result<SystemPrompt, PromptBuildError> {
-    load_system_prompt_with(
-        cwd,
-        current_date,
-        os_name,
-        os_version,
-        model_family,
-        &StdFsBackend,
-    )
+    load_system_prompt_with(cwd, current_date, os_name, os_version, &StdFsBackend)
 }
 
 /// Backend-parameterised variant of [`load_system_prompt`].
@@ -619,18 +574,9 @@ pub fn load_system_prompt_with(
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
-    model_family: ModelFamilyIdentity,
     fs: &dyn FsBackend,
 ) -> Result<SystemPrompt, PromptBuildError> {
-    load_system_prompt_impl(
-        cwd,
-        current_date,
-        os_name,
-        os_version,
-        model_family,
-        fs,
-        None,
-    )
+    load_system_prompt_impl(cwd, current_date, os_name, os_version, fs, None)
 }
 
 /// Same as [`load_system_prompt`] but injects the per-agent-type
@@ -648,7 +594,6 @@ pub fn load_system_prompt_for_agent(
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
-    model_family: ModelFamilyIdentity,
     agent_type: &str,
 ) -> Result<SystemPrompt, PromptBuildError> {
     load_system_prompt_impl(
@@ -656,7 +601,6 @@ pub fn load_system_prompt_for_agent(
         current_date,
         os_name,
         os_version,
-        model_family,
         &StdFsBackend,
         Some(agent_type),
     )
@@ -667,7 +611,6 @@ fn load_system_prompt_impl(
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
-    model_family: ModelFamilyIdentity,
     fs: &dyn FsBackend,
     agent_type: Option<&str>,
 ) -> Result<SystemPrompt, PromptBuildError> {
@@ -676,7 +619,6 @@ fn load_system_prompt_impl(
     let config = ConfigLoader::default_for(&cwd).load()?;
     let builder_base = SystemPromptBuilder::new()
         .with_os(os_name, os_version)
-        .with_model_family(model_family)
         .with_project_context(project_context)
         .with_runtime_config(config);
     // Preserves the previous per-branch choice exactly: sub-agent spawns ask
@@ -766,7 +708,7 @@ mod tests {
     use super::{
         collapse_blank_lines, display_context_path, normalize_instruction_content,
         render_instruction_content, render_instruction_files, truncate_instruction_content,
-        ContextFile, ModelFamilyIdentity, ProjectContext, SystemPromptBuilder,
+        ContextFile, ProjectContext, SystemPromptBuilder,
     };
     use crate::config::ConfigLoader;
     use std::fs;
@@ -1073,15 +1015,9 @@ mod tests {
         std::env::set_var("HOME", &root);
         std::env::set_var("SUDO_CODE_CONFIG_HOME", root.join("missing-home"));
         std::env::set_current_dir(&root).expect("change cwd");
-        let prompt = super::load_system_prompt(
-            &root,
-            "2026-03-31",
-            "linux",
-            "6.8",
-            ModelFamilyIdentity::Claude,
-        )
-        .expect("system prompt should load")
-        .render();
+        let prompt = super::load_system_prompt(&root, "2026-03-31", "linux", "6.8")
+            .expect("system prompt should load")
+            .render();
         std::env::set_current_dir(previous).expect("restore cwd");
         if let Some(value) = original_home {
             std::env::set_var("HOME", value);
@@ -1232,7 +1168,6 @@ mod tests {
         };
         let rendered = SystemPromptBuilder::new()
             .with_os("linux", "6.8")
-            .with_model_family(ModelFamilyIdentity::Claude)
             .with_project_context(project_context)
             .render();
         assert!(!rendered.contains("2026-03-31"));

@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 use super::{AuthMode, ProviderKind};
 use crate::error::ApiError;
@@ -49,7 +50,7 @@ pub enum Credential {
 }
 
 /// Fully resolved provider information — everything needed to build a client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedProvider {
     pub kind: ProviderKind,
     pub api_format: ApiFormat,
@@ -57,6 +58,10 @@ pub struct ResolvedProvider {
     pub credential: Credential,
     /// The wire model ID to send to the provider.
     pub model_id: String,
+    /// Per-model extra request-body fields from `models.<alias>.extraBody`.
+    /// Merged additively into the outbound payload by the provider client;
+    /// empty for models that do not configure it.
+    pub extra_body: Map<String, Value>,
 }
 
 /// Token-limit metadata for a wire model ID.
@@ -102,6 +107,13 @@ pub fn model_token_limit_from_config(
 /// while keeping sensible defaults for unknown models.
 #[must_use]
 pub fn max_tokens_for_model(model_id: &str) -> u32 {
+    // An explicit `models.<alias>.maxOutputTokens` is the user's own number
+    // for a model the compiled-in table may not know — take it as written,
+    // above or below the heuristic.
+    if let Some(configured) = runtime::model_capabilities::config_max_output_tokens(model_id) {
+        return configured;
+    }
+
     let heuristic = if model_id.contains("opus") {
         32_000
     } else {
@@ -356,6 +368,7 @@ pub fn resolve_provider_from_config(
         base_url,
         credential,
         model_id: mapping.model.clone(),
+        extra_body: model_config.extra_body.clone(),
     })
 }
 
@@ -399,6 +412,8 @@ fn try_proxy_passthrough(
         base_url,
         credential,
         model_id: model_id.to_string(),
+        // Proxy passthrough has no `models.<alias>` entry to read from.
+        extra_body: Map::new(),
     })
 }
 
@@ -722,6 +737,7 @@ mod tests {
                 name: "Claude Opus 4.6".to_string(),
                 input: vec!["text".to_string()],
                 providers: opus_providers,
+                ..Default::default()
             },
         );
 
@@ -741,6 +757,7 @@ mod tests {
                 name: "Grok 3".to_string(),
                 input: vec!["text".to_string()],
                 providers: grok_providers,
+                ..Default::default()
             },
         );
 
@@ -769,6 +786,7 @@ mod tests {
                 name: "GPT 5.4 Mini".to_string(),
                 input: vec!["text".to_string()],
                 providers: codex_providers,
+                ..Default::default()
             },
         );
 
@@ -855,6 +873,7 @@ mod tests {
                 name: "GPT 5.4".to_string(),
                 input: vec!["text".to_string()],
                 providers: proxy_only_providers,
+                ..Default::default()
             },
         );
 
@@ -874,6 +893,7 @@ mod tests {
                 name: "Custom GPT 5.4".to_string(),
                 input: vec!["text".to_string()],
                 providers: custom_providers,
+                ..Default::default()
             },
         );
 

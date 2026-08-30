@@ -182,6 +182,33 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
     })
 }
 
+/// The system-prompt section that teaches a co-hosted agent the A2A reply
+/// contract it runs under, so the model addresses its reply correctly instead
+/// of guessing a recipient from the message text.
+///
+/// It is the prose counterpart of two mechanisms this module owns and MUST stay
+/// in step with them:
+/// * inbound framing — `run_loop` hands each message to the turn as
+///   `[message from <sender>]\n\n<body>`, so `<sender>` is the reply target;
+/// * the reply path — [`mailbox_sender`] wires the `send_message` tool as the
+///   ONLY way a co-hosted agent replies (writing to the sender's inbox).
+///
+/// Kept next to those two so the wording cannot drift from the framing/tool it
+/// describes. `self_id` is the agent's own name (`Mailbox::self_id`).
+#[must_use]
+pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
+    format!(
+        "# Agent-to-agent messaging\n\
+         You are the agent \"{self_id}\", conversing with other agents by message. \
+         Each message you receive is shown as `[message from <sender>]` followed by \
+         its text. To reply, call the `send_message` tool with `to` set to that \
+         exact `<sender>` name — the agent that messaged you, never a word copied \
+         from the message text — and `body` set to your reply. Calling \
+         `send_message` is the only way to reply; if you do not call it you stay \
+         silent and the conversation ends."
+    )
+}
+
 /// Handle returned by [`spawn_task`].
 pub struct SpawnHandle {
     /// Shared abort signal — wired into the [`ConversationRuntime`] via
@@ -466,5 +493,19 @@ mod tests {
         assert_eq!(mb.self_id(), "scode");
         // LocalStream replies on the shared stream regardless of sender.
         assert_eq!(mb.reply_path("anyone"), "/proc/7/chat-with-me");
+    }
+
+    #[test]
+    fn cohost_prompt_teaches_reply_to_sender_via_send_message() {
+        let section = super::cohost_a2a_prompt_section("chatbot");
+        // Names the agent so the model knows its own identity …
+        assert!(section.contains("chatbot"));
+        // … names the ONLY reply path …
+        assert!(section.contains("send_message"));
+        // … mirrors the `[message from <sender>]` framing `run_loop` emits …
+        assert!(section.contains("[message from <sender>]"));
+        // … and encodes the fix: reply target is the sender, never a word
+        // lifted from the message body (the exact mistake this prevents).
+        assert!(section.contains("never a word copied"));
     }
 }

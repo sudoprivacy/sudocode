@@ -2810,3 +2810,112 @@ async fn acp_session_new_mcp_available_under_allowed_tools() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+/// ACP spec compliance: `tool_call_update` must carry `content` — the field
+/// clients render — and not `rawOutput` alone, which the spec marks as an
+/// optional machine-readable payload. From v0.1.21 through the shipped
+/// v0.1.25 `on_tool_result` filled `rawOutput` only, so every standard ACP
+/// client (Zed, and the downstream apeiron layer, which reads `content` per
+/// spec) saw tool calls complete with no visible output at all.
+///
+/// Asserts both fields ride the same notification and that the content text
+/// is the *verbatim* tool-result string — i.e. re-deriving `rawOutput` from
+/// the content text with the same parse-or-wrap rule the server uses
+/// reproduces `rawOutput` exactly.
+#[tokio::test]
+async fn acp_stdio_tool_call_update_carries_content_and_raw_output() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-tool-call-content");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    // `allow` so bash runs instead of parking the turn on a permission prompt.
+    set_permission_mode(&mut client, &session, "allow").await;
+
+    let prompt_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}bash_stdout_roundtrip")
+                }]
+            }),
+        )
+        .await;
+    let (notifs, resp) = client
+        .recv_until(Duration::from_secs(60), |m| is_response_to(m, prompt_id))
+        .await
+        .unwrap_or_else(|seen| panic!("bash_stdout_roundtrip did not finish; seen: {seen:?}"));
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "turn should complete normally: {resp}"
+    );
+
+    let updates = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session.as_str())
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call_update")
+        })
+        .map(|m| m["params"]["update"].clone())
+        .collect::<Vec<_>>();
+    assert!(
+        !updates.is_empty(),
+        "scenario should emit at least one tool_call_update; notifs: {notifs:?}"
+    );
+
+    let completed = updates
+        .iter()
+        .find(|u| u["status"].as_str() == Some("completed"))
+        .unwrap_or_else(|| panic!("no completed tool_call_update; updates: {updates:?}"));
+
+    let raw_output = &completed["rawOutput"];
+    assert!(
+        !raw_output.is_null(),
+        "rawOutput must stay populated for backward compatibility: {completed}"
+    );
+
+    let content = completed["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool_call_update must carry ACP `content`: {completed}"));
+    assert_eq!(
+        content.len(),
+        1,
+        "one text block per tool result: {completed}"
+    );
+    assert_eq!(
+        content[0]["type"].as_str(),
+        Some("content"),
+        "content block must use the ACP `content` variant: {completed}"
+    );
+    assert_eq!(
+        content[0]["content"]["type"].as_str(),
+        Some("text"),
+        "tool output is emitted as a text content block: {completed}"
+    );
+    let text = content[0]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("text content block must carry `text`: {completed}"));
+    assert!(
+        text.contains("alpha from bash"),
+        "content text should be the bash stdout the model saw, got: {text}"
+    );
+    // Same parse-or-wrap rule the server applies to build rawOutput; equality
+    // proves `text` is the original tool-result string, unreformatted.
+    let rederived: Value =
+        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
+    assert_eq!(
+        &rederived, raw_output,
+        "content text must be the verbatim tool output that rawOutput was built from"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}

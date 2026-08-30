@@ -2122,7 +2122,7 @@ fn message_has_generation_tool_use(message: &ConversationMessage) -> bool {
 fn is_generation_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "write_file" | "edit_file" | "bash" | "REPL" | "PowerShell" | "NotebookEdit"
+        "write_file" | "edit_file" | "bash" | "PowerShell"
     )
 }
 
@@ -2266,9 +2266,6 @@ fn is_concurrency_safe_tool(tool_name: &str) -> bool {
             | "grep_search"
             // Search
             | "ToolSearch"
-            // MCP reads
-            | "ListMcpResources"
-            | "ReadMcpResource"
             // Task reads (CC marks TaskGet read-only; List/Output are symmetric)
             | "TaskGet"
             | "TaskList"

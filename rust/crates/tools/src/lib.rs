@@ -215,8 +215,6 @@ use runtime::{
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
     glob_search, grep_search,
-    lsp_client::LspRegistry,
-    mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     read_file,
     summary_compression::compress_summary_text,
@@ -231,19 +229,6 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-/// Global task registry shared across tool invocations within a session.
-fn global_lsp_registry() -> &'static LspRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<LspRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(LspRegistry::new)
-}
-
-fn global_mcp_registry() -> &'static McpToolRegistry {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<McpToolRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(McpToolRegistry::new)
-}
 
 fn global_cron_registry() -> &'static CronRegistry {
     use std::sync::OnceLock;
@@ -981,23 +966,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "NotebookEdit",
-            description: "Replace, insert, or delete a cell in a Jupyter notebook.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "notebook_path": { "type": "string" },
-                    "cell_id": { "type": "string" },
-                    "new_source": { "type": "string" },
-                    "cell_type": { "type": "string", "enum": ["code", "markdown"] },
-                    "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"] }
-                },
-                "required": ["notebook_path"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
             name: "Sleep",
             description: "Wait for a specified duration without holding a shell process.",
             input_schema: json!({
@@ -1006,27 +974,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "duration_ms": { "type": "integer", "minimum": 0 }
                 },
                 "required": ["duration_ms"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "SendUserMessage",
-            description: "Send a message to the user.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string" },
-                    "attachments": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["normal", "proactive"]
-                    }
-                },
-                "required": ["message", "status"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -1075,21 +1022,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": true
             }),
             required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "REPL",
-            description: "Execute code in a REPL-like subprocess.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string" },
-                    "language": { "type": "string" },
-                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting execution (default 120000)." }
-                },
-                "required": ["code", "language"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "PowerShell",
@@ -1313,9 +1245,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Structured messages CANNOT be broadcast (`to: \"*\"`). ",
                 "Live delivery: `shutdown_request` calls abort() on the target subagent's ",
                 "HookAbortSignal via the process-wide agent-abort registry, so an in-process ",
-                "background subagent stops on its next tool-loop check. Plain-text messages are ",
-                "written to disk for observability but consumption by a running subagent requires ",
-                "the multi-turn subagent loop (deferred)."
+                "background subagent stops on its next tool-loop check. Plain-text messages sent ",
+                "to a running background subagent are picked up by its multi-turn loop at the end ",
+                "of its current turn and become its next user-turn prompt."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1357,77 +1289,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "LSP",
-            description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics).",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["symbols", "references", "diagnostics", "definition", "hover"] },
-                    "path": { "type": "string" },
-                    "line": { "type": "integer", "minimum": 0 },
-                    "character": { "type": "integer", "minimum": 0 },
-                    "query": { "type": "string" }
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "ListMcpResources",
-            description: "List available resources from connected MCP servers.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "server": { "type": "string" }
-                },
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "ReadMcpResource",
-            description: "Read a specific resource from an MCP server by URI.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "server": { "type": "string" },
-                    "uri": { "type": "string" }
-                },
-                "required": ["uri"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "McpAuth",
-            description: "Authenticate with an MCP server that requires OAuth or credentials.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "server": { "type": "string" }
-                },
-                "required": ["server"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
-            name: "MCP",
-            description: "Execute a tool provided by a connected MCP server.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "server": { "type": "string" },
-                    "tool": { "type": "string" },
-                    "arguments": { "type": "object" }
-                },
-                "required": ["server", "tool"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "send_message",
@@ -1614,16 +1475,13 @@ fn execute_tool_with_enforcer(
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, ctx)),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
-        "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
-        "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
         "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
-        "REPL" => from_value::<ReplInput>(input).and_then(|input| run_repl(input, abort_signal)),
         "PowerShell" => {
             // Parse input to get the command for permission classification
             let ps_input: PowerShellInput = from_value(input)?;
@@ -1650,13 +1508,6 @@ fn execute_tool_with_enforcer(
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
         "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
-        "LSP" => from_value::<LspInput>(input).and_then(run_lsp),
-        "ListMcpResources" => {
-            from_value::<McpResourceInput>(input).and_then(run_list_mcp_resources)
-        }
-        "ReadMcpResource" => from_value::<McpResourceInput>(input).and_then(run_read_mcp_resource),
-        "McpAuth" => from_value::<McpAuthInput>(input).and_then(run_mcp_auth),
-        "MCP" => from_value::<McpToolInput>(input).and_then(run_mcp_tool),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -2693,115 +2544,6 @@ pub fn abort_registered_agent(agent_id: &str) -> bool {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_lsp(input: LspInput) -> Result<String, String> {
-    let registry = global_lsp_registry();
-    let action = &input.action;
-    let path = input.path.as_deref();
-    let line = input.line;
-    let character = input.character;
-    let query = input.query.as_deref();
-
-    match registry.dispatch(action, path, line, character, query) {
-        Ok(result) => to_pretty_json(result),
-        Err(e) => to_pretty_json(json!({
-            "action": action,
-            "error": e,
-            "status": "error"
-        })),
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_list_mcp_resources(input: McpResourceInput) -> Result<String, String> {
-    let registry = global_mcp_registry();
-    let server = input.server.as_deref().unwrap_or("default");
-    match registry.list_resources(server) {
-        Ok(resources) => {
-            let items: Vec<_> = resources
-                .iter()
-                .map(|r| {
-                    json!({
-                        "uri": r.uri,
-                        "name": r.name,
-                        "description": r.description,
-                        "mime_type": r.mime_type,
-                    })
-                })
-                .collect();
-            to_pretty_json(json!({
-                "server": server,
-                "resources": items,
-                "count": items.len()
-            }))
-        }
-        Err(e) => to_pretty_json(json!({
-            "server": server,
-            "resources": [],
-            "error": e
-        })),
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_read_mcp_resource(input: McpResourceInput) -> Result<String, String> {
-    let registry = global_mcp_registry();
-    let uri = input.uri.as_deref().unwrap_or("");
-    let server = input.server.as_deref().unwrap_or("default");
-    match registry.read_resource(server, uri) {
-        Ok(resource) => to_pretty_json(json!({
-            "server": server,
-            "uri": resource.uri,
-            "name": resource.name,
-            "description": resource.description,
-            "mime_type": resource.mime_type
-        })),
-        Err(e) => to_pretty_json(json!({
-            "server": server,
-            "uri": uri,
-            "error": e
-        })),
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_mcp_auth(input: McpAuthInput) -> Result<String, String> {
-    let registry = global_mcp_registry();
-    match registry.get_server(&input.server) {
-        Some(state) => to_pretty_json(json!({
-            "server": input.server,
-            "status": state.status,
-            "server_info": state.server_info,
-            "tool_count": state.tools.len(),
-            "resource_count": state.resources.len()
-        })),
-        None => to_pretty_json(json!({
-            "server": input.server,
-            "status": "disconnected",
-            "message": "Server not registered. Use MCP tool to connect first."
-        })),
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_mcp_tool(input: McpToolInput) -> Result<String, String> {
-    let registry = global_mcp_registry();
-    let args = input.arguments.unwrap_or(serde_json::json!({}));
-    match registry.call_tool(&input.server, &input.tool, &args) {
-        Ok(result) => to_pretty_json(json!({
-            "server": input.server,
-            "tool": input.tool,
-            "result": result,
-            "status": "success"
-        })),
-        Err(e) => to_pretty_json(json!({
-            "server": input.server,
-            "tool": input.tool,
-            "error": e,
-            "status": "error"
-        })),
-    }
-}
-
 fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> {
     serde_json::from_value(input.clone()).map_err(|error| error.to_string())
 }
@@ -3295,16 +3037,8 @@ fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
     to_pretty_json(execute_tool_search(input))
 }
 
-fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
-    to_pretty_json(execute_notebook_edit(input)?)
-}
-
 fn run_sleep(input: SleepInput, abort_signal: Option<&HookAbortSignal>) -> Result<String, String> {
     to_pretty_json(execute_sleep(input, abort_signal)?)
-}
-
-fn run_brief(input: BriefInput) -> Result<String, String> {
-    to_pretty_json(execute_brief(input)?)
 }
 
 fn run_config(input: ConfigInput) -> Result<String, String> {
@@ -3321,10 +3055,6 @@ fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {
     to_pretty_json(execute_structured_output(input)?)
-}
-
-fn run_repl(input: ReplInput, abort_signal: Option<&HookAbortSignal>) -> Result<String, String> {
-    to_pretty_json(execute_repl(input, abort_signal)?)
 }
 
 /// Classify `PowerShell` command permission based on command type and path.
@@ -3521,46 +3251,8 @@ struct ToolSearchInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct NotebookEditInput {
-    notebook_path: String,
-    cell_id: Option<String>,
-    new_source: Option<String>,
-    cell_type: Option<NotebookCellType>,
-    edit_mode: Option<NotebookEditMode>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum NotebookCellType {
-    Code,
-    Markdown,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum NotebookEditMode {
-    Replace,
-    Insert,
-    Delete,
-}
-
-#[derive(Debug, Deserialize)]
 struct SleepInput {
     duration_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct BriefInput {
-    message: String,
-    attachments: Option<Vec<String>>,
-    status: BriefStatus,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum BriefStatus {
-    Normal,
-    Proactive,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3588,13 +3280,6 @@ enum ConfigValue {
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 struct StructuredOutputInput(BTreeMap<String, Value>);
-
-#[derive(Debug, Deserialize)]
-struct ReplInput {
-    code: String,
-    language: String,
-    timeout_ms: Option<u64>,
-}
 
 #[derive(Debug, Deserialize)]
 struct PowerShellInput {
@@ -3806,40 +3491,6 @@ struct SendMessageInput {
 /// agent path.
 const TEAM_LEAD_NAME: &str = "team-lead";
 
-#[derive(Debug, Deserialize)]
-struct LspInput {
-    action: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    character: Option<u32>,
-    #[serde(default)]
-    query: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpResourceInput {
-    #[serde(default)]
-    server: Option<String>,
-    #[serde(default)]
-    uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpAuthInput {
-    server: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpToolInput {
-    server: String,
-    tool: String,
-    #[serde(default)]
-    arguments: Option<Value>,
-}
-
 #[derive(Debug, Serialize)]
 struct WebFetchOutput {
     bytes: usize,
@@ -4008,38 +3659,9 @@ pub struct ToolSearchOutput {
 }
 
 #[derive(Debug, Serialize)]
-struct NotebookEditOutput {
-    new_source: String,
-    cell_id: Option<String>,
-    cell_type: Option<NotebookCellType>,
-    language: String,
-    edit_mode: String,
-    error: Option<String>,
-    notebook_path: String,
-    original_file: String,
-    updated_file: String,
-}
-
-#[derive(Debug, Serialize)]
 struct SleepOutput {
     duration_ms: u64,
     message: String,
-}
-
-#[derive(Debug, Serialize)]
-struct BriefOutput {
-    message: String,
-    attachments: Option<Vec<ResolvedAttachment>>,
-    #[serde(rename = "sentAt")]
-    sent_at: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ResolvedAttachment {
-    path: String,
-    size: u64,
-    #[serde(rename = "isImage")]
-    is_image: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -4092,17 +3714,6 @@ struct SearchableToolSpec {
 struct StructuredOutputResult {
     data: String,
     structured_output: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReplOutput {
-    language: String,
-    stdout: String,
-    stderr: String,
-    #[serde(rename = "exitCode")]
-    exit_code: i32,
-    #[serde(rename = "durationMs")]
-    duration_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -5660,7 +5271,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "TaskUpdate",
             "TaskList",
             "StructuredOutput",
-            "SendUserMessage",
         ],
         "Verification" => vec![
             "bash",
@@ -5674,7 +5284,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "TaskUpdate",
             "TaskList",
             "StructuredOutput",
-            "SendUserMessage",
             "PowerShell",
         ],
         "scode-guide" => vec![
@@ -5686,7 +5295,6 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "ToolSearch",
             "Skill",
             "StructuredOutput",
-            "SendUserMessage",
         ],
         "statusline-setup" => vec![
             "bash",
@@ -5719,12 +5327,9 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "TaskList",
             "Skill",
             "ToolSearch",
-            "NotebookEdit",
             "Sleep",
-            "SendUserMessage",
             "Config",
             "StructuredOutput",
-            "REPL",
             "PowerShell",
             "Agent",
             "SendMessage",
@@ -5753,12 +5358,9 @@ fn general_purpose_tools() -> BTreeSet<String> {
         "TaskList",
         "Skill",
         "ToolSearch",
-        "NotebookEdit",
         "Sleep",
-        "SendUserMessage",
         "Config",
         "StructuredOutput",
-        "REPL",
         "PowerShell",
     ]
     .into_iter()
@@ -7449,183 +7051,6 @@ fn iso8601_now() -> String {
         .to_string()
 }
 
-#[allow(clippy::too_many_lines)]
-fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput, String> {
-    // Relative notebook paths resolve against the turn's workspace root,
-    // like every other file tool.
-    let requested = std::path::PathBuf::from(&input.notebook_path);
-    let path = if requested.is_absolute() {
-        requested
-    } else {
-        current_workspace_root()
-            .map_err(|error| error.to_string())?
-            .join(requested)
-    };
-    if path.extension().and_then(|ext| ext.to_str()) != Some("ipynb") {
-        return Err(String::from(
-            "File must be a Jupyter notebook (.ipynb file).",
-        ));
-    }
-
-    let original_file = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let mut notebook: serde_json::Value =
-        serde_json::from_str(&original_file).map_err(|error| error.to_string())?;
-    let language = notebook
-        .get("metadata")
-        .and_then(|metadata| metadata.get("kernelspec"))
-        .and_then(|kernelspec| kernelspec.get("language"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("python")
-        .to_string();
-    let cells = notebook
-        .get_mut("cells")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| String::from("Notebook cells array not found"))?;
-
-    let edit_mode = input.edit_mode.unwrap_or(NotebookEditMode::Replace);
-    let target_index = match input.cell_id.as_deref() {
-        Some(cell_id) => Some(resolve_cell_index(cells, Some(cell_id), edit_mode)?),
-        None if matches!(
-            edit_mode,
-            NotebookEditMode::Replace | NotebookEditMode::Delete
-        ) =>
-        {
-            Some(resolve_cell_index(cells, None, edit_mode)?)
-        }
-        None => None,
-    };
-    let resolved_cell_type = match edit_mode {
-        NotebookEditMode::Delete => None,
-        NotebookEditMode::Insert => Some(input.cell_type.unwrap_or(NotebookCellType::Code)),
-        NotebookEditMode::Replace => Some(input.cell_type.unwrap_or_else(|| {
-            target_index
-                .and_then(|index| cells.get(index))
-                .and_then(cell_kind)
-                .unwrap_or(NotebookCellType::Code)
-        })),
-    };
-    let new_source = require_notebook_source(input.new_source, edit_mode)?;
-
-    let cell_id = match edit_mode {
-        NotebookEditMode::Insert => {
-            let resolved_cell_type = resolved_cell_type
-                .ok_or_else(|| String::from("insert mode requires a cell type"))?;
-            let new_id = make_cell_id(cells.len());
-            let new_cell = build_notebook_cell(&new_id, resolved_cell_type, &new_source);
-            let insert_at = target_index.map_or(cells.len(), |index| index + 1);
-            cells.insert(insert_at, new_cell);
-            cells
-                .get(insert_at)
-                .and_then(|cell| cell.get("id"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        }
-        NotebookEditMode::Delete => {
-            let idx = target_index
-                .ok_or_else(|| String::from("delete mode requires a target cell index"))?;
-            let removed = cells.remove(idx);
-            removed
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        }
-        NotebookEditMode::Replace => {
-            let resolved_cell_type = resolved_cell_type
-                .ok_or_else(|| String::from("replace mode requires a cell type"))?;
-            let idx = target_index
-                .ok_or_else(|| String::from("replace mode requires a target cell index"))?;
-            let cell = cells
-                .get_mut(idx)
-                .ok_or_else(|| String::from("Cell index out of range"))?;
-            cell["source"] = serde_json::Value::Array(source_lines(&new_source));
-            cell["cell_type"] = serde_json::Value::String(match resolved_cell_type {
-                NotebookCellType::Code => String::from("code"),
-                NotebookCellType::Markdown => String::from("markdown"),
-            });
-            match resolved_cell_type {
-                NotebookCellType::Code => {
-                    if !cell.get("outputs").is_some_and(serde_json::Value::is_array) {
-                        cell["outputs"] = json!([]);
-                    }
-                    if cell.get("execution_count").is_none() {
-                        cell["execution_count"] = serde_json::Value::Null;
-                    }
-                }
-                NotebookCellType::Markdown => {
-                    if let Some(object) = cell.as_object_mut() {
-                        object.remove("outputs");
-                        object.remove("execution_count");
-                    }
-                }
-            }
-            cell.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        }
-    };
-
-    let updated_file =
-        serde_json::to_string_pretty(&notebook).map_err(|error| error.to_string())?;
-    std::fs::write(&path, &updated_file).map_err(|error| error.to_string())?;
-
-    Ok(NotebookEditOutput {
-        new_source,
-        cell_id,
-        cell_type: resolved_cell_type,
-        language,
-        edit_mode: format_notebook_edit_mode(edit_mode),
-        error: None,
-        notebook_path: path.display().to_string(),
-        original_file,
-        updated_file,
-    })
-}
-
-fn require_notebook_source(
-    source: Option<String>,
-    edit_mode: NotebookEditMode,
-) -> Result<String, String> {
-    match edit_mode {
-        NotebookEditMode::Delete => Ok(source.unwrap_or_default()),
-        NotebookEditMode::Insert | NotebookEditMode::Replace => source
-            .ok_or_else(|| String::from("new_source is required for insert and replace edits")),
-    }
-}
-
-fn build_notebook_cell(cell_id: &str, cell_type: NotebookCellType, source: &str) -> Value {
-    let mut cell = json!({
-        "cell_type": match cell_type {
-            NotebookCellType::Code => "code",
-            NotebookCellType::Markdown => "markdown",
-        },
-        "id": cell_id,
-        "metadata": {},
-        "source": source_lines(source),
-    });
-    if let Some(object) = cell.as_object_mut() {
-        match cell_type {
-            NotebookCellType::Code => {
-                object.insert(String::from("outputs"), json!([]));
-                object.insert(String::from("execution_count"), Value::Null);
-            }
-            NotebookCellType::Markdown => {}
-        }
-    }
-    cell
-}
-
-fn cell_kind(cell: &serde_json::Value) -> Option<NotebookCellType> {
-    cell.get("cell_type")
-        .and_then(serde_json::Value::as_str)
-        .map(|kind| {
-            if kind == "markdown" {
-                NotebookCellType::Markdown
-            } else {
-                NotebookCellType::Code
-            }
-        })
-}
-
 const MAX_SLEEP_DURATION_MS: u64 = 300_000;
 
 #[allow(clippy::needless_pass_by_value)]
@@ -7652,62 +7077,6 @@ fn execute_sleep(
         duration_ms: input.duration_ms,
         message: format!("Slept for {}ms", input.duration_ms),
     })
-}
-
-fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
-    if input.message.trim().is_empty() {
-        return Err(String::from("message must not be empty"));
-    }
-
-    let attachments = input
-        .attachments
-        .as_ref()
-        .map(|paths| {
-            paths
-                .iter()
-                .map(|path| resolve_attachment(path))
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?;
-
-    let message = match input.status {
-        BriefStatus::Normal | BriefStatus::Proactive => input.message,
-    };
-
-    Ok(BriefOutput {
-        message,
-        attachments,
-        sent_at: iso8601_timestamp(),
-    })
-}
-
-fn resolve_attachment(path: &str) -> Result<ResolvedAttachment, String> {
-    // Relative attachment paths resolve against the turn's workspace root.
-    let requested = std::path::Path::new(path);
-    let anchored = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        current_workspace_root()
-            .map_err(|error| error.to_string())?
-            .join(requested)
-    };
-    let resolved = std::fs::canonicalize(&anchored).map_err(|error| error.to_string())?;
-    let metadata = std::fs::metadata(&resolved).map_err(|error| error.to_string())?;
-    Ok(ResolvedAttachment {
-        path: resolved.display().to_string(),
-        size: metadata.len(),
-        is_image: is_image_path(&resolved),
-    })
-}
-
-fn is_image_path(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg")
-    )
 }
 
 fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
@@ -7909,101 +7278,6 @@ fn execute_structured_output(
         data: String::from("Structured output provided successfully"),
         structured_output: input.0,
     })
-}
-
-fn execute_repl(
-    input: ReplInput,
-    abort_signal: Option<&HookAbortSignal>,
-) -> Result<ReplOutput, String> {
-    if input.code.trim().is_empty() {
-        return Err(String::from("code must not be empty"));
-    }
-    let runtime = resolve_repl_runtime(&input.language)?;
-    let started = Instant::now();
-    let mut process = Command::new(runtime.program);
-    process
-        .args(runtime.args)
-        .arg(&input.code)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if let Ok(root) = current_workspace_root() {
-        process.current_dir(root);
-    }
-
-    let timeout_ms = input
-        .timeout_ms
-        .unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = process.spawn().map_err(|error| error.to_string())?;
-    let output = loop {
-        if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
-            child.kill().map_err(|error| error.to_string())?;
-            child
-                .wait_with_output()
-                .map_err(|error| error.to_string())?;
-            return Err(String::from("REPL execution interrupted by user"));
-        }
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            break child
-                .wait_with_output()
-                .map_err(|error| error.to_string())?;
-        }
-        if started.elapsed() >= Duration::from_millis(timeout_ms) {
-            child.kill().map_err(|error| error.to_string())?;
-            child
-                .wait_with_output()
-                .map_err(|error| error.to_string())?;
-            return Err(format!(
-                "REPL execution exceeded timeout of {timeout_ms} ms"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-
-    Ok(ReplOutput {
-        language: input.language,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(1),
-        duration_ms: started.elapsed().as_millis(),
-    })
-}
-
-struct ReplRuntime {
-    program: &'static str,
-    args: &'static [&'static str],
-}
-
-fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
-    match language.trim().to_ascii_lowercase().as_str() {
-        "python" | "py" => Ok(ReplRuntime {
-            program: detect_first_command(&["python3", "python"])
-                .ok_or_else(|| String::from("python runtime not found"))?,
-            args: &["-c"],
-        }),
-        "javascript" | "js" | "node" => Ok(ReplRuntime {
-            program: detect_first_command(&["node"])
-                .ok_or_else(|| String::from("node runtime not found"))?,
-            args: &["-e"],
-        }),
-        "sh" | "shell" | "bash" => Ok(ReplRuntime {
-            program: detect_first_command(&["bash", "sh"])
-                .ok_or_else(|| String::from("shell runtime not found"))?,
-            args: &["-lc"],
-        }),
-        other => Err(format!("unsupported REPL language: {other}")),
-    }
-}
-
-fn detect_first_command(commands: &[&'static str]) -> Option<&'static str> {
-    commands
-        .iter()
-        .copied()
-        .find(|command| command_exists(command))
 }
 
 #[derive(Clone, Copy)]
@@ -8310,18 +7584,6 @@ fn clear_plan_mode_state(path: &Path) -> Result<(), String> {
     }
 }
 
-fn iso8601_timestamp() -> String {
-    if let Ok(output) = Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-    {
-        if output.status.success() {
-            return String::from_utf8_lossy(&output.stdout).trim().to_string();
-        }
-    }
-    iso8601_now()
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn execute_powershell(
     input: PowerShellInput,
@@ -8611,51 +7873,6 @@ fn append_status_line(stderr: &str, status_line: &str) -> String {
     } else {
         format!("{}\n{status_line}", stderr.trim_end())
     }
-}
-
-fn resolve_cell_index(
-    cells: &[serde_json::Value],
-    cell_id: Option<&str>,
-    edit_mode: NotebookEditMode,
-) -> Result<usize, String> {
-    if cells.is_empty()
-        && matches!(
-            edit_mode,
-            NotebookEditMode::Replace | NotebookEditMode::Delete
-        )
-    {
-        return Err(String::from("Notebook has no cells to edit"));
-    }
-    if let Some(cell_id) = cell_id {
-        cells
-            .iter()
-            .position(|cell| cell.get("id").and_then(serde_json::Value::as_str) == Some(cell_id))
-            .ok_or_else(|| format!("Cell id not found: {cell_id}"))
-    } else {
-        Ok(cells.len().saturating_sub(1))
-    }
-}
-
-fn source_lines(source: &str) -> Vec<serde_json::Value> {
-    if source.is_empty() {
-        return vec![serde_json::Value::String(String::new())];
-    }
-    source
-        .split_inclusive('\n')
-        .map(|line| serde_json::Value::String(line.to_string()))
-        .collect()
-}
-
-fn format_notebook_edit_mode(mode: NotebookEditMode) -> String {
-    match mode {
-        NotebookEditMode::Replace => String::from("replace"),
-        NotebookEditMode::Insert => String::from("insert"),
-        NotebookEditMode::Delete => String::from("delete"),
-    }
-}
-
-fn make_cell_id(index: usize) -> String {
-    format!("cell-{}", index + 1)
 }
 
 #[cfg(test)]
@@ -9056,14 +8273,11 @@ mod tests {
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"ToolSearch"));
-        assert!(names.contains(&"NotebookEdit"));
         assert!(names.contains(&"Sleep"));
-        assert!(names.contains(&"SendUserMessage"));
         assert!(names.contains(&"Config"));
         assert!(names.contains(&"EnterPlanMode"));
         assert!(names.contains(&"ExitPlanMode"));
         assert!(names.contains(&"StructuredOutput"));
-        assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
     }
 
@@ -9093,7 +8307,6 @@ mod tests {
             "TaskCreate",
             "TaskUpdate",
             "StructuredOutput",
-            "NotebookEdit",
         ] {
             assert_eq!(
                 canonicalize_tool_name(tool),
@@ -11578,129 +10791,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn notebook_edit_replaces_inserts_and_deletes_cells() {
-        let path = temp_path("notebook.ipynb");
-        std::fs::write(
-            &path,
-            r#"{
-  "cells": [
-    {"cell_type": "code", "id": "cell-a", "metadata": {}, "source": ["print(1)\n"], "outputs": [], "execution_count": null}
-  ],
-  "metadata": {"kernelspec": {"language": "python"}},
-  "nbformat": 4,
-  "nbformat_minor": 5
-}"#,
-        )
-        .expect("write notebook");
 
-        let replaced = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": path.display().to_string(),
-                "cell_id": "cell-a",
-                "new_source": "print(2)\n",
-                "edit_mode": "replace"
-            }),
-        )
-        .expect("NotebookEdit replace should succeed");
-        let replaced_output: serde_json::Value = serde_json::from_str(&replaced).expect("json");
-        assert_eq!(replaced_output["cell_id"], "cell-a");
-        assert_eq!(replaced_output["cell_type"], "code");
-
-        let inserted = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": path.display().to_string(),
-                "cell_id": "cell-a",
-                "new_source": "# heading\n",
-                "cell_type": "markdown",
-                "edit_mode": "insert"
-            }),
-        )
-        .expect("NotebookEdit insert should succeed");
-        let inserted_output: serde_json::Value = serde_json::from_str(&inserted).expect("json");
-        assert_eq!(inserted_output["cell_type"], "markdown");
-        let appended = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": path.display().to_string(),
-                "new_source": "print(3)\n",
-                "edit_mode": "insert"
-            }),
-        )
-        .expect("NotebookEdit append should succeed");
-        let appended_output: serde_json::Value = serde_json::from_str(&appended).expect("json");
-        assert_eq!(appended_output["cell_type"], "code");
-
-        let deleted = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": path.display().to_string(),
-                "cell_id": "cell-a",
-                "edit_mode": "delete"
-            }),
-        )
-        .expect("NotebookEdit delete should succeed without new_source");
-        let deleted_output: serde_json::Value = serde_json::from_str(&deleted).expect("json");
-        assert!(deleted_output["cell_type"].is_null());
-        assert_eq!(deleted_output["new_source"], "");
-
-        let final_notebook: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("read notebook"))
-                .expect("valid notebook json");
-        let cells = final_notebook["cells"].as_array().expect("cells array");
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0]["cell_type"], "markdown");
-        assert!(cells[0].get("outputs").is_none());
-        assert_eq!(cells[1]["cell_type"], "code");
-        assert_eq!(cells[1]["source"][0], "print(3)\n");
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn notebook_edit_rejects_invalid_inputs() {
-        let text_path = temp_path("notebook.txt");
-        fs::write(&text_path, "not a notebook").expect("write text file");
-        let wrong_extension = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": text_path.display().to_string(),
-                "new_source": "print(1)\n"
-            }),
-        )
-        .expect_err("non-ipynb file should fail");
-        assert!(wrong_extension.contains("Jupyter notebook"));
-        let _ = fs::remove_file(&text_path);
-
-        let empty_notebook = temp_path("empty.ipynb");
-        fs::write(
-            &empty_notebook,
-            r#"{"cells":[],"metadata":{"kernelspec":{"language":"python"}},"nbformat":4,"nbformat_minor":5}"#,
-        )
-        .expect("write empty notebook");
-
-        let missing_source = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": empty_notebook.display().to_string(),
-                "edit_mode": "insert"
-            }),
-        )
-        .expect_err("insert without source should fail");
-        assert!(missing_source.contains("new_source is required"));
-
-        let missing_cell = execute_tool(
-            "NotebookEdit",
-            &json!({
-                "notebook_path": empty_notebook.display().to_string(),
-                "edit_mode": "delete"
-            }),
-        )
-        .expect_err("delete on empty notebook should fail");
-        assert!(missing_cell.contains("Notebook has no cells to edit"));
-        let _ = fs::remove_file(empty_notebook);
-    }
 
     // `#[cfg(unix)]` because every command in this test (`printf 'hello'`,
     // `false`, `sleep`, etc.) is POSIX shell vocabulary; the bash tool
@@ -12046,33 +11137,6 @@ mod tests {
         assert_eq!(output["duration_ms"], 0);
     }
 
-    #[test]
-    fn brief_returns_sent_message_and_attachment_metadata() {
-        let attachment = std::env::temp_dir().join(format!(
-            "sudocode-brief-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::write(&attachment, b"png-data").expect("write attachment");
-
-        let result = execute_tool(
-            "SendUserMessage",
-            &json!({
-                "message": "hello user",
-                "attachments": [attachment.display().to_string()],
-                "status": "normal"
-            }),
-        )
-        .expect("SendUserMessage should succeed");
-
-        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
-        assert_eq!(output["message"], "hello user");
-        assert!(output["sentAt"].as_str().is_some());
-        assert_eq!(output["attachments"][0]["isImage"], true);
-        let _ = std::fs::remove_file(attachment);
-    }
 
     #[test]
     fn ask_user_question_v2_returns_structured_answers() {
@@ -12415,73 +11479,9 @@ mod tests {
     // skip branch covers. Tracked alongside the bash tool's
     // cross-platform refactor.
     #[cfg(unix)]
-    #[test]
-    fn repl_executes_python_code() {
-        let result = execute_tool(
-            "REPL",
-            &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 500}),
-        );
-        // Skip if Python is not installed (e.g. bare CI runners) — the
-        // error string varies by platform, so accept the documented
-        // sentinel ("runtime not found") *and* any other spawn failure
-        // ("program not found", "cannot find the path", etc.) that
-        // surfaces when no `python` is on PATH.
-        let output_str = match &result {
-            Err(e)
-                if e.contains("runtime not found")
-                    || e.contains("not found")
-                    || e.contains("cannot find the path") =>
-            {
-                eprintln!("SKIP: python not available on this machine");
-                return;
-            }
-            other => other.as_deref().expect("REPL should succeed").to_string(),
-        };
-        let output: serde_json::Value = serde_json::from_str(&output_str).expect("json");
-        assert_eq!(output["language"], "python");
-        assert_eq!(output["exitCode"], 0);
-        assert!(output["stdout"].as_str().expect("stdout").contains('2'));
-    }
 
-    #[test]
-    fn given_empty_code_when_repl_then_rejects_with_error() {
-        let result = execute_tool("REPL", &json!({"language": "python", "code": "   "}));
 
-        let error = result.expect_err("empty REPL code should fail");
-        assert!(error.contains("code must not be empty"));
-    }
 
-    #[test]
-    fn given_unsupported_language_when_repl_then_rejects_with_error() {
-        let result = execute_tool("REPL", &json!({"language": "ruby", "code": "puts 1"}));
-
-        let error = result.expect_err("unsupported REPL language should fail");
-        assert!(error.contains("unsupported REPL language: ruby"));
-    }
-
-    #[test]
-    fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
-        let result = execute_tool(
-            "REPL",
-            &json!({
-                "language": "python",
-                "code": "import time\ntime.sleep(1)",
-                "timeout_ms": 10
-            }),
-        );
-
-        let error = match &result {
-            Err(e) if e.contains("runtime not found") => {
-                eprintln!("SKIP: python not available on this machine");
-                return;
-            }
-            other => other
-                .as_ref()
-                .expect_err("timed out REPL execution should fail")
-                .clone(),
-        };
-        assert!(error.contains("REPL execution exceeded timeout of 10 ms"));
-    }
 
     // `#[cfg(unix)]` because the test builds a `pwsh` stub by writing
     // a `#!/bin/sh` script, marking it executable via the hardcoded

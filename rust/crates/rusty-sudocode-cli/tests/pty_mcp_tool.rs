@@ -153,7 +153,10 @@ fn mcp_echo_tool_round_trips_through_ndjson_stdio() {
     // `danger-full-access` so the MCP tool call is not gated behind an
     // interactive permission prompt (this test exercises transport +
     // runtime, not the permission surface).
-    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access", &prompt],
+        &[("SUDOCODE_ENABLE_MCP", "1")],
+    );
 
     // Assert on the `echo:`-prefixed form, not the bare input text: the
     // `echo:` prefix is added only by the MCP server's response, so it

@@ -2,9 +2,11 @@ name: Nightly channel
 
 # Moves the rolling `nightly` tag to the current main HEAD once a day at
 # midnight China Standard Time (16:00 UTC), but only when main actually moved
-# since the last nightly. The tag push triggers `release.yml`, which builds the full platform
-# matrix and publishes/overwrites the single rolling `nightly` prerelease —
-# one build path for stable, RC, and nightly alike.
+# since the last nightly. It then dispatches `release.yml` on that tag
+# explicitly — a tag pushed with the default GITHUB_TOKEN does not fire other
+# workflows' push triggers (Actions' recursion guard) — which builds the full
+# platform matrix and publishes/overwrites the single rolling `nightly`
+# prerelease. One build path for stable, RC, and nightly alike.
 #
 # Promotion flow (documented in CONTRIBUTING.md § Release channels):
 # nightly soaks → tag `vX.Y.Z-rc.N` on that nightly's commit → soak →

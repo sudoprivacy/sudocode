@@ -232,6 +232,10 @@ pub(crate) const READ_DISPLAY_MAX_CHARS: usize = 2_000;
 /// result is still preserved in the session file.
 pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 15;
 pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
+/// Longest single line shown inline. A JSON-escaped blob or a minified file
+/// is one "line" that wraps across dozens of terminal rows; past this it is
+/// cut with an ellipsis. The full result is still in the session file.
+pub(crate) const TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS: usize = 200;
 
 pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
     match kind {
@@ -1022,6 +1026,8 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
             "edit_file" | "Edit" => format_edit_result(&icon, &parsed),
             "glob_search" | "Glob" => format_glob_result(&icon, &parsed),
             "grep_search" | "Grep" => format_grep_result(&icon, &parsed),
+            "Skill" => format_skill_result(&icon, &parsed),
+            "read_tool_output" => format_read_tool_output_result(&icon, &parsed),
             _ => format_generic_tool_result(&icon, name, &parsed),
         }
     };
@@ -1636,7 +1642,8 @@ pub(crate) fn format_generic_tool_result(
     let rendered_output = match parsed {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => String::new(),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+        serde_json::Value::Object(map) => digest_json_object(map),
+        serde_json::Value::Array(_) => {
             serde_json::to_string_pretty(parsed).unwrap_or_else(|_| parsed.to_string())
         }
         _ => parsed.to_string(),
@@ -1655,6 +1662,97 @@ pub(crate) fn format_generic_tool_result(
         format!("{icon} {muted}{name}{RESET}\n  {indented}")
     } else {
         format!("{icon} {muted}{name}:{RESET} {preview}")
+    }
+}
+
+/// One line per top-level key: `key: value`. A multi-line string shows its
+/// first line and a `(+N lines)` count; nested objects and arrays are
+/// compact JSON. Pretty-printing the whole object put a skill's entire
+/// SKILL.md on screen as one JSON-escaped line; the transcript keeps the
+/// full value, the screen only needs to say what came back.
+fn digest_json_object(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut lines = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let rendered = match value {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(text) => {
+                let mut it = text.lines();
+                let first = it.next().unwrap_or_default();
+                let rest = it.count();
+                if rest > 0 {
+                    format!("{first} (+{rest} lines)")
+                } else {
+                    first.to_string()
+                }
+            }
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    lines.join("\n")
+}
+
+fn format_skill_result(icon: &str, parsed: &serde_json::Value) -> String {
+    let muted = ansi_fg(theme().muted);
+    let path = parsed.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+    let prompt = parsed.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    let lines = prompt.lines().count();
+    format!("{icon} {muted}Skill{RESET} loaded {path} {DIM}({lines} lines){RESET}")
+}
+
+fn format_read_tool_output_result(icon: &str, parsed: &serde_json::Value) -> String {
+    let muted = ansi_fg(theme().muted);
+    let total = parsed.get("totalBytes").and_then(serde_json::Value::as_u64);
+    // Seek mode reports matches; window mode reports a byte range + content.
+    if let Some(matches) = parsed.get("matches").and_then(|v| v.as_array()) {
+        let total_matches = parsed
+            .get("totalMatches")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(matches.len() as u64);
+        let mut out = format!(
+            "{icon} {muted}read_tool_output{RESET} {total_matches} match(es) for {}",
+            parsed
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+        );
+        for hit in matches.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
+            let line = hit
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let text = hit.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!(
+                "\n  {DIM}{line}:{RESET} {}",
+                truncate_for_summary(text, 120)
+            ));
+        }
+        return out;
+    }
+    let start = parsed
+        .get("byteOffset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let end = parsed
+        .get("byteEnd")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let content = parsed.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let preview = truncate_output_for_display(
+        content,
+        TOOL_OUTPUT_DISPLAY_MAX_LINES,
+        TOOL_OUTPUT_DISPLAY_MAX_CHARS,
+    );
+    let header = match total {
+        Some(total) => {
+            format!("{icon} {muted}read_tool_output{RESET} bytes {start}–{end} of {total}")
+        }
+        None => format!("{icon} {muted}read_tool_output{RESET} bytes {start}–{end}"),
+    };
+    if preview.is_empty() {
+        header
+    } else {
+        format!("{header}\n  {}", preview.replace('\n', "\n  "))
     }
 }
 
@@ -1912,6 +2010,17 @@ pub(crate) fn truncate_output_for_display(
             preview_lines.push(line.chars().take(available).collect::<String>());
             truncated = true;
             break;
+        }
+
+        if line_chars > TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS {
+            let mut cut = line
+                .chars()
+                .take(TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS)
+                .collect::<String>();
+            cut.push('…');
+            used_chars += newline_cost + TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS + 1;
+            preview_lines.push(cut);
+            continue;
         }
 
         preview_lines.push(line.to_string());

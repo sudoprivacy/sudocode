@@ -839,22 +839,18 @@ where
     /// so the prompt-cache prefix stays byte-identical. The full bytes live only
     /// in the offloaded file (the read-more side-channel); the transcript is the
     /// prompt SSOT.
-    fn maybe_offload_tool_output(&self, tool_use_id: &str, output: String) -> String {
-        /// Outputs at or under this stay fully inline. Shares the bash output
-        /// budget so the "16 KiB" threshold lives in one place.
-        const OFFLOAD_THRESHOLD: usize = crate::bash::MAX_OUTPUT_BYTES;
-        /// Bytes of the head kept inline as a preview when offloading.
-        const PREVIEW_BYTES: usize = 12_288;
-        if output.len() <= OFFLOAD_THRESHOLD {
+    fn maybe_offload_tool_output(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        output: String,
+    ) -> String {
+        let Some(threshold) = offload_threshold_for(tool_name) else {
+            return output;
+        };
+        if output.len() <= threshold {
             return output;
         }
-        let head = |n: usize| {
-            let mut end = n.min(output.len());
-            while end > 0 && !output.is_char_boundary(end) {
-                end -= 1;
-            }
-            end
-        };
         match self
             .session
             .offload_tool_result(tool_use_id, output.as_bytes())
@@ -863,16 +859,17 @@ where
                 // The physical path never leaves the engine; the model only
                 // ever sees the opaque tool_use id. The full result is paged
                 // back in as byte windows via `read_tool_output`, continuing
-                // from where this preview stops (offset={end}).
-                let end = head(PREVIEW_BYTES);
+                // from where this preview stops (offset={end}) — or located
+                // first with its `pattern` seek.
+                let end = offload_preview_end(&output);
                 format!(
-                    "{}\n\n<persisted-output bytes={total} id=\"{tool_use_id}\">\n[Tool output was {total} bytes; the first {end} are shown above as a preview. Read the rest in bounded windows with read_tool_output(id=\"{tool_use_id}\", offset={end}) — continue from each response's nextOffset until it is null.]\n</persisted-output>",
+                    "<persisted-output bytes={total} id=\"{tool_use_id}\">\nOutput too large ({total} bytes). Preview (first {end} bytes):\n{}\n…\n[Read the rest with read_tool_output(id=\"{tool_use_id}\", offset={end}) — continue from each response's nextOffset until it is null — or pass pattern=<regex> to find the offsets of specific lines first.]\n</persisted-output>",
                     &output[..end]
                 )
             }
             // Offload failed (e.g. no persistence path) — never send an
             // unbounded prompt; fall back to a bounded truncation (shared with bash).
-            Err(_) => crate::bash::truncate_output(&output, OFFLOAD_THRESHOLD),
+            Err(_) => crate::bash::truncate_output(&output, threshold),
         }
     }
 
@@ -1591,7 +1588,8 @@ where
                                 || post_hook_result.is_cancelled(),
                         );
 
-                        let output = self.maybe_offload_tool_output(&tool_use_id, output);
+                        let output =
+                            self.maybe_offload_tool_output(&tool_use_id, &tool_name, output);
                         ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
@@ -2350,6 +2348,50 @@ impl ToolExecutor for StaticToolExecutor {
     }
 }
 
+/// Per-tool inline budget for a tool result, in bytes; above it the full
+/// result is spilled to the session's tool-results dir and replaced with a
+/// preview + marker. Tiered like CC's `maxResultSizeChars`: bash 30 000,
+/// grep 20 000, everything else 50 000. `None` = never offload — `read_file`
+/// paginates itself (a file read is always wanted in full, so spilling it
+/// would only cost round-trips), matching CC's `Read` which opts out of the
+/// persistence path entirely.
+pub(crate) fn offload_threshold_for(tool_name: &str) -> Option<usize> {
+    // Model-facing names may be CC-style PascalCase aliases (`Read`, `Bash`)
+    // or scode's snake_case; compare case-insensitively on both spellings.
+    let lower = tool_name.to_ascii_lowercase();
+    match lower.as_str() {
+        "read" | "read_file" | "read_tool_output" => None,
+        "bash" | "powershell" => Some(OFFLOAD_THRESHOLD_BASH),
+        "grep" | "grep_search" => Some(OFFLOAD_THRESHOLD_GREP),
+        _ => Some(OFFLOAD_THRESHOLD_DEFAULT),
+    }
+}
+
+/// Inline budget for `bash` output before offload (CC: 30 000 chars).
+pub(crate) const OFFLOAD_THRESHOLD_BASH: usize = 30_000;
+/// Inline budget for `grep_search` output before offload (CC: 20 000 chars).
+pub(crate) const OFFLOAD_THRESHOLD_GREP: usize = 20_000;
+/// Inline budget for every other tool (CC: min(maxResultSizeChars, 50 000)).
+pub(crate) const OFFLOAD_THRESHOLD_DEFAULT: usize = 50_000;
+/// Bytes of the head kept inline as a preview when offloading (CC: 2000
+/// chars). Small on purpose — it exists to let the model recognise what the
+/// result is; locating content is `read_tool_output`'s job.
+pub(crate) const OFFLOAD_PREVIEW_BYTES: usize = 2_000;
+
+/// End index of the inline preview: [`OFFLOAD_PREVIEW_BYTES`], pulled back
+/// to the last newline when one falls in the second half of the window (so
+/// the preview ends on a whole line), and always on a char boundary.
+fn offload_preview_end(output: &str) -> usize {
+    let mut end = OFFLOAD_PREVIEW_BYTES.min(output.len());
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    match output[..end].rfind('\n') {
+        Some(nl) if nl * 2 > end => nl,
+        _ => end,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2805,7 +2847,7 @@ mod tests {
         // sentinel sits past the preview window so we can prove it is spilled
         // to the offload file and never inlined into the transcript.
         const SENTINEL: &str = "UNIQUE_TAIL_SENTINEL_ZZZ";
-        let big = format!("{}{SENTINEL}", "A".repeat(20_000));
+        let big = format!("{}{SENTINEL}", "A".repeat(60_000));
 
         struct OneToolThenStop;
         #[async_trait]

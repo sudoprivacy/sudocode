@@ -492,6 +492,7 @@ async fn provider_client_dispatches_xai_requests() {
         base_url: server.base_url(),
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3".to_string(),
+        extra_body: serde_json::Map::new(),
     };
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("xAI provider client should be constructed");
@@ -511,6 +512,221 @@ async fn provider_client_dispatches_xai_requests() {
         request.headers.get("authorization").map(String::as_str),
         Some("Bearer xai-test-key")
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Per-model `extraBody` (sudocode.json `models.<alias>.extraBody`)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Baseline: a client with no configured extra body sends exactly the
+/// fields it sent before the feature existed. Guards the "absent =>
+/// zero wire change" contract for every existing user.
+#[tokio::test]
+async fn extra_body_absent_leaves_payload_untouched() {
+    let (state, _server, body) = capture_chat_completion_body(serde_json::Map::new()).await;
+    drop(state);
+
+    let mut keys = body
+        .as_object()
+        .expect("payload object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "max_tokens",
+            "messages",
+            "model",
+            "stream",
+            "tool_choice",
+            "tools",
+        ]
+    );
+}
+
+/// Configured fields reach the wire verbatim, whatever their JSON type.
+#[tokio::test]
+async fn extra_body_fields_are_merged_into_the_request() {
+    let extra = json!({
+        "enable_thinking": false,
+        "thinking_budget": 0,
+        "top_k": 20,
+        "repetition_penalty": 1.05,
+        "response_format": {"type": "text"},
+        "stop_sequences": ["<eot>"],
+        "trace": null,
+    });
+    let extra = extra.as_object().expect("object literal").clone();
+    let (_state, _server, body) = capture_chat_completion_body(extra.clone()).await;
+
+    for (key, value) in &extra {
+        assert_eq!(
+            &body[key.as_str()],
+            value,
+            "field {key} should reach the wire"
+        );
+    }
+    // The computed payload is still intact alongside the additions.
+    assert_eq!(body["model"], json!("grok-3"));
+    assert_eq!(body["max_tokens"], json!(64));
+}
+
+/// The precedence rule: `extraBody` is additive. Fields sudocode computes
+/// itself win, so a bad config can never corrupt the request.
+#[tokio::test]
+async fn extra_body_cannot_override_computed_fields() {
+    let extra = json!({
+        "model": "hijacked-model",
+        "messages": [],
+        "stream": true,
+        "max_tokens": 999_999,
+        "tools": [],
+        "tool_choice": "none",
+        "enable_thinking": false,
+    });
+    let extra = extra.as_object().expect("object literal").clone();
+    let (_state, _server, body) = capture_chat_completion_body(extra).await;
+
+    assert_eq!(body["model"], json!("grok-3"));
+    assert_eq!(body["max_tokens"], json!(64));
+    assert_eq!(body["stream"], json!(false));
+    assert_eq!(body["messages"][0]["role"], json!("system"));
+    assert_eq!(body["tools"][0]["function"]["name"], json!("weather"));
+    assert_eq!(body["tool_choice"], json!("auto"));
+    // The non-reserved field in the same object still lands.
+    assert_eq!(body["enable_thinking"], json!(false));
+}
+
+/// `models.<alias>.extraBody` is carried by provider resolution, so two
+/// models in one config get different request bodies — the reason the
+/// setting hangs off the model entry rather than a process-wide flag.
+#[test]
+fn resolve_provider_from_config_carries_per_model_extra_body() {
+    use std::collections::BTreeMap;
+
+    use api::{
+        resolve_provider_from_config, AuthMode, ModelConfigEntry, ModelProviderMapping,
+        ProviderConnectionConfig, SudoCodeConfig,
+    };
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "api-key".to_string(),
+        ModelProviderMapping {
+            provider: "dashscope".to_string(),
+            model: "qwen3.7-flash".to_string(),
+            api: Some("openai-completions".to_string()),
+        },
+    );
+    let mut thinking_off = ModelConfigEntry {
+        alias: "qwen-fast".to_string(),
+        name: "qwen3.7-flash".to_string(),
+        input: vec!["text".to_string()],
+        providers: providers.clone(),
+        ..Default::default()
+    };
+    thinking_off
+        .extra_body
+        .insert("enable_thinking".to_string(), json!(false));
+
+    let mut deep_providers = BTreeMap::new();
+    deep_providers.insert(
+        "api-key".to_string(),
+        ModelProviderMapping {
+            provider: "dashscope".to_string(),
+            model: "qwen3.8-max".to_string(),
+            api: Some("openai-completions".to_string()),
+        },
+    );
+    let deep = ModelConfigEntry {
+        alias: "qwen-deep".to_string(),
+        name: "qwen3.8-max".to_string(),
+        input: vec!["text".to_string()],
+        providers: deep_providers,
+        ..Default::default()
+    };
+
+    let mut models = BTreeMap::new();
+    models.insert("qwen-fast".to_string(), thinking_off);
+    models.insert("qwen-deep".to_string(), deep);
+
+    let mut api_key_mode = BTreeMap::new();
+    api_key_mode.insert(
+        "dashscope".to_string(),
+        ProviderConnectionConfig {
+            base_url: "https://dashscope.example/compatible-mode/v1".to_string(),
+            api_key: Some("test-key".to_string()),
+            api_key_env: None,
+            token: None,
+            token_env: None,
+            auth_file: None,
+        },
+    );
+    let mut auth_modes = BTreeMap::new();
+    auth_modes.insert("api-key".to_string(), api_key_mode);
+
+    let config = SudoCodeConfig {
+        auth_modes,
+        models,
+        ..Default::default()
+    };
+
+    let fast = resolve_provider_from_config("qwen-fast", Some(AuthMode::ApiKey), &config)
+        .expect("fast model resolves");
+    assert_eq!(fast.extra_body.get("enable_thinking"), Some(&json!(false)));
+
+    let deep = resolve_provider_from_config("qwen-deep", Some(AuthMode::ApiKey), &config)
+        .expect("deep model resolves");
+    assert!(
+        deep.extra_body.is_empty(),
+        "a model without extraBody keeps an empty map: {:?}",
+        deep.extra_body
+    );
+}
+
+/// Drives one `/chat/completions` round-trip through `ProviderClient` with
+/// the given `extraBody` attached to the resolved model, and returns the
+/// JSON body the server saw.
+async fn capture_chat_completion_body(
+    extra_body: serde_json::Map<String, serde_json::Value>,
+) -> (
+    Arc<Mutex<Vec<CapturedRequest>>>,
+    TestServer,
+    serde_json::Value,
+) {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response(
+            "200 OK",
+            "application/json",
+            "{\"id\":\"chatcmpl_extra\",\"model\":\"grok-3\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\",\"tool_calls\":[]},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}",
+        )],
+    )
+    .await;
+
+    let resolved = ResolvedProvider {
+        kind: ProviderKind::Xai,
+        api_format: ApiFormat::OpenAiCompletions,
+        base_url: server.base_url(),
+        credential: Credential::ApiKey("xai-test-key".to_string()),
+        model_id: "grok-3".to_string(),
+        extra_body,
+    };
+    let client = ProviderClient::from_resolved(&resolved, None).expect("client should build");
+    client
+        .send_message(&sample_request(false), None)
+        .await
+        .expect("request should succeed");
+
+    let body = {
+        let captured = state.lock().await;
+        let request = captured.first().expect("server should capture request");
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("json body")
+    };
+    (state, server, body)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

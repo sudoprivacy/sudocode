@@ -59,8 +59,19 @@ impl ProviderClient {
                         ));
                     }
                 };
-                let client = AnthropicClient::from_auth_with_mode(auth, mode)
+                let mut client = AnthropicClient::from_auth_with_mode(auth, mode)
                     .with_base_url(resolved.base_url.clone());
+                // Per-model `extraBody` (sudocode.json) — same additive rule
+                // as the OpenAI-compatible path: sudocode's own fields win.
+                // `render_json_body` skips keys the serialized request already
+                // carries; the reserved list covers the ones it omits when
+                // unset (e.g. `stream` when false).
+                for (key, value) in &resolved.extra_body {
+                    if crate::types::is_reserved_request_body_key(key) {
+                        continue;
+                    }
+                    client = client.with_extra_body_param(key.clone(), value.clone());
+                }
                 Ok(Self::Anthropic(client))
             }
             ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => {
@@ -130,7 +141,8 @@ impl ProviderClient {
                 let config = OpenAiCompatConfig::openai();
                 let client = OpenAiCompatClient::new(api_key, config)
                     .with_api_format(resolved.api_format)
-                    .with_base_url(resolved.base_url.clone());
+                    .with_base_url(resolved.base_url.clone())
+                    .with_extra_body(resolved.extra_body.clone());
                 match resolved.kind {
                     ProviderKind::Xai => Ok(Self::Xai(client)),
                     _ => Ok(Self::OpenAi(client)),
@@ -342,6 +354,7 @@ mod tests {
                 name: "Qwen Plus".to_string(),
                 input: vec!["text".to_string()],
                 providers: qwen_providers,
+                ..Default::default()
             },
         );
 

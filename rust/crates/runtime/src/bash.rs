@@ -823,8 +823,10 @@ mod tests {
     }
 }
 
-/// Baseline output byte budget (16 KiB); the central offload threshold in the
-/// conversation loop matches it.
+/// Baseline output byte budget used by the truncation tests below. The live
+/// per-tool offload thresholds live in `conversation.rs`
+/// (`offload_threshold_for`).
+#[cfg(test)]
 pub(crate) const MAX_OUTPUT_BYTES: usize = 16_384;
 
 /// Hard safety cap for a single tool output buffered in memory before it

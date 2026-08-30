@@ -281,9 +281,35 @@ impl<'a> Parser<'a> {
             return Err(JsonError::new("invalid number"));
         }
 
+        // `JsonValue::Number` is an i64, so a fractional or exponent part
+        // cannot be represented. Consume and discard it rather than failing
+        // the whole document: config files may carry float literals in
+        // pass-through sections (e.g. `models.<alias>.extraBody`), which are
+        // re-read with serde_json where the exact value matters.
+        self.skip_number_tail();
+
         value
             .parse::<i64>()
             .map_err(|_| JsonError::new("number out of range"))
+    }
+
+    /// Consume an optional `.digits` fraction and `e[+-]digits` exponent.
+    fn skip_number_tail(&mut self) {
+        if self.peek() == Some('.') {
+            self.index += 1;
+            while matches!(self.peek(), Some('0'..='9')) {
+                self.index += 1;
+            }
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            self.index += 1;
+            if matches!(self.peek(), Some('+' | '-')) {
+                self.index += 1;
+            }
+            while matches!(self.peek(), Some('0'..='9')) {
+                self.index += 1;
+            }
+        }
     }
 
     fn expect(&mut self, expected: char) -> Result<(), JsonError> {

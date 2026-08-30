@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use serde_json::Value as SerdeValue;
+
 use crate::json::JsonValue;
 use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
 
@@ -89,7 +91,7 @@ pub struct ModelProviderMapping {
 /// Model entry in the config registry.
 ///
 /// Parsed from `models.<alias>` in `sudocode.json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelConfigEntry {
     /// Short alias (also the map key), e.g. `"opus"`.
     pub alias: String,
@@ -99,6 +101,21 @@ pub struct ModelConfigEntry {
     pub input: Vec<String>,
     /// Auth mode → provider mapping.
     pub providers: BTreeMap<String, ModelProviderMapping>,
+    /// Extra top-level fields merged into the outbound request body for this
+    /// model (`models.<alias>.extraBody`). Values are arbitrary JSON.
+    ///
+    /// Merge rule: additive only — a key that sudocode already computed for
+    /// the request (`model`, `messages`, `stream`, `tools`, `max_tokens`, …)
+    /// is never overwritten. Empty by default, i.e. no wire change.
+    pub extra_body: serde_json::Map<String, serde_json::Value>,
+    /// Output-token ceiling for this model (`models.<alias>.maxOutputTokens`),
+    /// overriding the compiled-in model-capabilities table. `None` keeps the
+    /// table's value.
+    pub max_output_tokens: Option<u32>,
+    /// Context-window size for this model (`models.<alias>.contextWindow`),
+    /// overriding the compiled-in model-capabilities table. `None` keeps the
+    /// table's value.
+    pub context_window: Option<u32>,
 }
 
 /// Web search configuration from `sudocode.json`.
@@ -123,7 +140,7 @@ impl Default for WebSearchConfig {
 }
 
 /// Top-level config from `sudocode.json`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SudoCodeConfig {
     /// `auth_modes.<mode>.<provider_name>` → connection details.
     pub auth_modes: BTreeMap<String, BTreeMap<String, ProviderConnectionConfig>>,
@@ -1266,7 +1283,7 @@ fn parse_sudocode_json_str_with_label(
     let sentinel = Path::new(label);
 
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
-    let models = parse_sudocode_models_section(root_obj, sentinel)?;
+    let models = parse_sudocode_models_section(root_obj, sentinel, &parse_extra_bodies(content))?;
     let web_search = parse_web_search_section(root_obj);
 
     Ok(SudoCodeConfig {
@@ -1348,9 +1365,35 @@ fn parse_web_search_section(root: &BTreeMap<String, JsonValue>) -> WebSearchConf
     }
 }
 
+/// Re-read `models.<alias>.extraBody` with `serde_json`.
+///
+/// `crate::json::JsonValue` models numbers as `i64`, so it cannot round-trip
+/// float literals (`"temperature": 0.6`) or hand back a `serde_json::Value`
+/// without loss. `extraBody` is opaque pass-through data that must survive
+/// verbatim, so it is read from the same source text with `serde_json` — a
+/// strict superset of what the hand-rolled parser accepts. Keys are the raw
+/// `models` keys; shape validation stays in the main parser.
+fn parse_extra_bodies(content: &str) -> BTreeMap<String, serde_json::Map<String, SerdeValue>> {
+    let Ok(root) = serde_json::from_str::<SerdeValue>(content) else {
+        eprintln!("warning: serde_json failed to re-parse config for extraBody extraction; extraBody values will be ignored");
+        return BTreeMap::new();
+    };
+    let Some(models) = root.get("models").and_then(SerdeValue::as_object) else {
+        return BTreeMap::new();
+    };
+    models
+        .iter()
+        .filter_map(|(alias, entry)| {
+            let extra = entry.get("extraBody")?.as_object()?;
+            Some((alias.clone(), extra.clone()))
+        })
+        .collect()
+}
+
 fn parse_sudocode_models_section(
     root: &BTreeMap<String, JsonValue>,
     path: &Path,
+    extra_bodies: &BTreeMap<String, serde_json::Map<String, SerdeValue>>,
 ) -> Result<BTreeMap<String, ModelConfigEntry>, ConfigError> {
     let Some(value) = root.get("models") else {
         return Ok(BTreeMap::new());
@@ -1390,6 +1433,18 @@ fn parse_sudocode_models_section(
             BTreeMap::new()
         };
 
+        // `extraBody` must be an object; its values come from the serde_json
+        // pass (see `parse_extra_bodies`) so arbitrary JSON survives verbatim.
+        let extra_body = match entry.get("extraBody") {
+            None | Some(JsonValue::Null) => serde_json::Map::new(),
+            Some(JsonValue::Object(_)) => extra_bodies.get(alias).cloned().unwrap_or_default(),
+            Some(_) => {
+                return Err(ConfigError::Parse(format!(
+                    "{ctx}.extraBody: expected a JSON object of request-body fields"
+                )))
+            }
+        };
+
         result.insert(
             alias.to_ascii_lowercase(),
             ModelConfigEntry {
@@ -1397,6 +1452,9 @@ fn parse_sudocode_models_section(
                 name,
                 input,
                 providers,
+                extra_body,
+                max_output_tokens: optional_u32(entry, "maxOutputTokens", &ctx)?,
+                context_window: optional_u32(entry, "contextWindow", &ctx)?,
             },
         );
     }

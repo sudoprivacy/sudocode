@@ -71,7 +71,12 @@ struct Cli {
     base_commit: Option<String>,
 
     /// Reasoning effort level
-    #[arg(long, global = true, value_parser = ["low", "medium", "high"])]
+    ///
+    /// `none` / `minimal` are part of the OpenAI reasoning-effort ladder and
+    /// are what several OpenAI-compatible backends accept to turn reasoning
+    /// off entirely (DashScope Qwen3.x, for one); keeping them out of the
+    /// allow-list blocked a capability the wire already supports.
+    #[arg(long, global = true, value_parser = ["none", "minimal", "low", "medium", "high"])]
     reasoning_effort: Option<String>,
 
     /// Allow running in a broad (non-project) working directory
@@ -146,6 +151,18 @@ enum Cmd {
     Login,
     /// Log out from the service
     Logout,
+    /// Update scode to the latest release and restart
+    Update {
+        /// Pin a release tag (e.g. v0.1.27); defaults to the latest release
+        #[arg(long)]
+        version: Option<String>,
+        /// Only report the current and latest versions; download nothing
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Export a session transcript
     Export {
         /// Session reference (defaults to latest)
@@ -267,7 +284,6 @@ pub(crate) enum CliAction {
     PrintSystemPrompt {
         cwd: PathBuf,
         date: String,
-        model: String,
         output_format: CliOutputFormat,
     },
     Version {
@@ -353,6 +369,11 @@ pub(crate) enum CliAction {
     },
     Login,
     Logout,
+    Update {
+        version: Option<String>,
+        check: bool,
+        yes: bool,
+    },
 }
 
 impl CliAction {
@@ -369,6 +390,7 @@ impl CliAction {
                 | CliAction::Config { .. }
                 | CliAction::Login
                 | CliAction::Logout
+                | CliAction::Update { .. }
         )
     }
 }
@@ -542,6 +564,15 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             }),
             Cmd::Diff => Ok(CliAction::Diff { output_format }),
             Cmd::Login => Ok(CliAction::Login),
+            Cmd::Update {
+                version,
+                check,
+                yes,
+            } => Ok(CliAction::Update {
+                version,
+                check,
+                yes,
+            }),
             Cmd::Logout => Ok(CliAction::Logout),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,
@@ -601,7 +632,6 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 Ok(CliAction::PrintSystemPrompt {
                     cwd: resolved_cwd,
                     date: resolved_date,
-                    model: model.clone(),
                     output_format,
                 })
             }
@@ -1204,12 +1234,20 @@ pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
 
 pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> api::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().unwrap_or_default()
+    let config = loader.load_sudocode_config().unwrap_or_default();
+    runtime::model_capabilities::apply_config_limits(&config);
+    config
 }
 
 pub(crate) fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<api::SudoCodeConfig, String> {
     let loader = ConfigLoader::default_for(cwd);
-    loader.load_sudocode_config().map_err(|e| e.to_string())
+    let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
+    // Seed the capability overrides here rather than at each startup site:
+    // every entry point (REPL, --print, acp, subagents) reaches the config
+    // through this pair, and a forgotten seeding call is invisible until a
+    // provider rejects `max_tokens` at request time.
+    runtime::model_capabilities::apply_config_limits(&config);
+    Ok(config)
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1376,7 @@ mod tests {
                 name: "custom-openai/gpt-5.4".to_string(),
                 input: vec!["text".to_string()],
                 providers,
+                ..Default::default()
             },
         );
 

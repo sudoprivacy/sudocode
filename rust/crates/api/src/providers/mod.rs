@@ -122,21 +122,6 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     ProviderKind::Anthropic
 }
 
-#[must_use]
-pub const fn model_family_identity_for_kind(kind: ProviderKind) -> runtime::ModelFamilyIdentity {
-    match kind {
-        ProviderKind::Anthropic => runtime::ModelFamilyIdentity::Claude,
-        ProviderKind::Xai | ProviderKind::OpenAi | ProviderKind::Codex | ProviderKind::Gemini => {
-            runtime::ModelFamilyIdentity::Generic
-        }
-    }
-}
-
-#[must_use]
-pub fn model_family_identity_for(model: &str) -> runtime::ModelFamilyIdentity {
-    model_family_identity_for_kind(detect_provider_kind(model))
-}
-
 /// Env var names used by other provider backends. When Anthropic auth
 /// resolution fails we sniff these so we can hint the user that their
 /// credentials probably belong to a different provider and suggest the
@@ -272,8 +257,7 @@ mod tests {
 
     use super::{
         anthropic_missing_credentials, anthropic_missing_credentials_hint, detect_provider_kind,
-        load_dotenv_file, model_family_identity_for, model_family_identity_for_kind, parse_dotenv,
-        ProviderKind,
+        load_dotenv_file, parse_dotenv, ProviderKind,
     };
 
     /// Serializes every test in this module that mutates process-wide
@@ -548,52 +532,6 @@ NO_EQUALS_LINE
         let hint = anthropic_missing_credentials_hint();
 
         assert!(hint.is_none());
-    }
-
-    #[test]
-    fn maps_provider_kind_to_model_family_identity() {
-        let anthropic = ProviderKind::Anthropic;
-        let openai = ProviderKind::OpenAi;
-        let xai = ProviderKind::Xai;
-        let codex = ProviderKind::Codex;
-        let gemini = ProviderKind::Gemini;
-
-        assert_eq!(
-            model_family_identity_for_kind(anthropic),
-            runtime::ModelFamilyIdentity::Claude
-        );
-        assert_eq!(
-            model_family_identity_for_kind(openai),
-            runtime::ModelFamilyIdentity::Generic
-        );
-        assert_eq!(
-            model_family_identity_for_kind(xai),
-            runtime::ModelFamilyIdentity::Generic
-        );
-        assert_eq!(
-            model_family_identity_for_kind(codex),
-            runtime::ModelFamilyIdentity::Generic
-        );
-        assert_eq!(
-            model_family_identity_for_kind(gemini),
-            runtime::ModelFamilyIdentity::Generic
-        );
-    }
-
-    #[test]
-    fn maps_model_name_to_model_family_identity() {
-        assert_eq!(
-            model_family_identity_for("claude-opus-4-6"),
-            runtime::ModelFamilyIdentity::Claude
-        );
-        assert_eq!(
-            model_family_identity_for("openai/gpt-4.1-mini"),
-            runtime::ModelFamilyIdentity::Generic
-        );
-        assert_eq!(
-            model_family_identity_for("grok-3"),
-            runtime::ModelFamilyIdentity::Generic
-        );
     }
 
     #[test]

@@ -33,6 +33,8 @@ serde = { version = "1", features = ["derive"] }
 smol = "2"
 serde_json.workspace = true
 sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
 syntect = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
 tools = { path = "../tools" }

@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,82 @@ impl Default for ModelCapabilitiesFile {
 /// In-memory snapshot of the capabilities file, loaded once per session.
 static CAPABILITIES: OnceLock<ModelCapabilitiesFile> = OnceLock::new();
 
+/// Per-model limit overrides from `sudocode.json`, keyed by lowercase wire
+/// model ID. Seeded by [`apply_config_limits`] at startup; empty otherwise.
+static CONFIG_LIMITS: RwLock<Option<BTreeMap<String, ModelLimitOverride>>> = RwLock::new(None);
+
+/// Token-limit overrides a model entry may declare in `sudocode.json`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelLimitOverride {
+    pub max_output_tokens: Option<u32>,
+    pub context_window: Option<u32>,
+}
+
+impl ModelLimitOverride {
+    fn is_empty(self) -> bool {
+        self.max_output_tokens.is_none() && self.context_window.is_none()
+    }
+
+    fn apply(self, cap: &mut ModelCapability) {
+        if let Some(value) = self.max_output_tokens {
+            cap.max_output_tokens = value;
+        }
+        if let Some(value) = self.context_window {
+            cap.context_window = value;
+        }
+    }
+}
+
+/// Seed the per-model limit overrides from a parsed `sudocode.json`.
+///
+/// The compiled-in capabilities table cannot cover every model a user points
+/// `scode` at — an unknown model silently inherits the table's `default`
+/// entry, and a too-large `max_tokens` is rejected by the provider
+/// (`DashScope`
+/// answers `Range of max_tokens should be [1, 32768]`). `maxOutputTokens` /
+/// `contextWindow` on the model entry are the user-side patch for that.
+///
+/// Overrides are keyed by **wire model ID**, since that is what every
+/// capability lookup on the hot path has in hand. Two aliases mapping to the
+/// same wire ID therefore share one override; the last one wins (aliases are
+/// visited in sorted order). Calling this again replaces the previous set.
+pub fn apply_config_limits(config: &crate::config::SudoCodeConfig) {
+    let mut overrides: BTreeMap<String, ModelLimitOverride> = BTreeMap::new();
+    for entry in config.models.values() {
+        let over = ModelLimitOverride {
+            max_output_tokens: entry.max_output_tokens,
+            context_window: entry.context_window,
+        };
+        if over.is_empty() {
+            continue;
+        }
+        for mapping in entry.providers.values() {
+            overrides.insert(mapping.model.to_ascii_lowercase(), over);
+        }
+    }
+    let value = (!overrides.is_empty()).then_some(overrides);
+    if let Ok(mut guard) = CONFIG_LIMITS.write() {
+        *guard = value;
+    }
+}
+
+/// The configured `maxOutputTokens` for a wire model ID, if the user set one.
+///
+/// Callers that apply their own heuristic cap use this to tell "the table's
+/// number" (cap it) from "the user's number" (obey it).
+#[must_use]
+pub fn config_max_output_tokens(model_id: &str) -> Option<u32> {
+    let base = model_id.rsplit('/').next().unwrap_or(model_id);
+    config_limit_for(base).and_then(|over| over.max_output_tokens)
+}
+
+/// Look up the configured override for a wire model ID, if any.
+fn config_limit_for(base: &str) -> Option<ModelLimitOverride> {
+    let guard = CONFIG_LIMITS.read().ok()?;
+    let map = guard.as_ref()?;
+    map.get(&base.to_ascii_lowercase()).copied()
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -96,10 +172,20 @@ static CAPABILITIES: OnceLock<ModelCapabilitiesFile> = OnceLock::new();
 pub fn lookup(model_id: &str) -> Option<ModelCapability> {
     let base = model_id.rsplit('/').next().unwrap_or(model_id);
     let caps = CAPABILITIES.get_or_init(ModelCapabilitiesFile::default);
-    caps.models
+    let table_entry = caps
+        .models
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
-        .map(|(_, cap)| cap.clone())
+        .map(|(_, cap)| cap.clone());
+    let Some(over) = config_limit_for(base) else {
+        return table_entry;
+    };
+    // A configured model is "known" even when the table has never heard of
+    // it: start from the table's `default` entry so the override lands on a
+    // complete capability rather than being dropped.
+    let mut cap = table_entry.unwrap_or_else(|| caps.default.clone());
+    over.apply(&mut cap);
+    Some(cap)
 }
 
 /// Returns `true` if the model is known to accept image input. Used by the

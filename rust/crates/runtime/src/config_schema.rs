@@ -267,6 +267,28 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         FieldType::StringArray,
         "Trusted project root paths",
     ),
+    FieldSchema::object(
+        "experimental",
+        EXPERIMENTAL_CHILDREN,
+        "Experimental feature flags (off by default)",
+    ),
+];
+
+/// Children of `experimental`. MUST mirror
+/// `runtime::experiments::Experiment::ALL` — `parse_optional_experiments`
+/// rejects keys outside that registry, so a key listed here but missing
+/// there would validate and then fail to load.
+const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
+    FieldSchema::leaf(
+        "coordinatorMode",
+        FieldType::Bool,
+        "Coordinator role prompt + worker-delegation tool allowlist",
+    ),
+    FieldSchema::leaf(
+        "mcpConfigServers",
+        FieldType::Bool,
+        "Spawn config/plugin MCP servers and advertise their tools",
+    ),
 ];
 
 // ── sudocode.json schema ────────────────────────────────────────────

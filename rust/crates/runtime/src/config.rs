@@ -1375,6 +1375,7 @@ fn parse_web_search_section(root: &BTreeMap<String, JsonValue>) -> WebSearchConf
 /// `models` keys; shape validation stays in the main parser.
 fn parse_extra_bodies(content: &str) -> BTreeMap<String, serde_json::Map<String, SerdeValue>> {
     let Ok(root) = serde_json::from_str::<SerdeValue>(content) else {
+        eprintln!("warning: serde_json failed to re-parse config for extraBody extraction; extraBody values will be ignored");
         return BTreeMap::new();
     };
     let Some(models) = root.get("models").and_then(SerdeValue::as_object) else {

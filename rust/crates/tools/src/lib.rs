@@ -3131,8 +3131,9 @@ fn seek_tool_output(
     let start_at = input.offset.unwrap_or(0);
 
     // Byte offsets of every line boundary (real or escaped), ascending.
-    let boundaries: Vec<(usize, usize)> = regex::Regex::new(r"\n|\\n")
-        .expect("static regex")
+    static NEWLINE_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\n|\\n").unwrap());
+    let boundaries: Vec<(usize, usize)> = NEWLINE_RE
         .find_iter(content)
         .map(|m| (m.start(), m.end()))
         .collect();

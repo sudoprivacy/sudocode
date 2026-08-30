@@ -78,7 +78,7 @@ caller's (e.g. a multi-tenant service's) decision.
 
 | Key | Effect |
 |---|---|
-| `systemPrompt` | **Override.** Replaces the built-in static system-prompt blocks (the `You are Sudo Code…` identity, `# System`, `# Doing tasks`, `# Executing actions with care`, `# Using your tools`, `# Tone and style`, `# Output efficiency`) with this text as the single static block. |
+| `systemPrompt` | **Override.** Replaces the built-in static system-prompt blocks (the `You are Sudo Code…` identity, `# System`, `# Working`, `# Risky actions`, `# Tools`, `# Git`) with this text as the single static block. |
 | `appendSystemPrompt` | **Append.** Added as the last **static** block, after the built-in identity and behaviour blocks and before every dynamic block (environment / project context, `AGENTS.md` instructions, runtime-config summary, auto-memory, plugin inventory, skill listing). A caller preamble is stable for the life of the session, so it belongs in the aggressively cached prefix; the cost is that the workspace-derived dynamic blocks now follow it rather than precede it. |
 
 The two compose: set both and the static blocks are replaced *and* the

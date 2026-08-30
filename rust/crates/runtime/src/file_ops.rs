@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -12,6 +13,18 @@ use crate::fs_backend::FsBackend;
 
 /// Maximum file size that can be read (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Default line window for `read_file` when the caller gives no `limit`
+/// (CC parity: `Read` pages 2000 lines by default).
+pub const READ_DEFAULT_LINE_LIMIT: usize = 2000;
+
+/// Byte budget for a single `read_file` payload. CC caps `Read` at 25 000
+/// *tokens* with a real tokenizer; we have none, so this is the ~4 bytes/token
+/// equivalent. When a page exceeds it the window shrinks (never errors, never
+/// offloads — a file read is always wanted in full, so spilling it to the
+/// side-channel would only add round-trips) and a partial-view banner tells
+/// the model how to page on.
+pub const READ_MAX_OUTPUT_BYTES: usize = 100_000;
 
 /// Maximum file size that can be written (10 MB).
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
@@ -55,6 +68,16 @@ pub struct TextFilePayload {
     pub start_line: usize,
     #[serde(rename = "totalLines")]
     pub total_lines: usize,
+    /// Set when the requested window was auto-shrunk to fit
+    /// [`READ_MAX_OUTPUT_BYTES`]. A programmatic signal that survives any
+    /// re-rendering of `content`; the human/model-facing banner rides in
+    /// `content` itself.
+    #[serde(
+        rename = "truncatedBySizeCap",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub truncated_by_size_cap: bool,
 }
 
 /// Output envelope for the `read_file` tool.
@@ -220,10 +243,68 @@ pub fn read_file(
 
     let lines: Vec<&str> = content.lines().collect();
     let start_index = offset.unwrap_or(0).min(lines.len());
-    let end_index = limit.map_or(lines.len(), |limit| {
-        start_index.saturating_add(limit).min(lines.len())
-    });
-    let selected = lines[start_index..end_index].join("\n");
+    let requested = limit.unwrap_or(READ_DEFAULT_LINE_LIMIT);
+    let mut end_index = start_index.saturating_add(requested).min(lines.len());
+    let mut selected = lines[start_index..end_index].join("\n");
+    let mut truncated_by_size_cap = false;
+
+    if selected.len() > READ_MAX_OUTPUT_BYTES {
+        // Shrink the line window until the page fits. First guess is
+        // proportional (×0.85 for slack), then geometric ×0.7 backoff.
+        let mut count = end_index - start_index;
+        let mut guess = count * READ_MAX_OUTPUT_BYTES / selected.len() * 85 / 100;
+        for _ in 0..6 {
+            guess = guess.clamp(1, count);
+            count = guess;
+            selected = lines[start_index..start_index + guess].join("\n");
+            if selected.len() <= READ_MAX_OUTPUT_BYTES || guess == 1 {
+                break;
+            }
+            guess = guess * 7 / 10;
+        }
+        end_index = start_index + count;
+        truncated_by_size_cap = true;
+
+        if selected.len() > READ_MAX_OUTPUT_BYTES {
+            // A single line that is bigger than the whole budget: cut it by
+            // bytes (char-aligned) — this file cannot be paginated by line.
+            let mut cut = READ_MAX_OUTPUT_BYTES;
+            while cut > 0 && !selected.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let shown = cut;
+            let full_len = selected.len();
+            selected.truncate(cut);
+            let _ = write!(
+                selected,
+                "\n\n[Truncated: PARTIAL view — {abs_str}: showing the first {shown} of {full_len} bytes of line {line}; this file has very long lines and cannot be paginated by line. Use grep_search to find a specific section. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
+                line = start_index + 1
+            );
+        } else if end_index < lines.len() {
+            let _ = write!(
+                selected,
+                "\n\n[Truncated: PARTIAL view — {abs_str}: showing lines {first}-{last} of {total} total ({bytes} bytes, cap {cap}). Call read_file with offset={next} limit={count} for the next page, or grep_search to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]",
+                first = start_index + 1,
+                last = end_index,
+                total = lines.len(),
+                bytes = selected.len(),
+                cap = READ_MAX_OUTPUT_BYTES,
+                next = end_index,
+            );
+        }
+    } else if limit.is_none() && end_index < lines.len() {
+        // Default window hit before EOF: not a size cap, but the model still
+        // needs to know the file continues.
+        let _ = write!(
+            selected,
+            "\n\n[Truncated: PARTIAL view — {abs_str}: showing lines {first}-{last} of {total} total (default window {win} lines). Call read_file with offset={next} limit={win} for the next page. Do NOT answer from this page alone if the answer may be further in the file.]",
+            first = start_index + 1,
+            last = end_index,
+            total = lines.len(),
+            win = READ_DEFAULT_LINE_LIMIT,
+            next = end_index,
+        );
+    }
 
     Ok(ReadFileOutput {
         kind: String::from("text"),
@@ -233,6 +314,7 @@ pub fn read_file(
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
+            truncated_by_size_cap,
         },
     })
 }

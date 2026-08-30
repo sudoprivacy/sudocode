@@ -790,13 +790,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
+            description: "Read a text file from the workspace. Reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "offset": { "type": "integer", "minimum": 0 },
-                    "limit": { "type": "integer", "minimum": 1 }
+                    "offset": { "type": "integer", "minimum": 0, "description": "0-based line to start reading from. Only provide if the file is too large to read at once." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Number of lines to read (default 2000)." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -805,13 +805,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_tool_output",
-            description: "Page an oversized earlier tool result back into context. When a tool's output was too large to inline, the transcript shows a <persisted-output id=\"...\"> marker with a head preview; pass that id here to read the rest in bounded byte windows. Walk forward: start at the marker's offset, then pass each response's `nextOffset` as the next `offset` until `nextOffset` is null.",
+            description: "Page an oversized earlier tool result back into context. When a tool's output was too large to inline, the transcript shows a <persisted-output id=\"...\"> marker with a head preview; pass that id here. Two modes: (1) window read — returns bytes [offset, offset+limit) and a `nextOffset` to continue from (null when done); (2) seek — pass `pattern` (a regex) to get the line numbers and byte offsets of matching lines without reading the body, then window-read around the offset you want. Prefer seek for logs and build output: the error is usually near the end.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "The tool_use id from the <persisted-output> marker." },
                     "offset": { "type": "integer", "minimum": 0, "description": "Start byte offset into the full result (default 0). Use the previous response's nextOffset to continue." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum bytes to return in this window (default 16384, capped at 65536)." }
+                    "limit": { "type": "integer", "minimum": 1, "description": "Window mode: maximum bytes to return (default 16384, capped at 65536). Seek mode: maximum matches to return (default 50, capped at 500)." },
+                    "pattern": { "type": "string", "description": "Seek mode: regex to search the full result for. Returns matching lines (truncated to 200 bytes each) with their line number and byte offset; does not return the body." },
+                    "case_insensitive": { "type": "boolean", "description": "Seek mode: case-insensitive matching (default false)." }
                 },
                 "required": ["id"],
                 "additionalProperties": false
@@ -3072,6 +3074,10 @@ fn run_read_tool_output(
         .map_err(|_| "offloaded tool output is not valid UTF-8".to_string())?;
     let total = content.len();
 
+    if let Some(pattern) = input.pattern.clone() {
+        return seek_tool_output(&content, &pattern, &input);
+    }
+
     // Clamp the window to char boundaries so we never split a multi-byte char.
     let mut start = input.offset.unwrap_or(0).min(total);
     while start > 0 && !content.is_char_boundary(start) {
@@ -3091,6 +3097,69 @@ fn run_read_tool_output(
         "byteEnd": end,
         "totalBytes": total,
         "nextOffset": next_offset,
+    }))
+}
+
+/// Seek mode of `read_tool_output`: locate lines matching `pattern` in the
+/// offloaded result and return their line numbers + byte offsets, so the
+/// model can window-read exactly the region it needs instead of walking the
+/// whole blob from offset 0. Bodies stay out of the payload: each hit is
+/// capped at a short excerpt.
+fn seek_tool_output(
+    content: &str,
+    pattern: &str,
+    input: &ReadToolOutputInput,
+) -> Result<String, String> {
+    /// Matches returned when the caller omits `limit`.
+    const DEFAULT_MATCHES: usize = 50;
+    /// Hard ceiling on matches per call.
+    const MAX_MATCHES: usize = 500;
+    /// Per-hit excerpt cap, bytes.
+    const EXCERPT_BYTES: usize = 200;
+
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(input.case_insensitive.unwrap_or(false))
+        .build()
+        .map_err(|e| format!("invalid pattern: {e}"))?;
+    let max = input.limit.unwrap_or(DEFAULT_MATCHES).clamp(1, MAX_MATCHES);
+    let start_at = input.offset.unwrap_or(0);
+
+    let mut matches = Vec::new();
+    let mut total_matches = 0usize;
+    let mut offset = 0usize;
+    for (idx, line) in content.split_inclusive('\n').enumerate() {
+        let line_start = offset;
+        offset += line.len();
+        if line_start < start_at || !re.is_match(line) {
+            continue;
+        }
+        total_matches += 1;
+        if matches.len() >= max {
+            continue;
+        }
+        let text = line.trim_end_matches(['\n', '\r']);
+        let mut cut = EXCERPT_BYTES.min(text.len());
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        matches.push(json!({
+            "line": idx + 1,
+            "byteOffset": line_start,
+            "text": &text[..cut],
+            "truncated": cut < text.len(),
+        }));
+    }
+    let total_lines = content.split_inclusive('\n').count();
+
+    to_pretty_json(json!({
+        "id": input.id,
+        "pattern": pattern,
+        "totalBytes": content.len(),
+        "totalLines": total_lines,
+        "totalMatches": total_matches,
+        "returned": matches.len(),
+        "matches": matches,
+        "hint": "Window-read around a hit with read_tool_output(id, offset=<byteOffset>, limit=<bytes>).",
     }))
 }
 
@@ -3350,6 +3419,8 @@ struct ReadToolOutputInput {
     id: String,
     offset: Option<usize>,
     limit: Option<usize>,
+    pattern: Option<String>,
+    case_insensitive: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8788,6 +8859,8 @@ mod tests {
                     id: id.to_string(),
                     offset,
                     limit,
+                    pattern: None,
+                    case_insensitive: None,
                 },
                 Some(&ctx),
                 &runtime::StdFsBackend,
@@ -8847,6 +8920,8 @@ mod tests {
                 id: id.to_string(),
                 offset: Some(0),
                 limit: Some(1_000_000),
+                pattern: None,
+                case_insensitive: None,
             },
             Some(&ctx),
             &runtime::StdFsBackend,
@@ -8867,6 +8942,8 @@ mod tests {
                 id: "whatever".to_string(),
                 offset: None,
                 limit: None,
+                pattern: None,
+                case_insensitive: None,
             },
             None,
             &runtime::StdFsBackend,

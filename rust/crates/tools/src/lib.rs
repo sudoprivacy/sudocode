@@ -203,10 +203,10 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, model_family_identity_for, resolve_provider_from_config, ApiError,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
+    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
+    ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
+    ToolResultContentBlock,
 };
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
@@ -4693,7 +4693,7 @@ fn prepare_agent_job(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| slugify_agent_name(&input.description));
     let created_at = iso8601_now();
-    let system_prompt = build_agent_system_prompt(&normalized_subagent_type, &model)?;
+    let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
 
     // Fork subagent: wrap the caller's directive with the non-negotiable
@@ -5478,7 +5478,7 @@ fn build_agent_runtime(
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
-fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemPrompt, String> {
+fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String> {
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     // Route sub-agents through the per-agent-type memory scope
     // (`<workspace>/agent-memory/<subagent_type>/`) so one agent's
@@ -5491,7 +5491,6 @@ fn build_agent_system_prompt(subagent_type: &str, model: &str) -> Result<SystemP
         runtime::today_local(),
         std::env::consts::OS,
         "unknown",
-        model_family_identity_for(model),
         subagent_type,
     )
     .map_err(|error| error.to_string())?;
@@ -11297,10 +11296,8 @@ mod tests {
         )
         .expect("write plan entry");
 
-        let explore_prompt =
-            build_agent_system_prompt("Explore", "claude-opus-4-8").expect("Explore prompt built");
-        let plan_prompt =
-            build_agent_system_prompt("Plan", "claude-opus-4-8").expect("Plan prompt built");
+        let explore_prompt = build_agent_system_prompt("Explore").expect("Explore prompt built");
+        let plan_prompt = build_agent_system_prompt("Plan").expect("Plan prompt built");
 
         std::env::remove_var("SUDOCODE_MEMORY_DIR");
 
@@ -11339,8 +11336,7 @@ mod tests {
         );
         let _home = HomeGuard::override_home(&home);
 
-        let prompt =
-            build_agent_system_prompt("committee", "claude-opus-4-8").expect("system prompt build");
+        let prompt = build_agent_system_prompt("committee").expect("system prompt build");
         let joined = prompt.dynamic_sections.join("\n---section---\n");
         assert!(
             joined.contains("NAMING_COMMITTEE_SENTINEL"),

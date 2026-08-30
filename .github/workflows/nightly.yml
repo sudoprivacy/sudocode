@@ -1,0 +1,57 @@
+name: Nightly channel
+
+# Moves the rolling `nightly` tag to the current main HEAD once a day at
+# midnight China Standard Time (16:00 UTC), but only when main actually moved
+# since the last nightly. It then dispatches `release.yml` on that tag
+# explicitly — a tag pushed with the default GITHUB_TOKEN does not fire other
+# workflows' push triggers (Actions' recursion guard) — which builds the full
+# platform matrix and publishes/overwrites the single rolling `nightly`
+# prerelease. One build path for stable, RC, and nightly alike.
+#
+# Promotion flow (documented in CONTRIBUTING.md § Release channels):
+# nightly soaks → tag `vX.Y.Z-rc.N` on that nightly's commit → soak →
+# tag `vX.Y.Z` on the same commit. The RC/stable tags rebuild via the same
+# workflow, so what was tested is what ships, commit-for-commit.
+
+on:
+  schedule:
+    - cron: '0 16 * * *'  # 00:00 CST (UTC+8)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  roll-nightly-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Move nightly tag if main advanced
+        id: roll
+        shell: bash
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          prev="$(git rev-parse -q --verify refs/tags/nightly^{commit} || true)"
+          git fetch -q origin 'refs/tags/nightly:refs/tags/nightly' 2>/dev/null || true
+          prev="$(git rev-parse -q --verify refs/tags/nightly^{commit} || true)"
+          if [[ "$head" == "$prev" ]]; then
+            echo "main unchanged since last nightly ($head); nothing to do"
+            echo "rolled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "rolling nightly: ${prev:-<none>} -> $head"
+          git tag -f nightly "$head"
+          git push -f origin refs/tags/nightly
+          echo "rolled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release build for the nightly tag
+        if: steps.roll.outputs.rolled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref nightly -f build_scope=all

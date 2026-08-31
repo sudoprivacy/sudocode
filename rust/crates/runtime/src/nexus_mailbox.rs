@@ -260,13 +260,28 @@ pub struct Inbound {
     pub body: String,
 }
 
-/// Drain every frame in `self_agent`'s inbox from `cursor` forward
-/// (non-blocking — stops at the first `eof`). Returns the new inbound
-/// messages and the advanced cursor to persist for the next poll.
+/// Wait for and drain new frames in `self_agent`'s inbox from `cursor` forward.
 ///
-/// Skips our OWN writes (`from == self_agent`) so a shared read/write stream
-/// never echoes to us, and skips senderless / empty-body frames — the same
-/// filter the co-host loop applies in `parse_inbound`.
+/// `block_ms == 0` is a pure non-blocking drain (seek-to-tail / one-shot
+/// collect). `block_ms > 0` makes the FIRST read a blocking tail read: the
+/// server parks up to `block_ms` on the DT_STREAM's per-path condvar and wakes
+/// sub-millisecond on the next write (node-local or a replicated peer), so an
+/// idle receiver costs one parked RPC rather than a busy `sleep` loop. Once the
+/// first frame arrives the remaining buffered frames are drained non-blocking,
+/// so a burst surfaces in one call.
+///
+/// Why blocking `read_at_blocking` and not `sys_watch`/`Watch`: for the WAL
+/// mailbox both wake (the apply observer signals the file-watch AND the stream
+/// condvar), but a blocking read is ONE RPC that returns the next frame AT the
+/// cursor, whereas `sys_watch` returns only a "something changed" event and
+/// still needs a follow-up read — two round-trips and no cursor precision. The
+/// blocking read is the cursor-aware tail primitive the A2A mailbox is built
+/// on; `sys_watch` is the generic inotify-style path-change notifier.
+///
+/// Returns the new inbound messages and the advanced cursor to persist for the
+/// next poll. Skips our OWN writes (`from == self_agent`) so a shared
+/// read/write stream never echoes to us, and skips senderless / empty-body
+/// frames — the same filter the co-host loop applies in `parse_inbound`.
 ///
 /// # Errors
 /// Returns a `String` error if a `stream_read_at` RPC fails.
@@ -275,12 +290,25 @@ pub fn poll_new(
     self_agent: &str,
     mut cursor: u64,
     auth_token: &str,
+    block_ms: u64,
 ) -> Result<(Vec<Inbound>, u64), String> {
     let path = inbox_path(self_agent);
     let mut out = Vec::new();
+    let mut first = true;
     loop {
+        // Block only on the first read (park on the tail); every subsequent
+        // read in this call is a non-blocking drain of the already-buffered
+        // burst so the loop terminates at `eof`.
+        let blocking = first && block_ms > 0;
+        first = false;
         let (data, next, eof) = client
-            .stream_read_at(&path, cursor, auth_token)
+            .stream_read_at(
+                &path,
+                cursor,
+                blocking,
+                if blocking { block_ms } else { 0 },
+                auth_token,
+            )
             .map_err(|e| format!("A2A stream_read_at {path}@{cursor}: {e}"))?;
         if eof {
             break;

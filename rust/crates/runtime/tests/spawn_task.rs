@@ -527,8 +527,9 @@ fn loop_exits_on_abort_signal() {
             self_id: "scode".to_string(),
         },
     );
-    // No message sent — the loop is parked on `sys_watch`. abort() must let
-    // it exit on the next `while !abort` check (≤ one watch timeout).
+    // No message sent — the loop is parked on the blocking `sys_read` tail.
+    // abort() must let it exit on the next `while !abort` check (≤ one read
+    // block timeout).
     handle.abort_signal.abort();
 
     let watcher = thread::Builder::new()

@@ -1,8 +1,8 @@
 //! Managed-agent loop spawn entry — v2 ConversationRuntime integration.
 //!
 //! Wires the per-pid agent loop into a full LLM turn-driver that waits
-//! on the agent's mailbox (via `sys_watch` condvar blocking) for inbound
-//! [`MailboxEnvelope`]s and drives each one through a
+//! on the agent's mailbox (via a blocking `sys_read` on the DT_STREAM tail)
+//! for inbound [`MailboxEnvelope`]s and drives each one through a
 //! [`crate::ConversationRuntime`]. The loop does NOT auto-reply: the agent
 //! decides whether to respond by calling the `send_message` tool during the
 //! turn (routed through [`mailbox_sender`]). Not calling it = silence, so a
@@ -59,16 +59,23 @@ use crate::permissions::PermissionPolicy;
 use crate::prompt::SystemPrompt;
 use crate::session::Session;
 
-/// `sys_watch` timeout per iteration. The kernel's `FileWatchRegistry`
-/// condvar blocks the thread until a `FileWrite` event fires on the
-/// mailbox path or the timeout expires — no busy-polling, near-zero
-/// idle CPU. On timeout the loop re-checks `abort.is_aborted()` and
-/// re-arms the watch.
-const WATCH_TIMEOUT_MS: u64 = 500;
-
-/// Per-call `sys_read` blocking timeout. `0` keeps the call
-/// non-blocking — data is already present because `sys_watch` woke us.
-const READ_TIMEOUT_MS: u64 = 0;
+/// Blocking-tail read timeout per iteration. A `sys_read` with a non-zero
+/// timeout does a fast-path read at the cursor and, on empty, parks on the
+/// DT_STREAM's per-path condvar until the next frame lands or the timeout
+/// expires (returning `Ok(None)`, at which point the loop re-checks `abort`).
+///
+/// This replaces the prior `sys_watch` (event notify) + non-blocking `sys_read`
+/// pair with ONE tier-1 syscall. It is NOT a latency change: for the WAL A2A
+/// mailbox both the old `sys_watch` and this blocking read wake sub-millisecond
+/// on a same-node or replicated write (the raft apply observer signals BOTH the
+/// file-watch and the stream condvar); for a non-WAL stream a same-node
+/// `sys_write` wakes neither (it appends via the backend, not `write_nowait`),
+/// so both fall back to this timeout. The wins are (1) DRY — the same
+/// cursor-aware tail primitive the standalone `scode` receiver uses over gRPC
+/// (`StreamReadAt` blocking); (2) one syscall that both waits AND returns the
+/// frame at the cursor, no follow-up read; (3) atomic check-then-park closes
+/// the lost-wakeup gap between the old separate `sys_read` and `sys_watch`.
+const READ_BLOCK_MS: u64 = 500;
 
 /// Where the co-hosted agent's chat mailbox lives — determines the path the
 /// loop reads for inbound messages and where each reply is written.
@@ -87,7 +94,7 @@ pub enum Mailbox {
 }
 
 impl Mailbox {
-    /// Path the loop reads + `sys_watch`es for inbound messages.
+    /// Path the loop blocking-reads for inbound messages.
     fn inbox_path(&self) -> String {
         match self {
             Mailbox::LocalStream { path, .. } => path.clone(),
@@ -338,7 +345,7 @@ fn run_loop<K, C, T, F>(
     let cursor_path = cursor_path_for(&self_id);
     let mut next_offset: u64 = load_cursor(kernel.as_ref(), &cursor_path, &ctx);
     while !abort.is_aborted() {
-        match kernel.sys_read(&inbox_path, &ctx, READ_TIMEOUT_MS, next_offset) {
+        match kernel.sys_read(&inbox_path, &ctx, READ_BLOCK_MS, next_offset) {
             Ok(result) => {
                 if let Some(bytes) = result.data.as_ref() {
                     if !bytes.is_empty() {
@@ -386,19 +393,19 @@ fn run_loop<K, C, T, F>(
                 // path: a cold-read-before-`resolve`, a momentary not-leader,
                 // or being read before the mint has planted it are all
                 // TRANSIENT — a `break` here would silently kill a co-hosted
-                // agent for the daemon's lifetime. Log, then fall through to
-                // `sys_watch` (which paces the retry at `WATCH_TIMEOUT_MS`)
-                // and re-check `abort`.
+                // agent for the daemon's lifetime. Log, then pace the retry
+                // and re-check `abort`. The happy path is paced by the
+                // blocking read itself (which parks on the tail); an error
+                // returns immediately, so sleep here to avoid a hot retry loop.
                 eprintln!(
                     "[managed-agent {self_id}] inbox read error (transient, retrying): {e:?}"
                 );
+                thread::sleep(std::time::Duration::from_millis(READ_BLOCK_MS));
             }
         }
-        // Block until a FileWrite event fires on the inbox path, or
-        // timeout. Replaces the old `thread::sleep(50ms)` busy-poll
-        // with a condvar wait — near-zero idle CPU, sub-millisecond
-        // wake latency on new data.
-        kernel.sys_watch(&inbox_path, WATCH_TIMEOUT_MS);
+        // No separate wait step: the blocking `sys_read` above already parks on
+        // the DT_STREAM tail up to READ_BLOCK_MS (waking sub-ms on a new frame,
+        // returning Ok(None) on timeout so the loop re-checks `abort`).
     }
 }
 

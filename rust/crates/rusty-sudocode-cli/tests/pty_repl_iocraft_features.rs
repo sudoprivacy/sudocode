@@ -653,6 +653,17 @@ fn config_tree_navigate_back_and_toggle() {
     });
 
     // 14. Clean exit.
+    //
+    // The `❯` matched above is ambiguous: the config-tree overlay also renders
+    // `❯` as its row selector, so on a slow render (loaded macOS CI) `expect`
+    // can match an intermediate tree frame while ESC is still tearing the
+    // overlay down. If `/exit` is sent then, it lands on the closing overlay
+    // instead of the REPL command line and the child never exits (10s eof
+    // timeout — the macOS-only flake). Settle the render loop first — the same
+    // input-slot pause the steps above use — so `/exit` reaches the command
+    // parser, and give teardown extra headroom for a loaded runner.
+    std::thread::sleep(Duration::from_millis(400));
+    sess.set_default_timeout(Duration::from_secs(20));
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

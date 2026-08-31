@@ -16,20 +16,29 @@
 
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use nexus_vfs_client::NexusVfsClient;
 use runtime::nexus_mailbox::{self, Config, Inbound};
 use runtime::spawn_task::MailboxSender;
 use runtime::HookAbortSignal;
 
-/// How often the receive poller checks the inbox. A2A is turn-scale, not
-/// latency-critical, so a coarse interval keeps idle cost negligible.
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Blocking-tail wait per receive iteration. Each drain parks in a blocking
+/// `stream_read_at` (the DT_STREAM `read_at_blocking` primitive) up to this
+/// long, waking sub-millisecond on the next inbox write and returning empty at
+/// the deadline so the loop can re-check `abort`. This is event-driven, not a
+/// poll interval — an idle receiver costs one parked RPC, not a `sleep` spin.
+const INBOX_WAIT_MS: u64 = 500;
 
 /// The resolved, connected standalone A2A session.
 pub(crate) struct Session {
     config: Config,
+    /// The one daemon connection: `ensure_inbox`, the send half, the CLI tool
+    /// executor, and the blocking receive tail all share it. Safe to share
+    /// because [`NexusVfsClient`] dispatches each op on its own task — a
+    /// receiver parked in a blocking `stream_read_at` no longer stalls the
+    /// worker, so it can't starve concurrent sends. (An earlier revision split
+    /// off a second connection to dodge a single-worker stall; the client is
+    /// now concurrent, so one connection is correct and simpler.)
     client: Arc<NexusVfsClient>,
     sender: MailboxSender,
 }
@@ -84,25 +93,34 @@ pub(crate) fn session() -> Result<Option<&'static Session>, String> {
         .map_err(Clone::clone)
 }
 
-/// Spawn the background inbox poller (the receive half).
+/// Spawn the background inbox receiver (the receive half).
 ///
 /// Surfaces each new peer message to `sink` as it arrives. Starts at the
 /// stream tail — a fresh interactive session never replays history, the same
 /// seek-to-tail the co-host cold-start uses — and stops when `abort` fires.
+///
+/// Event-driven, not polling: each iteration parks in a blocking
+/// `stream_read_at` (via `poll_new`'s `block_ms`) until the daemon signals the
+/// next inbox write, then drains the burst. The block returns empty at the
+/// `INBOX_WAIT_MS` deadline so the loop can re-check `abort`. No `sleep` spin —
+/// an idle receiver costs one parked RPC, replacing the former poll interval.
 pub(crate) fn spawn_poller(
     session: &'static Session,
     abort: HookAbortSignal,
     sink: impl Fn(&Inbound) + Send + 'static,
 ) -> JoinHandle<()> {
+    // Shares `session.client`: the client dispatches ops concurrently, so
+    // parking here on the blocking tail cannot starve the send half.
     let client = Arc::clone(&session.client);
     let agent = session.config.agent.clone();
     let api_key = session.config.api_key.clone();
     std::thread::Builder::new()
-        .name("nexus-a2a-poller".into())
+        .name("nexus-a2a-receiver".into())
         .spawn(move || {
-            // Seek to tail: drain-and-discard once to fix the cursor at the
-            // current end, so only messages that arrive after startup surface.
-            let mut cursor = match nexus_mailbox::poll_new(&client, &agent, 0, &api_key) {
+            // Seek to tail: a non-blocking (block_ms=0) drain-and-discard once
+            // to fix the cursor at the current end, so only messages that
+            // arrive after startup surface.
+            let mut cursor = match nexus_mailbox::poll_new(&client, &agent, 0, &api_key, 0) {
                 Ok((_history, tail)) => tail,
                 Err(e) => {
                     eprintln!("[nexus-a2a] initial inbox seek failed: {e}");
@@ -110,17 +128,22 @@ pub(crate) fn spawn_poller(
                 }
             };
             while !abort.is_aborted() {
-                match nexus_mailbox::poll_new(&client, &agent, cursor, &api_key) {
+                // Block on the tail up to INBOX_WAIT_MS, then drain the burst.
+                match nexus_mailbox::poll_new(&client, &agent, cursor, &api_key, INBOX_WAIT_MS) {
                     Ok((msgs, next)) => {
                         for m in &msgs {
                             sink(m);
                         }
                         cursor = next;
                     }
-                    Err(e) => eprintln!("[nexus-a2a] inbox poll failed: {e}"),
+                    Err(e) => {
+                        eprintln!("[nexus-a2a] inbox poll failed: {e}");
+                        // Avoid a hot error loop if the daemon connection is
+                        // sick; the blocking read itself paces the happy path.
+                        std::thread::sleep(std::time::Duration::from_millis(INBOX_WAIT_MS));
+                    }
                 }
-                std::thread::sleep(POLL_INTERVAL);
             }
         })
-        .expect("spawn nexus-a2a poller thread")
+        .expect("spawn nexus-a2a receiver thread")
 }

@@ -45,11 +45,14 @@ enum VfsOp {
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<u64>>,
     },
-    /// Non-blocking read of a DT_STREAM at `offset`; returns
-    /// `(data, next_offset, eof)`.
+    /// Read a DT_STREAM at `offset`; returns `(data, next_offset, eof)`.
+    /// When `blocking`, the server parks up to `timeout_ms` waiting for the
+    /// next frame (returning `eof` on timeout) — the event-driven mailbox tail.
     StreamReadAt {
         path: String,
         offset: u64,
+        blocking: bool,
+        timeout_ms: u64,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
     },
@@ -160,164 +163,178 @@ impl NexusVfsClient {
                                 .connect_lazy()
                         }
                     };
-                    let mut client = NexusVfsServiceClient::new(ch);
+                    let client = NexusVfsServiceClient::new(ch);
                     while let Some(op) = rx.recv().await {
-                        match op {
-                            VfsOp::Read {
-                                path,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .read(ReadRequest {
-                                        path,
-                                        auth_token,
-                                        content_id: String::new(),
-                                        timeout_ms: 0,
-                                        offset: 0,
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok(r.content)
-                                    }
-                                }));
+                        // Each op runs on its own task: a long op (a blocking
+                        // stream-tail read) must not block the others on this
+                        // connection. The tonic client clones cheaply and
+                        // multiplexes concurrent requests over the one HTTP/2
+                        // channel, so a receiver parked on the tail can't
+                        // starve the send half. Single-caller ordering is
+                        // unchanged — every sync method blocks on its reply
+                        // channel, so a caller can't issue its next op until
+                        // this one returns; only cross-thread use concurs.
+                        let mut client = client.clone();
+                        tokio::spawn(async move {
+                            match op {
+                                VfsOp::Read {
+                                    path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .read(ReadRequest {
+                                            path,
+                                            auth_token,
+                                            content_id: String::new(),
+                                            timeout_ms: 0,
+                                            offset: 0,
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.content)
+                                        }
+                                    }));
+                                }
+                                VfsOp::Write {
+                                    path,
+                                    content,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .write(WriteRequest {
+                                            path,
+                                            content,
+                                            auth_token,
+                                            content_id: String::new(),
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(())
+                                        }
+                                    }));
+                                }
+                                VfsOp::Delete {
+                                    path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .delete(DeleteRequest {
+                                            path,
+                                            auth_token,
+                                            recursive: false,
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(())
+                                        }
+                                    }));
+                                }
+                                VfsOp::Call {
+                                    method,
+                                    payload,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .call(CallRequest {
+                                            method,
+                                            payload,
+                                            auth_token,
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.payload))
+                                        } else {
+                                            Ok(r.payload)
+                                        }
+                                    }));
+                                }
+                                VfsOp::StreamWrite {
+                                    path,
+                                    data,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .stream_write_nowait(StreamWriteRequest {
+                                            path,
+                                            data,
+                                            auth_token,
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.offset)
+                                        }
+                                    }));
+                                }
+                                VfsOp::StreamReadAt {
+                                    path,
+                                    offset,
+                                    blocking,
+                                    timeout_ms,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .stream_read_at(StreamReadAtRequest {
+                                            path,
+                                            offset,
+                                            blocking,
+                                            timeout_ms,
+                                            auth_token,
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok((r.data, r.next_offset, r.eof))
+                                        }
+                                    }));
+                                }
+                                VfsOp::EnsureStream {
+                                    path,
+                                    io_profile,
+                                    capacity,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .setattr(SetattrRequest {
+                                            path,
+                                            auth_token,
+                                            entry_type: DT_STREAM,
+                                            io_profile,
+                                            capacity,
+                                            ..Default::default()
+                                        })
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.created)
+                                        }
+                                    }));
+                                }
                             }
-                            VfsOp::Write {
-                                path,
-                                content,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .write(WriteRequest {
-                                        path,
-                                        content,
-                                        auth_token,
-                                        content_id: String::new(),
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok(())
-                                    }
-                                }));
-                            }
-                            VfsOp::Delete {
-                                path,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .delete(DeleteRequest {
-                                        path,
-                                        auth_token,
-                                        recursive: false,
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok(())
-                                    }
-                                }));
-                            }
-                            VfsOp::Call {
-                                method,
-                                payload,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .call(CallRequest {
-                                        method,
-                                        payload,
-                                        auth_token,
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.payload))
-                                    } else {
-                                        Ok(r.payload)
-                                    }
-                                }));
-                            }
-                            VfsOp::StreamWrite {
-                                path,
-                                data,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .stream_write_nowait(StreamWriteRequest {
-                                        path,
-                                        data,
-                                        auth_token,
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok(r.offset)
-                                    }
-                                }));
-                            }
-                            VfsOp::StreamReadAt {
-                                path,
-                                offset,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .stream_read_at(StreamReadAtRequest {
-                                        path,
-                                        offset,
-                                        blocking: false,
-                                        timeout_ms: 0,
-                                        auth_token,
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok((r.data, r.next_offset, r.eof))
-                                    }
-                                }));
-                            }
-                            VfsOp::EnsureStream {
-                                path,
-                                io_profile,
-                                capacity,
-                                auth_token,
-                                resp,
-                            } => {
-                                let r = client
-                                    .setattr(SetattrRequest {
-                                        path,
-                                        auth_token,
-                                        entry_type: DT_STREAM,
-                                        io_profile,
-                                        capacity,
-                                        ..Default::default()
-                                    })
-                                    .await;
-                                let _ = resp.send(grpc_result(r, |r| {
-                                    if r.is_error {
-                                        Err(vfs_err(&r.error_payload))
-                                    } else {
-                                        Ok(r.created)
-                                    }
-                                }));
-                            }
-                        }
+                        });
                     }
                 });
             })
@@ -384,10 +401,18 @@ impl NexusVfsClient {
     /// `(data, next_offset, eof)` — `eof == true` means no frame was
     /// available at `offset` yet. This is the A2A inbox POLL path (advance
     /// the caller's cursor to `next_offset` after each delivered frame).
+    /// Read one DT_STREAM frame at `offset`, returning `(data, next_offset,
+    /// eof)`. When `blocking`, the server parks up to `timeout_ms` for the next
+    /// frame and returns `eof=true` (empty) on timeout — the event-driven
+    /// mailbox tail (`read_at_blocking`), woken sub-millisecond by any write to
+    /// `path` (node-local inline or a replicated peer write). Pass
+    /// `blocking=false, timeout_ms=0` for a plain non-blocking drain.
     pub fn stream_read_at(
         &self,
         path: &str,
         offset: u64,
+        blocking: bool,
+        timeout_ms: u64,
         auth_token: &str,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
@@ -395,6 +420,8 @@ impl NexusVfsClient {
             .send(VfsOp::StreamReadAt {
                 path: path.to_owned(),
                 offset,
+                blocking,
+                timeout_ms,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })

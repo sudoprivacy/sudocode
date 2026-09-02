@@ -240,7 +240,7 @@ fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> S
         NoTools,
         system_prompt,
         PermissionPolicy::new(PermissionMode::Allow),
-        |_state| {},
+        |_state, _reason| {},
     )
 }
 
@@ -273,7 +273,7 @@ fn spawn_sending(
         SendingTools { send },
         system_prompt,
         PermissionPolicy::new(PermissionMode::Allow),
-        |_state| {},
+        |_state, _reason| {},
     )
 }
 

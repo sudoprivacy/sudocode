@@ -1,0 +1,19 @@
+[package]
+name = "engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# engine-core sits just BELOW the seam on the engine side. It owns the driver
+# that turns runtime callbacks into `engine_events` (added in later commits) and
+# re-exports the `api` config/provider/error surface so renderer crates
+# (rusty-sudocode-cli, engine-acp) can drop their direct `api` dependency and
+# still name `SudoCodeConfig`, `resolve_model`, `ApiError`, … . `api::StreamEvent`
+# and the other wire types are deliberately NOT re-exported: they stay internal
+# to the engine side so a renderer can never name them.
+api = { path = "../api" }
+
+[lints]
+workspace = true

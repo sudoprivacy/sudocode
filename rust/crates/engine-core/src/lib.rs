@@ -1,25 +1,40 @@
-//! Engine-side core, just below the [engine↔renderer seam](engine_events).
+//! # THE engine↔renderer seam (read this before adding any cross-boundary path)
 //!
-//! This crate hosts the driver that runs a turn and turns the runtime's
-//! callbacks into [`engine_events::EngineEvent`]s (added incrementally in
-//! later commits), plus the pure (non-rendering) `ApiClient` the engine uses.
+//! sudocode has exactly ONE abstraction between the engine (the model/tool loop)
+//! and every renderer (the REPL, ACP for moss/sudowork, …). If you are wiring a
+//! new frontend, a new transport, or any engine↔UI communication, it goes
+//! through here — do NOT grow a second path. The whole cut is three types:
 //!
-//! It also owns the **config/provider/error re-export surface**. The CLI is a
-//! renderer that lives ABOVE the seam, yet `api` is historically the CLI's
-//! configuration SSOT too (`SudoCodeConfig`, `resolve_model`, `ApiError`, …).
-//! Re-exporting those symbols here lets renderer crates drop their direct `api`
-//! dependency entirely — which is what makes the wire type `api::StreamEvent`
-//! *un-nameable* in a renderer (the compiler half of the seam enforcement).
+//! ```text
+//!   renderer side (ABOVE the seam)                 engine side (BELOW)
+//!   ──────────────────────────────                 ───────────────────
+//!   REPL ┐
+//!   ACP  ┼─▶ EngineHandle { commands, events } ─▶ EngineSession ─▶ EngineDelegate
+//!   moss ┘   send EngineCommand / recv EngineEvent   (the pump)     (impl'd per engine)
+//! ```
 //!
-//! Only the config / provider / error surface is re-exported. The wire /
-//! streaming types (`StreamEvent`, `MessageRequest`, `ContentBlockDelta`, the
-//! provider clients, …) are intentionally kept internal to the engine side.
+//! * [`EngineCommand`] / [`EngineEvent`] — the only *data* that crosses (defined
+//!   in `engine_events`; payload value types ride along, re-exported there).
+//! * [`EngineHandle`] — **to add a renderer, consume this.** `commands.send(..)`
+//!   drives the engine, `events.recv()` observes it. Nothing else.
+//! * [`EngineDelegate`] — **to plug an engine, implement this.** One method per
+//!   thing a turn can do. Nothing else.
 //!
-//! # The seam, in one place
+//! [`EngineSession`] is the pump between them — generic over `dyn EngineDelegate`,
+//! zero engine/renderer-specific logic. See [`session`] for the full map + the
+//! one internal subtlety (the sync-prompt → async-answer bridge).
 //!
-//! [`EngineSession`] / [`EngineHandle`] / [`EngineDelegate`] (this crate) plus
-//! [`EngineEvent`] / [`EngineCommand`] (re-exported from `engine_events`) are
-//! the entire engine↔renderer abstraction. See [`session`] for the map.
+//! # What else this crate owns
+//!
+//! The pure (non-rendering) `ApiClient` the engine uses, and the
+//! **config/provider/error re-export surface**: `api` is historically the CLI's
+//! config SSOT (`SudoCodeConfig`, `resolve_model`, `ApiError`, …), so
+//! re-exporting those here lets renderer crates drop their direct `api`
+//! dependency — which makes the wire type `api::StreamEvent` *un-nameable* in a
+//! renderer (the compiler half of the seam enforcement). Only the config /
+//! provider / error surface is re-exported; the wire / streaming types
+//! (`StreamEvent`, `MessageRequest`, the provider clients, …) stay internal to
+//! the engine side.
 
 mod session;
 pub use session::{EngineDelegate, EngineHandle, EngineSession};

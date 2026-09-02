@@ -79,6 +79,20 @@ the code first.
 
 - **No telemetry by default.** Opt-in is explicit; never buried.
 
+- **One engine↔renderer seam — do not grow a second.** All
+  communication between the engine (the model/tool loop) and any
+  renderer (the REPL, ACP for moss/sudowork, a future frontend)
+  crosses exactly one abstraction: the `engine-core` crate. A
+  renderer *consumes* an `EngineHandle` (send `EngineCommand`, recv
+  `EngineEvent`); an engine *implements* `EngineDelegate`. That is
+  the whole cut. Do not reach past it (no new ad-hoc channel, no
+  renderer touching `runtime::TurnSummary`/`RuntimeObserver`, no
+  renderer depending on the `api` wire types). The SSOT + the map is
+  the crate-root doc of
+  [`rust/crates/engine-core/src/lib.rs`](./rust/crates/engine-core/src/lib.rs)
+  and [`.../src/session.rs`](./rust/crates/engine-core/src/session.rs).
+  A CI `boundary-gate` job enforces it. (See ROADMAP → ACP-cut / #100.)
+
 The full 11 Always / 10 Never list lives in [`README.md` § Design
 principles](./README.md#design-principles). When in doubt, read
 that section before opening the PR.

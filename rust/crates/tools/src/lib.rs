@@ -534,7 +534,12 @@ impl GlobalToolRegistry {
             .collect::<BTreeMap<_, _>>();
 
         for &(alias, canonical) in TOOL_ALIASES {
-            name_map.insert(alias.to_string(), canonical.to_string());
+            // Don't overwrite a spec-name mapping — `--allowedTools TaskList`
+            // must resolve to the spec name `"TaskList"` (not the dispatch
+            // alias `"pid.status"`) so `definitions()` can match `spec.name`.
+            name_map
+                .entry(alias.to_string())
+                .or_insert_with(|| canonical.to_string());
         }
 
         let mut allowed = BTreeSet::new();
@@ -951,6 +956,52 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
+        // ── Unified agent.list ────────────────────────────────────────
+        // Discovery tool: list all available agent types (builtin +
+        // custom `.md` agents from ~/.nexus/sudocode/agents/ and
+        // .sudocode/agents/).
+        ToolSpec {
+            name: "agent.list",
+            description: "List all available agent types with their names, descriptions, and capabilities.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        // ── Unified agent.spawn ───────────────────────────────────────
+        // Canonical replacement for `Agent`. Adds `fresh` flag:
+        // `false` (default) = auto-resume most recent session;
+        // `true` = start a clean session. The old `Agent` name is
+        // retained as a deprecated alias via `TOOL_ALIASES`.
+        ToolSpec {
+            name: "agent.spawn",
+            description: concat!(
+                "Spawn an agent, returning a pid. ",
+                "By default resumes the agent's most recent session (auto-resume). ",
+                "Set `fresh: true` to start a clean session. ",
+                "Runs in the background by default; set `run_in_background: false` for synchronous. ",
+                "Use `pid.output(pid, block: true)` to await a background agent."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string", "description": "Agent type/name to spawn (e.g. general-purpose, Explore, Plan)." },
+                    "prompt": { "type": "string", "description": "The full task prompt for the agent." },
+                    "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
+                    "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
+                    "name": { "type": "string", "description": "Optional human-readable label for this agent." },
+                    "model": { "type": "string", "description": "Model ID override; defaults to the system default." },
+                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async. When false, run synchronously." },
+                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode override." },
+                    "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode." }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
         ToolSpec {
             name: "ToolSearch",
             description: "Search for deferred or specialized tools by exact name or keywords.",
@@ -1195,6 +1246,88 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        // ── Unified pid.* tools ───────────────────────────────────────
+        // Canonical replacements for TaskStop, TaskGet/TaskList, and
+        // TaskOutput. The old names are retained as deprecated aliases
+        // via TOOL_ALIASES.
+        ToolSpec {
+            name: "pid.kill",
+            description: "Terminate a running agent by pid. Replaces TaskStop.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "string", "description": "The pid (task/agent ID) to terminate." }
+                },
+                "required": ["pid"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "pid.status",
+            description: concat!(
+                "Query the status of one or all agent pids. ",
+                "With `pid`: returns READY/BUSY/TERMINATED for that pid. ",
+                "Without `pid`: lists all pids with their statuses (replaces TaskList). ",
+                "Also replaces TaskGet for single-pid queries."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "string", "description": "Optional pid to query. Omit to list all." },
+                    "backgrounded_only": {
+                        "type": "boolean",
+                        "description": "When true and listing all, include only backgrounded/running agents."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "pid.output",
+            description: concat!(
+                "Retrieve output from a pid (background agent or task). ",
+                "Set `block: true` to wait until the agent finishes (max 60s per call). ",
+                "`merge: true` merges the agent's result into the caller's context. ",
+                "Replaces TaskOutput."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "string", "description": "The pid (task/agent ID) to retrieve output from." },
+                    "block": { "type": "boolean", "description": "When true (default), wait until the agent finishes before returning." },
+                    "timeout_ms": { "type": "integer", "minimum": 0, "description": "Max milliseconds to wait when block=true (default 30000, capped at 60000)." },
+                    "merge": { "type": "boolean", "description": "When true, merge the agent's result back into the caller's context. Default false (drop)." }
+                },
+                "required": ["pid"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        // ── pid.fork ───────────────────────────────────────────────────
+        // Snapshots the current session into a new pid. Equivalent to
+        // `agent.spawn(agent="fork")` but exposed as its own tool for
+        // clarity and discoverability.
+        ToolSpec {
+            name: "pid.fork",
+            description: concat!(
+                "Fork the current session into a new pid. ",
+                "The child starts with a snapshot of the parent's conversation context. ",
+                "Returns a pid that can be addressed with send/pid.output/pid.status. ",
+                "Runs in the background by default."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Optional task prompt for the forked child. If omitted, the child inherits the parent's last context." },
+                    "description": { "type": "string", "description": "A short (3-5 word) description of the fork's purpose." },
+                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async. When false, run synchronously." }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
         ToolSpec {
             name: "CronCreate",
             description: "Create a scheduled recurring task.",
@@ -1308,6 +1441,60 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        // ── Unified send ──────────────────────────────────────────────
+        // Canonical replacement for both `SendMessage` (coordinator /
+        // sub-agent mailbox) and `send_message` (A2A / co-hosted).
+        // Both old names are retained as deprecated aliases via
+        // `TOOL_ALIASES` so existing prompts and tool calls keep working.
+        ToolSpec {
+            name: "send",
+            description: concat!(
+                "Send a message to an agent by name or pid. ",
+                "Unified replacement for SendMessage and send_message. ",
+                "When `to` is an agent name the message is delivered to its ",
+                "workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
+                "When `to` is a pid it is routed to the running process. ",
+                "`to: \"*\"` broadcasts to all teammates. ",
+                "`message` accepts a plain string (requires `summary` for named agents) ",
+                "or a structured object {type: shutdown_request|shutdown_response|plan_approval_response, ...}."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient: agent name, pid, or \"*\" for broadcast."
+                    },
+                    "message": {
+                        "description": "Plain text (string) or a structured message object.",
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["shutdown_request", "shutdown_response", "plan_approval_response"]
+                                    },
+                                    "request_id": { "type": "string" },
+                                    "approve": { "type": "boolean" },
+                                    "reason": { "type": "string" },
+                                    "feedback": { "type": "string" }
+                                },
+                                "required": ["type"]
+                            }
+                        ]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)."
+                    }
+                },
+                "required": ["to", "message"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
     ];
     if cron_tools_disabled() {
         specs.retain(|s| !is_cron_tool(s.name));
@@ -1395,6 +1582,16 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     ("edit", "edit_file"),
     ("glob", "glob_search"),
     ("grep", "grep_search"),
+    // Unified send: both old names → canonical "send"
+    ("sendmessage", "send"),  // SendMessage (normalized)
+    ("send_message", "send"), // send_message (managed-agent A2A)
+    // Unified agent.spawn: old name → canonical
+    ("agent", "agent.spawn"), // Agent (normalized)
+    // Unified pid.*: old Task* names → canonical pid.* names
+    ("taskstop", "pid.kill"),     // TaskStop (normalized)
+    ("taskget", "pid.status"),    // TaskGet (normalized)
+    ("tasklist", "pid.status"),   // TaskList (normalized) — both map to pid.status
+    ("taskoutput", "pid.output"), // TaskOutput (normalized)
 ];
 
 /// Canonicalize a tool name from the model into the internal name used
@@ -1473,7 +1670,22 @@ fn execute_tool_with_enforcer(
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "Agent" => from_value::<AgentInput>(input).and_then(|input| run_agent(input, ctx)),
+        "agent.list" => run_agent_list(),
+        // Canonical "agent.spawn" — also reached by the deprecated
+        // alias "Agent" (via TOOL_ALIASES). Normalize `agent` →
+        // `subagent_type` so the new schema's field name maps to
+        // `AgentInput`. `fresh` is accepted but currently no-op
+        // (session resume is future work).
+        "agent.spawn" => {
+            let input = normalize_agent_spawn_input(input);
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+        }
+        // pid.fork: synthesize an AgentInput with subagent_type="fork"
+        // and delegate to the existing fork machinery.
+        "pid.fork" => {
+            let input = normalize_pid_fork_input(input);
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+        }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
@@ -1493,11 +1705,26 @@ fn execute_tool_with_enforcer(
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
         "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
-        "TaskGet" => from_value::<TaskIdInput>(input).and_then(run_task_get),
-        "TaskList" => run_task_list(input.clone()),
-        "TaskStop" => from_value::<TaskIdInput>(input).and_then(run_task_stop),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
-        "TaskOutput" => from_value::<TaskOutputInput>(input).and_then(run_task_output),
+        // Canonical pid.* — also reached by the deprecated aliases
+        // TaskStop, TaskGet, TaskList, TaskOutput (via TOOL_ALIASES).
+        "pid.kill" => {
+            let input = normalize_pid_input(input);
+            from_value::<TaskIdInput>(&input).and_then(run_task_stop)
+        }
+        "pid.status" => {
+            let input = normalize_pid_input(input);
+            // Single-pid query (like TaskGet) vs list-all (like TaskList)
+            if input.get("task_id").and_then(|v| v.as_str()).is_some() {
+                from_value::<TaskIdInput>(&input).and_then(run_task_get)
+            } else {
+                run_task_list(input)
+            }
+        }
+        "pid.output" => {
+            let input = normalize_pid_output_input(input);
+            from_value::<TaskOutputInput>(&input).and_then(run_task_output)
+        }
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
@@ -1507,7 +1734,14 @@ fn execute_tool_with_enforcer(
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
-        "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
+        // Canonical "send" — also reached by the deprecated aliases
+        // "SendMessage" and "send_message" (via TOOL_ALIASES).
+        // Normalize `body` → `message` so the old `send_message` input
+        // format `{to, body}` deserializes into `SendMessageInput`.
+        "send" => {
+            let input = normalize_send_input(input);
+            from_value::<SendMessageInput>(&input).and_then(run_send_message)
+        }
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -2226,6 +2460,107 @@ fn sanitize_recipient(name: &str) -> String {
         out.push('_');
     }
     out
+}
+
+/// Normalize the input `Value` for the unified `send` tool so that
+/// the old `send_message` format `{to, body}` is accepted alongside
+/// the `SendMessage` format `{to, message, ...}`. If `message` is
+/// absent but `body` is present, copies `body` into `message`.
+fn normalize_send_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if !obj.contains_key("message") {
+            if let Some(body) = obj.remove("body") {
+                obj.insert("message".to_string(), body);
+            }
+        }
+    }
+    v
+}
+
+/// Normalize `pid` → `task_id` for the unified `pid.kill` and
+/// `pid.status` tools, so the new schema's field name maps to
+/// `TaskIdInput`. If `task_id` already exists, `pid` is ignored.
+fn normalize_pid_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if !obj.contains_key("task_id") {
+            if let Some(pid) = obj.remove("pid") {
+                obj.insert("task_id".to_string(), pid);
+            }
+        }
+    }
+    v
+}
+
+/// Normalize `pid` → `agent_id` for the unified `pid.output` tool.
+/// The new schema uses `pid` while the internal `TaskOutputInput`
+/// expects `agent_id` (or `task_id`). Maps `pid` → `agent_id` since
+/// that is the more common (and more capable) retrieval path.
+fn normalize_pid_output_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if !obj.contains_key("agent_id") && !obj.contains_key("task_id") {
+            if let Some(pid) = obj.remove("pid") {
+                obj.insert("agent_id".to_string(), pid);
+            }
+        }
+        // `merge` is accepted but not yet acted on (future work).
+        // The field is harmless — `TaskOutputInput` ignores unknown keys.
+    }
+    v
+}
+
+/// Build an `AgentInput`-compatible `Value` for `pid.fork`.
+/// Injects `subagent_type: "fork"` and provides defaults for
+/// `description` and `prompt` when the caller omits them.
+fn normalize_pid_fork_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "subagent_type".to_string(),
+            Value::String("fork".to_string()),
+        );
+        if !obj.contains_key("description") {
+            obj.insert("description".to_string(), Value::String("fork".to_string()));
+        }
+        if !obj.contains_key("prompt") {
+            obj.insert("prompt".to_string(), Value::String(String::new()));
+        }
+    }
+    v
+}
+
+/// Normalize the input `Value` for `agent.spawn` so that the new
+/// `agent` field maps to `AgentInput::subagent_type`. Also copies
+/// `agent` into `description` when `description` is missing (the new
+/// schema makes `description` optional, defaulting from agent type).
+fn normalize_agent_spawn_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        // `agent` field → `subagent_type` (backward compat)
+        if !obj.contains_key("subagent_type") {
+            if let Some(agent) = obj.remove("agent") {
+                obj.insert("subagent_type".to_string(), agent.clone());
+                // Default description from agent type when not provided
+                if !obj.contains_key("description") {
+                    let desc = agent.as_str().unwrap_or("agent task");
+                    obj.insert("description".to_string(), Value::String(desc.to_string()));
+                }
+            }
+        }
+        // Provide a default description if still missing
+        if !obj.contains_key("description") {
+            obj.insert(
+                "description".to_string(),
+                Value::String("agent task".to_string()),
+            );
+        }
+        // `fresh` is accepted but stripped (future work: session resume).
+        // No action needed — `AgentInput` ignores unknown fields via
+        // `from_value` which is permissive by default.
+    }
+    v
 }
 
 /// Extract the sender label, defaulting to `TEAM_LEAD_NAME` (matches
@@ -3027,6 +3362,66 @@ fn run_web_search(input: WebSearchInput) -> Result<String, String> {
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
+}
+
+/// List all available agent types: builtins + custom `.md` agents.
+fn run_agent_list() -> Result<String, String> {
+    let builtins = vec![
+        json!({
+            "name": "general-purpose",
+            "description": "General-purpose agent for research, implementation, and multi-step tasks.",
+            "builtin": true,
+        }),
+        json!({
+            "name": "Explore",
+            "description": "Read-only research agent: read_file, glob, grep, web search.",
+            "builtin": true,
+        }),
+        json!({
+            "name": "Plan",
+            "description": "Planning agent: read-only exploration + task management.",
+            "builtin": true,
+        }),
+        json!({
+            "name": "Verification",
+            "description": "Verification agent: bash + read-only tools for testing changes.",
+            "builtin": true,
+        }),
+        json!({
+            "name": "scode-guide",
+            "description": "Help agent for scode usage questions.",
+            "builtin": true,
+        }),
+        json!({
+            "name": "statusline-setup",
+            "description": "Configure the status line display.",
+            "builtin": true,
+        }),
+    ];
+
+    let mut custom = Vec::new();
+    if let Ok(cwd) = current_workspace_root() {
+        for dir in runtime::custom_agents::standard_custom_agent_dirs(&cwd) {
+            for def in runtime::custom_agents::load_md_agents(&dir) {
+                // Avoid duplicating builtins that a user might shadow
+                if is_builtin_subagent(&def.name) {
+                    continue;
+                }
+                custom.push(json!({
+                    "name": def.name,
+                    "description": def.description,
+                    "builtin": false,
+                    "tools": def.tools,
+                }));
+            }
+        }
+    }
+
+    let all: Vec<_> = builtins.into_iter().chain(custom).collect();
+    to_pretty_json(json!({
+        "agents": all,
+        "count": all.len(),
+    }))
 }
 
 fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
@@ -8303,7 +8698,6 @@ mod tests {
             "WebFetch",
             "WebSearch",
             "Skill",
-            "Agent",
             "TaskCreate",
             "TaskUpdate",
             "StructuredOutput",
@@ -8314,6 +8708,14 @@ mod tests {
                 "{tool} must not be mangled"
             );
         }
+        // Unified tool aliases: old names → new canonical names.
+        assert_eq!(canonicalize_tool_name("Agent"), "agent.spawn");
+        assert_eq!(canonicalize_tool_name("SendMessage"), "send");
+        assert_eq!(canonicalize_tool_name("send_message"), "send");
+        assert_eq!(canonicalize_tool_name("TaskStop"), "pid.kill");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "pid.status");
+        assert_eq!(canonicalize_tool_name("TaskList"), "pid.status");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid.output");
     }
 
     #[test]
@@ -8418,6 +8820,40 @@ mod tests {
         // Multiple empty strings
         let result = registry.normalize_allowed_tools(&["".to_string(), "  ".to_string()]);
         assert!(result.is_err(), "all-empty values should be rejected");
+    }
+
+    #[test]
+    fn allowed_tools_resolves_deprecated_names_to_spec_names() {
+        let registry = GlobalToolRegistry::builtin();
+
+        // Old names (TaskList, SendMessage, Agent, etc.) still have
+        // specs in mvp_tool_specs(). --allowedTools with these names
+        // must resolve to the SPEC name (not the dispatch alias) so
+        // that definitions() can filter by spec.name.
+        for (old_name, spec_name) in [
+            ("TaskList", "TaskList"),
+            ("TaskGet", "TaskGet"),
+            ("TaskStop", "TaskStop"),
+            ("TaskOutput", "TaskOutput"),
+            ("SendMessage", "SendMessage"),
+            ("Agent", "Agent"),
+            // New canonical names resolve to themselves
+            ("pid.status", "pid.status"),
+            ("pid.kill", "pid.kill"),
+            ("pid.output", "pid.output"),
+            ("agent.spawn", "agent.spawn"),
+            ("send", "send"),
+            ("agent.list", "agent.list"),
+        ] {
+            let allowed = registry
+                .normalize_allowed_tools(&[old_name.to_string()])
+                .unwrap_or_else(|e| panic!("--allowedTools {old_name} should succeed: {e}"))
+                .expect("should produce a non-empty set");
+            assert!(
+                allowed.contains(spec_name),
+                "--allowedTools {old_name} must resolve to spec name \"{spec_name}\", got: {allowed:?}"
+            );
+        }
     }
 
     #[test]

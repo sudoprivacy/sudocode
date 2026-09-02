@@ -250,7 +250,7 @@ where
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentState) + Send + 'static,
+    F: Fn(AgentState, Option<String>) + Send + 'static,
 {
     let abort_signal = HookAbortSignal::default();
     let abort_for_thread = abort_signal.clone();
@@ -294,7 +294,7 @@ fn run_loop<K, C, T, F>(
     K: KernelSyscall + Send + Sync + 'static,
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
-    F: Fn(AgentState),
+    F: Fn(AgentState, Option<String>),
 {
     // Build a tokio runtime for async run_turn calls.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -303,7 +303,7 @@ fn run_loop<K, C, T, F>(
         .expect("managed-agent tokio runtime");
 
     // -- WARMING_UP --
-    state_cb(AgentState::WarmingUp);
+    state_cb(AgentState::WarmingUp, None);
 
     // The VFS-backed file tools are constructed by the spawn factory
     // (`tools::managed_agent::spawn_managed_agent`), which injects a
@@ -322,7 +322,7 @@ fn run_loop<K, C, T, F>(
     .with_hook_abort_signal(abort.clone());
 
     // -- READY --
-    state_cb(AgentState::Ready);
+    state_cb(AgentState::Ready, None);
 
     // Inbox the loop reads/watches, and the id it filters its own writes by.
     // For A2A this is the replicated `/agents/<self>/chat-with-me`; replies
@@ -351,7 +351,7 @@ fn run_loop<K, C, T, F>(
                     if !bytes.is_empty() {
                         if let Some((sender, body)) = parse_inbound(bytes, &self_id) {
                             // -- BUSY --
-                            state_cb(AgentState::Busy);
+                            state_cb(AgentState::Busy, None);
 
                             // Drive ONE turn on the inbound message. The sender is
                             // surfaced in the prompt so the agent can address a reply.
@@ -367,7 +367,7 @@ fn run_loop<K, C, T, F>(
                             }
 
                             // -- READY --
-                            state_cb(AgentState::Ready);
+                            state_cb(AgentState::Ready, None);
                         }
                     }
                 }

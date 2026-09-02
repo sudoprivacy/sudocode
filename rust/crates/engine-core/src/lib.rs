@@ -73,7 +73,9 @@
 //! (`StreamEvent`, `MessageRequest`, the provider clients, …) stay internal to
 //! the engine side.
 
+mod engine_client;
 mod session;
+pub use engine_client::EngineApiClient;
 pub use session::{EngineDelegate, EngineHandle, EngineSession};
 
 // Re-export the seam data types so a renderer / engine gets the WHOLE seam from

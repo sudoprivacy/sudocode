@@ -1372,9 +1372,14 @@ name = "engine-core"
 version = "0.2.0"
 dependencies = [
  "api",
+ "async-trait",
  "engine-events",
+ "futures",
  "runtime",
+ "serde_json",
+ "telemetry",
  "tokio",
+ "tools",
 ]
 
 [[package]]

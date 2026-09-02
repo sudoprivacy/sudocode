@@ -18,10 +18,20 @@ api = { path = "../api" }
 # channel, plus the runtime payload types they carry.
 engine-events = { path = "../engine-events" }
 runtime = { path = "../runtime" }
+# The pure `EngineApiClient` builds tool specs from the tool registry.
+tools = { path = "../tools" }
 # The driver runs each turn on its own multi-thread runtime and bridges the
 # synchronous permission/question prompters to the async command pump via
 # `block_in_place` + oneshot (the proven ACP mechanism).
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+# `EngineApiClient` implements the async `runtime::ApiClient` trait and drives an
+# incremental provider stream (no rendering — that is the renderer's job).
+async-trait = "0.1"
+futures = "0.3"
+# Session tracing attached to the provider client (parity with the CLI client).
+telemetry = { path = "../telemetry" }
+# Tool-use input parsing + fallback JSON in the wire-message conversion.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

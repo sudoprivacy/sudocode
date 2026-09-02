@@ -407,7 +407,7 @@ impl RuntimeObserver for ObserverAdapter {
     }
 
     fn on_usage(&mut self, usage: &TokenUsage) {
-        let _ = self.tx.send(EngineEvent::Usage(usage.clone()));
+        let _ = self.tx.send(EngineEvent::Usage(*usage));
     }
 
     fn on_prompt_cache(&mut self, event: &runtime::PromptCacheEvent) {

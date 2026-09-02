@@ -17,6 +17,8 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
+engine-core = { path = "../engine-core" }
+engine-events = { path = "../engine-events" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"

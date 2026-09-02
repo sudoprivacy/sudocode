@@ -3932,6 +3932,8 @@ dependencies = [
  "compat-harness",
  "crossterm 0.28.1",
  "dialoguer",
+ "engine-core",
+ "engine-events",
  "flate2",
  "futures",
  "futures-util",

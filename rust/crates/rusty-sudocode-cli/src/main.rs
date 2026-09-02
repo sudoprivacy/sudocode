@@ -3092,6 +3092,315 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The CLI's implementation of the seam's [`engine_core::EngineDelegate`] — one
+/// live session's runtime, driven the same way for every renderer (the REPL via
+/// `EngineSession`, ACP later). It consolidates the per-session build →
+/// run-turn (+ auto-compact) → model-switch → persist logic the ACP delegate
+/// pioneered (`run_prompt_impl` / `build_session` / `handle_acp_model_switch`),
+/// single-session and returning the seam's neutral `TurnComplete` instead of
+/// ACP types. Every renderer shares this one core.
+struct SessionEngine {
+    session: std::sync::Mutex<AcpCliSession>,
+    tokio_runtime: tokio::runtime::Runtime,
+    /// Current model; moved by `set_model`.
+    model: std::sync::Mutex<String>,
+    model_flag_raw: Option<String>,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode_override: Option<PermissionMode>,
+    reasoning_effort: Option<String>,
+    auth_mode: Option<AuthMode>,
+}
+
+impl SessionEngine {
+    /// Build a single-session engine for `cwd`. Ports `AcpCliAgent::build_session`.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        cwd: &Path,
+        mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+        model: String,
+        model_flag_raw: Option<String>,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode_override: Option<PermissionMode>,
+        reasoning_effort: Option<String>,
+        auth_mode: Option<AuthMode>,
+    ) -> Result<Self, String> {
+        let cwd = canonical_session_cwd(cwd).map_err(|e| e.to_string())?;
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        let resolved_model = if model_flag_raw.is_some() {
+            model.clone()
+        } else {
+            resolve_repl_model(model.clone())
+        };
+        let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &prompt_overrides).map_err(|e| e.to_string())?;
+        let session_state =
+            new_cli_session_for(&cwd).map_err(|e| format!("failed to create session: {e}"))?;
+        let handle = create_managed_session_handle_for(&cwd, &session_state.session_id)
+            .map_err(|e| format!("failed to create session handle: {e}"))?;
+        let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
+        let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
+            .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
+        let mut runtime = build_runtime_for_cwd(
+            &cwd,
+            session_state.with_persistence_path(handle.path.clone()),
+            &handle.id,
+            RuntimeConfig {
+                model: resolved_model.clone(),
+                system_prompt,
+                enable_tools: true,
+                emit_output: false,
+                allowed_tools: allowed_tools.clone(),
+                permission_mode,
+                progress_reporter: None,
+                auth_mode: resolved_auth,
+                sudocode_config,
+            },
+            mcp_servers,
+        )
+        .map_err(|e| format!("failed to build runtime: {e}"))?;
+        let abort_signal = runtime::HookAbortSignal::new();
+        runtime = runtime.with_hook_abort_signal(abort_signal.clone());
+        if let Some(rt) = runtime.runtime.as_mut() {
+            rt.api_client_mut()
+                .set_reasoning_effort(reasoning_effort.clone());
+            let thinking = ConfigLoader::default_for(&cwd)
+                .load()
+                .map_or(true, |cfg| cfg.thinking());
+            rt.api_client_mut().set_thinking_enabled(thinking);
+        }
+        runtime
+            .session()
+            .save_to_path(&handle.path)
+            .map_err(|e| format!("failed to persist session: {e}"))?;
+
+        let session = AcpCliSession {
+            cwd,
+            handle,
+            runtime,
+            abort_signal,
+            started_at: Instant::now(),
+            session_mcp_servers: mcp_servers.clone(),
+            prompt_overrides,
+        };
+        Ok(Self {
+            session: std::sync::Mutex::new(session),
+            tokio_runtime: tokio::runtime::Runtime::new()
+                .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
+            model: std::sync::Mutex::new(resolved_model),
+            model_flag_raw,
+            allowed_tools,
+            permission_mode_override,
+            reasoning_effort,
+            auth_mode,
+        })
+    }
+
+    fn lock_session(&self) -> std::sync::MutexGuard<'_, AcpCliSession> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl engine_core::EngineDelegate for SessionEngine {
+    fn run_turn(
+        &self,
+        blocks: Vec<runtime::ContentBlock>,
+        observer: &mut dyn runtime::RuntimeObserver,
+        prompter: &mut dyn runtime::PermissionPrompter,
+    ) -> Result<engine_events::TurnComplete, String> {
+        let mut session = self.lock_session();
+        session.abort_signal.reset();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+
+        // Pre-send auto-compaction (ported from run_prompt_impl).
+        let fallback_model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let model = session
+            .runtime
+            .session()
+            .model
+            .clone()
+            .unwrap_or(fallback_model);
+        let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
+        let estimated_tokens = estimate_session_tokens(session.runtime.session());
+        let threshold = (context_limit as f64 * 0.85) as usize;
+        if estimated_tokens > threshold {
+            let message_count = session.runtime.session().messages.len();
+            if message_count > 4 {
+                let result = compact_session_sync(
+                    session.runtime.session(),
+                    CompactionConfig {
+                        preserve_recent_messages: 2,
+                        max_estimated_tokens: 0,
+                    },
+                );
+                if result.removed_message_count > 0 {
+                    *session.runtime.session_mut() = result.compacted_session.clone();
+                    let path = session.handle.path.clone();
+                    let _ = session.runtime.session().save_to_path(&path);
+                }
+                if estimate_session_tokens(session.runtime.session()) > context_limit {
+                    return Err(format!(
+                        "[context_window_exceeded][history_context_too_large] estimated {} tokens exceeds model limit {} even after compaction",
+                        estimate_session_tokens(session.runtime.session()),
+                        context_limit
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "[context_window_exceeded][single_request_too_large] estimated {estimated_tokens} tokens exceeds model limit {context_limit}"
+                ));
+            }
+        }
+
+        let turn_summary = self
+            .tokio_runtime
+            .block_on(
+                session
+                    .runtime
+                    .run_turn_with_blocks(blocks, Some(prompter), Some(observer)),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let path = session.handle.path.clone();
+        session
+            .runtime
+            .session()
+            .save_to_path(&path)
+            .map_err(|e| format!("failed to persist session: {e}"))?;
+
+        Ok(engine_events::TurnComplete {
+            iterations: turn_summary.iterations,
+            turn_usage: turn_summary.turn_usage,
+            session_usage: turn_summary.session_usage,
+            cancelled: turn_summary.cancelled,
+            response_model: turn_summary.response_model,
+            auto_compaction: turn_summary.auto_compaction,
+        })
+    }
+
+    fn set_question_prompter(&self, prompter: Box<dyn runtime::QuestionPrompter>) {
+        let mut session = self.lock_session();
+        if let Some(rt) = session.runtime.runtime.as_mut() {
+            rt.tool_executor_mut().set_question_prompter(prompter);
+        }
+    }
+
+    fn abort_signal(&self) -> runtime::HookAbortSignal {
+        self.lock_session().abort_signal.clone()
+    }
+
+    fn set_model(&self, new_model: &str) -> Result<(String, Vec<String>), String> {
+        let resolved = resolve_model_alias_with_config(new_model);
+        {
+            let mut session = self.lock_session();
+            let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+            let mut cloned_session = session.runtime.session().clone();
+            cloned_session.model = Some(resolved.clone());
+            let cwd = session.cwd.clone();
+            let handle_id = session.handle.id.clone();
+            let session_mcp = session.session_mcp_servers.clone();
+            let sudocode_config = load_sudocode_config_for_cwd(&cwd);
+            let permission_mode = self
+                .permission_mode_override
+                .unwrap_or_else(default_permission_mode);
+            let resolved_auth =
+                resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
+                    .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
+            let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)
+                .map_err(|e| e.to_string())?;
+            let mut runtime = build_runtime_for_cwd(
+                &cwd,
+                cloned_session,
+                &handle_id,
+                RuntimeConfig {
+                    model: resolved.clone(),
+                    system_prompt,
+                    enable_tools: true,
+                    emit_output: false,
+                    allowed_tools: self.allowed_tools.clone(),
+                    permission_mode,
+                    progress_reporter: None,
+                    auth_mode: resolved_auth,
+                    sudocode_config,
+                },
+                &session_mcp,
+            )
+            .map_err(|e| e.to_string())?;
+            runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
+            if let Some(rt) = runtime.runtime.as_mut() {
+                rt.api_client_mut()
+                    .set_reasoning_effort(self.reasoning_effort.clone());
+                let thinking = ConfigLoader::default_for(&cwd)
+                    .load()
+                    .map_or(true, |cfg| cfg.thinking());
+                rt.api_client_mut().set_thinking_enabled(thinking);
+            }
+            session.runtime = runtime;
+        }
+        self.model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&resolved);
+
+        // Available models = config keys + discovery, with the current pinned first.
+        let config = load_sudocode_config_for_current_dir();
+        let config_keys: Vec<String> = config.models.keys().cloned().collect();
+        let mut available = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+        if !available.iter().any(|m| m.eq_ignore_ascii_case(&resolved)) {
+            available.insert(0, resolved.clone());
+        }
+        Ok((resolved, available))
+    }
+
+    fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), String> {
+        let mut session = self.lock_session();
+        if let Some(rt) = session.runtime.runtime.as_mut() {
+            rt.permission_policy_mut().set_active_mode(mode);
+        }
+        Ok(())
+    }
+
+    fn handle_slash_command(&self, line: &str) -> Result<String, String> {
+        // `/model <name>` switches the model; other slash commands are handled by
+        // the renderer locally (the REPL intercepts them before they reach the
+        // engine). Kept minimal here; the seam only needs the model verb.
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("/model") {
+            let arg = rest.trim();
+            if arg.is_empty() {
+                let (current, _) = {
+                    let session = self.lock_session();
+                    let n = session.runtime.session().messages.len();
+                    (
+                        self.model
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone(),
+                        n,
+                    )
+                };
+                return Ok(format!("current model: {current}"));
+            }
+            let (resolved, _available) = self.set_model(arg)?;
+            return Ok(format!("switched model to {resolved}"));
+        }
+        Ok(String::new())
+    }
+
+    fn close(&self) {
+        let session = self.lock_session();
+        let path = session.handle.path.clone();
+        let _ = session.runtime.session().save_to_path(&path);
+    }
+}
+
 fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
     let canonical = fs::canonicalize(cwd).map_err(|error| {
         AcpError::invalid_params(format!("params.cwd is not accessible: {error}"))

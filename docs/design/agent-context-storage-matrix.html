@@ -387,8 +387,8 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
     <div class="el"><span class="was">standalone/offline: no pointer</span> <span class="arw">→</span> <span class="tbd">? Q7 (adopt CC bridge-pointer?)</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><b>stays (SQLite):</b> which conversation the UI has open/active</div>
-    <div class="el"><b>→ sudocode:</b> <code>extra.acpSessionId</code> / <code>mossSessionId</code> = a copy of the engine's session-id → use the engine's durable <code>session-id</code> <span class="b dup">dup</span></div>
+    <div class="el"><b>stays (SQLite):</b> the conversation list + each conversation's session binding. ("Which conversation is open/active" is <b>not</b> stored — it's renderer routing, the <span class="path">/conversation/&lt;id&gt;</span> URL. sudowork has no "persistent-assistant" concept.)</div>
+    <div class="el"><span class="was"><code>extra.acpSessionId</code> / <code>mossSessionId</code> = sudowork's authoritative <b>conversation→session binding</b> — which engine session-id is this conversation's <b>live</b> one (written from the <code>session/new|load</code> response, read at resume). <b>Not a redundant copy</b>: standalone scode stores no per-conversation pointer (it recomputes "latest" by scan — see col 3), and a conversation cycles through many session-ids (only the latest is kept), so sudowork must own the binding; as a <i>live</i> pointer, latest-is-correct.</span> <span class="arw">→</span> <span class="to">converges only in the <b>nexus end-state</b>: defer "which pid/session is live" to the engine's <b>AgentRegistry</b> pid-FSM + durable session-id (col 6)</span></div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>resume key = session-id</b> (durable UUID)</div>

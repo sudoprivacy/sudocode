@@ -501,6 +501,11 @@ impl ConfigLoader {
                 path = global_path.display()
             )));
         };
+        // `extraBody` values are re-read from each layer's raw text (the custom
+        // JSON parser is lossy for arbitrary bodies — see `parse_extra_bodies`).
+        // Merge them per-alias with the same project-over-global precedence as
+        // the object merge below, so the resolved model view stays a single SSOT.
+        let mut extra_bodies = parse_extra_bodies(&base.source);
         let mut merged = base.object;
         let project_path = self
             .cwd
@@ -509,8 +514,12 @@ impl ConfigLoader {
             .join("sudocode.json");
         if let Some(project) = read_optional_json_object_with(backend, &project_path)? {
             deep_merge_objects(&mut merged, &project.object);
+            for (alias, body) in parse_extra_bodies(&project.source) {
+                extra_bodies.insert(alias, body);
+            }
         }
-        let mut config = parse_sudocode_from_object(&merged, &global_path.display().to_string())?;
+        let mut config =
+            parse_sudocode_from_object(&merged, &global_path.display().to_string(), &extra_bodies)?;
         // Wire the per-project account selection from the layered settings'
         // `auth_profile`. Single source of truth: the account (base_url + key)
         // stays defined once under `auth_modes`; here we only read *which* named
@@ -1367,7 +1376,7 @@ fn parse_sudocode_json_str_with_label(
             "{label}: expected JSON object at top level",
         )));
     };
-    parse_sudocode_from_object(root_obj, label)
+    parse_sudocode_from_object(root_obj, label, &parse_extra_bodies(content))
 }
 
 /// Parse a `SudoCodeConfig` from an already-parsed (and possibly layer-merged)
@@ -1377,10 +1386,11 @@ fn parse_sudocode_json_str_with_label(
 fn parse_sudocode_from_object(
     root_obj: &BTreeMap<String, JsonValue>,
     label: &str,
+    extra_bodies: &BTreeMap<String, serde_json::Map<String, SerdeValue>>,
 ) -> Result<SudoCodeConfig, ConfigError> {
     let sentinel = Path::new(label);
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
-    let models = parse_sudocode_models_section(root_obj, sentinel, &parse_extra_bodies(content))?;
+    let models = parse_sudocode_models_section(root_obj, sentinel, extra_bodies)?;
     let web_search = parse_web_search_section(root_obj);
 
     Ok(SudoCodeConfig {

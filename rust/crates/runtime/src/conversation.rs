@@ -137,6 +137,16 @@ pub trait ApiClient: Send {
 }
 
 /// Optional observer for runtime events emitted while processing a turn.
+///
+/// All methods default to empty so existing implementations
+/// (e.g. `SdkSessionObserver`) are unaffected when new hooks are added. The
+/// streaming loop in `run_turn_with_blocks` forwards each [`AssistantEvent`]
+/// to the matching hook in real time, so a renderer built on this trait sees
+/// every event as it arrives (not only the end-of-turn [`TurnSummary`]
+/// aggregate). This is the producer side of the engine↔renderer seam: the
+/// `engine-core` adapter that turns these callbacks into
+/// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
+/// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
     fn on_thinking_delta(&mut self, _delta: &str) {}
 
@@ -152,6 +162,19 @@ pub trait RuntimeObserver {
         _is_error: bool,
     ) {
     }
+
+    /// Wire model id resolved from `message_start` (`AssistantEvent::Model`).
+    fn on_model(&mut self, _wire_model: &str) {}
+
+    /// Incremental token usage for the in-flight assistant message
+    /// (`AssistantEvent::Usage`).
+    fn on_usage(&mut self, _usage: &TokenUsage) {}
+
+    /// Prompt-cache telemetry (`AssistantEvent::PromptCache`).
+    fn on_prompt_cache(&mut self, _event: &PromptCacheEvent) {}
+
+    /// End of one assistant message in the stream (`AssistantEvent::MessageStop`).
+    fn on_message_stop(&mut self) {}
 }
 
 /// XML tag identifying a fork subagent's inherited directive message.
@@ -1189,7 +1212,18 @@ where
                                             AssistantEvent::ToolUse { id, name, input, .. } => {
                                                 obs.on_tool_use(id, name, input);
                                             }
-                                            _ => {}
+                                            AssistantEvent::Model(model) => {
+                                                obs.on_model(model);
+                                            }
+                                            AssistantEvent::Usage(usage) => {
+                                                obs.on_usage(usage);
+                                            }
+                                            AssistantEvent::PromptCache(cache_event) => {
+                                                obs.on_prompt_cache(cache_event);
+                                            }
+                                            AssistantEvent::MessageStop => {
+                                                obs.on_message_stop();
+                                            }
                                         }
                                     }
                                     collected.push(event);

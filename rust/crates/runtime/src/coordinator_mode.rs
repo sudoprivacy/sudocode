@@ -54,11 +54,18 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
     [
         // Delegation surface
         "Agent",
+        "agent.list",
+        "agent.spawn",
         "TaskStop",
+        "pid.kill",
         "TaskGet",
         "TaskList",
+        "pid.status",
         "TaskOutput",
+        "pid.output",
+        "pid.fork",
         "SendMessage",
+        "send",
         // Skills + web (read-only research)
         "Skill",
         "WebSearch",

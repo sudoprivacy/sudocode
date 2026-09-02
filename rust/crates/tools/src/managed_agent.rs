@@ -70,7 +70,10 @@ where
     // `send_message` (its ONLY, deliberate reply path — see the ping-pong fix).
     // The full tool set (file ops, etc.) is gated behind the agent-profile work;
     // the duet needs only send_message.
-    let allowed_tools: BTreeSet<String> = std::iter::once("send_message".to_string()).collect();
+    let allowed_tools: BTreeSet<String> = ["send_message", "send"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let api_client = ProviderRuntimeClient::new(model, allowed_tools)
         .expect("failed to construct API client from model label");
 
@@ -152,7 +155,7 @@ impl ToolExecutor for ManagedToolExecutor {
         // the SHARED handler the standalone CLI executor also uses; only the
         // sender differs (this is the in-process kernel sender, standalone is
         // the gRPC sender).
-        if tool_name == "send_message" {
+        if tool_name == "send_message" || tool_name == "send" {
             return handle_send_message(&self.send, input).map_err(ToolError::new);
         }
 

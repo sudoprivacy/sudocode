@@ -534,7 +534,12 @@ impl GlobalToolRegistry {
             .collect::<BTreeMap<_, _>>();
 
         for &(alias, canonical) in TOOL_ALIASES {
-            name_map.insert(alias.to_string(), canonical.to_string());
+            // Don't overwrite a spec-name mapping — `--allowedTools TaskList`
+            // must resolve to the spec name `"TaskList"` (not the dispatch
+            // alias `"pid.status"`) so `definitions()` can match `spec.name`.
+            name_map
+                .entry(alias.to_string())
+                .or_insert_with(|| canonical.to_string());
         }
 
         let mut allowed = BTreeSet::new();
@@ -8815,6 +8820,40 @@ mod tests {
         // Multiple empty strings
         let result = registry.normalize_allowed_tools(&["".to_string(), "  ".to_string()]);
         assert!(result.is_err(), "all-empty values should be rejected");
+    }
+
+    #[test]
+    fn allowed_tools_resolves_deprecated_names_to_spec_names() {
+        let registry = GlobalToolRegistry::builtin();
+
+        // Old names (TaskList, SendMessage, Agent, etc.) still have
+        // specs in mvp_tool_specs(). --allowedTools with these names
+        // must resolve to the SPEC name (not the dispatch alias) so
+        // that definitions() can filter by spec.name.
+        for (old_name, spec_name) in [
+            ("TaskList", "TaskList"),
+            ("TaskGet", "TaskGet"),
+            ("TaskStop", "TaskStop"),
+            ("TaskOutput", "TaskOutput"),
+            ("SendMessage", "SendMessage"),
+            ("Agent", "Agent"),
+            // New canonical names resolve to themselves
+            ("pid.status", "pid.status"),
+            ("pid.kill", "pid.kill"),
+            ("pid.output", "pid.output"),
+            ("agent.spawn", "agent.spawn"),
+            ("send", "send"),
+            ("agent.list", "agent.list"),
+        ] {
+            let allowed = registry
+                .normalize_allowed_tools(&[old_name.to_string()])
+                .unwrap_or_else(|e| panic!("--allowedTools {old_name} should succeed: {e}"))
+                .expect("should produce a non-empty set");
+            assert!(
+                allowed.contains(spec_name),
+                "--allowedTools {old_name} must resolve to spec name \"{spec_name}\", got: {allowed:?}"
+            );
+        }
     }
 
     #[test]

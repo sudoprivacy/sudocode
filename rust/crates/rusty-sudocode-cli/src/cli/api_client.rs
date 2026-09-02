@@ -17,7 +17,10 @@ use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
 
 use super::format::{format_tool_call_start, format_user_visible_api_error};
-use crate::render::{MarkdownStreamState, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
+use crate::render::{
+    query_terminal_width, MarkdownStreamState, ResponseGlyphState, SpinnerRef, TerminalRenderer,
+    BOLD, DIM, RESET,
+};
 use crate::repl_ui::OutputSender;
 use std::sync::Arc;
 
@@ -764,96 +767,6 @@ pub(crate) fn collect_prompt_cache_events(
 
 pub(crate) fn max_tokens_for_model(model: &str) -> u32 {
     api::max_tokens_for_model(model)
-}
-
-/// Stateful processor that prefixes the first line with ⏺ (bold) and indents
-/// all continuation lines by two spaces so that column 0 is reserved
-/// exclusively for status glyphs. Hard-wraps text at the terminal width so
-/// the terminal never soft-wraps into column 0.
-pub(crate) struct ResponseGlyphState {
-    started: bool,
-    visible_col: usize,
-    max_col: usize,
-    in_escape: bool,
-}
-
-impl ResponseGlyphState {
-    fn new(terminal_width: usize) -> Self {
-        Self {
-            started: false,
-            visible_col: 0,
-            // Ensure at least 4 columns to avoid degenerate wrapping.
-            max_col: terminal_width.max(4),
-            in_escape: false,
-        }
-    }
-
-    /// Process a rendered ANSI text chunk. Returns the wrapped+margined output.
-    fn apply(&mut self, rendered: &str) -> String {
-        if rendered.is_empty() {
-            return String::new();
-        }
-
-        let mut out = String::with_capacity(rendered.len() + 64);
-
-        for ch in rendered.chars() {
-            if ch == '\r' {
-                out.push(ch);
-                self.visible_col = 0;
-                continue;
-            }
-            if ch == '\n' {
-                out.push(ch);
-                self.visible_col = 0;
-                continue;
-            }
-
-            // At line start, emit glyph or margin.
-            if self.visible_col == 0 {
-                if self.started {
-                    out.push_str("  ");
-                } else {
-                    self.started = true;
-                    out.push_str(&format!("\r\x1b[2K{BOLD}⏺{RESET} "));
-                }
-                self.visible_col = 2;
-            }
-
-            // ANSI escape start.
-            if ch == '\x1b' {
-                self.in_escape = true;
-                out.push(ch);
-                continue;
-            }
-
-            // Inside an ANSI CSI sequence — push until ASCII letter terminates.
-            if self.in_escape {
-                out.push(ch);
-                if ch.is_ascii_alphabetic() {
-                    self.in_escape = false;
-                }
-                continue;
-            }
-
-            // Hard wrap: line has reached the terminal edge.
-            if self.visible_col >= self.max_col {
-                out.push('\n');
-                out.push_str("  ");
-                self.visible_col = 2;
-            }
-
-            out.push(ch);
-            self.visible_col += 1;
-        }
-
-        out
-    }
-}
-
-fn query_terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
 }
 
 pub(crate) fn push_output_block(

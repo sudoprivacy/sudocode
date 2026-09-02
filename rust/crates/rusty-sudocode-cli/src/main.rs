@@ -19,6 +19,7 @@ mod input;
 mod input_chrome;
 mod input_queue;
 mod render;
+mod render_engine;
 mod repl_async;
 mod repl_ui;
 mod vlm_describe;

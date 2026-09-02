@@ -7,13 +7,21 @@ publish.workspace = true
 
 [dependencies]
 # engine-core sits just BELOW the seam on the engine side. It owns the driver
-# that turns runtime callbacks into `engine_events` (added in later commits) and
+# (`EngineSession`) that turns runtime callbacks into `engine_events` and
 # re-exports the `api` config/provider/error surface so renderer crates
 # (rusty-sudocode-cli, engine-acp) can drop their direct `api` dependency and
 # still name `SudoCodeConfig`, `resolve_model`, `ApiError`, … . `api::StreamEvent`
 # and the other wire types are deliberately NOT re-exported: they stay internal
 # to the engine side so a renderer can never name them.
 api = { path = "../api" }
+# The seam data types (EngineEvent / EngineCommand) the driver pumps across the
+# channel, plus the runtime payload types they carry.
+engine-events = { path = "../engine-events" }
+runtime = { path = "../runtime" }
+# The driver runs each turn on its own multi-thread runtime and bridges the
+# synchronous permission/question prompters to the async command pump via
+# `block_in_place` + oneshot (the proven ACP mechanism).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
 
 [lints]
 workspace = true

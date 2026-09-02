@@ -14,6 +14,22 @@
 //! Only the config / provider / error surface is re-exported. The wire /
 //! streaming types (`StreamEvent`, `MessageRequest`, `ContentBlockDelta`, the
 //! provider clients, …) are intentionally kept internal to the engine side.
+//!
+//! # The seam, in one place
+//!
+//! [`EngineSession`] / [`EngineHandle`] / [`EngineDelegate`] (this crate) plus
+//! [`EngineEvent`] / [`EngineCommand`] (re-exported from `engine_events`) are
+//! the entire engine↔renderer abstraction. See [`session`] for the map.
+
+mod session;
+pub use session::{EngineDelegate, EngineHandle, EngineSession};
+
+// Re-export the seam data types so a renderer / engine gets the WHOLE seam from
+// `engine_core` alone (`use engine_core::{EngineEvent, EngineCommand,
+// EngineSession, EngineHandle, EngineDelegate};`). The payload value types ride
+// along via `engine_events` (which re-exports them from `runtime`).
+pub use engine_events;
+pub use engine_events::{EngineCommand, EngineEvent, EngineState, RequestId, TurnComplete};
 
 // --- Config / provider / error surface (the renderer's `api::` SSOT) ---------
 //

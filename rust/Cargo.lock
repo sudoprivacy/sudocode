@@ -1372,6 +1372,9 @@ name = "engine-core"
 version = "0.2.0"
 dependencies = [
  "api",
+ "engine-events",
+ "runtime",
+ "tokio",
 ]
 
 [[package]]

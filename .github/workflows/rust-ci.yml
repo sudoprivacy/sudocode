@@ -15,6 +15,7 @@ on:
       - sudo-code-roadmap.html
       - CLAUDE.md
       - CONTRIBUTING.md
+      - LAST_CODEX_REF_VERSION
       - LAST_PARITY_SYNC_COMMIT
       - LAST_CCB_REF_VERSION
       - docs/**
@@ -31,6 +32,7 @@ on:
       - sudo-code-roadmap.html
       - CLAUDE.md
       - CONTRIBUTING.md
+      - LAST_CODEX_REF_VERSION
       - LAST_PARITY_SYNC_COMMIT
       - LAST_CCB_REF_VERSION
       - docs/**

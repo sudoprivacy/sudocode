@@ -165,7 +165,7 @@
     <li><a href="#what-sudo-code-is">What sudo code is</a></li>
     <li><a href="#north-star">North star</a></li>
     <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
-    <li><a href="#goal-2">Goal 2 · claude-code parity</a></li>
+    <li><a href="#goal-2">Goal 2 · cc/codex parity</a></li>
     <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
     <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
     <li><a href="#deployment-modes">Deployment Modes</a></li>
@@ -918,14 +918,18 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
   or interactive tool confirmation overlay).
 </div>
 
-<h2 id="goal-2">Goal 2 · claude-code parity</h2>
+<h2 id="goal-2">Goal 2 · cc/codex parity</h2>
 
-<p>Every feature gap between <code>scode</code> and
-<code>anthropics/claude-code</code> carries a written resolution —
-<code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> /
-<code>[N/A]</code> / <code>[OBSERVE]</code> — with a one-line rationale.</p>
+<p>Two upstream coding agents anchor parity: <code>anthropics/claude-code</code>
+(CC — private source; a TypeScript reconstruction stands in) and
+<code>openai/codex</code> (open-source, and — like <code>scode</code> —
+<strong>Rust</strong>, so its patterns transfer directly rather than through a
+port). Every feature gap between <code>scode</code> and either carries a written
+resolution — <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> /
+<code>[SKIP]</code> / <code>[N/A]</code> / <code>[OBSERVE]</code> — with a
+one-line rationale.</p>
 
-<h3>Parity scope</h3>
+<h3 id="parity-scope">Parity scope</h3>
 <p>Four dimensions, ordered by visibility to a <code>scode</code> user:</p>
 <ol>
   <li><strong>Tool surface</strong> — the set of tools the agent can call and the shape of their request / response payloads.</li>
@@ -936,7 +940,92 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
 
 <h3 id="reference-sources">Reference sources</h3>
 
-<h4>Tier 1 — sources of truth (multiple, peer-priority)</h4>
+<p>Parity now draws on two upstream agents, and they enter through different
+doors. The <strong>CC half</strong> works through Tiers&nbsp;1–3 below, because
+CC's upstream source is private — a public surface, a private snapshot, and a
+TypeScript reconstruction, cross-referenced. The <strong>codex half</strong>
+reads a single door: <code>openai/codex</code> is open, upstream-of-truth, and
+Rust, so it is cited and adapted directly.</p>
+
+<h4 id="codex-reference">Primary Rust reference — <code>openai/codex</code></h4>
+
+<p><a href="https://github.com/openai/codex"><code>openai/codex</code></a> (the
+<code>codex-rs</code> Cargo workspace) is a different <em>class</em> of reference
+from the CC chain. Because it is open and upstream, there is no reconstruction
+layer to triangulate through; because it is <strong>Rust — the same language as
+<code>scode</code></strong> — its patterns map onto <code>scode</code>'s tree
+directly rather than through a language port. It therefore plays two roles at
+once: the source of truth for the <em>codex</em> side of every gap, and the
+highest-fidelity <a href="#resolution-taxonomy"><code>[CHERRY-PICK]</code></a>
+source — a real Rust implementation under an open licence, ahead of a
+reconstruction like <code>claw-code</code>.</p>
+
+<p><strong>Where to read it</strong> — each dimension of
+<a href="#parity-scope">parity scope</a> maps to a crate under
+<code>codex-rs/</code> or a doc under <code>docs/</code>:</p>
+
+<table>
+  <thead><tr><th>Dimension</th><th>Codex source</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Agent loop / turn engine</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/core"><code>core</code></a> — <code>session/turn.rs</code> runs the sample → function-calls-or-message → dispatch → repeat loop; <code>tasks/</code> holds the <code>SessionTask</code> abstraction.</td>
+    </tr>
+    <tr>
+      <td>Tool surface</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/core"><code>core/src/tools/</code></a> (<code>router.rs</code>, <code>registry.rs</code>, <code>spec_plan.rs</code>, <code>handlers/</code>) — the model-visible <code>ToolSpec</code> is kept separate from the executable runtime.</td>
+    </tr>
+    <tr>
+      <td>Headless / GUI protocol</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/app-server-protocol"><code>app-server-protocol</code></a> — a code-generated JSON-RPC surface (<code>thread/*</code>, <code>turn/*</code>, approvals as server-requests) served over stdio / unix / ws; codex's analogue of ACP. The internal submission/event protocol lives in <a href="https://github.com/openai/codex/tree/main/codex-rs/protocol"><code>protocol</code></a>.</td>
+    </tr>
+    <tr>
+      <td>Edit format</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/apply-patch"><code>apply-patch</code></a> — the <code>*** Begin Patch</code> add / update / delete / move grammar, with a standalone binary.</td>
+    </tr>
+    <tr>
+      <td>Sandbox &amp; approvals</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/sandboxing"><code>sandboxing</code></a> (seatbelt / landlock+bwrap / windows) and <a href="https://github.com/openai/codex/tree/main/codex-rs/execpolicy"><code>execpolicy</code></a> (Starlark allow/prompt); <code>SandboxPolicy</code> + <code>AskForApproval</code> live in <code>protocol</code>. Docs: <a href="https://github.com/openai/codex/blob/main/docs/sandbox.md"><code>docs/sandbox.md</code></a>.</td>
+    </tr>
+    <tr>
+      <td>Configuration surface</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/config"><code>config</code></a> — <code>~/.codex/config.toml</code> with profile layering. Docs: <a href="https://github.com/openai/codex/blob/main/docs/config.md"><code>docs/config.md</code></a>.</td>
+    </tr>
+    <tr>
+      <td>Slash commands</td>
+      <td><a href="https://github.com/openai/codex/blob/main/docs/slash_commands.md"><code>docs/slash_commands.md</code></a>; the non-interactive runner is documented in <a href="https://github.com/openai/codex/blob/main/docs/exec.md"><code>docs/exec.md</code></a>.</td>
+    </tr>
+    <tr>
+      <td>Sessions / resume</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/rollout"><code>rollout</code></a> — JSONL rollout files plus a SQLite state DB; resume / fork / rollback.</td>
+    </tr>
+    <tr>
+      <td>MCP</td>
+      <td><a href="https://github.com/openai/codex/tree/main/codex-rs/codex-mcp"><code>codex-mcp</code></a> (client) and <a href="https://github.com/openai/codex/tree/main/codex-rs/mcp-server"><code>mcp-server</code></a> (codex itself exposed as an MCP tool).</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>What codex uniquely surfaces</strong> — dimensions that live in codex
+and each earn a resolution when set against <code>scode</code>: the
+<code>apply_patch</code> diff format; an <code>update_plan</code> checklist tool
+with streaming plan events; per-model reasoning-effort control
+(<code>none … xhigh</code>); a three-mode sandbox (<code>read-only</code> /
+<code>workspace-write</code> / <code>danger-full-access</code>) spanning macOS,
+Linux, and Windows; the app-server JSON-RPC daemon for GUI / IDE front-ends;
+ChatGPT-OAuth, device-code, and API-key login; a hooks engine plus a
+<code>notify</code> command; granular approvals backed by a Starlark
+<code>execpolicy</code>; deferred-tool search and a V8-sandboxed "Code Mode";
+unified <code>exec_command</code> + <code>write_stdin</code> with resumable
+background processes; and thread fork / rollback with remote compaction.</p>
+
+<p><strong>Scope note.</strong> Codex speaks the OpenAI Responses API only, and
+its tool payloads are Responses-shaped throughout. Its provider and wire layer
+is therefore a codex-specific reference rather than a template for
+<code>scode</code>'s provider abstraction; the transferable value is the
+agent-loop, tool, sandbox, protocol, and session patterns.</p>
+
+<h4>Tier 1 — sources of truth for the CC half (multiple, peer-priority)</h4>
 
 <p>Each Tier 1 source is a <em>partial truth</em>; none alone is enough. Cross-reference them.</p>
 
@@ -998,7 +1087,7 @@ grep -rn "working directory" docs/ src/</code></pre>
 
 <p><code>ultraworkers/claw-code</code> is a Rust port of the same family. Where its implementation of an overlapping feature fits <code>scode</code>'s shape, the commit can be cherry-picked. The relationship is <em>optional</em>: claw-code is a candidate Rust-side source, not upstream-of-truth. Methodology for cherry-pick triage lives in <code>scripts/triage_claw_code.py</code>; the current cycle report is at <a href="https://github.com/sudoprivacy/sudocode/blob/main/docs/parity-claw-code-sync-2026-W24.md"><code>docs/parity-claw-code-sync-2026-W24.md</code></a>.</p>
 
-<h3>Resolution taxonomy</h3>
+<h3 id="resolution-taxonomy">Resolution taxonomy</h3>
 
 <p>Every parity gap carries a one-word tag and a short rationale.</p>
 
@@ -1006,7 +1095,7 @@ grep -rn "working directory" docs/ src/</code></pre>
   <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
   <tbody>
     <tr><td><code>[BUILD]</code></td><td>The gap will be closed by implementing the feature in <code>scode</code>.</td></tr>
-    <tr><td><code>[CHERRY-PICK]</code></td><td>The gap will be closed by lifting a <code>claw-code</code> commit.</td></tr>
+    <tr><td><code>[CHERRY-PICK]</code></td><td>The gap will be closed by lifting a Rust commit from an open source — <code>openai/codex</code> (upstream, highest fidelity) or <code>claw-code</code>.</td></tr>
     <tr><td><code>[SKIP]</code></td><td>Closed by intent — <code>scode</code> provides the capability differently, the feature is replaced upstream, or it does not apply.</td></tr>
     <tr><td><code>[N/A]</code></td><td>The gap belongs to a layer <code>scode</code> does not implement (e.g. npm packaging).</td></tr>
     <tr><td><code>[OBSERVE]</code></td><td>Left open while waiting on more signal — how <code>claw-code</code> ports the feature, whether CCB has implemented it yet, whether real users hit it.</td></tr>
@@ -1015,11 +1104,12 @@ grep -rn "working directory" docs/ src/</code></pre>
 
 <h3>Sync markers</h3>
 
-<p>Two marker files at the repo root anchor each source to a point in time:</p>
+<p>Marker files at the repo root anchor each source to a point in time:</p>
 
 <table>
   <thead><tr><th>File</th><th>Source</th><th>What it records</th></tr></thead>
   <tbody>
+    <tr><td><code>LAST_CODEX_REF_VERSION</code></td><td><code>openai/codex</code> HEAD</td><td>The codex SHA the codex-side references and cherry-pick triage currently point at. Bumped when we re-pull codex for a new cycle.</td></tr>
     <tr><td><code>LAST_PARITY_SYNC_COMMIT</code></td><td><code>ultraworkers/claw-code</code> HEAD</td><td>The claw-code SHA the last cherry-pick cycle was triaged against.</td></tr>
     <tr><td><code>LAST_CCB_REF_VERSION</code></td><td><code>claude-code-best/claude-code</code> HEAD</td><td>The CCB SHA our behavioral references currently point at. Bumped when we re-clone CCB for a new cycle.</td></tr>
   </tbody>
@@ -1029,7 +1119,7 @@ grep -rn "working directory" docs/ src/</code></pre>
 
 <h3>Comparison window</h3>
 
-<p>The comparison window for the current cycle starts at <code>anthropics/claude-code</code> releases shipped on or after <strong>2026-01-01</strong>.</p>
+<p>The comparison window for the current cycle starts at <code>anthropics/claude-code</code> releases shipped on or after <strong>2026-01-01</strong>. The codex half is anchored to a commit rather than a release window — the <code>openai/codex</code> SHA recorded in <code>LAST_CODEX_REF_VERSION</code>.</p>
 
 <h3>Measurement</h3>
 
@@ -1054,11 +1144,11 @@ grep -rn "working directory" docs/ src/</code></pre>
 <table>
   <thead><tr><th>Step</th><th>Source</th><th>Action</th></tr></thead>
   <tbody>
-    <tr><td>1. Identify the gap</td><td>Tier 1 — public CC surfaces / private snapshot / runtime combo</td><td>List the CHANGELOG entry, the snapshot-date surface delta, or the observed behavior.</td></tr>
-    <tr><td>2. Align understanding</td><td>Tier 2 (CCB grep)</td><td>Open CCB, read the actual implementation, confirm intent.</td></tr>
-    <tr><td>3. Pick the resolution</td><td>All tiers</td><td>Decide <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> / <code>[N/A]</code> / <code>[OBSERVE]</code>.</td></tr>
-    <tr><td>4. Execute</td><td>Tier 3 if <code>[CHERRY-PICK]</code>; otherwise hand-rolled</td><td>Apply the resolution.</td></tr>
-    <tr><td>5. Anchor</td><td><code>LAST_PARITY_SYNC_COMMIT</code> / <code>LAST_CCB_REF_VERSION</code></td><td>Update marker files when the cycle closes.</td></tr>
+    <tr><td>1. Identify the gap</td><td>Tier 1 CC surfaces / snapshot / runtime combo, or <code>openai/codex</code></td><td>List the CHANGELOG entry, the snapshot-date surface delta, the observed behavior, or the codex crate / doc that carries the feature.</td></tr>
+    <tr><td>2. Align understanding</td><td>Tier 2 (CCB grep) for the CC side; the codex crate for the codex side</td><td>Read the actual implementation and confirm intent.</td></tr>
+    <tr><td>3. Pick the resolution</td><td>All sources</td><td>Decide <code>[BUILD]</code> / <code>[CHERRY-PICK]</code> / <code>[SKIP]</code> / <code>[N/A]</code> / <code>[OBSERVE]</code>.</td></tr>
+    <tr><td>4. Execute</td><td><code>openai/codex</code> or <code>claw-code</code> if <code>[CHERRY-PICK]</code>; otherwise hand-rolled</td><td>Apply the resolution.</td></tr>
+    <tr><td>5. Anchor</td><td><code>LAST_CODEX_REF_VERSION</code> / <code>LAST_PARITY_SYNC_COMMIT</code> / <code>LAST_CCB_REF_VERSION</code></td><td>Update marker files when the cycle closes.</td></tr>
   </tbody>
 </table>
 

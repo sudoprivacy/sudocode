@@ -3094,17 +3094,16 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 
 /// The CLI's implementation of the seam's [`engine_core::EngineDelegate`] — one
 /// live session's runtime, driven the same way for every renderer (the REPL via
-/// `EngineSession`, ACP later). It consolidates the per-session build →
-/// run-turn (+ auto-compact) → model-switch → persist logic the ACP delegate
-/// pioneered (`run_prompt_impl` / `build_session` / `handle_acp_model_switch`),
-/// single-session and returning the seam's neutral `TurnComplete` instead of
-/// ACP types. Every renderer shares this one core.
+/// `EngineSession`, ACP over stdio/ws). It owns one session's build →
+/// run-turn (+ auto-compact) → model-switch → persist lifecycle, single-session,
+/// returning the seam's neutral `TurnComplete`. Every renderer shares this one
+/// core — nothing renders here.
+///
+/// The active model is the session's own (`session.model`); this type keeps no
+/// separate copy.
 struct SessionEngine {
     session: std::sync::Mutex<AcpCliSession>,
     tokio_runtime: tokio::runtime::Runtime,
-    /// Current model; moved by `set_model`.
-    model: std::sync::Mutex<String>,
-    model_flag_raw: Option<String>,
     allowed_tools: Option<AllowedToolSet>,
     permission_mode_override: Option<PermissionMode>,
     reasoning_effort: Option<String>,
@@ -3188,8 +3187,6 @@ impl SessionEngine {
             session: std::sync::Mutex::new(session),
             tokio_runtime: tokio::runtime::Runtime::new()
                 .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
-            model: std::sync::Mutex::new(resolved_model),
-            model_flag_raw,
             allowed_tools,
             permission_mode_override,
             reasoning_effort,
@@ -3215,18 +3212,9 @@ impl engine_core::EngineDelegate for SessionEngine {
         session.abort_signal.reset();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
 
-        // Pre-send auto-compaction (ported from run_prompt_impl).
-        let fallback_model = self
-            .model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let model = session
-            .runtime
-            .session()
-            .model
-            .clone()
-            .unwrap_or(fallback_model);
+        // Pre-send auto-compaction. The session's own model is the SSOT for the
+        // context-window lookup (build + set_model both keep it current).
+        let model = session.runtime.session().model.clone().unwrap_or_default();
         let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let threshold = (context_limit as f64 * 0.85) as usize;
@@ -3344,10 +3332,6 @@ impl engine_core::EngineDelegate for SessionEngine {
             }
             session.runtime = runtime;
         }
-        self.model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone_from(&resolved);
 
         // Available models = config keys + discovery, with the current pinned first.
         let config = load_sudocode_config_for_current_dir();
@@ -3375,17 +3359,13 @@ impl engine_core::EngineDelegate for SessionEngine {
         if let Some(rest) = trimmed.strip_prefix("/model") {
             let arg = rest.trim();
             if arg.is_empty() {
-                let (current, _) = {
-                    let session = self.lock_session();
-                    let n = session.runtime.session().messages.len();
-                    (
-                        self.model
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone(),
-                        n,
-                    )
-                };
+                let current = self
+                    .lock_session()
+                    .runtime
+                    .session()
+                    .model
+                    .clone()
+                    .unwrap_or_default();
                 return Ok(format!("current model: {current}"));
             }
             let (resolved, _available) = self.set_model(arg)?;

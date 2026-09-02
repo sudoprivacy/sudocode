@@ -7487,7 +7487,11 @@ pub fn set_config_setting(setting: &str, value: &str) -> Result<String, String> 
         let shown = output
             .new_value
             .as_ref()
-            .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| Some(v.to_string()))
+            })
             .unwrap_or_default();
         Ok(format!("{setting} = {shown}"))
     } else {

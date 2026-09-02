@@ -237,7 +237,11 @@ fn check_account_health(config_loader: &ConfigLoader) -> DiagnosticCheck {
         .get("proxy")
         .filter(|accounts| !accounts.is_empty())
     else {
-        return DiagnosticCheck::new("Account", DiagnosticLevel::Ok, "no proxy accounts configured");
+        return DiagnosticCheck::new(
+            "Account",
+            DiagnosticLevel::Ok,
+            "no proxy accounts configured",
+        );
     };
     let selected = config.selected_account.as_deref();
     let resolved = match selected {

@@ -39,10 +39,11 @@ fn config_set_auth_profile_persists_to_settings_local() {
     // The unified SSOT writer echoes the persisted `key = value`. A session-only
     // toggle or unknown-key path would instead say "Unknown config key" / error,
     // so this line is proof the write went through `tools::set_config_setting`.
-    sess.expect("auth_profile = client-acct").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should confirm auth_profile persisted: {e}\nPTY screen:\n{screen}");
-    });
+    sess.expect("auth_profile = client-acct")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("should confirm auth_profile persisted: {e}\nPTY screen:\n{screen}");
+        });
 
     sess.expect("❯").expect("prompt after set");
     sess.send("/exit\r").expect("send exit");

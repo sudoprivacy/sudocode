@@ -1,0 +1,22 @@
+[package]
+name = "engine-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# engine-events depends on `runtime` ONLY to reuse + re-export the value
+# types that ride inside the seam (ContentBlock, TokenUsage, the permission
+# and question payloads, prompt-cache / auto-compaction telemetry). Renderers
+# get every payload from `engine-events` and never name the lower `api` /
+# `runtime` internals directly.
+#
+# CRITICAL invariant: `runtime` must NEVER depend on `engine-events` — the
+# adapter that turns `RuntimeObserver` / `PermissionPrompter` callbacks into
+# `EngineEvent`s lives in `engine-core`, one layer up. A `runtime ->
+# engine-events` edge would form a cycle.
+runtime = { path = "../runtime" }
+
+[lints]
+workspace = true

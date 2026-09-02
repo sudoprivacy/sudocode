@@ -56,7 +56,7 @@ pub fn spawn_managed_agent<K, F>(
 ) -> SpawnHandle
 where
     K: KernelSyscall + Send + Sync + 'static,
-    F: Fn(AgentState) + Send + 'static,
+    F: Fn(AgentState, Option<String>) + Send + 'static,
 {
     let model = desc
         .labels
@@ -197,7 +197,7 @@ where
         &self,
         kernel: Arc<K>,
         desc: AgentDescriptor,
-        state_observer: Arc<dyn Fn(AgentState) + Send + Sync>,
+        state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
     ) -> Box<dyn ManagedSpawnHandle> {
         // The co-host agent's mailbox is its persistent, cross-machine A2A
         // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
@@ -206,7 +206,9 @@ where
             base: "/agents".to_string(),
             self_name: desc.name.clone(),
         };
-        let handle = spawn_managed_agent(kernel, desc, mailbox, move |state| state_observer(state));
+        let handle = spawn_managed_agent(kernel, desc, mailbox, move |state, reason| {
+            state_observer(state, reason)
+        });
         Box::new(SudoCodeSpawnHandle { inner: handle })
     }
 }

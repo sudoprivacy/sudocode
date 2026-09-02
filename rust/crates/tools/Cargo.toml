@@ -19,7 +19,7 @@ runtime = { path = "../runtime" }
 # loop as a nexus managed-agent runtime body. Same nexus-vfs rev the runtime
 # crate pins (transitive `kernel` unifies). default-features = false → no
 # subprocess-host (that's the raw-ACP path, not the in-process co-host).
-managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "326d2b78115419d68689a0584d066372431b632c", default-features = false }
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b5b969a060c322835be67ff9b1e6e02f7c97abd1", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 regex = "1"
@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 # For the in-process co-host live proof (tests/cohost_live_llm.rs): builds a
 # real Kernel, plants the /proc mailbox stream, and drives spawn_managed_agent
 # through a real LLM turn. Same nexus-vfs rev the runtime crate pins.
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "326d2b78115419d68689a0584d066372431b632c", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b5b969a060c322835be67ff9b1e6e02f7c97abd1", default-features = false }
 
 [lints]
 workspace = true

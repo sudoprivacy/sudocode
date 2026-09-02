@@ -175,8 +175,8 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
         path: format!("/proc/{pid}/chat-with-me"),
         self_id: agent_id.to_string(),
     };
-    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, mailbox, |state| {
-        eprintln!("[agent state] {state:?}");
+    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, mailbox, |state, reason| {
+        eprintln!("[agent state] {state:?} reason={reason:?}");
     });
 
     let ctx = user_ctx();

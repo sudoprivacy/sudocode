@@ -24,6 +24,43 @@
 //! zero engine/renderer-specific logic. See [`session`] for the full map + the
 //! one internal subtlety (the sync-prompt → async-answer bridge).
 //!
+//! # Crate topology (why the seam can't leak)
+//!
+//! The seam is enforced by the *dependency graph*, not by convention: a renderer
+//! crate depends on `engine-core` and NOT on `runtime`/`api`, so the engine's
+//! internal types (`runtime::AssistantEvent`, `TurnSummary`, `RuntimeObserver`,
+//! `api::StreamEvent`) are literally un-nameable there — a leak fails to compile,
+//! not just a CI lint. Growing a second cross-boundary path would require adding
+//! a `runtime` dependency to a renderer's `Cargo.toml`: a visible, reviewable act.
+//!
+//! ```text
+//! ── engine side (below the seam — free to use runtime) ──────────────
+//!   runtime   api   tools   commands
+//!   engine-events        seam data types (EngineEvent / EngineCommand)
+//!   engine-core          this crate: driver + EngineDelegate + pure ApiClient
+//!                        + the api config/provider/error re-export surface
+//!   engine-host          impl EngineDelegate (wraps the ConversationRuntime;
+//!                        owns build_runtime + the tool executor); deps runtime
+//!
+//! ═══════════ seam: EngineEvent / EngineCommand ═════════════════════
+//!
+//! ── renderer side (above the seam — deps engine-core ONLY) ──────────
+//!   sudocode-render      EngineEvent → terminal + input → EngineCommand
+//!                        (in-process; the native REPL — NOT an ACP client)
+//!   engine-acp           EngineEvent ↔ ACP over stdio/ws (the ONE wire
+//!                        serialization; moss / sudowork / Zed / any ACP client)
+//!
+//! ── composition root ───────────────────────────────────────────────
+//!   scode (bin)          build the engine-host delegate → EngineSession::spawn
+//!                        → hand the EngineHandle to sudocode-render; the
+//!                        `scode acp` subcommand hands it to engine-acp instead
+//! ```
+//!
+//! Consumers by process boundary: the native REPL is **in-process** and consumes
+//! the enum directly; **every out-of-process** renderer (moss, sudowork, Zed, any
+//! third-party ACP client) goes through `engine-acp` — one serialization, so ACP
+//! is structurally just one more renderer, not a special case.
+//!
 //! # What else this crate owns
 //!
 //! The pure (non-rendering) `ApiClient` the engine uses, and the

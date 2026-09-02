@@ -130,11 +130,15 @@ cargo test -p runtime                      # one crate
 cargo test -p runtime -- session_resume    # one test by name
 ```
 
-PTY tests live in `crates/rusty-sudocode-cli/tests/pty/`. They use
-the `sudoprivacy/pty-expect` crate and run as part of
-`cargo test --workspace` on Linux and macOS. Windows runtime
-support is deferred to `pty-expect` v0.2; on Windows CI the PTY
-tests compile but skip-execute for now.
+PTY tests are the `tests/pty_*.rs` files under
+`crates/rusty-sudocode-cli/tests/`. They use the
+`sudoprivacy/pty-expect` crate and run as part of `cargo test
+--workspace` on **Linux, macOS, and Windows** — `pty-expect` drives a
+real ConPTY on Windows, so the core conversation / streaming / render /
+tool tests execute natively there too. A small number of tests that
+depend on Unix-only mechanisms (SIGINT/ESC signal delivery, `sh -c` /
+`python3` subprocesses, the ACP stdio subprocess handshake) are still
+`#[cfg(unix)]`-gated.
 
 ### Mock parity harness — optional
 

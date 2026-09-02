@@ -1384,6 +1384,7 @@ mod tests {
             auth_modes: BTreeMap::new(),
             models,
             web_search: Default::default(),
+            selected_account: None,
         };
 
         assert_eq!(

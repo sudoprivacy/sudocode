@@ -211,8 +211,62 @@ pub(crate) fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error:
             check_workspace_health(&context),
             check_sandbox_health(&context.sandbox_status),
             check_system_health(&cwd, config.as_ref().ok()),
+            check_account_health(&config_loader),
         ],
     })
+}
+
+/// Surface which named proxy account this project resolves to, so a user can
+/// confirm a per-project `auth_profile` selection actually takes effect. Mirrors
+/// the selection in `try_proxy_passthrough`: an explicit `auth_profile` picks
+/// that account by name; otherwise the first configured account is used.
+fn check_account_health(config_loader: &ConfigLoader) -> DiagnosticCheck {
+    let config = match config_loader.load_sudocode_config() {
+        Ok(config) => config,
+        Err(err) => {
+            return DiagnosticCheck::new(
+                "Account",
+                DiagnosticLevel::Warn,
+                "could not load config to resolve the proxy account",
+            )
+            .with_details(vec![err.to_string()]);
+        }
+    };
+    let Some(accounts) = config
+        .auth_modes
+        .get("proxy")
+        .filter(|accounts| !accounts.is_empty())
+    else {
+        return DiagnosticCheck::new(
+            "Account",
+            DiagnosticLevel::Ok,
+            "no proxy accounts configured",
+        );
+    };
+    let selected = config.selected_account.as_deref();
+    let resolved = match selected {
+        Some(name) => accounts.get_key_value(name),
+        None => accounts.iter().next(),
+    };
+    match resolved {
+        Some((name, connection)) => {
+            DiagnosticCheck::new("Account", DiagnosticLevel::Ok, "resolved proxy account")
+                .with_details(vec![format!(
+                    "account={name} base_url={} auth_profile={}",
+                    connection.base_url,
+                    selected.unwrap_or("<default: first>")
+                )])
+        }
+        None => DiagnosticCheck::new(
+            "Account",
+            DiagnosticLevel::Warn,
+            "auth_profile does not match any configured proxy account",
+        )
+        .with_details(vec![format!(
+            "auth_profile={} is not present in auth_modes.proxy",
+            selected.unwrap_or("<none>")
+        )]),
+    }
 }
 
 pub(crate) fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {

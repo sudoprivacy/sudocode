@@ -3382,6 +3382,46 @@ impl engine_core::EngineDelegate for SessionEngine {
     }
 }
 
+/// The non-turn session-lifecycle contract the composition root (`LiveCli`) uses
+/// to manage a live engine session **without being able to drive turns** — turns
+/// go only through `EngineHandle`. Split from [`engine_core::EngineDelegate`]
+/// (turn ops) so a renderer physically cannot bypass the seam: holding an
+/// `Arc<dyn SessionLifecycle>` gives no access to `run_turn`. SRP: turn-driving
+/// and session-management are two orthogonal responsibilities.
+///
+/// Methods are dyn-safe (no generics) and return owned snapshots — these are
+/// rare, non-hot-path management ops (export / status / slash / undo), so the
+/// clones cost nothing on the critical path.
+pub(crate) trait SessionLifecycle: Send + Sync + 'static {
+    /// A clone of the current session (for export / status / read inspection).
+    fn session_snapshot(&self) -> runtime::Session;
+    /// Persist the session to its backing path.
+    fn persist(&self) -> Result<(), String>;
+    /// Mutate the session in place (undo, fork prep, …).
+    fn with_session_mut(&self, f: &mut dyn FnMut(&mut runtime::Session));
+}
+
+impl SessionLifecycle for SessionEngine {
+    fn session_snapshot(&self) -> runtime::Session {
+        self.lock_session().runtime.session().clone()
+    }
+
+    fn persist(&self) -> Result<(), String> {
+        let session = self.lock_session();
+        let path = session.handle.path.clone();
+        session
+            .runtime
+            .session()
+            .save_to_path(&path)
+            .map_err(|e| e.to_string())
+    }
+
+    fn with_session_mut(&self, f: &mut dyn FnMut(&mut runtime::Session)) {
+        let mut session = self.lock_session();
+        f(session.runtime.session_mut());
+    }
+}
+
 fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
     let canonical = fs::canonicalize(cwd).map_err(|error| {
         AcpError::invalid_params(format!("params.cwd is not accessible: {error}"))

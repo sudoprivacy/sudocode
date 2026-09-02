@@ -26,11 +26,12 @@ the content.
 ## Project mechanics
 
 - Parity mechanism — inlined in [`../sudo-code-roadmap.html`](../sudo-code-roadmap.html)
-  under Goal 2: reference sources (public CC surfaces, the private
+  under Goal 2 (cc/codex parity): reference sources — the open-source Rust
+  `openai/codex` upstream, plus the CC chain (public CC surfaces, the private
   `sudoprivacy/claude-code` snapshot, runtime-observation combos,
-  CCB, claw-code), the mandatory "CHANGELOG → grep CCB → align"
+  CCB, claw-code) — the mandatory "CHANGELOG → grep CCB → align"
   loop, resolution taxonomy, and the sync markers
-  (`LAST_PARITY_SYNC_COMMIT`, `LAST_CCB_REF_VERSION`).
+  (`LAST_CODEX_REF_VERSION`, `LAST_PARITY_SYNC_COMMIT`, `LAST_CCB_REF_VERSION`).
 - [`mock-parity-harness.md`](./mock-parity-harness.md) — the
   deterministic mock backend and the harness that exercises the parity
   scenarios.

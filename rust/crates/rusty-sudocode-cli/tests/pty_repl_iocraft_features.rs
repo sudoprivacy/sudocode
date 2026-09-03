@@ -117,6 +117,11 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
+    // Settle: on macOS CI the signal handler may not be fully wired
+    // when the prompt first renders. A brief pause avoids Ctrl-C
+    // arriving before the REPL's SIGINT handler is installed.
+    std::thread::sleep(Duration::from_millis(200));
+
     // Press Ctrl-C once — should show hint in footer area.
     sess.send("\x03").expect("send Ctrl-C");
 

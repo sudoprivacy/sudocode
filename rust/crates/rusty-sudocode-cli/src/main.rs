@@ -2744,40 +2744,30 @@ impl AcpCliAgent {
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id).map_err(
             |error| AcpError::internal(format!("failed to create session handle: {error}")),
         )?;
-        let mut runtime = build_runtime_for_cwd(
+        let abort_signal = runtime::HookAbortSignal::new();
+        let sudocode_config = require_sudocode_config_for_cwd(&cwd).map_err(AcpError::internal)?;
+        let auth_mode = resolve_auth_mode(&model, self.auth_mode, &sudocode_config)
+            .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
+        let runtime = build_engine_runtime(
             &cwd,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
-            {
-                let sudocode_config =
-                    require_sudocode_config_for_cwd(&cwd).map_err(AcpError::internal)?;
-                let auth_mode = resolve_auth_mode(&model, self.auth_mode, &sudocode_config)
-                    .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-                RuntimeConfig {
-                    model: model.clone(),
-                    system_prompt,
-                    enable_tools: true,
-                    emit_output: false,
-                    allowed_tools: self.allowed_tools.clone(),
-                    permission_mode,
-                    progress_reporter: None,
-                    auth_mode,
-                    sudocode_config,
-                }
+            RuntimeConfig {
+                model: model.clone(),
+                system_prompt,
+                enable_tools: true,
+                emit_output: false,
+                allowed_tools: self.allowed_tools.clone(),
+                permission_mode,
+                progress_reporter: None,
+                auth_mode,
+                sudocode_config,
             },
             mcp_servers,
+            abort_signal.clone(),
+            self.reasoning_effort.clone(),
         )
         .map_err(|error| AcpError::internal(format!("failed to build runtime: {error}")))?;
-        let abort_signal = runtime::HookAbortSignal::new();
-        runtime = runtime.with_hook_abort_signal(abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
-            rt.api_client_mut()
-                .set_reasoning_effort(self.reasoning_effort.clone());
-            let thinking = ConfigLoader::default_for(&cwd)
-                .load()
-                .map_or(true, |cfg| cfg.thinking());
-            rt.api_client_mut().set_thinking_enabled(thinking);
-        }
         runtime
             .session()
             .save_to_path(&handle.path)
@@ -2900,7 +2890,7 @@ impl AcpCliAgent {
         let auth_mode = resolve_model_switch_auth_mode(model, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
         let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
-        let mut runtime = build_runtime_for_cwd(
+        let runtime = build_engine_runtime(
             &cwd,
             session_state,
             &handle_id,
@@ -2916,17 +2906,10 @@ impl AcpCliAgent {
                 sudocode_config,
             },
             &session_mcp,
+            session.abort_signal.clone(),
+            self.reasoning_effort.clone(),
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
-        runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
-            rt.api_client_mut()
-                .set_reasoning_effort(self.reasoning_effort.clone());
-            let thinking = ConfigLoader::default_for(&cwd)
-                .load()
-                .map_or(true, |cfg| cfg.thinking());
-            rt.api_client_mut().set_thinking_enabled(thinking);
-        }
         Ok(runtime)
     }
 
@@ -3102,22 +3085,52 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 ///
 /// The active model is the session's own (`session.model`); this type keeps no
 /// separate copy.
+/// Outcome of a model switch, returned by [`SessionEngine::set_model_impl`] so
+/// each seam consumer formats it its own way: the REPL renders a
+/// `format_model_switch_report` / `format_model_report`; the pump/ACP path takes
+/// `(resolved, available)`. Report DATA only — no formatting crosses the seam.
+pub(crate) struct ModelSwitchReport {
+    /// The model in effect before the switch.
+    previous: String,
+    /// The resolved target model (equal to `previous` when it was a no-op).
+    resolved: String,
+    /// Session message count at switch time (for the report lines).
+    message_count: usize,
+    /// Usage turns at switch time (for the no-op "current model" report).
+    turns: u32,
+    /// `false` when the target equalled the current model — no rebuild happened.
+    changed: bool,
+    /// Config keys ∪ discovery, current model pinned first (for `ModelChanged`).
+    available: Vec<String>,
+}
+
 struct SessionEngine {
     session: std::sync::Mutex<AcpCliSession>,
     tokio_runtime: tokio::runtime::Runtime,
     allowed_tools: Option<AllowedToolSet>,
-    permission_mode_override: Option<PermissionMode>,
+    /// Effective permission mode — the engine's SSOT (the renderer no longer
+    /// keeps a copy). Resolved once at build from the CLI override / default;
+    /// `/permissions` mutates it in place and every runtime rebuild reads it.
+    permission_mode: std::sync::Mutex<PermissionMode>,
+    /// Reasoning effort — immutable for now (no `/effort` verb yet).
     reasoning_effort: Option<String>,
-    auth_mode: Option<AuthMode>,
+    /// Auth-mode override — the engine's SSOT. `None` = auto-resolve from the
+    /// model + config; `/auth` pins a concrete mode. Every rebuild reads it.
+    auth_mode: std::sync::Mutex<Option<AuthMode>>,
 }
 
 impl SessionEngine {
     /// Build a single-session engine for `cwd`. Ports `AcpCliAgent::build_session`.
+    ///
+    /// `system_prompt` is supplied by the caller (the REPL passes its own
+    /// system prompt; the ACP path passes the ACP one) so this one engine core
+    /// serves every renderer without baking in a prompt policy.
     #[allow(clippy::too_many_arguments)]
     fn build(
         cwd: &Path,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
+        system_prompt: SystemPrompt,
         model: String,
         model_flag_raw: Option<String>,
         allowed_tools: Option<AllowedToolSet>,
@@ -3133,8 +3146,6 @@ impl SessionEngine {
             resolve_repl_model(model.clone())
         };
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
-        let system_prompt =
-            build_acp_system_prompt(&cwd, &prompt_overrides).map_err(|e| e.to_string())?;
         let session_state =
             new_cli_session_for(&cwd).map_err(|e| format!("failed to create session: {e}"))?;
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id)
@@ -3142,7 +3153,8 @@ impl SessionEngine {
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
-        let mut runtime = build_runtime_for_cwd(
+        let abort_signal = runtime::HookAbortSignal::new();
+        let runtime = build_engine_runtime(
             &cwd,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
@@ -3158,18 +3170,10 @@ impl SessionEngine {
                 sudocode_config,
             },
             mcp_servers,
+            abort_signal.clone(),
+            reasoning_effort.clone(),
         )
         .map_err(|e| format!("failed to build runtime: {e}"))?;
-        let abort_signal = runtime::HookAbortSignal::new();
-        runtime = runtime.with_hook_abort_signal(abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
-            rt.api_client_mut()
-                .set_reasoning_effort(reasoning_effort.clone());
-            let thinking = ConfigLoader::default_for(&cwd)
-                .load()
-                .map_or(true, |cfg| cfg.thinking());
-            rt.api_client_mut().set_thinking_enabled(thinking);
-        }
         runtime
             .session()
             .save_to_path(&handle.path)
@@ -3189,9 +3193,9 @@ impl SessionEngine {
             tokio_runtime: tokio::runtime::Runtime::new()
                 .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
             allowed_tools,
-            permission_mode_override,
+            permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
-            auth_mode,
+            auth_mode: std::sync::Mutex::new(auth_mode),
         })
     }
 
@@ -3199,6 +3203,158 @@ impl SessionEngine {
         self.session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// THE one runtime-rebuild primitive behind every session swap (model / auth
+    /// / permission switch, `/clear`, `/resume`, `/session switch|fork`,
+    /// compaction, plugin reload). Rebuilds the locked session's runtime for
+    /// `new_session` under `handle`, reading the effective config straight from
+    /// the engine's SSOT (`self.permission_mode` / `self.auth_mode` /
+    /// `self.reasoning_effort`) and the model from `new_session.model` — the
+    /// caller sets that field to the intended effective model, or leaves it
+    /// `None` to inherit the current one. Abort signal + prompt overrides come
+    /// from the live session. No model/permission/auth params: the engine, not
+    /// the renderer, owns that config (audit finding B — one SSOT).
+    fn rebuild_locked(
+        &self,
+        session: &mut AcpCliSession,
+        mut new_session: runtime::Session,
+        handle: SessionHandle,
+    ) -> Result<(), String> {
+        let cwd = session.cwd.clone();
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        if new_session.model.is_none() {
+            new_session.model = session.runtime.session().model.clone();
+        }
+        let model = new_session.model.clone().unwrap_or_default();
+        let permission_mode = self.locked_permission_mode();
+        let auth_override = self.auth_override();
+        let sudocode_config = load_sudocode_config_for_cwd(&cwd);
+        let auth_mode = resolve_model_switch_auth_mode(&model, auth_override, &sudocode_config)
+            .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &session.prompt_overrides).map_err(|e| e.to_string())?;
+        let runtime = build_engine_runtime(
+            &cwd,
+            new_session,
+            &handle.id,
+            RuntimeConfig {
+                model,
+                system_prompt,
+                enable_tools: true,
+                emit_output: false,
+                allowed_tools: self.allowed_tools.clone(),
+                permission_mode,
+                progress_reporter: None,
+                auth_mode,
+                sudocode_config,
+            },
+            &session.session_mcp_servers,
+            session.abort_signal.clone(),
+            self.reasoning_effort.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        session.runtime = runtime;
+        session.handle = handle;
+        Ok(())
+    }
+
+    /// Effective permission mode (engine SSOT). Private helper behind the
+    /// `SessionLifecycle::current_permission_mode` read + every rebuild.
+    fn locked_permission_mode(&self) -> PermissionMode {
+        *self
+            .permission_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The raw auth-mode override (`None` = auto-resolve). Internal — callers
+    /// wanting the resolved mode use [`Self::resolved_auth_mode`].
+    fn auth_override(&self) -> Option<AuthMode> {
+        *self
+            .auth_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The model in effect (engine SSOT = the session's own model).
+    fn session_model(&self) -> String {
+        self.lock_session()
+            .runtime
+            .session()
+            .model
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The resolved auth mode in effect: the pinned override, else the mode the
+    /// current model + config auto-resolve to (what the runtime actually uses).
+    fn resolved_auth_mode(&self) -> AuthMode {
+        let model = self.session_model();
+        let config = load_sudocode_config_for_current_dir();
+        resolve_auth_mode(&model, self.auth_override(), &config).unwrap_or(AuthMode::ApiKey)
+    }
+
+    /// Config keys ∪ discovery ids, `current` pinned first — the model list the
+    /// seam's `ModelChanged` carries and `/model` (no arg) shows.
+    fn available_models(&self, current: &str) -> Vec<String> {
+        let config = load_sudocode_config_for_current_dir();
+        let config_keys: Vec<String> = config.models.keys().cloned().collect();
+        let mut available = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+        if !available.iter().any(|m| m.eq_ignore_ascii_case(current)) {
+            available.insert(0, current.to_string());
+        }
+        available
+    }
+
+    /// The one model-switch implementation, shared by the turn seam
+    /// ([`engine_core::EngineDelegate::set_model`]) and the REPL lifecycle
+    /// ([`SessionLifecycle::set_model`]) — audit finding A (was 4 copies).
+    /// Resolves the alias, and when it differs from the current model rebuilds
+    /// the runtime via [`Self::rebuild_locked`] (keeping `session.model` in sync
+    /// so auto-compaction reads the right context window). Returns report DATA;
+    /// neither caller formats here.
+    fn set_model_impl(&self, new_model: &str) -> Result<ModelSwitchReport, String> {
+        let resolved = resolve_model_alias_with_config(new_model);
+        let (previous, message_count, turns, changed) = {
+            let mut session = self.lock_session();
+            let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+            let previous = session.runtime.session().model.clone().unwrap_or_default();
+            let message_count = session.runtime.session().messages.len();
+            let turns = session.runtime.usage().turns();
+            if resolved == previous {
+                (previous, message_count, turns, false)
+            } else {
+                let mut new_session = session.runtime.session().clone();
+                new_session.model = Some(resolved.clone());
+                let handle = session.handle.clone();
+                self.rebuild_locked(&mut session, new_session, handle)?;
+                (previous, message_count, turns, true)
+            }
+        };
+        let available = self.available_models(&resolved);
+        Ok(ModelSwitchReport {
+            previous,
+            resolved,
+            message_count,
+            turns,
+            changed,
+            available,
+        })
+    }
+
+    /// The one permission-mode implementation, shared by the seam and the REPL:
+    /// update the engine SSOT, then flip the live policy's active mode in place
+    /// (the lightweight mechanism the ACP path already trusts — no full rebuild).
+    fn set_permission_mode_impl(&self, mode: PermissionMode) {
+        *self
+            .permission_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
+        let mut session = self.lock_session();
+        if let Some(rt) = session.runtime.runtime.as_mut() {
+            rt.permission_policy_mut().set_active_mode(mode);
+        }
     }
 }
 
@@ -3286,69 +3442,12 @@ impl engine_core::EngineDelegate for SessionEngine {
     }
 
     fn set_model(&self, new_model: &str) -> Result<(String, Vec<String>), String> {
-        let resolved = resolve_model_alias_with_config(new_model);
-        {
-            let mut session = self.lock_session();
-            let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
-            let mut cloned_session = session.runtime.session().clone();
-            cloned_session.model = Some(resolved.clone());
-            let cwd = session.cwd.clone();
-            let handle_id = session.handle.id.clone();
-            let session_mcp = session.session_mcp_servers.clone();
-            let sudocode_config = load_sudocode_config_for_cwd(&cwd);
-            let permission_mode = self
-                .permission_mode_override
-                .unwrap_or_else(default_permission_mode);
-            let resolved_auth =
-                resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
-                    .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
-            let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)
-                .map_err(|e| e.to_string())?;
-            let mut runtime = build_runtime_for_cwd(
-                &cwd,
-                cloned_session,
-                &handle_id,
-                RuntimeConfig {
-                    model: resolved.clone(),
-                    system_prompt,
-                    enable_tools: true,
-                    emit_output: false,
-                    allowed_tools: self.allowed_tools.clone(),
-                    permission_mode,
-                    progress_reporter: None,
-                    auth_mode: resolved_auth,
-                    sudocode_config,
-                },
-                &session_mcp,
-            )
-            .map_err(|e| e.to_string())?;
-            runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
-            if let Some(rt) = runtime.runtime.as_mut() {
-                rt.api_client_mut()
-                    .set_reasoning_effort(self.reasoning_effort.clone());
-                let thinking = ConfigLoader::default_for(&cwd)
-                    .load()
-                    .map_or(true, |cfg| cfg.thinking());
-                rt.api_client_mut().set_thinking_enabled(thinking);
-            }
-            session.runtime = runtime;
-        }
-
-        // Available models = config keys + discovery, with the current pinned first.
-        let config = load_sudocode_config_for_current_dir();
-        let config_keys: Vec<String> = config.models.keys().cloned().collect();
-        let mut available = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-        if !available.iter().any(|m| m.eq_ignore_ascii_case(&resolved)) {
-            available.insert(0, resolved.clone());
-        }
-        Ok((resolved, available))
+        let report = self.set_model_impl(new_model)?;
+        Ok((report.resolved, report.available))
     }
 
     fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), String> {
-        let mut session = self.lock_session();
-        if let Some(rt) = session.runtime.runtime.as_mut() {
-            rt.permission_policy_mut().set_active_mode(mode);
-        }
+        self.set_permission_mode_impl(mode);
         Ok(())
     }
 
@@ -3369,7 +3468,7 @@ impl engine_core::EngineDelegate for SessionEngine {
                     .unwrap_or_default();
                 return Ok(format!("current model: {current}"));
             }
-            let (resolved, _available) = self.set_model(arg)?;
+            let resolved = self.set_model_impl(arg)?.resolved;
             return Ok(format!("switched model to {resolved}"));
         }
         Ok(String::new())
@@ -3419,6 +3518,43 @@ pub(crate) trait SessionLifecycle: Send + Sync + 'static {
     /// MCP state. `None` when no MCP servers are running in this session; else
     /// the action's `Ok(message)` / `Err(message)`.
     fn mcp_command(&self, action: &str, server: &str) -> Option<Result<String, String>>;
+
+    // --- config reads (engine SSOT) ------------------------------------------
+    /// The model in effect.
+    fn current_model(&self) -> String;
+    /// The effective permission mode.
+    fn current_permission_mode(&self) -> PermissionMode;
+    /// The resolved auth mode in effect.
+    fn current_auth_mode(&self) -> AuthMode;
+
+    // --- semantic session ops (engine owns the rebuild; renderer only formats)-
+    /// Switch the model. Returns report DATA (`previous` / `resolved` /
+    /// `changed` / counts / `available`); the renderer formats it. Shares the
+    /// one impl with [`engine_core::EngineDelegate::set_model`].
+    fn set_model(&self, new_model: &str) -> Result<ModelSwitchReport, String>;
+    /// Pin the auth mode (engine SSOT) and rebuild so it takes effect.
+    fn set_auth(&self, mode: AuthMode) -> Result<(), String>;
+    /// Switch the active permission mode (engine SSOT) in place.
+    fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), String>;
+    /// Start a fresh session (`/clear`), preserving the current model. Returns
+    /// the new session handle for the renderer to adopt + report.
+    fn reset_session(&self) -> Result<SessionHandle, String>;
+    /// Resume a session by reference (`/resume`, `/session switch`): the engine
+    /// loads it and swaps it in, keeping the current effective model. Returns
+    /// the new handle + its message count.
+    fn resume_session(&self, reference: &str) -> Result<(SessionHandle, usize), String>;
+    /// Fork the current session (`/session fork`). Returns the new handle, its
+    /// message count, and the branch name (if any).
+    fn fork_session(
+        &self,
+        branch: Option<String>,
+    ) -> Result<(SessionHandle, usize, Option<String>), String>;
+    /// Rebuild the runtime to pick up reloaded plugin / feature state, then
+    /// persist (`/plugins` reload).
+    fn reload_features(&self) -> Result<(), String>;
+    /// Run LLM-based history compaction and swap the compacted session in.
+    /// Returns `(removed, kept, skipped)` for the renderer's report.
+    fn run_compaction(&self) -> Result<(usize, usize, bool), String>;
 }
 
 impl SessionLifecycle for SessionEngine {
@@ -3474,6 +3610,119 @@ impl SessionLifecycle for SessionEngine {
             other => return Some(Err(format!("unknown /mcp action: {other}"))),
         };
         Some(result.map_err(|e| e.to_string()))
+    }
+
+    fn current_model(&self) -> String {
+        self.session_model()
+    }
+
+    fn current_permission_mode(&self) -> PermissionMode {
+        self.locked_permission_mode()
+    }
+
+    fn current_auth_mode(&self) -> AuthMode {
+        self.resolved_auth_mode()
+    }
+
+    fn set_model(&self, new_model: &str) -> Result<ModelSwitchReport, String> {
+        self.set_model_impl(new_model)
+    }
+
+    fn set_auth(&self, mode: AuthMode) -> Result<(), String> {
+        *self
+            .auth_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
+        let mut session = self.lock_session();
+        let new_session = session.runtime.session().clone();
+        let handle = session.handle.clone();
+        self.rebuild_locked(&mut session, new_session, handle)
+    }
+
+    fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), String> {
+        self.set_permission_mode_impl(mode);
+        Ok(())
+    }
+
+    fn reset_session(&self) -> Result<SessionHandle, String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        let current_model = session.runtime.session().model.clone();
+        let session_state = new_cli_session_for(&session.cwd).map_err(|e| e.to_string())?;
+        let handle = create_managed_session_handle_for(&session.cwd, &session_state.session_id)
+            .map_err(|e| e.to_string())?;
+        let mut fresh = session_state.with_persistence_path(handle.path.clone());
+        fresh.model = current_model;
+        self.rebuild_locked(&mut session, fresh, handle.clone())?;
+        Ok(handle)
+    }
+
+    fn resume_session(&self, reference: &str) -> Result<(SessionHandle, usize), String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        let (handle, mut loaded) = load_session_reference(reference).map_err(|e| e.to_string())?;
+        let message_count = loaded.messages.len();
+        // Keep the current effective model (REPL parity: the runtime model is
+        // config-driven, not adopted from the resumed session).
+        loaded.model = session.runtime.session().model.clone();
+        self.rebuild_locked(&mut session, loaded, handle.clone())?;
+        Ok((handle, message_count))
+    }
+
+    fn fork_session(
+        &self,
+        branch: Option<String>,
+    ) -> Result<(SessionHandle, usize, Option<String>), String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        let forked = session.runtime.fork_session(branch);
+        let handle = create_managed_session_handle_for(&session.cwd, &forked.session_id)
+            .map_err(|e| e.to_string())?;
+        let branch_name = forked
+            .fork
+            .as_ref()
+            .and_then(|fork| fork.branch_name.clone());
+        let forked = forked.with_persistence_path(handle.path.clone());
+        let message_count = forked.messages.len();
+        forked
+            .save_to_path(&handle.path)
+            .map_err(|e| e.to_string())?;
+        self.rebuild_locked(&mut session, forked, handle.clone())?;
+        Ok((handle, message_count, branch_name))
+    }
+
+    fn reload_features(&self) -> Result<(), String> {
+        let mut session = self.lock_session();
+        let new_session = session.runtime.session().clone();
+        let handle = session.handle.clone();
+        self.rebuild_locked(&mut session, new_session, handle)?;
+        let path = session.handle.path.clone();
+        session
+            .runtime
+            .session()
+            .save_to_path(&path)
+            .map_err(|e| e.to_string())
+    }
+
+    fn run_compaction(&self) -> Result<(usize, usize, bool), String> {
+        let mut session = self.lock_session();
+        let cwd = session.cwd.clone();
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        let result = self
+            .tokio_runtime
+            .block_on(session.runtime.compact(CompactionConfig::default(), None));
+        let removed = result.removed_message_count;
+        let kept = result.compacted_session.messages.len();
+        let skipped = removed == 0;
+        let handle = session.handle.clone();
+        self.rebuild_locked(&mut session, result.compacted_session, handle)?;
+        let path = session.handle.path.clone();
+        session
+            .runtime
+            .session()
+            .save_to_path(&path)
+            .map_err(|e| e.to_string())?;
+        Ok((removed, kept, skipped))
     }
 }
 
@@ -7020,6 +7269,35 @@ fn build_runtime(
     let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
         std::collections::BTreeMap::new();
     build_runtime_for_cwd(&cwd, session, session_id, config, &session_mcp)
+}
+
+/// The one place the post-build tail every engine-side runtime (re)build shares
+/// lives: build the runtime for `session` under `handle_id`, install the hook
+/// abort signal, then apply reasoning-effort + `thinking` config. Callers own
+/// the `RuntimeConfig` assembly (their config sources differ) and the
+/// surrounding save/tracer logic; this collapses the identical ~15-line tail
+/// that had been copied across `SessionEngine::build` / `rebuild_locked` /
+/// `set_model_impl` and `AcpCliAgent::build_session` / `handle_acp_model_switch`.
+/// The workspace-root scope must already be active for `cwd`.
+fn build_engine_runtime(
+    cwd: &Path,
+    session: Session,
+    handle_id: &str,
+    config: RuntimeConfig,
+    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+    abort_signal: runtime::HookAbortSignal,
+    reasoning_effort: Option<String>,
+) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+    let mut runtime = build_runtime_for_cwd(cwd, session, handle_id, config, session_mcp)?;
+    runtime = runtime.with_hook_abort_signal(abort_signal);
+    if let Some(rt) = runtime.runtime.as_mut() {
+        rt.api_client_mut().set_reasoning_effort(reasoning_effort);
+        let thinking = ConfigLoader::default_for(cwd)
+            .load()
+            .map_or(true, |cfg| cfg.thinking());
+        rt.api_client_mut().set_thinking_enabled(thinking);
+    }
+    Ok(runtime)
 }
 
 fn build_runtime_for_cwd(

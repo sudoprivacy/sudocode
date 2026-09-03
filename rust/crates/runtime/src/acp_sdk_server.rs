@@ -28,16 +28,17 @@ use agent_client_protocol::{
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest,
-    CloseSessionResponse, ContentBlock, ContentChunk, ExtRequest, Implementation,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
+    ContentChunk, ExtRequest, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
     SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
     StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage,
+    ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -276,6 +277,12 @@ pub trait SdkAcpDelegate: Send + Sync + 'static {
         observer: &mut SdkSessionObserver,
     ) -> Result<(), AcpError>;
 
+    /// The slash commands [`Self::handle_slash_command`] accepts. Broadcast
+    /// to the client as `available_commands_update` right after `session/new`
+    /// and `session/load` succeed, so it must describe exactly what the
+    /// delegate implements.
+    fn available_commands(&self) -> &'static [AcpSlashCommandSpec];
+
     /// List active session IDs with their cwds.
     fn list_sessions(&self) -> Vec<(String, PathBuf)>;
 
@@ -475,6 +482,10 @@ pub struct PromptUsage {
     pub cost_currency: Option<UsageCostCurrency>,
     /// Cumulative usage for the entire session, exposed via _meta.sudocode.cumulativeUsage
     pub cumulative_usage: Option<CumulativeUsage>,
+    /// `true` when the transcript was compacted automatically during this
+    /// turn (pre-turn overflow protection or the in-turn threshold path),
+    /// exposed via `_meta.sudocode.autoCompacted`.
+    pub auto_compacted: bool,
 }
 
 /// Cumulative token usage for the entire session.
@@ -485,6 +496,58 @@ pub struct CumulativeUsage {
     pub total_tokens: u64,
     pub cached_read_tokens: Option<u64>,
     pub cached_write_tokens: Option<u64>,
+}
+
+/// One slash command the ACP agent accepts inside `session/prompt`.
+///
+/// The single table of these (owned by the `commands` crate, wired in by the
+/// delegate) is the source of truth for three things at once: the
+/// `available_commands_update` notification, `/help` under ACP, and the
+/// unknown-command hint. Keep them in one place so they cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcpSlashCommandSpec {
+    /// Command name without the leading slash (`compact`, not `/compact`).
+    pub name: &'static str,
+    /// One-line, human-readable description shown by the client.
+    pub description: &'static str,
+    /// Placeholder for the argument text when the command takes any
+    /// (`<model-id>`); `None` for argument-less commands.
+    pub input_hint: Option<&'static str>,
+}
+
+impl AcpSlashCommandSpec {
+    /// `/name <hint>` as the user would type it.
+    #[must_use]
+    pub fn usage(&self) -> String {
+        match self.input_hint {
+            Some(hint) => format!("/{} {hint}", self.name),
+            None => format!("/{}", self.name),
+        }
+    }
+}
+
+impl From<&AcpSlashCommandSpec> for AvailableCommand {
+    fn from(spec: &AcpSlashCommandSpec) -> Self {
+        AvailableCommand::new(spec.name, spec.description).input(
+            spec.input_hint.map(|hint| {
+                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(hint))
+            }),
+        )
+    }
+}
+
+/// The `session/update` notification advertising `specs` to the client
+/// (`sessionUpdate: "available_commands_update"`, `availableCommands: [...]`).
+fn available_commands_notification(
+    session_id: &str,
+    specs: &[AcpSlashCommandSpec],
+) -> SessionNotification {
+    SessionNotification::new(
+        session_id.to_string(),
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(
+            specs.iter().map(AvailableCommand::from).collect(),
+        )),
+    )
 }
 
 /// Build the `_meta` map for the `initialize` response. Currently advertises
@@ -587,6 +650,9 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
             }),
         );
     }
+    if u.auto_compacted {
+        sudocode_meta.insert("autoCompacted".to_string(), json!(true));
+    }
     sudocode_meta
 }
 
@@ -624,6 +690,7 @@ mod tests {
                 cached_read_tokens: Some(3),
                 cached_write_tokens: Some(0),
             }),
+            auto_compacted: false,
         });
 
         assert_eq!(meta["costUnits"], serde_json::json!(43_700));
@@ -1195,6 +1262,8 @@ pub(crate) async fn run_acp_on_transport(
                         };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
+                    let commands = delegate.available_commands();
+                    let cx_notify = cx.clone();
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
@@ -1217,7 +1286,13 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((session_id, cwd, signal)) => {
                                 registry.register(session_id.clone(), signal, cwd);
-                                responder.respond(NewSessionResponse::new(session_id))?;
+                                responder.respond(NewSessionResponse::new(session_id.clone()))?;
+                                // Advertise the slash commands once the client
+                                // knows the session id (the response goes out
+                                // first on the same queue).
+                                let _ = cx_notify.send_notification(
+                                    available_commands_notification(&session_id, commands),
+                                );
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;
@@ -1645,6 +1720,8 @@ pub(crate) async fn run_acp_on_transport(
                         };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
+                    let commands = delegate.available_commands();
+                    let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
                     cx.spawn(async move {
@@ -1667,8 +1744,13 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((session_id, cwd, signal)) => {
-                                registry.register(session_id, signal, cwd);
+                                registry.register(session_id.clone(), signal, cwd);
                                 responder.respond(LoadSessionResponse::new())?;
+                                // Same broadcast as `session/new`: a loaded
+                                // session accepts the same commands.
+                                let _ = cx_notify.send_notification(
+                                    available_commands_notification(&session_id, commands),
+                                );
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;

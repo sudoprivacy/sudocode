@@ -97,14 +97,15 @@ use cli::tool_executor::{
     clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
 };
 use commands::{
-    classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
+    acp_slash_commands, classify_skills_slash_command, format_acp_unsupported_slash_command,
+    handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
     handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_skills_prompt_section, render_slash_command_help, render_slash_command_help_filtered,
-    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
-    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
-    SkillSlashDispatch, SlashCommand,
+    render_acp_slash_command_help, render_skills_prompt_section, render_slash_command_help,
+    render_slash_command_help_filtered, resolve_skill_invocation,
+    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
+    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
@@ -3199,11 +3200,18 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
     ) -> Result<(), runtime::AcpError> {
         use runtime::RuntimeObserver as _;
-        let Ok(Some(command)) = SlashCommand::parse(input) else {
-            observer.on_text_delta(&format!(
-                "Unknown slash command: `{input}`. Type `/help` for available commands."
-            ));
-            return Ok(());
+        let command = match SlashCommand::parse(input) {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                observer.on_text_delta(&format_acp_unsupported_slash_command(input));
+                return Ok(());
+            }
+            Err(error) => {
+                observer.on_text_delta(&format!(
+                    "{error}\n  Help             /help lists the commands available in ACP mode"
+                ));
+                return Ok(());
+            }
         };
 
         let response = match &command {
@@ -3213,7 +3221,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 self.inner
                     .handle_acp_model_switch(&mut session, model.clone())?
             }
-            SlashCommand::Help => render_repl_help(),
+            SlashCommand::Help => render_acp_slash_command_help(),
             SlashCommand::Status => {
                 let locked = self.lock_session(session_id)?;
                 let session = locked.get();
@@ -3237,8 +3245,8 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Cost => {
                 let locked = self.lock_session(session_id)?;
                 let session = locked.get();
-                let usage = UsageTracker::from_session(session.runtime.session())
-                    .cumulative_usage();
+                let usage =
+                    UsageTracker::from_session(session.runtime.session()).cumulative_usage();
                 format!(
                     "Token usage: {} input, {} output, {} cache-create, {} cache-read",
                     usage.input_tokens,
@@ -3293,14 +3301,15 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     .map(|report| report.render())
                     .map_err(|e| runtime::AcpError::internal(e.to_string()))?
             }
-            _ => format!(
-                "`{}` is not supported in ACP mode. Available: /model, /status, /cost, /config, /diff, /doctor, /help",
-                input.split_whitespace().next().unwrap_or(input)
-            ),
+            _ => format_acp_unsupported_slash_command(input),
         };
 
         observer.on_text_delta(&response);
         Ok(())
+    }
+
+    fn available_commands(&self) -> &'static [runtime::acp_sdk_server::AcpSlashCommandSpec] {
+        acp_slash_commands()
     }
 
     fn list_sessions(&self) -> Vec<(String, PathBuf)> {
@@ -3584,6 +3593,8 @@ impl AcpSdkDelegate {
         // Estimate current session tokens
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let threshold = (context_limit as f64 * 0.85) as usize; // 85% threshold
+                                                                // Surfaced to the client as `_meta.sudocode.autoCompacted`.
+        let mut auto_compacted = false;
 
         // If approaching limit, try auto-compact
         if estimated_tokens > threshold {
@@ -3620,6 +3631,7 @@ impl AcpSdkDelegate {
                 };
                 let result = compact_session_sync(session.runtime.session(), compaction_config);
                 if result.removed_message_count > 0 {
+                    auto_compacted = true;
                     // Update session with compacted version
                     *session.runtime.session_mut() = result.compacted_session.clone();
                     // Persist the compacted state immediately. The end-of-turn save_to_path is
@@ -3696,6 +3708,7 @@ impl AcpSdkDelegate {
                 }
                 runtime::AcpError::internal(e.to_string())
             })?;
+        auto_compacted |= turn_summary.auto_compaction.is_some();
         // Use turn_usage for PromptUsage, session_usage for cumulative
         let per_turn_usage =
             (turn_summary.turn_usage.total_tokens() > 0).then_some(turn_summary.turn_usage);
@@ -3720,6 +3733,7 @@ impl AcpSdkDelegate {
                 cached_read_tokens: Some(u64::from(cumulative_usage.cache_read_input_tokens)),
                 cached_write_tokens: Some(u64::from(cumulative_usage.cache_creation_input_tokens)),
             }),
+            auto_compacted,
         });
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {

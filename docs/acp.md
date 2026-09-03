@@ -119,7 +119,6 @@ no `usage`. The ACP agent implements a fixed subset of the REPL commands:
 | `/cost` | Cumulative token usage for this session. |
 | `/model [<model-id>]` | Show the current model, or switch this session to another model. |
 | `/compact` | Summarise older messages to free context. LLM summary first; if the model call is unavailable or fails, the local structural summary. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. |
-| `/clear` | Reset the session **in place**: session id, transcript file, working directory, model and permission mode are kept; the transcript is replaced by an empty one. **No `--confirm` is required** (the client's UI owns that confirmation); `--confirm` is accepted and ignored. |
 | `/config [section]` | Show the effective configuration (read-only; `/config set` is REPL-only). |
 | `/diff` | Staged and unstaged git changes in the session directory. |
 | `/doctor` | Local health checks for auth, config and workspace. |
@@ -141,7 +140,6 @@ table, so clients can build a command palette without hard-coding it:
       "sessionUpdate": "available_commands_update",
       "availableCommands": [
         { "name": "compact", "description": "Summarise older messages to free context (LLM summary, local fallback)" },
-        { "name": "clear", "description": "Start a fresh transcript in this session; the old one is archived" },
         { "name": "model", "description": "…", "input": { "hint": "<model-id>" } }
       ]
     }
@@ -162,17 +160,6 @@ drops the call, a cancel that lands after it discards the result; either way
 the transcript in memory and on disk is left untouched and the prompt ends
 with `stopReason: "cancelled"`. The other commands are local and complete
 before a cancel could matter.
-
-**`/clear` and the old transcript.** Before the reset the previous transcript
-is archived as its own managed session — a fork branch named `cleared` with a
-new session id, the full message history, compaction state, and lineage back
-to the live session id. The `/clear` reply names that id (`Archived as
-<id>`), and `session/load {sessionId: <id>, cwd}` reopens it as a separate
-session; `scode session list` in the same directory shows it too. The live
-session id continues with an empty transcript. The archive is a plain fork:
-it does not carry its own copy of tool results that were offloaded to the
-live session's storage, so once the live session is deleted, "read more"
-references inside the archive stop resolving.
 
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the

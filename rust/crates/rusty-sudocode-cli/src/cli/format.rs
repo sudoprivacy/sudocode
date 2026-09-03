@@ -501,6 +501,7 @@ pub(crate) fn format_compact_report(
     removed: usize,
     resulting_messages: usize,
     skipped: bool,
+    summary_source: &runtime::CompactionSummarySource,
 ) -> String {
     if skipped {
         format!(
@@ -514,7 +515,8 @@ pub(crate) fn format_compact_report(
             "Compact
   Result           compacted
   Messages removed {removed}
-  Messages kept    {resulting_messages}"
+  Messages kept    {resulting_messages}
+  Summary          {summary_source}"
         )
     }
 }

@@ -152,8 +152,16 @@ table, so clients can build a command palette without hard-coding it:
 Names carry no leading slash; send them as `/name …` in `session/prompt`.
 `input.hint` is present only for commands that take arguments. The
 notification follows the response on the same connection, so the client
-already knows the session id when it arrives. The same table drives `/help`
-and the unknown-command hint, so the three never disagree.
+already knows the session id when it arrives; be ready to receive
+`session/update` for a session as soon as its `session/new` response is in,
+because this one follows immediately. The same table drives `/help` and the
+unknown-command hint, so the three never disagree.
+
+`session/cancel` applies to `/compact`: a cancel during the model round-trip
+drops the call, a cancel that lands after it discards the result; either way
+the transcript in memory and on disk is left untouched and the prompt ends
+with `stopReason: "cancelled"`. The other commands are local and complete
+before a cancel could matter.
 
 **`/clear` and the old transcript.** Before the reset the previous transcript
 is archived as its own managed session — a fork branch named `cleared` with a
@@ -161,7 +169,10 @@ new session id, the full message history, compaction state, and lineage back
 to the live session id. The `/clear` reply names that id (`Archived as
 <id>`), and `session/load {sessionId: <id>, cwd}` reopens it as a separate
 session; `scode session list` in the same directory shows it too. The live
-session id continues with an empty transcript.
+session id continues with an empty transcript. The archive is a plain fork:
+it does not carry its own copy of tool results that were offloaded to the
+live session's storage, so once the live session is deleted, "read more"
+references inside the archive stop resolving.
 
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the
@@ -169,7 +180,9 @@ either the pre-turn overflow guard or the in-turn threshold path — the
 alongside the existing `contextWindowTokens`, `estimatedSessionTokens`,
 cost and `cumulativeUsage` fields. The key is absent when no automatic
 compaction happened; `/compact` itself never sets it (its report is the
-text reply).
+text reply). Like the rest of `_meta.sudocode`, it rides on the success
+response, so a turn that fails after compacting reports the error and no
+`autoCompacted`.
 
 ### `session/load`
 

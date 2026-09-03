@@ -61,15 +61,15 @@ use cli::export::{
     PromptHistoryEntry,
 };
 use cli::format::{
-    describe_tool_progress, first_visible_line, format_acp_clear_report, format_acp_compact_report,
-    format_auth_report, format_auth_switch_report, format_auto_compaction_notice,
-    format_bughunter_report, format_commit_preflight_report, format_commit_skipped_report,
-    format_compact_report, format_cost_report, format_internal_prompt_progress_line,
-    format_issue_report, format_model_report, format_model_switch_report,
-    format_permission_prompt_box, format_permissions_report, format_permissions_switch_report,
-    format_pr_report, format_resume_report, format_sandbox_report, format_tool_call_start,
-    format_tool_result, format_turn_status_line_with_branch, format_ultraplan_report,
-    render_messages, render_resume_usage, render_version_report, truncate_for_summary,
+    describe_tool_progress, first_visible_line, format_acp_compact_report, format_auth_report,
+    format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
+    format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
+    format_cost_report, format_internal_prompt_progress_line, format_issue_report,
+    format_model_report, format_model_switch_report, format_permission_prompt_box,
+    format_permissions_report, format_permissions_switch_report, format_pr_report,
+    format_resume_report, format_sandbox_report, format_tool_call_start, format_tool_result,
+    format_turn_status_line_with_branch, format_ultraplan_report, render_messages,
+    render_resume_usage, render_version_report, truncate_for_summary,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -2877,9 +2877,8 @@ impl AcpCliAgent {
     /// injected MCP servers, prompt overrides, abort signal and the *active*
     /// permission mode (a `session/setPermissionMode` must survive the
     /// rebuild). The caller installs it with `session.runtime = …` once any
-    /// step that may still fail (e.g. persisting) has succeeded. Shared by
-    /// `/model` (new model, same transcript) and `/clear` (same model, fresh
-    /// transcript). The caller holds the session lock.
+    /// step that may still fail has succeeded. Used by `/model`; the caller
+    /// holds the session lock.
     fn build_replacement_session_runtime(
         &self,
         session: &mut AcpCliSession,
@@ -3010,45 +3009,6 @@ impl AcpCliAgent {
             AcpStopReason::EndTurn,
         ))
     }
-
-    /// `/clear` under ACP: reset the session **in place**. The session id,
-    /// file, cwd, model and permission mode are kept; the transcript is
-    /// archived under a new session id (still resumable / `session/load`-able)
-    /// and replaced by an empty one. No `--confirm` needed — the client's UI
-    /// owns that decision. The caller holds the session lock.
-    fn handle_acp_clear(&self, session: &mut AcpCliSession) -> Result<String, AcpError> {
-        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
-        let model = session
-            .runtime
-            .session()
-            .model
-            .clone()
-            .unwrap_or_else(|| self.current_model());
-        let cleared = clear_session_state(
-            &session.cwd,
-            session.runtime.session(),
-            &session.handle,
-            ClearMode::InPlace,
-        )
-        .map_err(|e| AcpError::internal(format!("failed to clear session: {e}")))?;
-        let mut runtime = self.build_replacement_session_runtime(session, cleared.fresh, &model)?;
-        // Persist the empty transcript *before* installing the new runtime:
-        // if the write fails, memory and disk both still hold the old
-        // transcript (plus the archive), instead of a cleared session that
-        // reloads its old history.
-        runtime
-            .session()
-            .save_to_path(&session.handle.path)
-            .map_err(|e| AcpError::internal(format!("failed to persist cleared session: {e}")))?;
-        let permission_mode = runtime.permission_policy_mut().active_mode();
-        session.runtime = runtime;
-        Ok(format_acp_clear_report(
-            &session.handle.id,
-            &cleared.previous.id,
-            &model,
-            permission_mode.as_str(),
-        ))
-    }
 }
 
 /// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
@@ -3066,17 +3026,6 @@ async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
     }
 }
 
-/// How `/clear` replaces the live transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClearMode {
-    /// REPL: the fresh transcript gets a new session id and file; the previous
-    /// transcript stays on disk under its own id.
-    NewSessionId,
-    /// ACP: the session id and file are kept for the fresh transcript, and the
-    /// previous transcript is archived under a new id first.
-    InPlace,
-}
-
 /// Outcome of [`clear_session_state`].
 struct ClearedSession {
     /// Empty transcript to rebuild the runtime around (persistence path set).
@@ -3084,46 +3033,25 @@ struct ClearedSession {
     /// Where `fresh` lives.
     handle: SessionHandle,
     /// Where the previous transcript lives — a managed session, so it stays
-    /// resumable (`/resume <id>`, `session/load`).
+    /// resumable (`/resume <id>`).
     previous: SessionHandle,
 }
 
-/// `/clear` core shared by the REPL and ACP: keep the previous transcript on
-/// disk as its own managed session and hand back a fresh one that keeps the
-/// workspace root. The caller rebuilds its runtime around `fresh` (model and
-/// permission mode live in the runtime config, so they carry over).
+/// REPL `/clear` core: the previous transcript stays on disk under its own
+/// id, and a fresh one with a new id and file keeps the workspace root. The
+/// caller rebuilds its runtime around `fresh` (model and permission mode
+/// live in the runtime config, so they carry over).
 fn clear_session_state(
     cwd: &Path,
-    current: &Session,
     current_handle: &SessionHandle,
-    mode: ClearMode,
 ) -> Result<ClearedSession, Box<dyn std::error::Error>> {
-    match mode {
-        ClearMode::NewSessionId => {
-            let fresh = new_cli_session_for(cwd)?;
-            let handle = create_managed_session_handle_for(cwd, &fresh.session_id)?;
-            Ok(ClearedSession {
-                fresh: fresh.with_persistence_path(handle.path.clone()),
-                handle,
-                previous: current_handle.clone(),
-            })
-        }
-        ClearMode::InPlace => {
-            // Archive as a fork branch named "cleared": a new id with the full
-            // transcript, compaction state and lineage back to the live id.
-            let archived = current.fork(Some("cleared".to_string()));
-            let previous = create_managed_session_handle_for(cwd, &archived.session_id)?;
-            archived.save_to_path(&previous.path)?;
-            let mut fresh = new_cli_session_for(cwd)?;
-            fresh.session_id.clone_from(&current_handle.id);
-            fresh.model.clone_from(&current.model);
-            Ok(ClearedSession {
-                fresh: fresh.with_persistence_path(current_handle.path.clone()),
-                handle: current_handle.clone(),
-                previous,
-            })
-        }
-    }
+    let fresh = new_cli_session_for(cwd)?;
+    let handle = create_managed_session_handle_for(cwd, &fresh.session_id)?;
+    Ok(ClearedSession {
+        fresh: fresh.with_persistence_path(handle.path.clone()),
+        handle,
+        previous: current_handle.clone(),
+    })
 }
 
 fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
@@ -3447,13 +3375,6 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 let (report, compact_stop) = self.inner.handle_acp_compact(&mut session)?;
                 stop = compact_stop;
                 report
-            }
-            // `--confirm` is accepted but not required: an ACP client confirms
-            // in its own UI before sending the command.
-            SlashCommand::Clear { .. } => {
-                let locked = self.lock_session(session_id)?;
-                let mut session = locked.get();
-                self.inner.handle_acp_clear(&mut session)?
             }
             SlashCommand::Status => {
                 let locked = self.lock_session(session_id)?;
@@ -5347,12 +5268,7 @@ impl LiveCli {
         }
 
         let cwd = runtime::current_workspace_root()?;
-        let cleared = clear_session_state(
-            &cwd,
-            self.runtime.session(),
-            &self.session,
-            ClearMode::NewSessionId,
-        )?;
+        let cleared = clear_session_state(&cwd, &self.session)?;
         let runtime = self.build_replacement_runtime(
             cleared.fresh,
             cleared.handle.id.clone(),

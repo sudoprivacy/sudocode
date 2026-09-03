@@ -592,12 +592,16 @@ fn assert_available_commands_update(update: &Value, session_id: &str) {
         .iter()
         .map(|c| c["name"].as_str().expect("command name is a string"))
         .collect();
-    for expected in ["compact", "clear", "help", "model", "status"] {
+    for expected in ["compact", "help", "model", "status"] {
         assert!(
             names.contains(&expected),
             "available commands should include `{expected}`, got {names:?}"
         );
     }
+    assert!(
+        !names.contains(&"clear"),
+        "/clear is not offered in ACP mode, got {names:?}"
+    );
     for command in commands {
         assert!(
             !command["name"].as_str().unwrap_or("").starts_with('/'),
@@ -1084,76 +1088,6 @@ async fn scenario_slash_compact(
     );
 }
 
-/// `/clear` without `--confirm`: the session id keeps working, the model no
-/// longer sees the earlier turn, and the old transcript is archived under a
-/// new session id that `session/load` can reopen.
-async fn scenario_slash_clear(
-    client: &mut AcpTestClient,
-    server: &MockAnthropicService,
-    workspace: &TestWorkspace,
-) {
-    let session_id = scenario_session_new(client, &workspace.root).await;
-    run_marked_turn(client, &session_id, "ACP_CLEAR_ONE").await;
-
-    let (text, _resp) = run_slash_command(client, &session_id, "/clear").await;
-    assert!(
-        text.contains("Session cleared") && text.contains(&session_id),
-        "/clear should confirm the in-place reset for this session: {text}"
-    );
-    let archived_id = text
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("Archived as"))
-        .and_then(|v| v.split_whitespace().next())
-        .unwrap_or_else(|| panic!("report should name the archived session: {text}"))
-        .to_string();
-    assert_ne!(archived_id, session_id, "the archive gets its own id");
-
-    // Same session id, fresh context.
-    let body = last_model_request_after_prompt(client, server, &session_id, "ACP_CLEAR_TWO").await;
-    assert!(
-        !body.contains("ACP_CLEAR_ONE"),
-        "cleared turn must not reach the model: {body}"
-    );
-    assert!(body.contains("ACP_CLEAR_TWO"), "new turn reaches the model");
-
-    // The old transcript survives on disk and is loadable.
-    let archived = read_session_transcript(&workspace.root, &archived_id);
-    assert!(
-        archived.contains("ACP_CLEAR_ONE"),
-        "archived transcript keeps the cleared turn"
-    );
-    let live = read_session_transcript(&workspace.root, &session_id);
-    assert!(
-        !live.contains("ACP_CLEAR_ONE"),
-        "live transcript no longer holds the cleared turn"
-    );
-    let (_n, load_resp) = client
-        .send_request(
-            "session/load",
-            json!({
-                "sessionId": archived_id,
-                "cwd": workspace.root.to_string_lossy().to_string(),
-                "mcpServers": []
-            }),
-        )
-        .await;
-    assert!(
-        load_resp.get("error").is_none(),
-        "session/load of the archived transcript should succeed: {load_resp}"
-    );
-    // …and continues with the pre-clear history.
-    let archived_body =
-        last_model_request_after_prompt(client, server, &archived_id, "ACP_CLEAR_ARCHIVE").await;
-    assert!(
-        archived_body.contains("ACP_CLEAR_ONE"),
-        "a turn on the archived session must carry the cleared history to the model"
-    );
-
-    // `--confirm` is accepted too.
-    let (text, _resp) = run_slash_command(client, &session_id, "/clear --confirm").await;
-    assert!(text.contains("Session cleared"), "got: {text}");
-}
-
 /// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
 /// neither the in-memory nor the on-disk transcript is touched.
 ///
@@ -1250,13 +1184,13 @@ async fn scenario_slash_compact_cancel(
 /// `/help` renders only the ACP table; an unknown command names the table.
 async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id: &str) {
     let (help, _resp) = run_slash_command(client, session_id, "/help").await;
-    for expected in ["/compact", "/clear", "/model <model-id>", "/status"] {
+    for expected in ["/compact", "/model <model-id>", "/status"] {
         assert!(
             help.contains(expected),
             "/help should list {expected}: {help}"
         );
     }
-    for repl_only in ["/exit", "/resume", "Ctrl-R"] {
+    for repl_only in ["/exit", "/resume", "/clear", "Ctrl-R"] {
         assert!(
             !help.contains(repl_only),
             "/help under ACP must not advertise REPL-only `{repl_only}`: {help}"
@@ -1268,12 +1202,23 @@ async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id:
         unknown.contains("`/nonexistent` is not supported in ACP mode"),
         "got: {unknown}"
     );
-    for expected in ["/compact", "/clear", "/help"] {
+    for expected in ["/compact", "/help"] {
         assert!(
             unknown.contains(expected),
             "unknown-command hint should list {expected}: {unknown}"
         );
     }
+    assert!(
+        !unknown.contains("/clear"),
+        "unknown-command hint must not offer /clear: {unknown}"
+    );
+
+    // `/clear` itself is a REPL-only command under ACP.
+    let (clear, _resp) = run_slash_command(client, session_id, "/clear").await;
+    assert!(
+        clear.contains("`/clear` is not supported in ACP mode"),
+        "got: {clear}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,7 +1241,6 @@ async fn run_all_scenarios(
     scenario_slash_help_and_unknown(client, &session_id).await;
     scenario_slash_compact(client, server, workspace).await;
     scenario_slash_compact_cancel(client, server, workspace).await;
-    scenario_slash_clear(client, server, workspace).await;
     // Run per-turn usage test last with a fresh session
     scenario_session_prompt_per_turn_usage(client, workspace).await;
 }

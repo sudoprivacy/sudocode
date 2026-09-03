@@ -548,23 +548,6 @@ pub(crate) fn format_acp_compact_report(
     }
 }
 
-/// `/clear` report under ACP: the session id is kept, the transcript moved.
-pub(crate) fn format_acp_clear_report(
-    session_id: &str,
-    archived_session_id: &str,
-    model: &str,
-    permission_mode: &str,
-) -> String {
-    format!(
-        "Session cleared
-  Mode             in place (session id kept)
-  Session          {session_id}
-  Archived as      {archived_session_id} (reopen with session/load)
-  Preserved model  {model}
-  Permission mode  {permission_mode}"
-    )
-}
-
 pub(crate) fn format_auto_compaction_notice(removed: usize) -> String {
     format!("[auto-compacted: removed {removed} messages]")
 }

@@ -515,8 +515,8 @@ pub struct AcpSlashCommandSpec {
     /// Placeholder for the argument text when the command takes any
     /// (`<model-id>`); `None` for argument-less commands.
     pub input_hint: Option<&'static str>,
-    /// `true` for commands that rebuild the session runtime (`/model`,
-    /// `/clear`), which is a runtime-construction path and therefore runs
+    /// `true` for commands that rebuild the session runtime (`/model`),
+    /// which is a runtime-construction path and therefore runs
     /// under the process-cwd lease (see [`WorkspaceCwdLease`]). Everything
     /// else — in particular `/compact`, which waits on a model round-trip —
     /// runs outside the lease so it never stalls `session/new` / `session/load`
@@ -1407,8 +1407,8 @@ pub(crate) async fn run_acp_on_transport(
                             // `unknown sessionId` error.
                             let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
                             // The slash commands that rebuild the session
-                            // runtime (`/model`, `/clear` — `holds_cwd_lease`
-                            // in the command table) are runtime-construction
+                            // runtime (`/model` — `holds_cwd_lease` in the
+                            // command table) are runtime-construction
                             // paths (see `WorkspaceCwdLease`), so they run
                             // under the lease: short, never parked on the
                             // user. The others — notably `/compact`, which

@@ -98,12 +98,6 @@ const ACP_SLASH_COMMANDS: &[AcpSlashCommandSpec] = &[
         holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
-        name: "clear",
-        description: "Start a fresh transcript in this session; the old one is archived",
-        input_hint: None,
-        holds_cwd_lease: true,
-    },
-    AcpSlashCommandSpec {
         name: "config",
         description: "Show the effective configuration (read-only)",
         input_hint: Some("[section]"),

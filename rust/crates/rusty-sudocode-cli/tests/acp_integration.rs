@@ -1054,6 +1054,183 @@ async fn scenario_session_load_rejects_other_cwd(
     );
 }
 
+/// Regression: a long history must be compacted before the request is sent,
+/// not rejected by the API client's context-window preflight.
+///
+/// Before the fix the ACP pre-send check only compacted above 85% of the
+/// context window, while the preflight rejects at
+/// `history + system + tools + max_tokens > window` — roughly 65% for a
+/// 200K model with 64K `max_tokens`. A history in that gap failed on every
+/// prompt with `context_window_blocked`, the failed prompt was persisted
+/// (growing the history), and ACP has no `/compact`, so the session was
+/// wedged for good. This seeds a transcript inside that gap and asserts the
+/// next prompt is answered from a compacted request.
+#[tokio::test]
+async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-long-history");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    // --- Process A: create the session and run one turn so the transcript exists.
+    let session_id = {
+        let mut client = spawn_stdio_client(&workspace);
+        scenario_initialize(&mut client).await;
+        let session_id = scenario_session_new(&mut client, &workspace.root).await;
+        let (_notifs, resp) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }]
+                }),
+            )
+            .await;
+        assert!(
+            resp["result"].get("stopReason").is_some(),
+            "seed turn should complete: {resp}"
+        );
+        client.shutdown().await;
+        session_id
+    };
+
+    // --- Rewrite the transcript with a history that fits the 85% rule but
+    // not the preflight: ~150K estimated tokens (bytes/4) of plain text
+    // against a 200K window with 64K max_tokens and ~7K of system+tools.
+    let transcript_path = find_session_transcript(&workspace.root, &session_id);
+    let mut session =
+        runtime::Session::load_from_path(&transcript_path).expect("seed transcript should load");
+    session.messages.clear();
+    let filler_line = "The conversation went on about the migration plan for a long while. ";
+    let filler = filler_line.repeat(30_000 / filler_line.len()); // ~30 KB per message
+    for turn in 0..10 {
+        session
+            .push_user_text(format!("user turn {turn}: {filler}"))
+            .expect("seed user message");
+        session
+            .push_message(runtime::ConversationMessage::assistant(vec![
+                runtime::ContentBlock::Text {
+                    text: format!("assistant turn {turn}: {filler}"),
+                },
+            ]))
+            .expect("seed assistant message");
+    }
+    session
+        .save_to_path(&transcript_path)
+        .expect("seeded transcript should persist");
+    let seeded_bytes = fs::metadata(&transcript_path)
+        .expect("seeded transcript metadata")
+        .len();
+    assert!(
+        seeded_bytes > 550_000,
+        "seed should be well past the preflight budget, got {seeded_bytes} bytes"
+    );
+
+    // --- Process B: load the session and prompt once.
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let (_load_notifs, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id,
+                "cwd": workspace.root.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load should succeed, got: {load_resp}"
+    );
+
+    let before = server.captured_requests().await.len();
+    let (_notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}streaming_text after long history")
+                }]
+            }),
+        )
+        .await;
+    assert!(
+        resp.get("error").is_none() && resp["result"].get("stopReason").is_some(),
+        "prompt on a long history must be answered, not rejected: {resp}"
+    );
+
+    let requests = server.captured_requests().await;
+    let new_requests = &requests[before..];
+    assert!(
+        new_requests
+            .iter()
+            .any(|request| request.scenario == "llm_compaction_roundtrip"),
+        "history should have been compacted through the LLM path; scenarios seen: {:?}",
+        new_requests
+            .iter()
+            .map(|request| request.scenario.as_str())
+            .collect::<Vec<_>>()
+    );
+    let turn_request = new_requests
+        .iter()
+        .rev()
+        .find(|request| request.stream)
+        .expect("the answered turn should have reached the mock as a streaming request");
+    assert!(
+        turn_request
+            .raw_body
+            .contains("continued from a previous conversation"),
+        "turn request should carry the compaction summary; body head: {}",
+        &turn_request.raw_body[..turn_request.raw_body.len().min(400)]
+    );
+    assert!(
+        turn_request.raw_body.len() < 250_000,
+        "turn request should be far below the seeded history ({seeded_bytes} bytes), got {} bytes",
+        turn_request.raw_body.len()
+    );
+
+    // The compacted transcript is what a later resume sees.
+    let reloaded =
+        runtime::Session::load_from_path(&transcript_path).expect("compacted transcript loads");
+    assert!(
+        reloaded.compaction.is_some() && reloaded.messages.len() < 20,
+        "transcript on disk should be compacted: compaction={:?} messages={}",
+        reloaded
+            .compaction
+            .as_ref()
+            .map(|c| c.removed_message_count),
+        reloaded.messages.len()
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Locate `<root>/.scode/sessions/<fingerprint>/<id>/transcript.jsonl`.
+fn find_session_transcript(root: &std::path::Path, session_id: &str) -> PathBuf {
+    let sessions = root.join(".scode").join("sessions");
+    let entries = fs::read_dir(&sessions).expect("sessions dir should exist");
+    for entry in entries {
+        let candidate = entry
+            .expect("sessions dir entry")
+            .path()
+            .join(session_id)
+            .join("transcript.jsonl");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!(
+        "no transcript for {session_id} under {}",
+        sessions.display()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Cross-session concurrency
 // ---------------------------------------------------------------------------

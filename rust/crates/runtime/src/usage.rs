@@ -187,6 +187,20 @@ impl TokenUsage {
             + self.cache_read_input_tokens
     }
 
+    /// Size of the prompt the provider actually processed for this response:
+    /// uncached input plus everything served from or written to the prompt
+    /// cache. This is the current context-window occupancy, which is what
+    /// auto-compaction must compare against the window (CC parity: CC reads
+    /// the same three counters off the latest assistant message).
+    /// `input_tokens` alone is only the cache miss and drops to a few hundred
+    /// tokens per turn on caching providers.
+    #[must_use]
+    pub fn context_tokens(self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
     #[must_use]
     pub fn estimate_cost_usd(self) -> UsageCostEstimate {
         self.estimate_cost_usd_with_pricing(ModelPricing::default_sonnet_tier())

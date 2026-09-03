@@ -180,10 +180,26 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
 
 fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
-    estimate = estimate.saturating_add(estimate_serialized_tokens(&request.system));
-    estimate = estimate.saturating_add(estimate_serialized_tokens(&request.tools));
+    estimate = estimate.saturating_add(estimate_request_overhead_tokens(
+        request.system.as_deref(),
+        request.tools.as_deref(),
+    ));
     estimate = estimate.saturating_add(estimate_serialized_tokens(&request.tool_choice));
     estimate
+}
+
+/// Estimated tokens of the per-request payload that conversation history
+/// compaction cannot shrink: the system prompt plus the tool definitions.
+///
+/// Uses the same serialized-bytes heuristic as [`preflight_message_request`]
+/// so callers that budget history against the context window agree with the
+/// preflight guard about where the line is.
+#[must_use]
+pub fn estimate_request_overhead_tokens(
+    system: Option<&str>,
+    tools: Option<&[crate::types::ToolDefinition]>,
+) -> u32 {
+    estimate_serialized_tokens(&system).saturating_add(estimate_serialized_tokens(&tools))
 }
 
 fn estimate_serialized_tokens<T: Serialize>(value: &T) -> u32 {

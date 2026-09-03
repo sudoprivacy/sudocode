@@ -147,6 +147,32 @@ impl AnthropicRuntimeClient {
     pub(crate) fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
         self.client.session_tracer()
     }
+
+    /// Estimated tokens of the request parts that history compaction cannot
+    /// shrink — the rendered system prompt and the tool definitions this
+    /// client attaches — using the same heuristic as the API preflight.
+    pub(crate) fn fixed_request_overhead_tokens(
+        &self,
+        system_prompt: &runtime::SystemPrompt,
+    ) -> usize {
+        let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
+        let tools = self
+            .enable_tools
+            .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref()));
+        api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
+    }
+}
+
+/// Map an API failure to a runtime error, preserving the one classification
+/// the runtime acts on: a context-window rejection triggers compaction and a
+/// retry instead of ending the turn.
+fn runtime_error_from_api(session_id: &str, error: &api::ApiError) -> RuntimeError {
+    let message = format_user_visible_api_error(session_id, error);
+    if error.is_context_window_failure() {
+        RuntimeError::context_window_blocked(message)
+    } else {
+        RuntimeError::new(message)
+    }
 }
 
 pub(crate) fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
@@ -184,10 +210,15 @@ impl ApiClient for AnthropicRuntimeClient {
             .send_message(&request, None)
             .await
             .map_err(|error| {
-                RuntimeError::new(format!(
+                let message = format!(
                     "compaction API error: {}",
                     format_user_visible_api_error(&self.session_id, &error)
-                ))
+                );
+                if error.is_context_window_failure() {
+                    RuntimeError::context_window_blocked(message)
+                } else {
+                    RuntimeError::new(message)
+                }
             })?;
 
         // Extract text content from the response
@@ -478,23 +509,21 @@ impl AnthropicRuntimeClient {
             .client
             .stream_message(message_request, trace_id)
             .await
-            .map_err(|error| {
-                RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
-            })?;
+            .map_err(|error| runtime_error_from_api(&self.session_id, &error))?;
 
         let prefetched_next = if apply_stall_timeout {
             match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, provider_stream.next_event()).await
             {
-                Ok(inner) => match inner.map_err(|error| {
-                    RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
-                })? {
-                    Some(event) => Some(Some(event)),
-                    None => {
-                        return Err(RuntimeError::new(
-                            "post-tool stall: model stream ended before first event",
-                        ));
+                Ok(inner) => {
+                    match inner.map_err(|error| runtime_error_from_api(&self.session_id, &error))? {
+                        Some(event) => Some(Some(event)),
+                        None => {
+                            return Err(RuntimeError::new(
+                                "post-tool stall: model stream ended before first event",
+                            ));
+                        }
                     }
-                },
+                }
                 Err(_elapsed) => {
                     return Err(RuntimeError::new(
                         "post-tool stall: model did not respond within timeout",

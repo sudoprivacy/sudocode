@@ -3395,15 +3395,39 @@ impl engine_core::EngineDelegate for SessionEngine {
 pub(crate) trait SessionLifecycle: Send + Sync + 'static {
     /// A clone of the current session (for export / status / read inspection).
     fn session_snapshot(&self) -> runtime::Session;
+    /// The active session's handle (id + persistence path). Owned clone so a
+    /// slash-command handler can name the session without touching the runtime
+    /// mid-turn.
+    fn session_handle(&self) -> SessionHandle;
     /// Persist the session to its backing path.
     fn persist(&self) -> Result<(), String>;
     /// Mutate the session in place (undo, fork prep, …).
     fn with_session_mut(&self, f: &mut dyn FnMut(&mut runtime::Session));
+    /// Snapshot of the runtime's cumulative/turn usage tracker (for
+    /// `/status`, `/cost`, `/stats`, resume/model reports). Cloned, not
+    /// borrowed, so it never pins the session lock.
+    fn usage_snapshot(&self) -> runtime::UsageTracker;
+    /// Estimated token footprint of the current session (for `/status`).
+    fn estimated_tokens(&self) -> usize;
+    /// A clone of the session tracer, if telemetry is active. Returned owned
+    /// (the tracer is `Arc`-backed and cheap to clone) so callers record events
+    /// without holding the session lock.
+    fn session_tracer(&self) -> Option<telemetry::SessionTracer>;
+    /// A snapshot of the plugin load outcome (for `/skills` resolution).
+    fn plugin_load_outcome(&self) -> PluginLoadOutcome;
+    /// Run an `/mcp reconnect|enable|disable <server>` action against the live
+    /// MCP state. `None` when no MCP servers are running in this session; else
+    /// the action's `Ok(message)` / `Err(message)`.
+    fn mcp_command(&self, action: &str, server: &str) -> Option<Result<String, String>>;
 }
 
 impl SessionLifecycle for SessionEngine {
     fn session_snapshot(&self) -> runtime::Session {
         self.lock_session().runtime.session().clone()
+    }
+
+    fn session_handle(&self) -> SessionHandle {
+        self.lock_session().handle.clone()
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -3419,6 +3443,37 @@ impl SessionLifecycle for SessionEngine {
     fn with_session_mut(&self, f: &mut dyn FnMut(&mut runtime::Session)) {
         let mut session = self.lock_session();
         f(session.runtime.session_mut());
+    }
+
+    fn usage_snapshot(&self) -> runtime::UsageTracker {
+        self.lock_session().runtime.usage().clone()
+    }
+
+    fn estimated_tokens(&self) -> usize {
+        self.lock_session().runtime.estimated_tokens()
+    }
+
+    fn session_tracer(&self) -> Option<telemetry::SessionTracer> {
+        self.lock_session().runtime.session_tracer().cloned()
+    }
+
+    fn plugin_load_outcome(&self) -> PluginLoadOutcome {
+        self.lock_session().runtime.plugin_load_outcome().clone()
+    }
+
+    fn mcp_command(&self, action: &str, server: &str) -> Option<Result<String, String>> {
+        let session = self.lock_session();
+        let mcp_state = session.runtime.mcp_state.as_ref()?;
+        let mut mcp = mcp_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = match action {
+            "reconnect" => mcp.reconnect_server(server),
+            "enable" => mcp.enable_server(server),
+            "disable" => mcp.disable_server(server),
+            other => return Some(Err(format!("unknown /mcp action: {other}"))),
+        };
+        Some(result.map_err(|e| e.to_string()))
     }
 }
 

@@ -418,6 +418,21 @@ impl RuntimeObserver for ObserverAdapter {
         // MessageStop has no distinct renderer effect on its own; the turn
         // boundary is carried by TurnComplete.
     }
+
+    fn tool_progress_sink(&self) -> Option<runtime::ProgressSink> {
+        // Live tool progress fires from deep inside tool execution, off this
+        // thread, so it can't ride the `&mut self` hooks above. Hand the runtime
+        // a `Send + Sync` sink that forwards to the same session event channel.
+        // `std::sync::mpsc::Sender` is `Send` but not `Sync`, so wrap it so the
+        // closure satisfies `ProgressSink`'s `Send + Sync` bound.
+        let tx = Arc::new(Mutex::new(self.tx.clone()));
+        Some(runtime::ProgressSink::new(move |event| {
+            let _ = tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(EngineEvent::ToolProgress(event));
+        }))
+    }
 }
 
 /// `PermissionPrompter::decide` → emit [`EngineEvent::PermissionRequest`], park

@@ -57,6 +57,9 @@ pub use runtime::{
     // Incremental + cumulative token usage (AssistantEvent::Usage,
     // TurnSummary::{turn_usage,session_usage}).
     TokenUsage,
+    // Structured live tool-execution progress (streaming bash output, MCP
+    // progress notifications). The renderer formats it — no ANSI crosses.
+    ToolProgressEvent,
 };
 
 /// Monotonic identifier correlating a [`EngineEvent::PermissionRequest`] /
@@ -116,7 +119,11 @@ pub struct TurnComplete {
 /// Every variant documents the pre-seam callback / field it subsumes so the
 /// bisection is auditable: nothing reaches a renderer except through one of
 /// these.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is intentionally NOT derived: [`EngineEvent::ToolProgress`] carries
+/// floating-point MCP progress values, and events are never used as hash keys
+/// — `PartialEq` is all any consumer (tests included) needs.
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
     /// A new turn has begun. `label` is a short human description (e.g. the
     /// first line of the prompt) for progress display.
@@ -146,6 +153,11 @@ pub enum EngineEvent {
         output: String,
         is_error: bool,
     },
+    /// Live progress from a still-running tool (streaming `bash` output, MCP
+    /// progress notifications) — was the `emit_output`-gated terminal write in
+    /// the CLI `ToolExecutor`'s progress callbacks. Structured; the renderer
+    /// formats it.
+    ToolProgress(ToolProgressEvent),
     /// Incremental token usage for the in-flight assistant message (was
     /// `AssistantEvent::Usage`, previously only reaching `TurnSummary`).
     Usage(TokenUsage),

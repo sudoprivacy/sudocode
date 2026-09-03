@@ -175,6 +175,75 @@ pub trait RuntimeObserver {
 
     /// End of one assistant message in the stream (`AssistantEvent::MessageStop`).
     fn on_message_stop(&mut self) {}
+
+    /// Optional `Send + Sync` sink for live tool-execution progress (streaming
+    /// `bash` output, MCP progress notifications).
+    ///
+    /// Default `None`: existing observers (incl. the ACP `SdkSessionObserver`)
+    /// see no live progress, exactly as before. An observer that wants it (the
+    /// seam's `engine-core` adapter) returns a sink; the runtime hands it to the
+    /// tool executor via [`ToolDispatchContext::progress_sink`], which installs
+    /// it around a single tool call. Progress can't ride the other `&mut self`
+    /// hooks: it fires from deep inside tool execution, off the loop thread, so
+    /// it needs a `Send + Sync` value, not a borrow of the observer.
+    fn tool_progress_sink(&self) -> Option<ProgressSink> {
+        None
+    }
+}
+
+/// A live progress report from a running tool. Structured, not rendered — the
+/// renderer above the seam formats it; the runtime and tool executor only
+/// report data (no ANSI, no terminal writes).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolProgressEvent {
+    /// Streaming `bash` output progress.
+    Bash {
+        /// The most recent output line (already extracted; may be empty).
+        last_line: String,
+        /// Cumulative line count so far.
+        total_lines: usize,
+        /// Cumulative byte count so far.
+        total_bytes: usize,
+    },
+    /// MCP tool progress notification.
+    Mcp {
+        /// Human-readable status, if the server sent one.
+        message: Option<String>,
+        /// Progress value.
+        progress: f64,
+        /// Total, if known (enables a percentage).
+        total: Option<f64>,
+    },
+}
+
+/// A `Send + Sync` sink a renderer installs (via
+/// [`RuntimeObserver::tool_progress_sink`]) to receive [`ToolProgressEvent`]s
+/// during tool execution.
+///
+/// Threaded through [`ToolDispatchContext`] so the tool executor installs it
+/// **narrowly, at dispatch time**. A thread-local progress callback set for the
+/// whole async turn would be invisible once the turn future hops worker threads;
+/// installing it right before the (synchronous-ish) tool call keeps it on the
+/// executing thread.
+#[derive(Clone)]
+pub struct ProgressSink(std::sync::Arc<dyn Fn(ToolProgressEvent) + Send + Sync>);
+
+impl ProgressSink {
+    /// Wrap a progress handler.
+    pub fn new(f: impl Fn(ToolProgressEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Report one progress event to the renderer.
+    pub fn emit(&self, event: ToolProgressEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink(..)")
+    }
 }
 
 /// XML tag identifying a fork subagent's inherited directive message.
@@ -214,6 +283,11 @@ pub struct ToolDispatchContext {
     /// only ever names the opaque tool_use id, so the physical path never
     /// crosses the model boundary. `None` for in-memory sessions.
     pub tool_results_dir: Option<std::path::PathBuf>,
+    /// Optional live-progress sink for streaming tools (`bash`/MCP). `None`
+    /// when no renderer wants live progress (the observer returned no sink, or
+    /// there is no observer). The tool executor installs it narrowly around a
+    /// single tool call — see [`ProgressSink`].
+    pub progress_sink: Option<ProgressSink>,
 }
 
 impl ToolDispatchContext {
@@ -1335,6 +1409,12 @@ where
                 parent_assistant_message: Some(assistant_message),
                 parent_session_messages: self.session.messages.clone(),
                 tool_results_dir: self.session.tool_results_dir(),
+                // Live-progress sink for streaming tools, if the renderer wants
+                // it. Rebuilt each assistant turn (cheap Arc clone); `None` for
+                // observers that don't override `tool_progress_sink` (default).
+                progress_sink: observer
+                    .as_deref()
+                    .and_then(RuntimeObserver::tool_progress_sink),
             };
 
             let mut batch_start = 0usize;

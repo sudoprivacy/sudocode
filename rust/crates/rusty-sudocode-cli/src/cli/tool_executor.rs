@@ -378,19 +378,30 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == "ExitPlanMode" && self.emit_output && self.is_repl {
             return self.handle_exit_plan_mode(&value, ctx);
         }
-        // For bash tool calls, install a streaming progress callback so
-        // the user sees output as it is produced rather than only after
-        // the child process exits.
-        if tool_name == "bash" && self.emit_output {
-            if let Some(cb) = self.make_bash_progress_callback() {
-                runtime::set_bash_progress_callback(cb);
+        // For bash tool calls, install a streaming progress callback so the
+        // user sees output as it is produced rather than only after the child
+        // process exits. When a renderer supplied a seam progress sink
+        // (`ctx.progress_sink`), forward STRUCTURED progress to it (the renderer
+        // formats + draws — the seam way). Otherwise fall back to the legacy
+        // direct-to-terminal path used by the one-shot / pre-seam REPL flow.
+        if tool_name == "bash" {
+            if let Some(sink) = ctx.progress_sink.clone() {
+                runtime::set_bash_progress_callback(bash_progress_forward(sink));
+            } else if self.emit_output {
+                if let Some(cb) = self.make_bash_progress_callback() {
+                    runtime::set_bash_progress_callback(cb);
+                }
             }
         }
 
         let is_mcp_tool = self.tool_registry.has_runtime_tool(tool_name);
-        if is_mcp_tool && self.emit_output {
-            if let Some(cb) = self.make_mcp_progress_callback() {
-                runtime::set_mcp_progress_callback(cb);
+        if is_mcp_tool {
+            if let Some(sink) = ctx.progress_sink.clone() {
+                runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
+            } else if self.emit_output {
+                if let Some(cb) = self.make_mcp_progress_callback() {
+                    runtime::set_mcp_progress_callback(cb);
+                }
             }
         }
 
@@ -773,6 +784,37 @@ impl CliToolExecutor {
             }
         }
     }
+}
+
+/// Build a `bash` progress callback that forwards STRUCTURED progress to a seam
+/// [`runtime::ProgressSink`] instead of drawing it — the renderer above the seam
+/// formats and prints it. Preserves the empty-output filter of the legacy
+/// terminal callback so live-progress output stays byte-identical.
+fn bash_progress_forward(sink: runtime::ProgressSink) -> runtime::BashProgressCallback {
+    Box::new(move |progress: runtime::BashProgress<'_>| {
+        let trimmed = progress.output.trim_end();
+        if trimmed.is_empty() {
+            return;
+        }
+        let last_line = trimmed.lines().next_back().unwrap_or("").to_string();
+        sink.emit(runtime::ToolProgressEvent::Bash {
+            last_line,
+            total_lines: progress.total_lines,
+            total_bytes: progress.total_bytes,
+        });
+    })
+}
+
+/// Build an MCP progress callback that forwards STRUCTURED progress to a seam
+/// [`runtime::ProgressSink`].
+fn mcp_progress_forward(sink: runtime::ProgressSink) -> runtime::McpProgressCallback {
+    Box::new(move |progress: runtime::McpProgressNotification| {
+        sink.emit(runtime::ToolProgressEvent::Mcp {
+            message: progress.message,
+            progress: progress.progress,
+            total: progress.total,
+        });
+    })
 }
 
 pub(crate) fn permission_policy(

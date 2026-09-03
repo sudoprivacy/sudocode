@@ -115,9 +115,9 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compact_threshold_for_model, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
-    AutoCompactionEvent, CompactionMethod, ConversationRuntime, PromptCacheEvent, RuntimeError,
-    RuntimeObserver, StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor, TurnSummary,
-    FORK_BOILERPLATE_TAG,
+    AutoCompactionEvent, CompactionMethod, ConversationRuntime, ProgressSink, PromptCacheEvent,
+    RuntimeError, RuntimeObserver, StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor,
+    ToolProgressEvent, TurnSummary, FORK_BOILERPLATE_TAG,
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{

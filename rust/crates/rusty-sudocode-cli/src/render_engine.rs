@@ -11,11 +11,14 @@
 
 use std::io::{self, Write};
 
-use engine_events::{EngineEvent, PermissionRequest, QuestionPromptRequest, RequestId};
+use engine_events::{
+    EngineEvent, PermissionRequest, QuestionPromptRequest, RequestId, ToolProgressEvent,
+};
 
 use crate::cli::format::{format_tool_call_start, format_tool_result};
 use crate::render::{
     query_terminal_width, MarkdownStreamState, ResponseGlyphState, SpinnerRef, TerminalRenderer,
+    DIM, RESET,
 };
 use crate::repl_ui::OutputSender;
 
@@ -152,6 +155,12 @@ impl EngineEventRenderer {
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
+            EngineEvent::ToolProgress(progress) => {
+                self.pause_spinner();
+                self.write_out(&format!("{}\n", format_tool_progress(&progress)));
+                self.resume_spinner();
+                RenderOutcome::Continue
+            }
             EngineEvent::Notice { text } => {
                 if !text.is_empty() {
                     self.write_out(&format!("{text}\n"));
@@ -191,6 +200,46 @@ impl EngineEventRenderer {
             | EngineEvent::AutoCompaction(_)
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. } => RenderOutcome::Continue,
+        }
+    }
+}
+
+/// Format a live tool-progress event for the terminal. This is the render half
+/// of the CLI `ToolExecutor`'s old `make_bash_progress_callback` /
+/// `make_mcp_progress_callback`: the executor now reports structured data
+/// (`ToolProgressEvent`) and the ANSI/glyph formatting lives here, above the
+/// seam. Kept byte-identical to the pre-seam output for PTY parity.
+fn format_tool_progress(progress: &ToolProgressEvent) -> String {
+    match progress {
+        ToolProgressEvent::Bash {
+            last_line,
+            total_lines,
+            total_bytes,
+        } => {
+            let bytes_display = if *total_bytes >= 1024 {
+                format!("{:.1} KB", *total_bytes as f64 / 1024.0)
+            } else {
+                format!("{total_bytes} B")
+            };
+            format!("  {DIM}\u{27f3} {last_line}  ({total_lines} lines, {bytes_display}){RESET}")
+        }
+        ToolProgressEvent::Mcp {
+            message,
+            progress,
+            total,
+        } => {
+            let status = match total {
+                Some(total) if *total > 0.0 => {
+                    let pct = (progress / total * 100.0).min(100.0);
+                    format!(" ({pct:.0}%)")
+                }
+                _ => String::new(),
+            };
+            if let Some(msg) = message {
+                format!("  {DIM}\u{27f3} {msg}{status}{RESET}")
+            } else {
+                format!("  {DIM}\u{27f3} progress: {progress:.0}{status}{RESET}")
+            }
         }
     }
 }

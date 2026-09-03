@@ -536,7 +536,7 @@ impl GlobalToolRegistry {
         for &(alias, canonical) in TOOL_ALIASES {
             // Don't overwrite a spec-name mapping — `--allowedTools TaskList`
             // must resolve to the spec name `"TaskList"` (not the dispatch
-            // alias `"pid.status"`) so `definitions()` can match `spec.name`.
+            // alias `"pid_status"`) so `definitions()` can match `spec.name`.
             name_map
                 .entry(alias.to_string())
                 .or_insert_with(|| canonical.to_string());
@@ -956,12 +956,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::DangerFullAccess,
         },
-        // ── Unified agent.list ────────────────────────────────────────
+        // ── Unified agent_list ────────────────────────────────────────
         // Discovery tool: list all available agent types (builtin +
         // custom `.md` agents from ~/.nexus/sudocode/agents/ and
         // .sudocode/agents/).
         ToolSpec {
-            name: "agent.list",
+            name: "agent_list",
             description: "List all available agent types with their names, descriptions, and capabilities.",
             input_schema: json!({
                 "type": "object",
@@ -970,19 +970,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
-        // ── Unified agent.spawn ───────────────────────────────────────
+        // ── Unified agent_spawn ───────────────────────────────────────
         // Canonical replacement for `Agent`. Adds `fresh` flag:
         // `false` (default) = auto-resume most recent session;
         // `true` = start a clean session. The old `Agent` name is
         // retained as a deprecated alias via `TOOL_ALIASES`.
         ToolSpec {
-            name: "agent.spawn",
+            name: "agent_spawn",
             description: concat!(
                 "Spawn an agent, returning a pid. ",
                 "By default resumes the agent's most recent session (auto-resume). ",
                 "Set `fresh: true` to start a clean session. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
-                "Use `pid.output(pid, block: true)` to await a background agent."
+                "Use `pid_output(pid, block: true)` to await a background agent."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1251,7 +1251,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         // TaskOutput. The old names are retained as deprecated aliases
         // via TOOL_ALIASES.
         ToolSpec {
-            name: "pid.kill",
+            name: "pid_kill",
             description: "Terminate a running agent by pid. Replaces TaskStop.",
             input_schema: json!({
                 "type": "object",
@@ -1264,7 +1264,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
-            name: "pid.status",
+            name: "pid_status",
             description: concat!(
                 "Query the status of one or all agent pids. ",
                 "With `pid`: returns READY/BUSY/TERMINATED for that pid. ",
@@ -1285,7 +1285,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "pid.output",
+            name: "pid_output",
             description: concat!(
                 "Retrieve output from a pid (background agent or task). ",
                 "Set `block: true` to wait until the agent finishes (max 60s per call). ",
@@ -1305,16 +1305,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
-        // ── pid.fork ───────────────────────────────────────────────────
+        // ── pid_fork ───────────────────────────────────────────────────
         // Snapshots the current session into a new pid. Equivalent to
-        // `agent.spawn(agent="fork")` but exposed as its own tool for
+        // `agent_spawn(agent="fork")` but exposed as its own tool for
         // clarity and discoverability.
         ToolSpec {
-            name: "pid.fork",
+            name: "pid_fork",
             description: concat!(
                 "Fork the current session into a new pid. ",
                 "The child starts with a snapshot of the parent's conversation context. ",
-                "Returns a pid that can be addressed with send/pid.output/pid.status. ",
+                "Returns a pid that can be addressed with send/pid_output/pid_status. ",
                 "Runs in the background by default."
             ),
             input_schema: json!({
@@ -1585,13 +1585,13 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     // Unified send: both old names → canonical "send"
     ("sendmessage", "send"),  // SendMessage (normalized)
     ("send_message", "send"), // send_message (managed-agent A2A)
-    // Unified agent.spawn: old name → canonical
-    ("agent", "agent.spawn"), // Agent (normalized)
+    // Unified agent_spawn: old name → canonical
+    ("agent", "agent_spawn"), // Agent (normalized)
     // Unified pid.*: old Task* names → canonical pid.* names
-    ("taskstop", "pid.kill"),     // TaskStop (normalized)
-    ("taskget", "pid.status"),    // TaskGet (normalized)
-    ("tasklist", "pid.status"),   // TaskList (normalized) — both map to pid.status
-    ("taskoutput", "pid.output"), // TaskOutput (normalized)
+    ("taskstop", "pid_kill"),     // TaskStop (normalized)
+    ("taskget", "pid_status"),    // TaskGet (normalized)
+    ("tasklist", "pid_status"),   // TaskList (normalized) — both map to pid_status
+    ("taskoutput", "pid_output"), // TaskOutput (normalized)
 ];
 
 /// Canonicalize a tool name from the model into the internal name used
@@ -1670,19 +1670,19 @@ fn execute_tool_with_enforcer(
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "agent.list" => run_agent_list(),
-        // Canonical "agent.spawn" — also reached by the deprecated
+        "agent_list" => run_agent_list(),
+        // Canonical "agent_spawn" — also reached by the deprecated
         // alias "Agent" (via TOOL_ALIASES). Normalize `agent` →
         // `subagent_type` so the new schema's field name maps to
         // `AgentInput`. `fresh` is accepted but currently no-op
         // (session resume is future work).
-        "agent.spawn" => {
+        "agent_spawn" => {
             let input = normalize_agent_spawn_input(input);
             from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
         }
-        // pid.fork: synthesize an AgentInput with subagent_type="fork"
+        // pid_fork: synthesize an AgentInput with subagent_type="fork"
         // and delegate to the existing fork machinery.
-        "pid.fork" => {
+        "pid_fork" => {
             let input = normalize_pid_fork_input(input);
             from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
         }
@@ -1708,11 +1708,11 @@ fn execute_tool_with_enforcer(
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
         // Canonical pid.* — also reached by the deprecated aliases
         // TaskStop, TaskGet, TaskList, TaskOutput (via TOOL_ALIASES).
-        "pid.kill" => {
+        "pid_kill" => {
             let input = normalize_pid_input(input);
             from_value::<TaskIdInput>(&input).and_then(run_task_stop)
         }
-        "pid.status" => {
+        "pid_status" => {
             let input = normalize_pid_input(input);
             // Single-pid query (like TaskGet) vs list-all (like TaskList)
             if input.get("task_id").and_then(|v| v.as_str()).is_some() {
@@ -1721,7 +1721,7 @@ fn execute_tool_with_enforcer(
                 run_task_list(input)
             }
         }
-        "pid.output" => {
+        "pid_output" => {
             let input = normalize_pid_output_input(input);
             from_value::<TaskOutputInput>(&input).and_then(run_task_output)
         }
@@ -2478,8 +2478,8 @@ fn normalize_send_input(input: &Value) -> Value {
     v
 }
 
-/// Normalize `pid` → `task_id` for the unified `pid.kill` and
-/// `pid.status` tools, so the new schema's field name maps to
+/// Normalize `pid` → `task_id` for the unified `pid_kill` and
+/// `pid_status` tools, so the new schema's field name maps to
 /// `TaskIdInput`. If `task_id` already exists, `pid` is ignored.
 fn normalize_pid_input(input: &Value) -> Value {
     let mut v = input.clone();
@@ -2493,7 +2493,7 @@ fn normalize_pid_input(input: &Value) -> Value {
     v
 }
 
-/// Normalize `pid` → `agent_id` for the unified `pid.output` tool.
+/// Normalize `pid` → `agent_id` for the unified `pid_output` tool.
 /// The new schema uses `pid` while the internal `TaskOutputInput`
 /// expects `agent_id` (or `task_id`). Maps `pid` → `agent_id` since
 /// that is the more common (and more capable) retrieval path.
@@ -2511,7 +2511,7 @@ fn normalize_pid_output_input(input: &Value) -> Value {
     v
 }
 
-/// Build an `AgentInput`-compatible `Value` for `pid.fork`.
+/// Build an `AgentInput`-compatible `Value` for `pid_fork`.
 /// Injects `subagent_type: "fork"` and provides defaults for
 /// `description` and `prompt` when the caller omits them.
 fn normalize_pid_fork_input(input: &Value) -> Value {
@@ -2531,7 +2531,7 @@ fn normalize_pid_fork_input(input: &Value) -> Value {
     v
 }
 
-/// Normalize the input `Value` for `agent.spawn` so that the new
+/// Normalize the input `Value` for `agent_spawn` so that the new
 /// `agent` field maps to `AgentInput::subagent_type`. Also copies
 /// `agent` into `description` when `description` is missing (the new
 /// schema makes `description` optional, defaulting from agent type).
@@ -8752,13 +8752,13 @@ mod tests {
             );
         }
         // Unified tool aliases: old names → new canonical names.
-        assert_eq!(canonicalize_tool_name("Agent"), "agent.spawn");
+        assert_eq!(canonicalize_tool_name("Agent"), "agent_spawn");
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid.kill");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "pid.status");
-        assert_eq!(canonicalize_tool_name("TaskList"), "pid.status");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid.output");
+        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
+        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
     }
 
     #[test]
@@ -8881,12 +8881,12 @@ mod tests {
             ("SendMessage", "SendMessage"),
             ("Agent", "Agent"),
             // New canonical names resolve to themselves
-            ("pid.status", "pid.status"),
-            ("pid.kill", "pid.kill"),
-            ("pid.output", "pid.output"),
-            ("agent.spawn", "agent.spawn"),
+            ("pid_status", "pid_status"),
+            ("pid_kill", "pid_kill"),
+            ("pid_output", "pid_output"),
+            ("agent_spawn", "agent_spawn"),
             ("send", "send"),
-            ("agent.list", "agent.list"),
+            ("agent_list", "agent_list"),
         ] {
             let allowed = registry
                 .normalize_allowed_tools(&[old_name.to_string()])

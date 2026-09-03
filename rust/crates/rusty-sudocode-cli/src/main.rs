@@ -2858,7 +2858,8 @@ impl AcpCliAgent {
         // this the resumed/switched session keeps its OLD model — which then drives the wrong
         // context-window in the pre-turn auto-compaction and can wedge the session on overflow.
         cloned_session.model = Some(resolved.clone());
-        self.rebuild_session_runtime(session, cloned_session, &resolved)?;
+        session.runtime =
+            self.build_replacement_session_runtime(session, cloned_session, &resolved)?;
         self.model
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2871,13 +2872,15 @@ impl AcpCliAgent {
         ))
     }
 
-    /// Rebuild `session`'s runtime around `session_state` for `model`,
-    /// keeping everything else the session owns: cwd, handle, injected MCP
-    /// servers, prompt overrides, abort signal and the *active* permission
-    /// mode (a `session/setPermissionMode` must survive the rebuild). Shared
-    /// by `/model` (new model, same transcript) and `/clear` (same model,
-    /// fresh transcript). The caller holds the session lock.
-    fn rebuild_session_runtime(
+    /// Build a replacement runtime for `session` around `session_state` and
+    /// `model`, keeping everything else the session owns: cwd, handle,
+    /// injected MCP servers, prompt overrides, abort signal and the *active*
+    /// permission mode (a `session/setPermissionMode` must survive the
+    /// rebuild). The caller installs it with `session.runtime = …` once any
+    /// step that may still fail (e.g. persisting) has succeeded. Shared by
+    /// `/model` (new model, same transcript) and `/clear` (same model, fresh
+    /// transcript). The caller holds the session lock.
+    fn build_replacement_session_runtime(
         &self,
         session: &mut AcpCliSession,
         session_state: Session,
@@ -2919,18 +2922,28 @@ impl AcpCliAgent {
                 .map_or(true, |cfg| cfg.thinking());
             rt.api_client_mut().set_thinking_enabled(thinking);
         }
-
-        session.runtime = runtime;
-        Ok(())
+        Ok(runtime)
     }
 
-    /// `/compact` under ACP. Mirrors the REPL command: LLM summary first,
-    /// local heuristic when that is unavailable; no token threshold because
-    /// the user asked explicitly. The compacted transcript is persisted at
-    /// once (same reasoning as the pre-turn overflow path in
-    /// `run_prompt_impl`). The caller holds the session lock.
-    fn handle_acp_compact(&self, session: &mut AcpCliSession) -> Result<String, AcpError> {
+    /// `/compact` under ACP. Same strategy as the REPL command (LLM summary
+    /// first, local heuristic when that is unavailable) but with no token
+    /// threshold, because the user asked explicitly. The compacted transcript
+    /// is persisted at once (same reasoning as the pre-turn overflow path in
+    /// `run_prompt_impl`). A `session/cancel` during the model round-trip
+    /// drops the call; one that lands after it discards the result. Either
+    /// way the transcript in memory and on disk is left untouched and the
+    /// turn ends with `Cancelled`. The caller holds the session lock; the
+    /// server runs this *outside* the process-cwd lease.
+    fn handle_acp_compact(
+        &self,
+        session: &mut AcpCliSession,
+    ) -> Result<(String, runtime::acp_sdk_server::AcpStopReason), AcpError> {
+        use runtime::acp_sdk_server::AcpStopReason;
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        // Fresh turn: a cancel left over from an earlier turn must not abort
+        // this one (mirrors `run_prompt_impl`).
+        session.abort_signal.reset();
+        let abort_signal = session.abort_signal.clone();
         let before_tokens = estimate_session_tokens(session.runtime.session());
         let config = CompactionConfig {
             max_estimated_tokens: 0,
@@ -2952,10 +2965,6 @@ impl AcpCliAgent {
             ));
         };
         let removed = result.removed_message_count;
-        // Fresh turn: a cancel left over from an earlier turn must not abort
-        // this one (mirrors `run_prompt_impl`).
-        session.abort_signal.reset();
-        let abort_signal = session.abort_signal.clone();
         if removed > 0 {
             *session.runtime.session_mut() = result.compacted_session;
             session
@@ -3022,9 +3031,12 @@ impl AcpCliAgent {
             ClearMode::InPlace,
         )
         .map_err(|e| AcpError::internal(format!("failed to clear session: {e}")))?;
-        self.rebuild_session_runtime(session, cleared.fresh, &model)?;
-        session
-            .runtime
+        let mut runtime = self.build_replacement_session_runtime(session, cleared.fresh, &model)?;
+        // Persist the empty transcript *before* installing the new runtime:
+        // if the write fails, memory and disk both still hold the old
+        // transcript (plus the archive), instead of a cleared session that
+        // reloads its old history.
+        runtime
             .session()
             .save_to_path(&session.handle.path)
             .map_err(|e| AcpError::internal(format!("failed to persist cleared session: {e}")))?;
@@ -3039,18 +3051,6 @@ impl AcpCliAgent {
     }
 }
 
-/// How `/clear` replaces the live transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClearMode {
-    /// REPL: the fresh transcript gets a new session id and file; the previous
-    /// transcript stays on disk under its own id.
-    NewSessionId,
-    /// ACP: the session id and file are kept for the fresh transcript, and the
-    /// previous transcript is archived under a new id first.
-    InPlace,
-}
-
-/// Outcome of [`clear_session_state`].
 /// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
 /// notification, so an `abort()` that races the subscription is still seen
 /// promptly.
@@ -3066,6 +3066,18 @@ async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
     }
 }
 
+/// How `/clear` replaces the live transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearMode {
+    /// REPL: the fresh transcript gets a new session id and file; the previous
+    /// transcript stays on disk under its own id.
+    NewSessionId,
+    /// ACP: the session id and file are kept for the fresh transcript, and the
+    /// previous transcript is archived under a new id first.
+    InPlace,
+}
+
+/// Outcome of [`clear_session_state`].
 struct ClearedSession {
     /// Empty transcript to rebuild the runtime around (persistence path set).
     fresh: Session,
@@ -3420,6 +3432,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             }
         };
 
+        let mut stop = AcpStopReason::EndTurn;
         let response = match &command {
             SlashCommand::Model { model } => {
                 let locked = self.lock_session(session_id)?;
@@ -3434,7 +3447,6 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 let (report, compact_stop) = self.inner.handle_acp_compact(&mut session)?;
                 stop = compact_stop;
                 report
-        let mut stop = AcpStopReason::EndTurn;
             }
             // `--confirm` is accepted but not required: an ACP client confirms
             // in its own UI before sending the command.

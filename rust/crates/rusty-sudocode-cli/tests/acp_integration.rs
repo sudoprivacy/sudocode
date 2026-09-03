@@ -44,6 +44,10 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// the ACP response. 30s was cutting it exactly at the VLM timeout and
 /// the test recv panicked before scode's push_images could finish.
 const RECV_TIMEOUT: Duration = Duration::from_secs(90);
+/// The `available_commands_update` follows a `session/new` / `session/load`
+/// response on the same queue, so it is either there at once or the
+/// broadcast regressed — fail fast instead of waiting out `RECV_TIMEOUT`.
+const AVAILABLE_COMMANDS_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -196,7 +200,13 @@ impl AcpTestClient {
         // it here so every session-creating test verifies the broadcast and
         // no test sees it as a stray notification on its next request.
         if matches!(method, "session/new" | "session/load") && response.get("error").is_none() {
-            let update = self.recv().await;
+            let update = timeout(AVAILABLE_COMMANDS_TIMEOUT, self.recv_inner())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{method} succeeded but no available_commands_update arrived within {AVAILABLE_COMMANDS_TIMEOUT:?}"
+                    )
+                });
             assert_eq!(
                 update["method"].as_str(),
                 Some("session/update"),
@@ -1131,29 +1141,19 @@ async fn scenario_slash_clear(
         load_resp.get("error").is_none(),
         "session/load of the archived transcript should succeed: {load_resp}"
     );
+    // …and continues with the pre-clear history.
+    let archived_body =
+        last_model_request_after_prompt(client, server, &archived_id, "ACP_CLEAR_ARCHIVE").await;
+    assert!(
+        archived_body.contains("ACP_CLEAR_ONE"),
+        "a turn on the archived session must carry the cleared history to the model"
+    );
 
     // `--confirm` is accepted too.
     let (text, _resp) = run_slash_command(client, &session_id, "/clear --confirm").await;
     assert!(text.contains("Session cleared"), "got: {text}");
 }
 
-/// `/help` renders only the ACP table; an unknown command names the table.
-async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id: &str) {
-    let (help, _resp) = run_slash_command(client, session_id, "/help").await;
-    for expected in ["/compact", "/clear", "/model <model-id>", "/status"] {
-        assert!(
-            help.contains(expected),
-            "/help should list {expected}: {help}"
-        );
-    }
-    for repl_only in ["/exit", "/resume", "Ctrl-R"] {
-        assert!(
-            !help.contains(repl_only),
-            "/help under ACP must not advertise REPL-only `{repl_only}`: {help}"
-        );
-    }
-
-    let (unknown, _resp) = run_slash_command(client, session_id, "/nonexistent").await;
 /// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
 /// neither the in-memory nor the on-disk transcript is touched.
 ///
@@ -1247,6 +1247,23 @@ async fn scenario_slash_compact_cancel(
     );
 }
 
+/// `/help` renders only the ACP table; an unknown command names the table.
+async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id: &str) {
+    let (help, _resp) = run_slash_command(client, session_id, "/help").await;
+    for expected in ["/compact", "/clear", "/model <model-id>", "/status"] {
+        assert!(
+            help.contains(expected),
+            "/help should list {expected}: {help}"
+        );
+    }
+    for repl_only in ["/exit", "/resume", "Ctrl-R"] {
+        assert!(
+            !help.contains(repl_only),
+            "/help under ACP must not advertise REPL-only `{repl_only}`: {help}"
+        );
+    }
+
+    let (unknown, _resp) = run_slash_command(client, session_id, "/nonexistent").await;
     assert!(
         unknown.contains("`/nonexistent` is not supported in ACP mode"),
         "got: {unknown}"
@@ -1278,6 +1295,7 @@ async fn run_all_scenarios(
     scenario_slash_command_model(client, &session_id).await;
     scenario_slash_help_and_unknown(client, &session_id).await;
     scenario_slash_compact(client, server, workspace).await;
+    scenario_slash_compact_cancel(client, server, workspace).await;
     scenario_slash_clear(client, server, workspace).await;
     // Run per-turn usage test last with a fresh session
     scenario_session_prompt_per_turn_usage(client, workspace).await;
@@ -1295,7 +1313,6 @@ async fn acp_stdio_integration() {
     let workspace = TestWorkspace::new("stdio");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
-    scenario_slash_compact_cancel(client, server, workspace).await;
 
     let mut client = spawn_stdio_client(&workspace);
     run_all_scenarios(&mut client, &server, &workspace).await;

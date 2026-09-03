@@ -519,6 +519,52 @@ pub(crate) fn format_compact_report(
     }
 }
 
+/// `/compact` report under ACP: what happened, how, and the effect on the
+/// transcript. `method` is `None` when nothing was removed.
+pub(crate) fn format_acp_compact_report(
+    before_tokens: usize,
+    after_tokens: usize,
+    removed: usize,
+    kept: usize,
+    method: Option<runtime::CompactionMethod>,
+) -> String {
+    match method {
+        Some(method) => format!(
+            "Compact
+  Result           compacted
+  Method           {}
+  Messages removed {removed}
+  Messages kept    {kept}
+  Estimated tokens {before_tokens} before, {after_tokens} after",
+            method.as_str()
+        ),
+        None => format!(
+            "Compact
+  Result           skipped
+  Reason           nothing to compact beyond the preserved recent messages
+  Messages kept    {kept}
+  Estimated tokens {after_tokens}"
+        ),
+    }
+}
+
+/// `/clear` report under ACP: the session id is kept, the transcript moved.
+pub(crate) fn format_acp_clear_report(
+    session_id: &str,
+    archived_session_id: &str,
+    model: &str,
+    permission_mode: &str,
+) -> String {
+    format!(
+        "Session cleared
+  Mode             in place (session id kept)
+  Session          {session_id}
+  Archived as      {archived_session_id} (reopen with session/load)
+  Preserved model  {model}
+  Permission mode  {permission_mode}"
+    )
+}
+
 pub(crate) fn format_auto_compaction_notice(removed: usize) -> String {
     format!("[auto-compacted: removed {removed} messages]")
 }

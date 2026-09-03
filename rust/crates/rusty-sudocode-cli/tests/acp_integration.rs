@@ -1154,6 +1154,99 @@ async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id:
     }
 
     let (unknown, _resp) = run_slash_command(client, session_id, "/nonexistent").await;
+/// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
+/// neither the in-memory nor the on-disk transcript is touched.
+///
+/// The first turn uses the mock's `delayed_text` scenario. Compaction
+/// requests are classified by the markers of the messages being summarised,
+/// and with three turns the first one is what gets summarised — so the
+/// compaction request itself is held for `DELAYED_TEXT_LATENCY`, which is the
+/// window in which the cancel lands.
+async fn scenario_slash_compact_cancel(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session_id = scenario_session_new(client, &workspace.root).await;
+    let (_n, first) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}delayed_text ACP_CANCEL_ONE") }]
+            }),
+        )
+        .await;
+    assert!(first["result"].get("stopReason").is_some(), "{first}");
+    for marker in ["ACP_CANCEL_TWO", "ACP_CANCEL_THREE"] {
+        run_marked_turn(client, &session_id, marker).await;
+    }
+    let transcript_before = read_session_transcript(&workspace.root, &session_id);
+    let requests_before = server.captured_requests().await.len();
+
+    let compact_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "/compact" }]
+            }),
+        )
+        .await;
+    // Wait until the compaction request is in flight at the mock.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let requests = server.captured_requests().await;
+        if requests[requests_before..]
+            .iter()
+            .any(|r| r.scenario == "delayed_text")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "/compact never issued its compaction request"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_id }
+        }))
+        .await;
+    let (notifs, resp) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, compact_id))
+        .await
+        .unwrap_or_else(|seen| panic!("/compact never answered after cancel; seen: {seen:?}"));
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("cancelled"),
+        "cancelled /compact must end with stopReason cancelled: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk"))
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(text.contains("cancelled"), "got: {text}");
+
+    // Nothing changed on disk…
+    let transcript_after = read_session_transcript(&workspace.root, &session_id);
+    assert_eq!(
+        transcript_before, transcript_after,
+        "a cancelled /compact must leave the persisted transcript untouched"
+    );
+    // …or in memory: the next turn still carries the would-be-summarised turn.
+    let body =
+        last_model_request_after_prompt(client, server, &session_id, "ACP_CANCEL_FOUR").await;
+    assert!(
+        body.contains("ACP_CANCEL_ONE"),
+        "a cancelled /compact must not replace the in-memory transcript"
+    );
+}
+
     assert!(
         unknown.contains("`/nonexistent` is not supported in ACP mode"),
         "got: {unknown}"
@@ -1202,6 +1295,7 @@ async fn acp_stdio_integration() {
     let workspace = TestWorkspace::new("stdio");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
+    scenario_slash_compact_cancel(client, server, workspace).await;
 
     let mut client = spawn_stdio_client(&workspace);
     run_all_scenarios(&mut client, &server, &workspace).await;

@@ -71,46 +71,55 @@ const ACP_SLASH_COMMANDS: &[AcpSlashCommandSpec] = &[
         name: "help",
         description: "List the slash commands available in ACP mode",
         input_hint: None,
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "status",
         description: "Show model, usage, git and config status for this session",
         input_hint: None,
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "cost",
         description: "Show cumulative token usage for this session",
         input_hint: None,
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "model",
         description: "Show the current model, or switch this session to another model",
         input_hint: Some("<model-id>"),
+        holds_cwd_lease: true,
     },
     AcpSlashCommandSpec {
         name: "compact",
         description: "Summarise older messages to free context (LLM summary, local fallback)",
         input_hint: None,
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "clear",
         description: "Start a fresh transcript in this session; the old one is archived",
         input_hint: None,
+        holds_cwd_lease: true,
     },
     AcpSlashCommandSpec {
         name: "config",
         description: "Show the effective configuration (read-only)",
         input_hint: Some("[section]"),
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "diff",
         description: "Show staged and unstaged git changes in the session directory",
         input_hint: None,
+        holds_cwd_lease: false,
     },
     AcpSlashCommandSpec {
         name: "doctor",
         description: "Run local health checks for auth, config and workspace",
         input_hint: None,
+        holds_cwd_lease: false,
     },
 ];
 

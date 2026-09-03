@@ -2882,7 +2882,7 @@ impl AcpCliAgent {
         session: &mut AcpCliSession,
         session_state: Session,
         model: &str,
-    ) -> Result<(), AcpError> {
+    ) -> Result<BuiltRuntime, AcpError> {
         let cwd = session.cwd.clone();
         let handle_id = session.handle.id.clone();
         let session_mcp = session.session_mcp_servers.clone();
@@ -2936,10 +2936,26 @@ impl AcpCliAgent {
             max_estimated_tokens: 0,
             ..CompactionConfig::default()
         };
-        let (result, method) = self
-            .tokio_runtime
-            .block_on(session.runtime.compact_with_method(config, None));
+        let compaction = self.tokio_runtime.block_on(async {
+            tokio::select! {
+                result = session.runtime.compact_with_method(config, None) => Some(result),
+                () = wait_for_abort(&abort_signal) => None,
+            }
+        });
+        let Some((result, method)) = compaction.filter(|_| !abort_signal.is_aborted()) else {
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record("slash_compact_cancelled", Map::new());
+            }
+            return Ok((
+                "Compact\n  Result           cancelled\n  Transcript       unchanged".to_string(),
+                AcpStopReason::Cancelled,
+            ));
+        };
         let removed = result.removed_message_count;
+        // Fresh turn: a cancel left over from an earlier turn must not abort
+        // this one (mirrors `run_prompt_impl`).
+        session.abort_signal.reset();
+        let abort_signal = session.abort_signal.clone();
         if removed > 0 {
             *session.runtime.session_mut() = result.compacted_session;
             session
@@ -2974,12 +2990,15 @@ impl AcpCliAgent {
                 attrs
             });
         }
-        Ok(format_acp_compact_report(
-            before_tokens,
-            after_tokens,
-            removed,
-            kept,
-            (removed > 0).then_some(method),
+        Ok((
+            format_acp_compact_report(
+                before_tokens,
+                after_tokens,
+                removed,
+                kept,
+                (removed > 0).then_some(method),
+            ),
+            AcpStopReason::EndTurn,
         ))
     }
 
@@ -3009,7 +3028,8 @@ impl AcpCliAgent {
             .session()
             .save_to_path(&session.handle.path)
             .map_err(|e| AcpError::internal(format!("failed to persist cleared session: {e}")))?;
-        let permission_mode = session.runtime.permission_policy_mut().active_mode();
+        let permission_mode = runtime.permission_policy_mut().active_mode();
+        session.runtime = runtime;
         Ok(format_acp_clear_report(
             &session.handle.id,
             &cleared.previous.id,
@@ -3031,6 +3051,21 @@ enum ClearMode {
 }
 
 /// Outcome of [`clear_session_state`].
+/// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
+/// notification, so an `abort()` that races the subscription is still seen
+/// promptly.
+async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
+    loop {
+        if signal.is_aborted() {
+            return;
+        }
+        tokio::select! {
+            () = signal.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
 struct ClearedSession {
     /// Empty transcript to rebuild the runtime around (persistence path set).
     fresh: Session,
@@ -3368,19 +3403,20 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         input: &str,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<runtime::acp_sdk_server::AcpStopReason, runtime::AcpError> {
+        use runtime::acp_sdk_server::AcpStopReason;
         use runtime::RuntimeObserver as _;
         let command = match SlashCommand::parse(input) {
             Ok(Some(command)) => command,
             Ok(None) => {
                 observer.on_text_delta(&format_acp_unsupported_slash_command(input));
-                return Ok(());
+                return Ok(AcpStopReason::EndTurn);
             }
             Err(error) => {
                 observer.on_text_delta(&format!(
                     "{error}\n  Help             /help lists the commands available in ACP mode"
                 ));
-                return Ok(());
+                return Ok(AcpStopReason::EndTurn);
             }
         };
 
@@ -3395,7 +3431,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Compact => {
                 let locked = self.lock_session(session_id)?;
                 let mut session = locked.get();
-                self.inner.handle_acp_compact(&mut session)?
+                let (report, compact_stop) = self.inner.handle_acp_compact(&mut session)?;
+                stop = compact_stop;
+                report
+        let mut stop = AcpStopReason::EndTurn;
             }
             // `--confirm` is accepted but not required: an ACP client confirms
             // in its own UI before sending the command.
@@ -3487,7 +3526,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         };
 
         observer.on_text_delta(&response);
-        Ok(())
+        Ok(stop)
     }
 
     fn available_commands(&self) -> &'static [runtime::acp_sdk_server::AcpSlashCommandSpec] {

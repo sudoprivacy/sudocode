@@ -160,6 +160,11 @@ enum Transport {
 struct AcpTestClient {
     transport: Transport,
     next_id: u64,
+    /// The `available_commands_update` the agent sent after the most recent
+    /// successful `session/new` / `session/load` (consumed by
+    /// [`AcpTestClient::send_request`] so it never leaks into the next
+    /// request's notifications).
+    last_available_commands: Option<Value>,
 }
 
 impl AcpTestClient {
@@ -178,14 +183,40 @@ impl AcpTestClient {
         self.send_raw(&request).await;
 
         let mut notifications = Vec::new();
-        loop {
+        let response = loop {
             let msg = self.recv().await;
             // A response has a matching numeric id.
             if msg.get("id").and_then(Value::as_u64) == Some(id) {
-                return (notifications, msg);
+                break msg;
             }
             notifications.push(msg);
+        };
+        // A successful session/new or session/load is followed by exactly one
+        // `available_commands_update` for the new session. Consume and check
+        // it here so every session-creating test verifies the broadcast and
+        // no test sees it as a stray notification on its next request.
+        if matches!(method, "session/new" | "session/load") && response.get("error").is_none() {
+            let update = self.recv().await;
+            assert_eq!(
+                update["method"].as_str(),
+                Some("session/update"),
+                "{method} must be followed by a session/update, got: {update}"
+            );
+            assert_eq!(
+                update["params"]["update"]["sessionUpdate"].as_str(),
+                Some("available_commands_update"),
+                "{method} must be followed by available_commands_update, got: {update}"
+            );
+            if let Some(expected) = params["sessionId"].as_str() {
+                assert_eq!(
+                    update["params"]["sessionId"].as_str(),
+                    Some(expected),
+                    "available_commands_update must target the loaded session"
+                );
+            }
+            self.last_available_commands = Some(update);
         }
+        (notifications, response)
     }
 
     /// Send a JSON-RPC request WITHOUT waiting for its response. Returns the
@@ -360,6 +391,7 @@ fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> Ac
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -422,6 +454,7 @@ async fn spawn_ws_client(workspace: &TestWorkspace) -> AcpTestClient {
             ws_stream: Box::new(ws_stream),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -527,7 +560,60 @@ async fn scenario_session_new(client: &mut AcpTestClient, cwd: &std::path::Path)
         .as_str()
         .expect("sessionId should be a string");
     assert!(!session_id.is_empty(), "sessionId should not be empty");
+    assert_available_commands_update(
+        client
+            .last_available_commands
+            .as_ref()
+            .expect("session/new should be followed by available_commands_update"),
+        session_id,
+    );
     session_id.to_string()
+}
+
+/// The `available_commands_update` broadcast: addressed to `session_id`,
+/// shaped per the ACP schema (`availableCommands: [{name, description,
+/// input?: {hint}}]`), and listing the commands apeiron needs.
+fn assert_available_commands_update(update: &Value, session_id: &str) {
+    assert_eq!(update["params"]["sessionId"].as_str(), Some(session_id));
+    let commands = update["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("availableCommands should be an array: {update}"));
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|c| c["name"].as_str().expect("command name is a string"))
+        .collect();
+    for expected in ["compact", "clear", "help", "model", "status"] {
+        assert!(
+            names.contains(&expected),
+            "available commands should include `{expected}`, got {names:?}"
+        );
+    }
+    for command in commands {
+        assert!(
+            !command["name"].as_str().unwrap_or("").starts_with('/'),
+            "command names carry no leading slash: {command}"
+        );
+        assert!(
+            command["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
+            "every command has a description: {command}"
+        );
+        if let Some(input) = command.get("input") {
+            assert!(
+                input["hint"].as_str().is_some(),
+                "input, when present, is {{hint}}: {command}"
+            );
+        }
+    }
+    let model = commands
+        .iter()
+        .find(|c| c["name"] == "model")
+        .expect("model command");
+    assert!(
+        model["input"]["hint"].as_str().is_some(),
+        "/model advertises an input hint: {model}"
+    );
 }
 
 async fn scenario_session_prompt_streaming(client: &mut AcpTestClient, session_id: &str) {
@@ -834,11 +920,261 @@ async fn scenario_session_prompt_with_image_attachment(
     );
 }
 
+/// Send one slash command and return the concatenated agent text it produced
+/// plus the response.
+async fn run_slash_command(
+    client: &mut AcpTestClient,
+    session_id: &str,
+    command: &str,
+) -> (String, Value) {
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": command }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "{command} should end the turn normally: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+        })
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        !text.is_empty(),
+        "{command} should produce text: {notifs:?}"
+    );
+    (text, resp)
+}
+
+/// Run one `streaming_text` turn tagged with `marker` and return the
+/// response (for `_meta`) — the marker later identifies the turn in the
+/// model's request bodies and in the transcript on disk.
+async fn run_marked_turn(client: &mut AcpTestClient, session_id: &str, marker: &str) -> Value {
+    let (_notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text {marker}") }]
+            }),
+        )
+        .await;
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "turn {marker} should complete: {resp}"
+    );
+    resp
+}
+
+/// The persisted transcript of `session_id` under `root`'s session store
+/// (`.scode/sessions/<workspace-fingerprint>/<session-id>/...`).
+fn read_session_transcript(root: &std::path::Path, session_id: &str) -> String {
+    fn walk(dir: &std::path::Path, session_id: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some(session_id) {
+                    for file in fs::read_dir(&path).into_iter().flatten().flatten() {
+                        if file.path().is_file() {
+                            out.push(file.path());
+                        }
+                    }
+                } else {
+                    walk(&path, session_id, out);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &root.join(".scode").join("sessions"),
+        session_id,
+        &mut files,
+    );
+    assert!(
+        !files.is_empty(),
+        "session {session_id} should be persisted under {}",
+        root.display()
+    );
+    files
+        .iter()
+        .map(|f| fs::read_to_string(f).expect("read transcript"))
+        .collect()
+}
+
+/// `/compact`: after three turns the two oldest messages are summarised (the
+/// mock answers compaction requests with its canned summary, so the LLM path
+/// is taken), the compaction is on disk immediately, and the next model
+/// request no longer carries the summarised turn.
+async fn scenario_slash_compact(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session_id = scenario_session_new(client, &workspace.root).await;
+    for marker in ["ACP_COMPACT_ONE", "ACP_COMPACT_TWO", "ACP_COMPACT_THREE"] {
+        run_marked_turn(client, &session_id, marker).await;
+    }
+    let before = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        !before.contains("\"type\":\"compaction\""),
+        "no compaction record before /compact"
+    );
+
+    let (text, _resp) = run_slash_command(client, &session_id, "/compact").await;
+    assert!(
+        text.contains("Result           compacted"),
+        "/compact should report a compaction, got: {text}"
+    );
+    assert!(
+        text.contains("Method           llm summary"),
+        "/compact should take the LLM path against the mock, got: {text}"
+    );
+    let removed: usize = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Messages removed"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("report should carry the removed count: {text}"));
+    assert!(removed >= 1, "/compact should remove messages: {text}");
+    assert!(
+        text.contains("Estimated tokens"),
+        "/compact should report the token estimate: {text}"
+    );
+
+    // Persisted right away, not at the end of the next turn.
+    let after = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        after.contains("\"type\":\"compaction\""),
+        "compaction metadata should be on disk right after /compact"
+    );
+
+    // The model now sees the summary instead of the oldest turn.
+    let body =
+        last_model_request_after_prompt(client, server, &session_id, "ACP_COMPACT_FOUR").await;
+    assert!(
+        !body.contains("ACP_COMPACT_ONE"),
+        "summarised turn must not reach the model after /compact"
+    );
+    assert!(
+        body.contains("ACP_COMPACT_THREE"),
+        "preserved recent turn must still reach the model"
+    );
+}
+
+/// `/clear` without `--confirm`: the session id keeps working, the model no
+/// longer sees the earlier turn, and the old transcript is archived under a
+/// new session id that `session/load` can reopen.
+async fn scenario_slash_clear(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session_id = scenario_session_new(client, &workspace.root).await;
+    run_marked_turn(client, &session_id, "ACP_CLEAR_ONE").await;
+
+    let (text, _resp) = run_slash_command(client, &session_id, "/clear").await;
+    assert!(
+        text.contains("Session cleared") && text.contains(&session_id),
+        "/clear should confirm the in-place reset for this session: {text}"
+    );
+    let archived_id = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Archived as"))
+        .and_then(|v| v.split_whitespace().next())
+        .unwrap_or_else(|| panic!("report should name the archived session: {text}"))
+        .to_string();
+    assert_ne!(archived_id, session_id, "the archive gets its own id");
+
+    // Same session id, fresh context.
+    let body = last_model_request_after_prompt(client, server, &session_id, "ACP_CLEAR_TWO").await;
+    assert!(
+        !body.contains("ACP_CLEAR_ONE"),
+        "cleared turn must not reach the model: {body}"
+    );
+    assert!(body.contains("ACP_CLEAR_TWO"), "new turn reaches the model");
+
+    // The old transcript survives on disk and is loadable.
+    let archived = read_session_transcript(&workspace.root, &archived_id);
+    assert!(
+        archived.contains("ACP_CLEAR_ONE"),
+        "archived transcript keeps the cleared turn"
+    );
+    let live = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        !live.contains("ACP_CLEAR_ONE"),
+        "live transcript no longer holds the cleared turn"
+    );
+    let (_n, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": archived_id,
+                "cwd": workspace.root.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load of the archived transcript should succeed: {load_resp}"
+    );
+
+    // `--confirm` is accepted too.
+    let (text, _resp) = run_slash_command(client, &session_id, "/clear --confirm").await;
+    assert!(text.contains("Session cleared"), "got: {text}");
+}
+
+/// `/help` renders only the ACP table; an unknown command names the table.
+async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id: &str) {
+    let (help, _resp) = run_slash_command(client, session_id, "/help").await;
+    for expected in ["/compact", "/clear", "/model <model-id>", "/status"] {
+        assert!(
+            help.contains(expected),
+            "/help should list {expected}: {help}"
+        );
+    }
+    for repl_only in ["/exit", "/resume", "Ctrl-R"] {
+        assert!(
+            !help.contains(repl_only),
+            "/help under ACP must not advertise REPL-only `{repl_only}`: {help}"
+        );
+    }
+
+    let (unknown, _resp) = run_slash_command(client, session_id, "/nonexistent").await;
+    assert!(
+        unknown.contains("`/nonexistent` is not supported in ACP mode"),
+        "got: {unknown}"
+    );
+    for expected in ["/compact", "/clear", "/help"] {
+        assert!(
+            unknown.contains(expected),
+            "unknown-command hint should list {expected}: {unknown}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scenario runner
 // ---------------------------------------------------------------------------
 
-async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace) {
+async fn run_all_scenarios(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
     scenario_initialize(client).await;
     let session_id = scenario_session_new(client, &workspace.root).await;
     scenario_session_prompt_streaming(client, &session_id).await;
@@ -847,6 +1183,9 @@ async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace
     scenario_session_load_unknown_session_errors(client).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
+    scenario_slash_help_and_unknown(client, &session_id).await;
+    scenario_slash_compact(client, server, workspace).await;
+    scenario_slash_clear(client, server, workspace).await;
     // Run per-turn usage test last with a fresh session
     scenario_session_prompt_per_turn_usage(client, workspace).await;
 }
@@ -865,7 +1204,7 @@ async fn acp_stdio_integration() {
     workspace.write_sudocode_json(&server.base_url());
 
     let mut client = spawn_stdio_client(&workspace);
-    run_all_scenarios(&mut client, &workspace).await;
+    run_all_scenarios(&mut client, &server, &workspace).await;
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -1863,6 +2202,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     };
 
     // 1×1 transparent PNG.
@@ -1972,7 +2312,7 @@ async fn acp_ws_integration() {
     workspace.write_sudocode_json(&server.base_url());
 
     let mut client = spawn_ws_client(&workspace).await;
-    run_all_scenarios(&mut client, &workspace).await;
+    run_all_scenarios(&mut client, &server, &workspace).await;
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -2062,6 +2402,7 @@ fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -2105,6 +2446,7 @@ fn spawn_stdio_client_danger_with_allowed(
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 

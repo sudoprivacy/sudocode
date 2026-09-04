@@ -12,7 +12,7 @@ pub use client::{
     resolve_saved_oauth_token, resolve_startup_auth_source, MessageStream, OAuthTokenSet,
     ProviderClient,
 };
-pub use error::ApiError;
+pub use error::{format_context_window_blocked_error, format_user_visible_api_error, ApiError};
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with,
     build_http_client_with_opts, ProxyConfig, TimeoutConfig,

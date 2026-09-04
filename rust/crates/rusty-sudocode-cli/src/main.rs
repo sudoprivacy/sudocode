@@ -25,7 +25,8 @@ mod repl_ui;
 mod vlm_describe;
 
 use engine_core::{
-    EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession, TurnComplete,
+    EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
+    TurnComplete,
 };
 use render_engine::{EngineEventRenderer, RenderOutcome};
 
@@ -51,7 +52,7 @@ use api::{
 
 use cli::api_client::{
     collect_prompt_cache_events, collect_tool_results, collect_tool_uses, final_assistant_text,
-    max_tokens_for_model, AnthropicRuntimeClient,
+    max_tokens_for_model,
 };
 use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
@@ -2903,7 +2904,7 @@ struct RuntimeConfig {
 }
 
 struct BuiltRuntime {
-    runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
+    runtime: Option<ConversationRuntime<EngineApiClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
     plugin_load_outcome: PluginLoadOutcome,
     plugins_active: bool,
@@ -2913,7 +2914,7 @@ struct BuiltRuntime {
 
 impl BuiltRuntime {
     fn new(
-        runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
+        runtime: ConversationRuntime<EngineApiClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
         plugin_load_outcome: PluginLoadOutcome,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -2989,7 +2990,7 @@ impl BuiltRuntime {
 }
 
 impl Deref for BuiltRuntime {
-    type Target = ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>;
+    type Target = ConversationRuntime<EngineApiClient, CliToolExecutor>;
 
     fn deref(&self) -> &Self::Target {
         self.runtime
@@ -7649,7 +7650,15 @@ fn build_runtime_with_plugin_state(
             .push(session.peer_system_prompt());
     }
     let emit_output = config.emit_output;
-    let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
+    let client = match EngineApiClient::new(
+        session_id,
+        &config.sudocode_config,
+        &config.model,
+        config.auth_mode,
+        tool_registry.clone(),
+        config.enable_tools,
+        config.allowed_tools.clone(),
+    ) {
         Ok(client) => client,
         Err(error) => {
             shutdown_mcp_state_best_effort(&mcp_state);

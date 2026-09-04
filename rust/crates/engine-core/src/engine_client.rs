@@ -42,6 +42,7 @@ const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is c
 /// [`AssistantEventStream`]; renders nothing.
 pub struct EngineApiClient {
     client: ProviderClient,
+    session_id: String,
     model: String,
     enable_tools: bool,
     allowed_tools: Option<BTreeSet<String>>,
@@ -72,6 +73,7 @@ impl EngineApiClient {
 
         Ok(Self {
             client,
+            session_id: session_id.to_string(),
             model: resolved.model_id.clone(),
             enable_tools,
             allowed_tools,
@@ -94,6 +96,27 @@ impl EngineApiClient {
         &self.model
     }
 
+    /// The session tracer installed on the underlying provider client — the
+    /// runtime + CLI read it for structured turn logging. (`BuiltRuntime`
+    /// delegates its `session_tracer()` here once this client is installed.)
+    #[must_use]
+    pub fn session_tracer(&self) -> Option<&SessionTracer> {
+        self.client.session_tracer()
+    }
+
+    /// Estimated tokens of the request parts history compaction cannot shrink —
+    /// the rendered system prompt and the tool definitions this client attaches
+    /// — using the same heuristic as the API preflight. Drives the budget-aware
+    /// pre-send auto-compaction on the engine turn path.
+    #[must_use]
+    pub fn fixed_request_overhead_tokens(&self, system_prompt: &runtime::SystemPrompt) -> usize {
+        let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
+        let tools = self
+            .enable_tools
+            .then(|| self.tool_registry.definitions(self.allowed_tools.as_ref()));
+        api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
+    }
+
     /// Start a streaming response, optionally applying a stall timeout on the
     /// first event for post-tool continuations. Returns an incremental stream of
     /// [`AssistantEvent`]s; dropping it cancels the underlying HTTP request.
@@ -107,12 +130,16 @@ impl EngineApiClient {
             .client
             .stream_message(message_request, None)
             .await
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
+            .map_err(|error| {
+                RuntimeError::new(api::format_user_visible_api_error(&self.session_id, &error))
+            })?;
 
         let prefetched_next = if apply_stall_timeout {
             match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, provider_stream.next_event()).await
             {
-                Ok(inner) => match inner.map_err(|error| RuntimeError::new(error.to_string()))? {
+                Ok(inner) => match inner.map_err(|error| {
+                    RuntimeError::new(api::format_user_visible_api_error(&self.session_id, &error))
+                })? {
                     Some(event) => Some(Some(event)),
                     None => {
                         return Err(RuntimeError::new(
@@ -139,6 +166,7 @@ impl EngineApiClient {
             has_content: false,
             done: false,
             client: self.client.clone(),
+            session_id: self.session_id.clone(),
             fallback_request: Some(build_non_streaming_fallback_request(
                 message_request,
                 is_post_tool,
@@ -159,11 +187,12 @@ impl EngineApiClient {
                     let next = if let Some(prefetched_next) = state.prefetched_next.take() {
                         prefetched_next
                     } else {
-                        state
-                            .provider_stream
-                            .next_event()
-                            .await
-                            .map_err(|error| RuntimeError::new(error.to_string()))?
+                        state.provider_stream.next_event().await.map_err(|error| {
+                            RuntimeError::new(api::format_user_visible_api_error(
+                                &state.session_id,
+                                &error,
+                            ))
+                        })?
                     };
 
                     let Some(event) = next else {
@@ -184,7 +213,12 @@ impl EngineApiClient {
                                     .client
                                     .send_message(&fallback_request, None)
                                     .await
-                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                    .map_err(|error| {
+                                        RuntimeError::new(api::format_user_visible_api_error(
+                                            &state.session_id,
+                                            &error,
+                                        ))
+                                    })?;
                                 state.buffer.extend(response_to_events(response));
                                 if let Some(record) = state.client.take_last_prompt_cache_record() {
                                     if let Some(evt) = prompt_cache_record_to_event(record) {
@@ -315,6 +349,7 @@ struct StreamState {
     has_content: bool,
     done: bool,
     client: ProviderClient,
+    session_id: String,
     fallback_request: Option<MessageRequest>,
 }
 

@@ -6940,7 +6940,12 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
         .collect()
 }
 
-fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+/// Convert runtime conversation messages to wire input messages, merging
+/// consecutive tool-result messages into the preceding user message (Anthropic
+/// requires every `tool_use` to have its matching `tool_result` in the same next
+/// user message). Shared by the subagent provider client and the engine's
+/// `EngineApiClient` — the one message-shaping mapping, identical for both.
+pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
     let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
     for message in messages {
         let role = match message.role {

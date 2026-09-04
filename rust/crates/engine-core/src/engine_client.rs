@@ -18,15 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::{
-    AuthMode, CacheHints, ContentBlockDelta, ImageSource, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, MessageStream, OutputContentBlock, PromptCache,
-    PromptCacheRecord, ProviderClient, ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice,
-    ToolResultContentBlock,
+    AuthMode, CacheHints, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse,
+    MessageStream, OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient,
+    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice,
 };
 use async_trait::async_trait;
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ContentBlock, ConversationMessage,
-    MessageRole, PromptCacheEvent, RuntimeError,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ConversationMessage, MessageRole,
+    PromptCacheEvent, RuntimeError,
 };
 use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
@@ -260,7 +259,7 @@ impl ApiClient for EngineApiClient {
         let request = MessageRequest {
             model: model.to_string(),
             max_tokens,
-            messages: convert_messages(&messages),
+            messages: tools::convert_messages(&messages),
             system: Some(system_prompt.to_string()),
             tools: None,
             tool_choice: None,
@@ -304,7 +303,7 @@ impl ApiClient for EngineApiClient {
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens: api::max_tokens_for_model(&self.model),
-            messages: convert_messages(&request.messages),
+            messages: tools::convert_messages(&request.messages),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
             tools: self
                 .enable_tools
@@ -528,80 +527,4 @@ fn build_non_streaming_fallback_request(
             .push(InputMessage::user_text(POST_TOOL_FINAL_SYNTHESIS_PROMPT));
     }
     fallback
-}
-
-/// Convert runtime conversation messages to wire input messages, merging
-/// consecutive tool-result messages into the preceding user message (Anthropic
-/// requires every `tool_use` to have its matching `tool_result` in the same next
-/// user message).
-fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
-    for message in messages {
-        let role = match message.role {
-            MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-            MessageRole::Assistant => "assistant",
-        };
-        let content = message
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
-                ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
-                    source: ImageSource {
-                        source_type: "base64".to_string(),
-                        media_type: mime_type.clone(),
-                        data: data.clone(),
-                    },
-                }),
-                ContentBlock::Thinking { .. } => None,
-                ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    thought_signature,
-                } => Some(InputContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: serde_json::from_str(input)
-                        .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                    thought_signature: thought_signature.clone(),
-                }),
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    output,
-                    is_error,
-                    ..
-                } => Some(InputContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: vec![ToolResultContentBlock::Text {
-                        text: output.clone(),
-                    }],
-                    is_error: *is_error,
-                }),
-            })
-            .collect::<Vec<_>>();
-        if content.is_empty() {
-            continue;
-        }
-
-        if matches!(message.role, MessageRole::Tool) {
-            if let Some(last) = result.last_mut() {
-                if last.role == "user"
-                    && last
-                        .content
-                        .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
-                {
-                    last.content.extend(content);
-                    continue;
-                }
-            }
-        }
-
-        result.push(InputMessage {
-            role: role.to_string(),
-            content,
-        });
-    }
-    result
 }

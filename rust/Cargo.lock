@@ -1408,6 +1408,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-host"
+version = "0.2.2"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,16 @@
+[package]
+name = "engine-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# engine-host is the ENGINE side of the seam: it owns session construction, the
+# `ConversationRuntime` wrapper, the tool executor, and the `EngineDelegate` /
+# `SessionLifecycle` impl (`SessionEngine`). Both the CLI (REPL renderer) and
+# `engine-acp` depend on it to build a session; neither the wire types nor the
+# renderer live here. Dependencies are added as the engine code moves in.
+[dependencies]
+
+[lints]
+workspace = true

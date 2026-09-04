@@ -6992,7 +6992,12 @@ impl LiveCli {
 
     fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (removed, kept, skipped, summary_source) = self.lifecycle.run_compaction()?;
-        self.out_println(format_compact_report(removed, kept, skipped, &summary_source));
+        self.out_println(format_compact_report(
+            removed,
+            kept,
+            skipped,
+            &summary_source,
+        ));
         Ok(())
     }
 

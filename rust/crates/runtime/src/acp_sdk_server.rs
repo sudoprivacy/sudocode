@@ -246,6 +246,24 @@ pub trait SdkAcpDelegate: Send + Sync + 'static {
         prompt_overrides: SystemPromptOverrides,
     ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
 
+    /// Create a new session in `cwd` whose transcript starts as a copy of
+    /// another session's (`session/new` with `_meta.sudocode.forkFrom`).
+    ///
+    /// The source is resolved per [`SessionForkSource`]: a session open in
+    /// this process, or one persisted under `source.cwd`'s session store.
+    /// The fork gets a fresh session id, records the source as its parent
+    /// (`fork.parent_session_id`) and is persisted under `cwd`'s own store —
+    /// the source session is left untouched. Everything else (`mcp_servers`,
+    /// `prompt_overrides`, the returned tuple) is as for
+    /// [`Self::new_session`].
+    fn fork_session(
+        &self,
+        source: SessionForkSource,
+        cwd: PathBuf,
+        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
+        prompt_overrides: SystemPromptOverrides,
+    ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
+
     /// Run a prompt turn. The implementation should call observer methods
     /// to stream session updates.
     fn run_prompt(
@@ -603,6 +621,10 @@ fn initialize_meta() -> Map<String, serde_json::Value> {
     // (see `system_prompt_overrides_from_meta`).
     sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
+    // `session/new` accepts `_meta.sudocode.forkFrom` (see
+    // `fork_source_from_meta`): a client that forks a conversation into a
+    // new directory gates on this instead of probing.
+    sudocode_ns.insert("sessionFork".to_string(), json!(true));
     let mut meta = Map::new();
     meta.insert("sudocode".to_string(), json!(sudocode_ns));
     meta
@@ -630,6 +652,65 @@ fn system_prompt_overrides_from_meta(
         system_prompt: non_empty_string_meta(ns, SYSTEM_PROMPT_META_KEY)?,
         append_system_prompt: non_empty_string_meta(ns, APPEND_SYSTEM_PROMPT_META_KEY)?,
     })
+}
+
+/// `_meta.sudocode` key on `session/new`: start the new session from a copy
+/// of another session's transcript.
+pub const FORK_FROM_META_KEY: &str = "forkFrom";
+
+/// Where a forked session's transcript comes from
+/// (`_meta.sudocode.forkFrom` on `session/new`).
+///
+/// At least one of the two fields is present:
+///
+/// * `session_id` alone — the source must be open in this process;
+/// * `cwd` alone — the most recently updated session persisted under that
+///   directory's session store;
+/// * both — the persisted session `session_id` under `cwd`'s store (or the
+///   open session of that id, which must live in `cwd`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionForkSource {
+    pub session_id: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+/// Parse `_meta.sudocode.forkFrom` from a `session/new` request. Absent →
+/// `None`; present but malformed → `invalid_params` (never silently ignored,
+/// like the system-prompt keys).
+fn fork_source_from_meta(
+    meta: Option<&agent_client_protocol_schema::Meta>,
+) -> Result<Option<SessionForkSource>, AcpError> {
+    let ns = meta.and_then(|m| m.get("sudocode"));
+    let Some(value) = ns.and_then(|ns| ns.get(FORK_FROM_META_KEY)) else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Err(AcpError::invalid_params(format!(
+            "_meta.sudocode.{FORK_FROM_META_KEY} must be an object"
+        )));
+    };
+    let field = |key: &str| -> Result<Option<String>, AcpError> {
+        match object.get(key) {
+            None => Ok(None),
+            Some(v) => match v.as_str() {
+                Some(text) if !text.trim().is_empty() => Ok(Some(text.to_string())),
+                Some(_) => Err(AcpError::invalid_params(format!(
+                    "_meta.sudocode.{FORK_FROM_META_KEY}.{key} must not be empty"
+                ))),
+                None => Err(AcpError::invalid_params(format!(
+                    "_meta.sudocode.{FORK_FROM_META_KEY}.{key} must be a string"
+                ))),
+            },
+        }
+    };
+    let session_id = field("sessionId")?;
+    let cwd = field("cwd")?.map(PathBuf::from);
+    if session_id.is_none() && cwd.is_none() {
+        return Err(AcpError::invalid_params(format!(
+            "_meta.sudocode.{FORK_FROM_META_KEY} needs sessionId and/or cwd"
+        )));
+    }
+    Ok(Some(SessionForkSource { session_id, cwd }))
 }
 
 fn non_empty_string_meta(
@@ -1288,6 +1369,13 @@ pub(crate) async fn run_acp_on_transport(
                                 return Ok(());
                             }
                         };
+                    let fork_source = match fork_source_from_meta(req.meta.as_ref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            responder.respond_with_error(acp_error_to_sdk(&e))?;
+                            return Ok(());
+                        }
+                    };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     let commands = delegate.available_commands();
@@ -1306,7 +1394,16 @@ pub(crate) async fn run_acp_on_transport(
                                 .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
                             let _scope = WorkspaceRootScope::enter(cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
-                            d.new_session(req.cwd, mcp_servers, prompt_overrides)
+                            match fork_source {
+                                // `forkFrom`: the new session starts from a
+                                // copy of another session's transcript. The
+                                // source is read, never written, so only the
+                                // new cwd needs the lease.
+                                Some(source) => {
+                                    d.fork_session(source, req.cwd, mcp_servers, prompt_overrides)
+                                }
+                                None => d.new_session(req.cwd, mcp_servers, prompt_overrides),
+                            }
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));

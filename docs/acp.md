@@ -190,7 +190,50 @@ the `session/load` request.
 `cwd` must be the directory the session was created in — a session's store
 is keyed by its workspace and the persisted `workspace_root` is validated on
 load, so loading a session id from another directory is rejected. Continuing
-a conversation in a new directory is a fork, not a load. `session/load` does
-not currently replay the history to the client as `session/update`
-notifications; the client is expected to keep its own copy of the
-conversation.
+a conversation in a new directory is a fork, not a load — see `forkFrom`
+below. `session/load` does not currently replay the history to the client as
+`session/update` notifications; the client is expected to keep its own copy
+of the conversation.
+
+### Forking a conversation (`session/new` + `_meta.sudocode.forkFrom`)
+
+A client that branches a conversation — "continue from here in a new
+session" — creates the branch with `session/new` and names the source under
+`_meta.sudocode.forkFrom`. The new session starts as a **copy of the source's
+transcript** (messages, compaction state, model, prompt history), gets a
+fresh id, records the source as its parent, and is persisted under the new
+`cwd`'s own session store, so it is a first-class session there (later
+`session/load {cwd}` of it works). The source is read, never modified.
+
+```json
+{
+  "cwd": "/home/user/session-b",
+  "mcpServers": [],
+  "_meta": {
+    "sudocode": {
+      "forkFrom": { "sessionId": "session-1788512053256-0", "cwd": "/home/user/session-a" }
+    }
+  }
+}
+```
+
+`forkFrom` takes `sessionId` and/or `cwd`:
+
+| Given | Source |
+|---|---|
+| `sessionId` only | A session **open in this process**. Rejected (`invalid_params`) if it is not — after a restart pass `cwd` as well. |
+| `sessionId` + `cwd` | The session persisted under `cwd`'s store, validated against its recorded workspace root exactly like `session/load`; an open session of that id must live in `cwd`. |
+| `cwd` only | The most recently updated session persisted under `cwd`. Useful for a client that keeps one directory per conversation and does not track scode's session ids. |
+
+An open source is copied from memory when it is idle; mid-turn (a turn holds
+the session for its duration) the persisted transcript is copied instead,
+which carries every completed message. Offloaded tool results referenced from
+the transcript are copied alongside it. The copy is the whole transcript —
+there is no point-in-time cut yet.
+
+`forkFrom` composes with `systemPrompt` / `appendSystemPrompt` on the same
+request; a present-but-malformed `forkFrom` (not an object, neither field,
+empty strings) is `invalid_params`. The `initialize` response advertises
+`_meta.sudocode.sessionFork: true` so clients can feature-detect. Older
+agents ignore the key and start an empty session, which is the behaviour
+the flag lets a client avoid relying on.

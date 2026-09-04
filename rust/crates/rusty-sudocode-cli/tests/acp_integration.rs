@@ -3662,3 +3662,253 @@ async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+// ---------------------------------------------------------------------------
+// `session/new` + `_meta.sudocode.forkFrom`: fork a conversation into a new cwd
+// ---------------------------------------------------------------------------
+
+/// `session/new` carrying `forkFrom` for the given source, into `cwd`.
+async fn fork_session(
+    client: &mut AcpTestClient,
+    cwd: &std::path::Path,
+    fork_from: Value,
+) -> Value {
+    fs::create_dir_all(cwd).expect("fork cwd should exist");
+    session_new_with_meta(client, cwd, json!({ "forkFrom": fork_from })).await
+}
+
+fn assert_invalid_params(resp: &Value, what: &str) {
+    assert_eq!(
+        resp["error"]["code"].as_i64(),
+        Some(-32602),
+        "{what} must be rejected with invalid_params, got: {resp}"
+    );
+}
+
+/// The apeiron shape: the parent conversation lives in one directory, a
+/// "branch from here" creates a NEW session in a NEW directory. Before
+/// `forkFrom` the only option was a plain `session/new`, which starts empty
+/// (`session/load` refuses another cwd) — the model on the branch had no
+/// memory of the conversation. With `forkFrom {sessionId}` on an open
+/// session the branch's first model request carries the parent's history,
+/// the transcript persisted under the new cwd records the lineage, and the
+/// parent goes on unaffected.
+#[tokio::test]
+async fn acp_stdio_fork_copies_open_session_history_into_new_cwd() {
+    const MARKER: &str = "fork-marker-live-5b1e9c7d";
+    const BRANCH_TURN: &str = "branch-turn-2e0f4a";
+    const PARENT_TURN: &str = "parent-turn-9c3d1b";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-fork-live");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client(&workspace);
+
+    let (_, init) = client
+        .send_request("initialize", json!({ "protocolVersion": 1 }))
+        .await;
+    assert_eq!(
+        init["result"]["_meta"]["sudocode"]["sessionFork"].as_bool(),
+        Some(true),
+        "initialize must advertise _meta.sudocode.sessionFork: {init}"
+    );
+
+    let parent = scenario_session_new(&mut client, &workspace.root).await;
+    run_marked_turn(&mut client, &parent, MARKER).await;
+
+    let fork_cwd = workspace.root.join("branch");
+    let resp = fork_session(&mut client, &fork_cwd, json!({ "sessionId": parent })).await;
+    assert!(
+        resp.get("error").is_none(),
+        "forkFrom an open session should succeed: {resp}"
+    );
+    let forked = session_id_of(&resp);
+    assert_ne!(forked, parent, "a fork is a new session");
+    assert_available_commands_update(
+        client
+            .last_available_commands
+            .as_ref()
+            .expect("a forked session/new is followed by available_commands_update"),
+        &forked,
+    );
+
+    // The branch's first model request carries the parent's turn — user
+    // message and assistant reply — not just the new prompt.
+    let body = last_model_request_after_prompt(&mut client, &server, &forked, BRANCH_TURN).await;
+    assert!(
+        body.contains(MARKER),
+        "forked session's model request must include the parent's message ({MARKER}); \
+         a plain session/new would omit it. body: {body}"
+    );
+    assert!(
+        body.contains("\"role\":\"assistant\""),
+        "forked session's model request must carry the parent's assistant turn; body: {body}"
+    );
+
+    // Persisted under the NEW cwd's store, with the lineage recorded.
+    let transcript = read_session_transcript(&fork_cwd, &forked);
+    assert!(
+        transcript.contains(&parent),
+        "forked transcript must record parent_session_id={parent}; got: {transcript}"
+    );
+    assert!(
+        transcript.contains(MARKER),
+        "forked transcript must contain the copied history; got: {transcript}"
+    );
+
+    // The parent is untouched: its next turn does not see the branch's turn.
+    let parent_body =
+        last_model_request_after_prompt(&mut client, &server, &parent, PARENT_TURN).await;
+    assert!(
+        !parent_body.contains(BRANCH_TURN),
+        "parent must not see the branch's turn; body: {parent_body}"
+    );
+    let parent_transcript = read_session_transcript(&workspace.root, &parent);
+    assert!(
+        !parent_transcript.contains(BRANCH_TURN),
+        "parent transcript must not contain the branch's turn"
+    );
+
+    // The fork is a first-class session of this process — and of the new
+    // cwd: `session/load {cwd: branch}` accepts it after a restart.
+    client.shutdown().await;
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let (_, load) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": forked,
+                "cwd": fork_cwd.to_string_lossy(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load.get("error").is_none(),
+        "the fork must be loadable from its own cwd: {load}"
+    );
+    let body = last_model_request_after_prompt(&mut client, &server, &forked, "after-reload").await;
+    assert!(
+        body.contains(MARKER) && body.contains(BRANCH_TURN),
+        "reloaded fork must carry both the parent history and its own turn; body: {body}"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// `forkFrom` against a session that is NOT open in this process (the
+/// parent was created by an earlier process — apeiron after a restart):
+/// `sessionId` alone cannot be resolved and is rejected, `cwd` points the
+/// lookup at that directory's session store (validated like `session/load`),
+/// and `cwd` alone forks the most recent session persisted there.
+#[tokio::test]
+async fn acp_stdio_fork_from_persisted_session_across_processes() {
+    const MARKER: &str = "fork-marker-persisted-a71c04e2";
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-fork-persisted");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    // --- Process A: the parent conversation, then exit ---
+    let parent = {
+        let mut client = spawn_stdio_client(&workspace);
+        scenario_initialize(&mut client).await;
+        let parent = scenario_session_new(&mut client, &workspace.root).await;
+        run_marked_turn(&mut client, &parent, MARKER).await;
+        client.shutdown().await;
+        parent
+    };
+
+    // --- Process B: fork it ---
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let branch_a = workspace.root.join("branch-a");
+    let branch_b = workspace.root.join("branch-b");
+    let elsewhere = workspace.root.join("elsewhere");
+
+    // Malformed `forkFrom` is rejected, never silently ignored.
+    for (label, meta) in [
+        ("non-object", json!("nope")),
+        ("empty object", json!({})),
+        ("empty sessionId", json!({ "sessionId": "  " })),
+        ("non-string cwd", json!({ "cwd": 7 })),
+    ] {
+        let resp = fork_session(&mut client, &branch_a, meta).await;
+        assert_invalid_params(&resp, &format!("forkFrom {label}"));
+    }
+
+    // Not open here and no cwd to look it up under.
+    let resp = fork_session(&mut client, &branch_a, json!({ "sessionId": parent })).await;
+    assert_invalid_params(&resp, "forkFrom.sessionId of a session that is not open");
+
+    // Wrong directory: the persisted workspace root does not match.
+    fs::create_dir_all(&elsewhere).expect("create elsewhere");
+    let resp = fork_session(
+        &mut client,
+        &branch_a,
+        json!({ "sessionId": parent, "cwd": elsewhere.to_string_lossy() }),
+    )
+    .await;
+    assert_invalid_params(&resp, "forkFrom with a cwd the session was not created in");
+
+    // sessionId + cwd: the persisted transcript is the source.
+    let resp = fork_session(
+        &mut client,
+        &branch_a,
+        json!({ "sessionId": parent, "cwd": workspace.root.to_string_lossy() }),
+    )
+    .await;
+    assert!(
+        resp.get("error").is_none(),
+        "forkFrom persisted session: {resp}"
+    );
+    let forked_a = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &forked_a, "branch-a").await;
+    assert!(
+        body.contains(MARKER),
+        "fork of a persisted session must carry its history; body: {body}"
+    );
+
+    // cwd only: the latest session persisted under that directory (the
+    // parent — the fork above lives under branch-a, not here).
+    let resp = fork_session(
+        &mut client,
+        &branch_b,
+        json!({ "cwd": workspace.root.to_string_lossy() }),
+    )
+    .await;
+    assert!(resp.get("error").is_none(), "forkFrom.cwd only: {resp}");
+    let forked_b = session_id_of(&resp);
+    assert_ne!(forked_b, forked_a);
+    let body = last_model_request_after_prompt(&mut client, &server, &forked_b, "branch-b").await;
+    assert!(
+        body.contains(MARKER) && !body.contains("branch-a"),
+        "cwd-only fork must start from the parent, not from the sibling branch; body: {body}"
+    );
+    assert!(
+        read_session_transcript(&branch_b, &forked_b).contains(&parent),
+        "cwd-only fork must record the parent as its lineage"
+    );
+
+    // A directory with no sessions at all cannot be forked from.
+    let empty = workspace.root.join("empty");
+    fs::create_dir_all(&empty).expect("create empty");
+    let resp = fork_session(
+        &mut client,
+        &branch_a,
+        json!({ "cwd": empty.to_string_lossy() }),
+    )
+    .await;
+    assert_invalid_params(&resp, "forkFrom.cwd with no persisted session");
+
+    client.shutdown().await;
+    workspace.cleanup();
+}

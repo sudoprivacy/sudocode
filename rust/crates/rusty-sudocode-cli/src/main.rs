@@ -3060,6 +3060,38 @@ fn clear_session_state(
     })
 }
 
+/// Read the persisted session `session_id` from `cwd`'s session store
+/// (workspace-root validated, like `session/load`). Errors are phrased for
+/// the `forkFrom` caller.
+fn load_persisted_session(cwd: &Path, session_id: &str) -> Result<runtime::Session, String> {
+    let store = runtime::SessionStore::from_cwd(cwd)
+        .map_err(|e| format!("forkFrom.cwd {}: {e}", cwd.display()))?;
+    store
+        .load_session(session_id)
+        .map(|loaded| loaded.session)
+        .map_err(|e| {
+            format!(
+                "forkFrom.sessionId {session_id} not found under {}: {e}",
+                cwd.display()
+            )
+        })
+}
+
+/// Copy a directory tree (files and sub-directories; symlinks are followed).
+fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
     let canonical = fs::canonicalize(cwd).map_err(|error| {
         AcpError::invalid_params(format!("params.cwd is not accessible: {error}"))
@@ -3647,7 +3679,129 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
 
         let (handle, session) = load_session_reference(session_id)
             .map_err(|e| runtime::AcpError::internal(format!("failed to load session: {e}")))?;
+        self.open_persisted_session(handle, session, cwd, mcp_servers, prompt_overrides)
+    }
 
+    fn fork_session(
+        &self,
+        source: runtime::acp_sdk_server::SessionForkSource,
+        cwd: PathBuf,
+        mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+        let cwd = canonical_session_cwd(&cwd)?;
+        // Read the source before entering the new cwd's scope: a persisted
+        // source resolves through *its* directory's session store.
+        let parent = self.resolve_fork_source(&source)?;
+        let parent_tool_results = parent.tool_results_dir();
+
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        // `Session::fork` keeps the transcript, compaction state, model and
+        // prompt history, mints a fresh id and records the parent; the
+        // workspace root is re-homed to the new cwd so the fork is a
+        // first-class session there (loadable with `session/load {cwd}`).
+        let forked = parent.fork(None).with_workspace_root(cwd.clone());
+        let handle =
+            create_managed_session_handle_for(&cwd, &forked.session_id).map_err(|error| {
+                runtime::AcpError::internal(format!("failed to create session handle: {error}"))
+            })?;
+        let forked = forked.with_persistence_path(handle.path.clone());
+        forked.save_to_path(&handle.path).map_err(|error| {
+            runtime::AcpError::internal(format!("failed to persist fork: {error}"))
+        })?;
+        // Offloaded tool results live beside the transcript and are
+        // referenced from it by id; carry them over so the fork's
+        // "read more" paths keep resolving. Best-effort: a source without
+        // any is the common case.
+        if let (Some(from), Some(to)) = (parent_tool_results, forked.tool_results_dir()) {
+            if from.is_dir() {
+                if let Err(error) = copy_dir_recursive(&from, &to) {
+                    eprintln!(
+                        "warning: fork of {} could not copy offloaded tool results: {error}",
+                        parent.session_id
+                    );
+                }
+            }
+        }
+        self.open_persisted_session(handle, forked, cwd, mcp_servers, prompt_overrides)
+    }
+}
+
+impl AcpSdkDelegate {
+    /// The transcript a `session/new { _meta.sudocode.forkFrom }` copies.
+    ///
+    /// An open session is read from memory (its freshest state) when its
+    /// lock is free; mid-turn — the turn holds the lock for its duration —
+    /// the persisted transcript is read instead, which carries every
+    /// completed message. A session that is not open resolves through the
+    /// session store of `source.cwd`, which validates the persisted
+    /// workspace root exactly like `session/load`.
+    fn resolve_fork_source(
+        &self,
+        source: &runtime::acp_sdk_server::SessionForkSource,
+    ) -> Result<runtime::Session, runtime::AcpError> {
+        let invalid = |message: String| runtime::AcpError::invalid_params(message);
+        let source_cwd = source
+            .cwd
+            .as_deref()
+            .map(canonical_session_cwd)
+            .transpose()
+            .map_err(|e| invalid(format!("forkFrom.cwd: {e}")))?;
+
+        if let Some(session_id) = &source.session_id {
+            let live = self
+                .inner
+                .lock_sessions()
+                .get(session_id)
+                .map(|slot| (slot.cwd.clone(), Arc::clone(&slot.session)));
+            if let Some((live_cwd, slot)) = live {
+                if let Some(expected) = &source_cwd {
+                    // Both sides are canonical (`canonical_session_cwd`).
+                    if live_cwd != *expected {
+                        return Err(invalid(format!(
+                            "forkFrom.sessionId {session_id} is open in {} not {}",
+                            live_cwd.display(),
+                            expected.display()
+                        )));
+                    }
+                }
+                if let Ok(guard) = slot.try_lock() {
+                    return Ok(guard.runtime.session().clone());
+                }
+                // Mid-turn: fall through to the persisted transcript.
+                return load_persisted_session(&live_cwd, session_id).map_err(invalid);
+            }
+            let Some(store_cwd) = &source_cwd else {
+                return Err(invalid(format!(
+                    "forkFrom.sessionId {session_id} is not open in this process; pass forkFrom.cwd to fork a persisted session"
+                )));
+            };
+            return load_persisted_session(store_cwd, session_id).map_err(invalid);
+        }
+
+        let store_cwd =
+            source_cwd.ok_or_else(|| invalid("forkFrom needs sessionId and/or cwd".to_string()))?;
+        let store = runtime::SessionStore::from_cwd(&store_cwd)
+            .map_err(|e| invalid(format!("forkFrom.cwd: {e}")))?;
+        let latest = store.latest_session().map_err(|e| {
+            invalid(format!(
+                "forkFrom.cwd {}: no persisted session to fork ({e})",
+                store_cwd.display()
+            ))
+        })?;
+        load_persisted_session(&store_cwd, &latest.id).map_err(invalid)
+    }
+
+    /// Build the runtime for an already-persisted transcript (a
+    /// `session/load` or a fresh fork) and register it as a live session.
+    fn open_persisted_session(
+        &self,
+        handle: SessionHandle,
+        session: runtime::Session,
+        cwd: PathBuf,
+        mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
         let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;

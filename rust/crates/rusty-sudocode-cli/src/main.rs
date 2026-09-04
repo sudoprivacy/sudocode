@@ -544,6 +544,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 reasoning_effort,
                 auth_mode,
             )?;
+            // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
+            // the turn across the seam (the running tool returns interrupted and
+            // the turn ends cancelled) rather than hard-kill the process. The
+            // REPL wires this through its input path; the one-shot path has no
+            // key reader, so install a scoped signal→Cancel monitor here.
+            let _cancel_guard = SignalCancelGuard::install(cli.engine_handle.commands.clone());
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 
             // Record token usage and session ended event for non-interactive prompt mode
@@ -1899,6 +1905,82 @@ impl repl_async::TurnDriver for LiveCliDriver {
         // the runner thread holds that lock while the turn streams and would
         // deadlock if we tried. The pump aborts the in-flight turn on Cancel.
         let _ = self.commands.send(EngineCommand::Cancel);
+    }
+}
+
+/// Installs a process SIGINT / Ctrl-C handler for the duration of a
+/// **non-interactive one-shot turn** (`scode <prompt>`, incl. `--output-format
+/// json`), translating the signal into an `EngineCommand::Cancel` across the
+/// seam. The pump then aborts the in-flight turn — the running tool returns an
+/// interrupted result and the turn ends `cancelled`, so the process still
+/// prints its final text / JSON and exits cleanly (exit 0), matching the
+/// pre-seam behavior that the old `HookAbortMonitor` provided.
+///
+/// Interactive REPL turns cancel through the input path
+/// (`LiveCliDriver::abort_current_turn`), so this guard is scoped to the
+/// one-shot entrypoint, which has no key-reader thread and would otherwise take
+/// SIGINT's default disposition (hard-kill, non-zero exit, no output).
+///
+/// The monitor runs on its own current-thread tokio runtime (the renderer is
+/// otherwise tokio-free). Dropping the guard stops it: the stop channel wakes
+/// the blocking waiter, which wins the `select!` and lets the runtime unwind.
+struct SignalCancelGuard {
+    stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SignalCancelGuard {
+    fn install(commands: std::sync::mpsc::Sender<EngineCommand>) -> Self {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let join_handle = thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                // Blocking waiter for the drop signal; it returns the moment the
+                // guard is dropped (or its sender disconnects), ending the turn.
+                let stop = tokio::task::spawn_blocking(move || {
+                    let _ = stop_rx.recv();
+                });
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if result.is_ok() {
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                    }
+                    _ = stop => {}
+                }
+            });
+        });
+        Self {
+            stop_tx: Some(stop_tx),
+            join_handle: Some(join_handle),
+        }
+    }
+}
+
+impl Drop for SignalCancelGuard {
+    fn drop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            // The monitor exits within a few ms of the stop signal (or right
+            // after it delivered a Cancel). Bound the wait so a wedged signal
+            // driver can never hang process teardown — mirrors the old
+            // HookAbortMonitor's timed join.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while !join_handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let _ = join_handle.join();
+        }
     }
 }
 

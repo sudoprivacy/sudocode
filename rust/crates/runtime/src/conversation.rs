@@ -317,6 +317,27 @@ pub struct TurnSummary {
     pub response_model: Option<String>,
 }
 
+/// Which path produced a [`CompactionResult`] from
+/// [`ConversationRuntime::compact_with_method`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionMethod {
+    /// The model summarised the removed messages (`send_compaction`).
+    LlmSummary,
+    /// The LLM call was unavailable or failed; the local structural
+    /// summary was used instead.
+    LocalHeuristic,
+}
+
+impl CompactionMethod {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlmSummary => "llm summary",
+            Self::LocalHeuristic => "local heuristic",
+        }
+    }
+}
+
 /// Details about automatic session compaction applied during a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
@@ -1640,6 +1661,18 @@ where
         config: CompactionConfig,
         custom_instructions: Option<&str>,
     ) -> CompactionResult {
+        self.compact_with_method(config, custom_instructions)
+            .await
+            .0
+    }
+
+    /// [`Self::compact`] that also reports which path produced the result,
+    /// for callers that surface the outcome to the user (ACP `/compact`).
+    pub async fn compact_with_method(
+        &mut self,
+        config: CompactionConfig,
+        custom_instructions: Option<&str>,
+    ) -> (CompactionResult, CompactionMethod) {
         let model = self
             .session
             .model
@@ -1654,9 +1687,17 @@ where
         )
         .await
         {
-            Ok(result) => result,
-            Err(CompactionError::NothingToCompact) => compact_session_sync(&self.session, config),
-            Err(error) => compact_session_sync_after_llm_failure(&self.session, config, &error),
+            Ok(result) => (result, CompactionMethod::LlmSummary),
+            Err(CompactionError::NothingToCompact) => (
+                compact_session_sync(&self.session, config),
+                CompactionMethod::LocalHeuristic,
+            ),
+            // LLM compaction failed (not supported or API error) — fall back
+            // to the local heuristic but keep the reason in `summary_source`.
+            Err(error) => (
+                compact_session_sync_after_llm_failure(&self.session, config, &error),
+                CompactionMethod::LocalHeuristic,
+            ),
         }
     }
 

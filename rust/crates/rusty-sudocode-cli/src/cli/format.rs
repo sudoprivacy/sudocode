@@ -521,6 +521,37 @@ pub(crate) fn format_compact_report(
     }
 }
 
+/// `/compact` report under ACP: what happened, how, and the effect on the
+/// transcript. `method` is `None` when nothing was removed; `summary_source`
+/// carries the LLM fallback reason (if any) alongside the method.
+pub(crate) fn format_acp_compact_report(
+    before_tokens: usize,
+    after_tokens: usize,
+    removed: usize,
+    kept: usize,
+    method: Option<(runtime::CompactionMethod, &runtime::CompactionSummarySource)>,
+) -> String {
+    match method {
+        Some((method, summary_source)) => format!(
+            "Compact
+  Result           compacted
+  Method           {}
+  Summary          {summary_source}
+  Messages removed {removed}
+  Messages kept    {kept}
+  Estimated tokens {before_tokens} before, {after_tokens} after",
+            method.as_str()
+        ),
+        None => format!(
+            "Compact
+  Result           skipped
+  Reason           nothing to compact beyond the preserved recent messages
+  Messages kept    {kept}
+  Estimated tokens {after_tokens}"
+        ),
+    }
+}
+
 pub(crate) fn format_auto_compaction_notice(removed: usize) -> String {
     format!("[auto-compacted: removed {removed} messages]")
 }

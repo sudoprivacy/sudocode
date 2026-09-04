@@ -79,7 +79,7 @@ fn spawn_stdin_eof_watchdog() {
 /// death, so this never fires while the host is still alive.
 #[cfg(unix)]
 fn spawn_parent_exit_watchdog() {
-    use crate::sandbox::detect_container_environment;
+    use runtime::sandbox::detect_container_environment;
 
     let initial_ppid = nix::unistd::getppid();
 

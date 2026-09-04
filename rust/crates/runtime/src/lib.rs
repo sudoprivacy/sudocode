@@ -4,9 +4,6 @@
 //! MCP plumbing, tool-facing file operations, and the core conversation loop
 //! that drives interactive and one-shot turns.
 
-pub mod acp_sdk_server;
-pub mod acp_stdio_server;
-pub mod acp_ws_server;
 pub mod agent_color;
 pub mod agent_mailbox;
 mod bash;
@@ -80,7 +77,6 @@ mod usage;
 pub mod worker_boot;
 pub mod workspace_root;
 
-pub use acp_sdk_server::AcpError;
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
     execute_bash_with_progress, execute_bash_with_tracking, set_bash_progress_callback,

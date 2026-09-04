@@ -24,6 +24,7 @@ mod repl_async;
 mod repl_ui;
 mod vlm_describe;
 
+use engine_acp::AcpError;
 use engine_core::{
     EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
     TurnComplete,
@@ -124,12 +125,12 @@ use render::{
 use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
-    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, AcpError,
-    ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
-    McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode, PermissionPolicy,
-    ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SystemPrompt,
-    TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool,
+    MessageRole, ModelPricing, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    ResolvedPermissionMode, RuntimeError, Session, SystemPrompt, TokenUsage, ToolError,
+    ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -3316,8 +3317,8 @@ impl AcpCliAgent {
     fn handle_acp_compact(
         &self,
         session: &mut AcpCliSession,
-    ) -> Result<(String, runtime::acp_sdk_server::AcpStopReason), AcpError> {
-        use runtime::acp_sdk_server::AcpStopReason;
+    ) -> Result<(String, engine_acp::acp_sdk_server::AcpStopReason), AcpError> {
+        use engine_acp::acp_sdk_server::AcpStopReason;
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         // Fresh turn: a cancel left over from an earlier turn must not abort
         // this one (mirrors `run_prompt_impl`).
@@ -4183,7 +4184,7 @@ fn run_acp_server(
     let config_home = runtime::default_config_home();
     runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
 
-    let config = runtime::acp_sdk_server::SdkAcpConfig {
+    let config = engine_acp::acp_sdk_server::SdkAcpConfig {
         agent_version: VERSION.to_string(),
         model: model.clone(),
         model_flag_raw: model_flag_raw.clone(),
@@ -4200,11 +4201,11 @@ fn run_acp_server(
     ));
     let rt = tokio::runtime::Runtime::new()?;
     if let Some(port) = ws_port {
-        rt.block_on(runtime::acp_ws_server::run_acp_ws_server(
+        rt.block_on(engine_acp::acp_ws_server::run_acp_ws_server(
             config, delegate, port,
         ))
     } else {
-        rt.block_on(runtime::acp_stdio_server::run_acp_stdio_server(
+        rt.block_on(engine_acp::acp_stdio_server::run_acp_stdio_server(
             config, delegate,
         ))
     }
@@ -4338,20 +4339,20 @@ impl AcpSdkDelegate {
     /// sessions lock independently, so a session parked on user input never
     /// holds up another one; the ACP server serializes calls on the same
     /// session, so this normally never waits.
-    fn lock_session(&self, session_id: &str) -> Result<LockedAcpSession, runtime::AcpError> {
+    fn lock_session(&self, session_id: &str) -> Result<LockedAcpSession, engine_acp::AcpError> {
         let handle = self.inner.session_handle(session_id)?;
         Ok(LockedAcpSession { handle })
     }
 
     /// The working directory of a session, read from the registry slot so
     /// it never waits on the session's own lock.
-    fn session_cwd(&self, session_id: &str) -> Result<PathBuf, runtime::AcpError> {
+    fn session_cwd(&self, session_id: &str) -> Result<PathBuf, engine_acp::AcpError> {
         self.inner
             .lock_sessions()
             .get(session_id)
             .map(|slot| slot.cwd.clone())
             .ok_or_else(|| {
-                runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
+                engine_acp::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
             })
     }
 }
@@ -4370,13 +4371,13 @@ impl LockedAcpSession {
     }
 }
 
-impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
+impl engine_acp::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     fn new_session(
         &self,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let session = self
             .inner
             .build_session(&cwd, &mcp_servers, prompt_overrides)?;
@@ -4391,14 +4392,14 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
@@ -4409,15 +4410,15 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         prompter: &mut dyn runtime::PermissionPrompter,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
@@ -4428,7 +4429,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompter: Box<dyn runtime::QuestionPrompter>,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         locked
             .get()
@@ -4442,9 +4443,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         input: &str,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
-    ) -> Result<runtime::acp_sdk_server::AcpStopReason, runtime::AcpError> {
-        use runtime::acp_sdk_server::AcpStopReason;
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
+    ) -> Result<engine_acp::acp_sdk_server::AcpStopReason, engine_acp::AcpError> {
+        use engine_acp::acp_sdk_server::AcpStopReason;
         use runtime::RuntimeObserver as _;
         let command = match SlashCommand::parse(input) {
             Ok(Some(command)) => command,
@@ -4492,7 +4493,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     },
                     default_permission_mode().as_str(),
                     &status_context(Some(&session.handle.path))
-                        .map_err(|e| runtime::AcpError::internal(e.to_string()))?,
+                        .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?,
                     None,
                 )
             }
@@ -4512,7 +4513,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Config { section } => {
                 let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
                 render_config_report(section.as_deref())
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?
             }
             SlashCommand::ConfigSet { .. } => {
                 "/config set is only available in interactive REPL mode".to_string()
@@ -4523,13 +4524,13 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     .args(["diff", "--cached", "--no-color"])
                     .current_dir(&cwd)
                     .output()
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
                 let cached = String::from_utf8_lossy(&output.stdout);
                 let output2 = std::process::Command::new("git")
                     .args(["diff", "--no-color"])
                     .current_dir(&cwd)
                     .output()
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
                 let unstaged = String::from_utf8_lossy(&output2.stdout);
                 if cached.is_empty() && unstaged.is_empty() {
                     "No changes detected.".to_string()
@@ -4553,7 +4554,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
                 render_doctor_report()
                     .map(|report| report.render())
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?
             }
             _ => format_acp_unsupported_slash_command(input),
         };
@@ -4562,7 +4563,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         Ok(stop)
     }
 
-    fn available_commands(&self) -> &'static [runtime::acp_sdk_server::AcpSlashCommandSpec] {
+    fn available_commands(&self) -> &'static [commands::AcpSlashCommandSpec] {
         acp_slash_commands()
     }
 
@@ -4610,7 +4611,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         true
     }
 
-    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, runtime::AcpError> {
+    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
         self.inner
@@ -4633,7 +4634,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         mode: PermissionMode,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
         if let Some(rt) = session.runtime.runtime.as_mut() {
@@ -4646,7 +4647,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         images: &[(String, String)],
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         eprintln!(
             "[push_images] entered — session={session_id}, {} images",
             images.len()
@@ -4722,7 +4723,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 .runtime
                 .session_mut()
                 .push_message(msg)
-                .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
         }
         Ok(())
     }
@@ -4733,24 +4734,24 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let cwd = canonical_session_cwd(&cwd)?;
         // The session store, config and system prompt all resolve against
         // the workspace root; scope this thread to the requested cwd.
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
 
         let (handle, session) = load_session_reference(session_id)
-            .map_err(|e| runtime::AcpError::internal(format!("failed to load session: {e}")))?;
+            .map_err(|e| engine_acp::AcpError::internal(format!("failed to load session: {e}")))?;
         self.open_persisted_session(handle, session, cwd, mcp_servers, prompt_overrides)
     }
 
     fn fork_session(
         &self,
-        source: runtime::acp_sdk_server::SessionForkSource,
+        source: engine_acp::acp_sdk_server::SessionForkSource,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let cwd = canonical_session_cwd(&cwd)?;
         // Read the source before entering the new cwd's scope: a persisted
         // source resolves through *its* directory's session store.
@@ -4765,11 +4766,11 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let forked = parent.fork(None).with_workspace_root(cwd.clone());
         let handle =
             create_managed_session_handle_for(&cwd, &forked.session_id).map_err(|error| {
-                runtime::AcpError::internal(format!("failed to create session handle: {error}"))
+                engine_acp::AcpError::internal(format!("failed to create session handle: {error}"))
             })?;
         let forked = forked.with_persistence_path(handle.path.clone());
         forked.save_to_path(&handle.path).map_err(|error| {
-            runtime::AcpError::internal(format!("failed to persist fork: {error}"))
+            engine_acp::AcpError::internal(format!("failed to persist fork: {error}"))
         })?;
         // Offloaded tool results live beside the transcript and are
         // referenced from it by id; carry them over so the fork's
@@ -4800,9 +4801,9 @@ impl AcpSdkDelegate {
     /// workspace root exactly like `session/load`.
     fn resolve_fork_source(
         &self,
-        source: &runtime::acp_sdk_server::SessionForkSource,
-    ) -> Result<runtime::Session, runtime::AcpError> {
-        let invalid = |message: String| runtime::AcpError::invalid_params(message);
+        source: &engine_acp::acp_sdk_server::SessionForkSource,
+    ) -> Result<runtime::Session, engine_acp::AcpError> {
+        let invalid = |message: String| engine_acp::AcpError::invalid_params(message);
         let source_cwd = source
             .cwd
             .as_deref()
@@ -4863,15 +4864,15 @@ impl AcpSdkDelegate {
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
         let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let sudocode_config =
-            require_sudocode_config_for_cwd(&cwd).map_err(runtime::AcpError::internal)?;
+            require_sudocode_config_for_cwd(&cwd).map_err(engine_acp::AcpError::internal)?;
         let auth_mode =
             resolve_auth_mode(&model, self.inner.auth_mode, &sudocode_config).map_err(|e| {
-                runtime::AcpError::internal(format!("failed to resolve auth mode: {e}"))
+                engine_acp::AcpError::internal(format!("failed to resolve auth mode: {e}"))
             })?;
 
         let mut runtime = build_runtime_for_cwd(
@@ -4891,7 +4892,7 @@ impl AcpSdkDelegate {
             },
             &mcp_servers,
         )
-        .map_err(|e| runtime::AcpError::internal(format!("failed to build runtime: {e}")))?;
+        .map_err(|e| engine_acp::AcpError::internal(format!("failed to build runtime: {e}")))?;
 
         let abort_signal = runtime::HookAbortSignal::new();
         runtime = runtime.with_hook_abort_signal(abort_signal.clone());
@@ -4928,15 +4929,15 @@ impl AcpSdkDelegate {
         &self,
         session: &mut AcpCliSession,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         prompter: Option<&mut dyn runtime::PermissionPrompter>,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         // Reset abort signal for this new turn.
         session.abort_signal.reset();
@@ -5058,11 +5059,13 @@ impl AcpSdkDelegate {
             if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
                 > context_limit
             {
-                return Err(runtime::AcpError::internal(context_overflow_user_message(
-                    session.runtime.session(),
-                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
-                    context_limit,
-                )));
+                return Err(engine_acp::AcpError::internal(
+                    context_overflow_user_message(
+                        session.runtime.session(),
+                        new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                        context_limit,
+                    ),
+                ));
             }
         }
         // Run the turn and get the TurnSummary directly
@@ -5081,13 +5084,13 @@ impl AcpSdkDelegate {
                     let estimated = estimate_session_tokens(session.runtime.session())
                         + overhead_tokens
                         + max_output_tokens;
-                    return runtime::AcpError::internal(context_overflow_user_message(
+                    return engine_acp::AcpError::internal(context_overflow_user_message(
                         session.runtime.session(),
                         estimated,
                         context_limit,
                     ));
                 }
-                runtime::AcpError::internal(e.to_string())
+                engine_acp::AcpError::internal(e.to_string())
             })?;
         auto_compacted |= turn_summary.auto_compaction.is_some();
         // Use turn_usage for PromptUsage, session_usage for cumulative
@@ -5095,7 +5098,7 @@ impl AcpSdkDelegate {
             (turn_summary.turn_usage.total_tokens() > 0).then_some(turn_summary.turn_usage);
         let cumulative_usage = turn_summary.session_usage;
         // Build PromptUsage if we have per-turn data, otherwise return None for usage
-        let prompt_usage = per_turn_usage.map(|u| runtime::acp_sdk_server::PromptUsage {
+        let prompt_usage = per_turn_usage.map(|u| engine_acp::acp_sdk_server::PromptUsage {
             input_tokens: u64::from(u.input_tokens),
             output_tokens: u64::from(u.output_tokens),
             total_tokens: u64::from(u.total_tokens()),
@@ -5107,7 +5110,7 @@ impl AcpSdkDelegate {
             ),
             cost_units: u.cost_units,
             cost_currency: u.cost_currency,
-            cumulative_usage: Some(runtime::acp_sdk_server::CumulativeUsage {
+            cumulative_usage: Some(engine_acp::acp_sdk_server::CumulativeUsage {
                 input_tokens: u64::from(cumulative_usage.input_tokens),
                 output_tokens: u64::from(cumulative_usage.output_tokens),
                 total_tokens: u64::from(cumulative_usage.total_tokens()),
@@ -5148,9 +5151,11 @@ impl AcpSdkDelegate {
             .runtime
             .session()
             .save_to_path(&session.handle.path)
-            .map_err(|e| runtime::AcpError::internal(format!("failed to persist session: {e}")))?;
+            .map_err(|e| {
+                engine_acp::AcpError::internal(format!("failed to persist session: {e}"))
+            })?;
         Ok((
-            runtime::acp_sdk_server::AcpStopReason::EndTurn,
+            engine_acp::acp_sdk_server::AcpStopReason::EndTurn,
             prompt_usage,
         ))
     }

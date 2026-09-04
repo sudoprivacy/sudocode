@@ -1368,6 +1368,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
+name = "engine-acp"
+version = "0.2.2"
+dependencies = [
+ "agent-client-protocol",
+ "agent-client-protocol-schema",
+ "agent-client-protocol-tokio",
+ "async-trait",
+ "axum",
+ "commands",
+ "futures",
+ "runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "engine-core"
 version = "0.2.2"
 dependencies = [
@@ -3932,6 +3949,7 @@ dependencies = [
  "compat-harness",
  "crossterm 0.28.1",
  "dialoguer",
+ "engine-acp",
  "engine-core",
  "engine-events",
  "flate2",

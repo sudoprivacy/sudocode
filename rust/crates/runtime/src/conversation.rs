@@ -9,8 +9,9 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_sync, estimate_session_tokens,
-    CompactionConfig, CompactionResult, ReadFileTracker,
+    autocompact_buffer_tokens, compact_session, compact_session_sync,
+    compact_session_sync_after_llm_failure, estimate_session_tokens, CompactionConfig,
+    CompactionError, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -341,6 +342,27 @@ pub struct TurnSummary {
     /// context window / capability lookups, because `config.model` may
     /// be an alias like "auto" that doesn't map to any capabilities entry.
     pub response_model: Option<String>,
+}
+
+/// Which path produced a [`CompactionResult`] from
+/// [`ConversationRuntime::compact_with_method`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionMethod {
+    /// The model summarised the removed messages (`send_compaction`).
+    LlmSummary,
+    /// The LLM call was unavailable or failed; the local structural
+    /// summary was used instead.
+    LocalHeuristic,
+}
+
+impl CompactionMethod {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlmSummary => "llm summary",
+            Self::LocalHeuristic => "local heuristic",
+        }
+    }
 }
 
 /// Details about automatic session compaction applied during a turn.
@@ -1687,12 +1709,26 @@ where
     }
 
     /// Compact using the LLM path. Falls back to sync if the API client
-    /// doesn't support `send_compaction`.
+    /// doesn't support `send_compaction` or the LLM call fails; the result's
+    /// `summary_source` records the fallback reason so the caller can
+    /// surface the lossier summary.
     pub async fn compact(
         &mut self,
         config: CompactionConfig,
         custom_instructions: Option<&str>,
     ) -> CompactionResult {
+        self.compact_with_method(config, custom_instructions)
+            .await
+            .0
+    }
+
+    /// [`Self::compact`] that also reports which path produced the result,
+    /// for callers that surface the outcome to the user (ACP `/compact`).
+    pub async fn compact_with_method(
+        &mut self,
+        config: CompactionConfig,
+        custom_instructions: Option<&str>,
+    ) -> (CompactionResult, CompactionMethod) {
         let model = self
             .session
             .model
@@ -1707,8 +1743,17 @@ where
         )
         .await
         {
-            Ok(result) => result,
-            Err(_) => compact_session_sync(&self.session, config),
+            Ok(result) => (result, CompactionMethod::LlmSummary),
+            Err(CompactionError::NothingToCompact) => (
+                compact_session_sync(&self.session, config),
+                CompactionMethod::LocalHeuristic,
+            ),
+            // LLM compaction failed (not supported or API error) — fall back
+            // to the local heuristic but keep the reason in `summary_source`.
+            Err(error) => (
+                compact_session_sync_after_llm_failure(&self.session, config, &error),
+                CompactionMethod::LocalHeuristic,
+            ),
         }
     }
 
@@ -1905,11 +1950,14 @@ where
         .await
         {
             Ok(result) => result,
-            Err(crate::compact::CompactionError::NothingToCompact) => return None,
-            Err(_) => {
+            // Nothing to shrink is not a failure; `maybe_auto_compact` counts
+            // the no-op toward its circuit-breaker from the `None` return.
+            Err(CompactionError::NothingToCompact) => return None,
+            Err(error) => {
                 // LLM compaction failed (not supported or API error) — fall
-                // back to the synchronous local heuristic.
-                compact_session_sync(&self.session, config)
+                // back to the synchronous local heuristic, keeping the
+                // reason in `summary_source`.
+                compact_session_sync_after_llm_failure(&self.session, config, &error)
             }
         };
 

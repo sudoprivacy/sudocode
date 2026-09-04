@@ -44,6 +44,10 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// the ACP response. 30s was cutting it exactly at the VLM timeout and
 /// the test recv panicked before scode's push_images could finish.
 const RECV_TIMEOUT: Duration = Duration::from_secs(90);
+/// The `available_commands_update` follows a `session/new` / `session/load`
+/// response on the same queue, so it is either there at once or the
+/// broadcast regressed — fail fast instead of waiting out `RECV_TIMEOUT`.
+const AVAILABLE_COMMANDS_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -160,6 +164,11 @@ enum Transport {
 struct AcpTestClient {
     transport: Transport,
     next_id: u64,
+    /// The `available_commands_update` the agent sent after the most recent
+    /// successful `session/new` / `session/load` (consumed by
+    /// [`AcpTestClient::send_request`] so it never leaks into the next
+    /// request's notifications).
+    last_available_commands: Option<Value>,
 }
 
 impl AcpTestClient {
@@ -178,14 +187,46 @@ impl AcpTestClient {
         self.send_raw(&request).await;
 
         let mut notifications = Vec::new();
-        loop {
+        let response = loop {
             let msg = self.recv().await;
             // A response has a matching numeric id.
             if msg.get("id").and_then(Value::as_u64) == Some(id) {
-                return (notifications, msg);
+                break msg;
             }
             notifications.push(msg);
+        };
+        // A successful session/new or session/load is followed by exactly one
+        // `available_commands_update` for the new session. Consume and check
+        // it here so every session-creating test verifies the broadcast and
+        // no test sees it as a stray notification on its next request.
+        if matches!(method, "session/new" | "session/load") && response.get("error").is_none() {
+            let update = timeout(AVAILABLE_COMMANDS_TIMEOUT, self.recv_inner())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{method} succeeded but no available_commands_update arrived within {AVAILABLE_COMMANDS_TIMEOUT:?}"
+                    )
+                });
+            assert_eq!(
+                update["method"].as_str(),
+                Some("session/update"),
+                "{method} must be followed by a session/update, got: {update}"
+            );
+            assert_eq!(
+                update["params"]["update"]["sessionUpdate"].as_str(),
+                Some("available_commands_update"),
+                "{method} must be followed by available_commands_update, got: {update}"
+            );
+            if let Some(expected) = params["sessionId"].as_str() {
+                assert_eq!(
+                    update["params"]["sessionId"].as_str(),
+                    Some(expected),
+                    "available_commands_update must target the loaded session"
+                );
+            }
+            self.last_available_commands = Some(update);
         }
+        (notifications, response)
     }
 
     /// Send a JSON-RPC request WITHOUT waiting for its response. Returns the
@@ -342,9 +383,22 @@ fn spawn_stdio_client(workspace: &TestWorkspace) -> AcpTestClient {
 /// process, so a test can exercise the process-wide prompt flags a session's
 /// `_meta` overrides layer on top of.
 fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> AcpTestClient {
+    spawn_stdio_client_with_args_and_env(workspace, extra, &[])
+}
+
+/// Like [`spawn_stdio_client_with_args`] but also sets extra environment
+/// variables on the `scode acp` process (`base_command` clears the
+/// environment, so runtime knobs such as the auto-compaction threshold have
+/// to be passed explicitly).
+fn spawn_stdio_client_with_args_and_env(
+    workspace: &TestWorkspace,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> AcpTestClient {
     let mut cmd = base_command(workspace);
     cmd.arg("acp")
         .args(extra)
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -360,6 +414,7 @@ fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> Ac
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -422,6 +477,7 @@ async fn spawn_ws_client(workspace: &TestWorkspace) -> AcpTestClient {
             ws_stream: Box::new(ws_stream),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -527,7 +583,64 @@ async fn scenario_session_new(client: &mut AcpTestClient, cwd: &std::path::Path)
         .as_str()
         .expect("sessionId should be a string");
     assert!(!session_id.is_empty(), "sessionId should not be empty");
+    assert_available_commands_update(
+        client
+            .last_available_commands
+            .as_ref()
+            .expect("session/new should be followed by available_commands_update"),
+        session_id,
+    );
     session_id.to_string()
+}
+
+/// The `available_commands_update` broadcast: addressed to `session_id`,
+/// shaped per the ACP schema (`availableCommands: [{name, description,
+/// input?: {hint}}]`), and listing the commands apeiron needs.
+fn assert_available_commands_update(update: &Value, session_id: &str) {
+    assert_eq!(update["params"]["sessionId"].as_str(), Some(session_id));
+    let commands = update["params"]["update"]["availableCommands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("availableCommands should be an array: {update}"));
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|c| c["name"].as_str().expect("command name is a string"))
+        .collect();
+    for expected in ["compact", "help", "model", "status"] {
+        assert!(
+            names.contains(&expected),
+            "available commands should include `{expected}`, got {names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"clear"),
+        "/clear is not offered in ACP mode, got {names:?}"
+    );
+    for command in commands {
+        assert!(
+            !command["name"].as_str().unwrap_or("").starts_with('/'),
+            "command names carry no leading slash: {command}"
+        );
+        assert!(
+            command["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
+            "every command has a description: {command}"
+        );
+        if let Some(input) = command.get("input") {
+            assert!(
+                input["hint"].as_str().is_some(),
+                "input, when present, is {{hint}}: {command}"
+            );
+        }
+    }
+    let model = commands
+        .iter()
+        .find(|c| c["name"] == "model")
+        .expect("model command");
+    assert!(
+        model["input"]["hint"].as_str().is_some(),
+        "/model advertises an input hint: {model}"
+    );
 }
 
 async fn scenario_session_prompt_streaming(client: &mut AcpTestClient, session_id: &str) {
@@ -834,11 +947,302 @@ async fn scenario_session_prompt_with_image_attachment(
     );
 }
 
+/// Send one slash command and return the concatenated agent text it produced
+/// plus the response.
+async fn run_slash_command(
+    client: &mut AcpTestClient,
+    session_id: &str,
+    command: &str,
+) -> (String, Value) {
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": command }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "{command} should end the turn normally: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+        })
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        !text.is_empty(),
+        "{command} should produce text: {notifs:?}"
+    );
+    (text, resp)
+}
+
+/// Run one `streaming_text` turn tagged with `marker` and return the
+/// response (for `_meta`) — the marker later identifies the turn in the
+/// model's request bodies and in the transcript on disk.
+async fn run_marked_turn(client: &mut AcpTestClient, session_id: &str, marker: &str) -> Value {
+    let (_notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text {marker}") }]
+            }),
+        )
+        .await;
+    assert!(
+        resp["result"].get("stopReason").is_some(),
+        "turn {marker} should complete: {resp}"
+    );
+    resp
+}
+
+/// The persisted transcript of `session_id` under `root`'s session store
+/// (`.scode/sessions/<workspace-fingerprint>/<session-id>/...`).
+fn read_session_transcript(root: &std::path::Path, session_id: &str) -> String {
+    fn walk(dir: &std::path::Path, session_id: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some(session_id) {
+                    for file in fs::read_dir(&path).into_iter().flatten().flatten() {
+                        if file.path().is_file() {
+                            out.push(file.path());
+                        }
+                    }
+                } else {
+                    walk(&path, session_id, out);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &root.join(".scode").join("sessions"),
+        session_id,
+        &mut files,
+    );
+    assert!(
+        !files.is_empty(),
+        "session {session_id} should be persisted under {}",
+        root.display()
+    );
+    files
+        .iter()
+        .map(|f| fs::read_to_string(f).expect("read transcript"))
+        .collect()
+}
+
+/// `/compact`: after three turns the two oldest messages are summarised (the
+/// mock answers compaction requests with its canned summary, so the LLM path
+/// is taken), the compaction is on disk immediately, and the next model
+/// request no longer carries the summarised turn.
+async fn scenario_slash_compact(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session_id = scenario_session_new(client, &workspace.root).await;
+    for marker in ["ACP_COMPACT_ONE", "ACP_COMPACT_TWO", "ACP_COMPACT_THREE"] {
+        run_marked_turn(client, &session_id, marker).await;
+    }
+    let before = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        !before.contains("\"type\":\"compaction\""),
+        "no compaction record before /compact"
+    );
+
+    let (text, _resp) = run_slash_command(client, &session_id, "/compact").await;
+    assert!(
+        text.contains("Result           compacted"),
+        "/compact should report a compaction, got: {text}"
+    );
+    assert!(
+        text.contains("Method           llm summary"),
+        "/compact should take the LLM path against the mock, got: {text}"
+    );
+    let removed: usize = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Messages removed"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("report should carry the removed count: {text}"));
+    assert!(removed >= 1, "/compact should remove messages: {text}");
+    assert!(
+        text.contains("Estimated tokens"),
+        "/compact should report the token estimate: {text}"
+    );
+
+    // Persisted right away, not at the end of the next turn.
+    let after = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        after.contains("\"type\":\"compaction\""),
+        "compaction metadata should be on disk right after /compact"
+    );
+
+    // The model now sees the summary instead of the oldest turn.
+    let body =
+        last_model_request_after_prompt(client, server, &session_id, "ACP_COMPACT_FOUR").await;
+    assert!(
+        !body.contains("ACP_COMPACT_ONE"),
+        "summarised turn must not reach the model after /compact"
+    );
+    assert!(
+        body.contains("ACP_COMPACT_THREE"),
+        "preserved recent turn must still reach the model"
+    );
+}
+
+/// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
+/// neither the in-memory nor the on-disk transcript is touched.
+///
+/// The first turn uses the mock's `delayed_text` scenario. Compaction
+/// requests are classified by the markers of the messages being summarised,
+/// and with three turns the first one is what gets summarised — so the
+/// compaction request itself is held for `DELAYED_TEXT_LATENCY`, which is the
+/// window in which the cancel lands.
+async fn scenario_slash_compact_cancel(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
+    let session_id = scenario_session_new(client, &workspace.root).await;
+    let (_n, first) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}delayed_text ACP_CANCEL_ONE") }]
+            }),
+        )
+        .await;
+    assert!(first["result"].get("stopReason").is_some(), "{first}");
+    for marker in ["ACP_CANCEL_TWO", "ACP_CANCEL_THREE"] {
+        run_marked_turn(client, &session_id, marker).await;
+    }
+    let transcript_before = read_session_transcript(&workspace.root, &session_id);
+    let requests_before = server.captured_requests().await.len();
+
+    let compact_id = client
+        .send_request_no_wait(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "/compact" }]
+            }),
+        )
+        .await;
+    // Wait until the compaction request is in flight at the mock.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let requests = server.captured_requests().await;
+        if requests[requests_before..]
+            .iter()
+            .any(|r| r.scenario == "delayed_text")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "/compact never issued its compaction request"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_id }
+        }))
+        .await;
+    let (notifs, resp) = client
+        .recv_until(Duration::from_secs(20), |m| is_response_to(m, compact_id))
+        .await
+        .unwrap_or_else(|seen| panic!("/compact never answered after cancel; seen: {seen:?}"));
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("cancelled"),
+        "cancelled /compact must end with stopReason cancelled: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk"))
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(text.contains("cancelled"), "got: {text}");
+
+    // Nothing changed on disk…
+    let transcript_after = read_session_transcript(&workspace.root, &session_id);
+    assert_eq!(
+        transcript_before, transcript_after,
+        "a cancelled /compact must leave the persisted transcript untouched"
+    );
+    // …or in memory: the next turn still carries the would-be-summarised turn.
+    let body =
+        last_model_request_after_prompt(client, server, &session_id, "ACP_CANCEL_FOUR").await;
+    assert!(
+        body.contains("ACP_CANCEL_ONE"),
+        "a cancelled /compact must not replace the in-memory transcript"
+    );
+}
+
+/// `/help` renders only the ACP table; an unknown command names the table.
+async fn scenario_slash_help_and_unknown(client: &mut AcpTestClient, session_id: &str) {
+    let (help, _resp) = run_slash_command(client, session_id, "/help").await;
+    for expected in ["/compact", "/model <model-id>", "/status"] {
+        assert!(
+            help.contains(expected),
+            "/help should list {expected}: {help}"
+        );
+    }
+    for repl_only in ["/exit", "/resume", "/clear", "Ctrl-R"] {
+        assert!(
+            !help.contains(repl_only),
+            "/help under ACP must not advertise REPL-only `{repl_only}`: {help}"
+        );
+    }
+
+    let (unknown, _resp) = run_slash_command(client, session_id, "/nonexistent").await;
+    assert!(
+        unknown.contains("`/nonexistent` is not supported in ACP mode"),
+        "got: {unknown}"
+    );
+    for expected in ["/compact", "/help"] {
+        assert!(
+            unknown.contains(expected),
+            "unknown-command hint should list {expected}: {unknown}"
+        );
+    }
+    assert!(
+        !unknown.contains("/clear"),
+        "unknown-command hint must not offer /clear: {unknown}"
+    );
+
+    // `/clear` itself is a REPL-only command under ACP.
+    let (clear, _resp) = run_slash_command(client, session_id, "/clear").await;
+    assert!(
+        clear.contains("`/clear` is not supported in ACP mode"),
+        "got: {clear}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scenario runner
 // ---------------------------------------------------------------------------
 
-async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace) {
+async fn run_all_scenarios(
+    client: &mut AcpTestClient,
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+) {
     scenario_initialize(client).await;
     let session_id = scenario_session_new(client, &workspace.root).await;
     scenario_session_prompt_streaming(client, &session_id).await;
@@ -847,6 +1251,9 @@ async fn run_all_scenarios(client: &mut AcpTestClient, workspace: &TestWorkspace
     scenario_session_load_unknown_session_errors(client).await;
     scenario_unknown_method(client).await;
     scenario_slash_command_model(client, &session_id).await;
+    scenario_slash_help_and_unknown(client, &session_id).await;
+    scenario_slash_compact(client, server, workspace).await;
+    scenario_slash_compact_cancel(client, server, workspace).await;
     // Run per-turn usage test last with a fresh session
     scenario_session_prompt_per_turn_usage(client, workspace).await;
 }
@@ -865,7 +1272,7 @@ async fn acp_stdio_integration() {
     workspace.write_sudocode_json(&server.base_url());
 
     let mut client = spawn_stdio_client(&workspace);
-    run_all_scenarios(&mut client, &workspace).await;
+    run_all_scenarios(&mut client, &server, &workspace).await;
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -2040,6 +2447,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     };
 
     // 1×1 transparent PNG.
@@ -2149,7 +2557,7 @@ async fn acp_ws_integration() {
     workspace.write_sudocode_json(&server.base_url());
 
     let mut client = spawn_ws_client(&workspace).await;
-    run_all_scenarios(&mut client, &workspace).await;
+    run_all_scenarios(&mut client, &server, &workspace).await;
     client.shutdown().await;
     workspace.cleanup();
 }
@@ -2239,6 +2647,7 @@ fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -2282,6 +2691,7 @@ fn spawn_stdio_client_danger_with_allowed(
             stdout: BufReader::new(stdout),
         },
         next_id: 1,
+        last_available_commands: None,
     }
 }
 
@@ -3091,6 +3501,162 @@ async fn acp_stdio_tool_call_update_carries_content_and_raw_output() {
     assert_eq!(
         &rederived, raw_output,
         "content text must be the verbatim tool output that rawOutput was built from"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Collect `(index, tool_use ids)` for every message in an Anthropic request
+/// body that carries `tool_use` blocks.
+fn tool_use_ids_by_message(messages: &[Value]) -> Vec<(usize, Vec<String>)> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let ids = message["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|block| block["type"].as_str() == Some("tool_use"))
+                        .filter_map(|block| block["id"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (!ids.is_empty()).then_some((index, ids))
+        })
+        .collect()
+}
+
+/// Regression guard for LLM compaction of a conversation that contains a
+/// parallel tool call.
+///
+/// Anthropic requires every `tool_use` in an assistant message to be
+/// answered by a `tool_result` in the SAME next user message. The runtime
+/// stores each tool result as its own `Tool`-role message and relies on
+/// `convert_messages` to merge consecutive `Tool` messages into one user
+/// message; `build_compaction_messages` used to remap `Tool` to `User`
+/// before that merge, so the compaction request split the results across
+/// consecutive user messages and the API rejected it with
+/// `messages.N: tool_use ids were found without tool_result blocks
+/// immediately after`. The runtime then silently fell back to the lossy
+/// local summary. The mock does not validate pairing, so the assertion on
+/// the captured request body has to be explicit.
+#[tokio::test]
+async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-compaction-pairing");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    fs::write(workspace.root.join("fixture.txt"), "alpha parity line\n")
+        .expect("fixture.txt should be written");
+
+    // A one-token threshold makes the runtime's post-turn auto-compaction
+    // fire after every turn, which is the only way to drive the LLM
+    // compaction path over ACP.
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1")],
+    );
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+
+    // One parallel-tool turn followed by two plain text turns. Compaction
+    // preserves the last four messages and never splits a tool_use /
+    // tool_result exchange, so the first two compactions only remove the
+    // leading user prompt (or nothing); the compaction after the third turn
+    // is the one whose input spans the parallel tool_use / tool_result
+    // exchange.
+    for scenario in [
+        "multi_tool_turn_roundtrip",
+        "streaming_text",
+        "streaming_text",
+    ] {
+        let (_notifs, resp) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session,
+                    "prompt": [{
+                        "type": "text",
+                        "text": format!("{SCENARIO_PREFIX}{scenario}")
+                    }]
+                }),
+            )
+            .await;
+        assert!(
+            resp["result"].get("stopReason").is_some(),
+            "{scenario} turn should complete normally: {resp}"
+        );
+    }
+
+    // Compaction requests are identified by their system prompt rather than
+    // the mock's scenario tag: the transcript being summarised still carries
+    // the PARITY_SCENARIO marker, which wins the mock's scenario detection.
+    let compaction_bodies = server
+        .captured_requests()
+        .await
+        .iter()
+        .filter(|request| !request.path.contains("count_tokens"))
+        .filter_map(|request| serde_json::from_str::<Value>(&request.raw_body).ok())
+        .filter(|body| {
+            body["system"]
+                .as_str()
+                .is_some_and(|system| system.contains("summarizing conversations"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !compaction_bodies.is_empty(),
+        "auto-compaction should have sent at least one LLM compaction request"
+    );
+
+    let mut saw_parallel_tool_use = false;
+    for body in &compaction_bodies {
+        let messages = body["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("compaction request should carry messages: {body}"));
+        for (index, tool_use_ids) in tool_use_ids_by_message(messages) {
+            if tool_use_ids.len() > 1 {
+                saw_parallel_tool_use = true;
+            }
+            let next = messages.get(index + 1).unwrap_or_else(|| {
+                panic!("compaction request messages.{index} has tool_use blocks but no following message: {body}")
+            });
+            assert_eq!(
+                next["role"].as_str(),
+                Some("user"),
+                "compaction request messages.{} must be the user message carrying the tool_results: {body}",
+                index + 1
+            );
+            let result_ids = next["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|block| block["type"].as_str() == Some("tool_result"))
+                        .filter_map(|block| block["tool_use_id"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for id in &tool_use_ids {
+                assert!(
+                    result_ids.contains(id),
+                    "compaction request messages.{index}: tool_use {id} has no tool_result in the \
+                     immediately following user message (messages.{} carries {result_ids:?}); \
+                     Anthropic rejects this shape with 400 `tool_use ids were found without \
+                     tool_result blocks immediately after`. Request: {body}",
+                    index + 1
+                );
+            }
+        }
+    }
+    assert!(
+        saw_parallel_tool_use,
+        "at least one compaction request should include the parallel tool_use pair; bodies: {compaction_bodies:?}"
     );
 
     client.shutdown().await;

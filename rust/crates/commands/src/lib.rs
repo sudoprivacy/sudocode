@@ -8,6 +8,7 @@ use plugins::{
     discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,
     PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary,
 };
+use runtime::acp_sdk_server::AcpSlashCommandSpec;
 use runtime::{
     compact_session_sync, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig,
     McpServerConfig, ScopedMcpServerConfig, Session,
@@ -57,6 +58,103 @@ pub struct SlashCommandSpec {
 pub enum SkillSlashDispatch {
     Local,
     Invoke(String),
+}
+
+/// The slash commands the ACP agent (`scode acp`) accepts in `session/prompt`.
+///
+/// Single source of truth for the `available_commands_update` broadcast,
+/// `/help` under ACP, and the unknown-command hint — add a command here when
+/// the ACP delegate learns to handle it, nowhere else. Names are the
+/// `SlashCommand::parse` names without the leading slash.
+const ACP_SLASH_COMMANDS: &[AcpSlashCommandSpec] = &[
+    AcpSlashCommandSpec {
+        name: "help",
+        description: "List the slash commands available in ACP mode",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "status",
+        description: "Show model, usage, git and config status for this session",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "cost",
+        description: "Show cumulative token usage for this session",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "model",
+        description: "Show the current model, or switch this session to another model",
+        input_hint: Some("<model-id>"),
+        holds_cwd_lease: true,
+    },
+    AcpSlashCommandSpec {
+        name: "compact",
+        description: "Summarise older messages to free context (LLM summary, local fallback)",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "config",
+        description: "Show the effective configuration (read-only)",
+        input_hint: Some("[section]"),
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "diff",
+        description: "Show staged and unstaged git changes in the session directory",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+    AcpSlashCommandSpec {
+        name: "doctor",
+        description: "Run local health checks for auth, config and workspace",
+        input_hint: None,
+        holds_cwd_lease: false,
+    },
+];
+
+/// The ACP slash-command table (see [`ACP_SLASH_COMMANDS`]).
+#[must_use]
+pub fn acp_slash_commands() -> &'static [AcpSlashCommandSpec] {
+    ACP_SLASH_COMMANDS
+}
+
+/// `/help` output under ACP: only the commands the ACP delegate implements,
+/// rendered from the same table the client was sent.
+#[must_use]
+pub fn render_acp_slash_command_help() -> String {
+    let width = ACP_SLASH_COMMANDS
+        .iter()
+        .map(|spec| spec.usage().len())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec!["Slash commands (ACP mode)".to_string()];
+    lines.extend(ACP_SLASH_COMMANDS.iter().map(|spec| {
+        format!(
+            "  {:<width$}  {}",
+            spec.usage(),
+            spec.description,
+            width = width
+        )
+    }));
+    lines.join("\n")
+}
+
+/// Hint returned for a slash command the ACP delegate does not implement:
+/// names the rejected command and lists the table.
+#[must_use]
+pub fn format_acp_unsupported_slash_command(input: &str) -> String {
+    let name = input.split_whitespace().next().unwrap_or(input);
+    let available = ACP_SLASH_COMMANDS
+        .iter()
+        .map(|spec| format!("/{}", spec.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("`{name}` is not supported in ACP mode. Available: {available}")
 }
 
 const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[

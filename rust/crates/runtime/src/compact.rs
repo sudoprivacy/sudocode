@@ -309,6 +309,34 @@ impl Default for CompactionConfig {
     }
 }
 
+/// Which path produced a [`CompactionResult`]'s summary.
+///
+/// The local heuristic summary is much lossier than the LLM one, so callers
+/// surface this to the user instead of reporting a silent downgrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionSummarySource {
+    /// The summary came from the LLM compaction call.
+    Llm,
+    /// The summary came from the local structural heuristic
+    /// ([`compact_session_sync`]). `fallback_reason` is set when the LLM
+    /// path was attempted first and failed.
+    Local { fallback_reason: Option<String> },
+}
+
+impl fmt::Display for CompactionSummarySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Llm => write!(f, "llm"),
+            Self::Local {
+                fallback_reason: None,
+            } => write!(f, "local"),
+            Self::Local {
+                fallback_reason: Some(reason),
+            } => write!(f, "local (LLM compaction failed: {reason})"),
+        }
+    }
+}
+
 /// Result of compacting a session into a summary plus preserved tail messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
@@ -316,6 +344,7 @@ pub struct CompactionResult {
     pub formatted_summary: String,
     pub compacted_session: Session,
     pub removed_message_count: usize,
+    pub summary_source: CompactionSummarySource,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,9 +538,15 @@ fn build_compaction_messages(
                 return None;
             }
 
-            // Map System/Tool roles to User for the compaction conversation
+            // Map System to User for the compaction conversation. Tool keeps
+            // its role: the API client relies on it to merge consecutive
+            // tool results into one user message, which Anthropic requires
+            // for every `tool_use` in the preceding assistant message
+            // (parallel tool calls otherwise fail with `tool_use ids were
+            // found without tool_result blocks immediately after`).
             let role = match msg.role {
-                MessageRole::System | MessageRole::User | MessageRole::Tool => MessageRole::User,
+                MessageRole::System | MessageRole::User => MessageRole::User,
+                MessageRole::Tool => MessageRole::Tool,
                 MessageRole::Assistant => MessageRole::Assistant,
             };
 
@@ -695,7 +730,24 @@ pub async fn compact_session<C: ApiClient>(
         formatted_summary,
         compacted_session,
         removed_message_count: removed.len(),
+        summary_source: CompactionSummarySource::Llm,
     })
+}
+
+/// Local fallback for callers whose LLM compaction attempt failed with
+/// `error`; identical to [`compact_session_sync`] except that the result
+/// records why the lossier local summary was used.
+#[must_use]
+pub fn compact_session_sync_after_llm_failure(
+    session: &Session,
+    config: CompactionConfig,
+    error: &CompactionError,
+) -> CompactionResult {
+    let mut result = compact_session_sync(session, config);
+    result.summary_source = CompactionSummarySource::Local {
+        fallback_reason: Some(error.to_string()),
+    };
+    result
 }
 
 /// Synchronous fallback compaction for callers without an async runtime or
@@ -710,6 +762,9 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
             formatted_summary: String::new(),
             compacted_session: session.clone(),
             removed_message_count: 0,
+            summary_source: CompactionSummarySource::Local {
+                fallback_reason: None,
+            },
         };
     }
 
@@ -752,6 +807,9 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         formatted_summary,
         compacted_session,
         removed_message_count: removed.len(),
+        summary_source: CompactionSummarySource::Local {
+            fallback_reason: None,
+        },
     }
 }
 

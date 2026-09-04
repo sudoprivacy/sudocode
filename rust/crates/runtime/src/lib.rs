@@ -90,9 +90,10 @@ pub use bash::{
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_sync, estimate_block_tokens,
-    estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
-    should_compact, CompactionConfig, CompactionError, CompactionResult, AUTOCOMPACT_BUFFER_TOKENS,
+    autocompact_buffer_tokens, compact_session, compact_session_sync,
+    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
+    format_compact_summary, get_compact_continuation_message, should_compact, CompactionConfig,
+    CompactionError, CompactionResult, CompactionSummarySource, AUTOCOMPACT_BUFFER_TOKENS,
     COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
@@ -114,8 +115,8 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compact_threshold_for_model, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
-    AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError, RuntimeObserver,
-    StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor, TurnSummary,
+    AutoCompactionEvent, CompactionMethod, ConversationRuntime, PromptCacheEvent, RuntimeError,
+    RuntimeObserver, StaticToolExecutor, ToolDispatchContext, ToolError, ToolExecutor, TurnSummary,
     FORK_BOILERPLATE_TAG,
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};

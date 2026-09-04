@@ -105,6 +105,72 @@ Rules:
   true` and `_meta.sudocode.systemPromptAppend: true` so clients can
   feature-detect.
 
+### Slash commands
+
+A `session/prompt` whose text starts with `/` is a slash command, not a model
+turn: it runs on the session's lane like any prompt, streams its result as
+`agent_message_chunk` text, and completes with `stopReason: "end_turn"` and
+no `usage`. The ACP agent implements a fixed subset of the REPL commands:
+
+| Command | Effect |
+|---|---|
+| `/help` | List the commands in this table (the REPL-only ones are not shown). |
+| `/status` | Model, usage, git and config status for this session. |
+| `/cost` | Cumulative token usage for this session. |
+| `/model [<model-id>]` | Show the current model, or switch this session to another model. |
+| `/compact` | Summarise older messages to free context. LLM summary first; if the model call is unavailable or fails, the local structural summary. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. |
+| `/config [section]` | Show the effective configuration (read-only; `/config set` is REPL-only). |
+| `/diff` | Staged and unstaged git changes in the session directory. |
+| `/doctor` | Local health checks for auth, config and workspace. |
+
+Any other `/command` is answered with a one-line text hint naming the command
+and listing this table.
+
+**Discovery.** Right after a successful `session/new` or `session/load`
+response, the agent sends one `session/update` notification advertising the
+table, so clients can build a command palette without hard-coding it:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "…",
+    "update": {
+      "sessionUpdate": "available_commands_update",
+      "availableCommands": [
+        { "name": "compact", "description": "Summarise older messages to free context (LLM summary, local fallback)" },
+        { "name": "model", "description": "…", "input": { "hint": "<model-id>" } }
+      ]
+    }
+  }
+}
+```
+
+Names carry no leading slash; send them as `/name …` in `session/prompt`.
+`input.hint` is present only for commands that take arguments. The
+notification follows the response on the same connection, so the client
+already knows the session id when it arrives; be ready to receive
+`session/update` for a session as soon as its `session/new` response is in,
+because this one follows immediately. The same table drives `/help` and the
+unknown-command hint, so the three never disagree.
+
+`session/cancel` applies to `/compact`: a cancel during the model round-trip
+drops the call, a cancel that lands after it discards the result; either way
+the transcript in memory and on disk is left untouched and the prompt ends
+with `stopReason: "cancelled"`. The other commands are local and complete
+before a cancel could matter.
+
+**Automatic compaction.** When a turn compacts the transcript on its own —
+either the pre-turn overflow guard or the in-turn threshold path — the
+`session/prompt` response carries `_meta.sudocode.autoCompacted: true`
+alongside the existing `contextWindowTokens`, `estimatedSessionTokens`,
+cost and `cumulativeUsage` fields. The key is absent when no automatic
+compaction happened; `/compact` itself never sets it (its report is the
+text reply). Like the rest of `_meta.sudocode`, it rides on the success
+response, so a turn that fails after compacting reports the error and no
+`autoCompacted`.
+
 ### `session/load`
 
 `agentCapabilities.loadSession` is advertised. `session/load

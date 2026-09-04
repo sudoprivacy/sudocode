@@ -73,11 +73,15 @@ impl AcpError {
             return raw_message.clone();
         }
 
-        // Check for specific error types and provide friendly messages
+        // Check for specific error types and provide friendly messages.
+        // A context-window rejection that reaches here was not classified by
+        // the prompt path (which knows whether history was compactable), so
+        // do not guess a sub-class: a long history and a single oversized
+        // message are different problems with different fixes.
         if raw_message.contains("context_window_blocked")
             || raw_message.contains("Context window blocked")
         {
-            return "[context_window_exceeded][single_request_too_large] 图片或文本内容过大，超出了模型的处理限制。\n\n建议解决方案：\n1. 使用较小的图片（建议压缩或缩小图片尺寸）\n2. 简化输入内容\n3. 使用支持更大上下文的模型\n4. 清除对话历史后重新开始".to_string();
+            return "[context_window_exceeded] 请求超出了模型的上下文限制。\n\n建议解决方案：\n1. 压缩或清除对话历史后重新开始\n2. 使用较小的图片或简化输入内容\n3. 使用支持更大上下文的模型".to_string();
         }
 
         if raw_message.contains("authentication")

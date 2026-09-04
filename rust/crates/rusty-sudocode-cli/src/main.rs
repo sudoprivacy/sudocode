@@ -45,7 +45,7 @@ use api::{
 
 use cli::api_client::{
     collect_prompt_cache_events, collect_tool_results, collect_tool_uses, final_assistant_text,
-    AnthropicRuntimeClient,
+    max_tokens_for_model, AnthropicRuntimeClient,
 };
 use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
@@ -3738,30 +3738,44 @@ impl AcpSdkDelegate {
             session.runtime.set_trace_id(tid);
         }
 
-        // Pre-send token estimation and auto-compact logic
+        // Pre-send context budget check.
+        //
+        // The request the provider sees is history + system prompt + tool
+        // definitions, and the window must also hold `max_tokens` of output.
+        // The API client's local preflight (`api::preflight_message_request`)
+        // rejects on exactly that sum, so history is budgeted against it here
+        // rather than against a bare percentage of the window: with the old
+        // 85% rule a long history sailed past this check and was then
+        // rejected by the preflight with no compaction ever having run —
+        // and, because ACP has no `/compact`, stayed rejected on every
+        // later prompt.
         let fallback_model = self.inner.current_model();
         let model = session
             .runtime
             .session()
             .model
-            .as_ref()
-            .unwrap_or(&fallback_model);
+            .clone()
+            .unwrap_or(fallback_model);
         // Context window comes from the model-capabilities SSOT file (per-model
         // entry, else the file's `default`). No hardcoded fallback here.
-        let context_limit = runtime::model_capabilities::context_window_or_default(model) as usize;
-
-        // Estimate current session tokens
+        let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
+        let max_output_tokens = max_tokens_for_model(&model) as usize;
+        let overhead_tokens = session
+            .runtime
+            .api_client()
+            .fixed_request_overhead_tokens(session.runtime.system_prompt());
+        let buffer_tokens = runtime::autocompact_buffer_tokens(&model) as usize;
+        let history_budget =
+            context_limit.saturating_sub(max_output_tokens + overhead_tokens + buffer_tokens);
+        let prompt_tokens = estimate_block_tokens(&ContentBlock::Text {
+            text: prompt.clone(),
+        });
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
-        let threshold = (context_limit as f64 * 0.85) as usize; // 85% threshold
-                                                                // Surfaced to the client as `_meta.sudocode.autoCompacted`.
+        // Surfaced to the client as `_meta.sudocode.autoCompacted`.
         let mut auto_compacted = false;
 
-        // If approaching limit, try auto-compact
-        if estimated_tokens > threshold {
-            // Check if we have enough messages to compact
+        if estimated_tokens + prompt_tokens > history_budget {
             let message_count = session.runtime.session().messages.len();
-            let can_compact = message_count > 4; // Need more than preserve_recent_messages
-
             if let Some(tracer) = session.runtime.session_tracer() {
                 tracer.record("auto_compact_check", {
                     let mut attrs = Map::new();
@@ -3769,7 +3783,22 @@ impl AcpSdkDelegate {
                         "estimated_tokens".to_string(),
                         Value::Number(estimated_tokens.into()),
                     );
-                    attrs.insert("threshold".to_string(), Value::Number(threshold.into()));
+                    attrs.insert(
+                        "prompt_tokens".to_string(),
+                        Value::Number(prompt_tokens.into()),
+                    );
+                    attrs.insert(
+                        "history_budget".to_string(),
+                        Value::Number(history_budget.into()),
+                    );
+                    attrs.insert(
+                        "overhead_tokens".to_string(),
+                        Value::Number(overhead_tokens.into()),
+                    );
+                    attrs.insert(
+                        "max_output_tokens".to_string(),
+                        Value::Number(max_output_tokens.into()),
+                    );
                     attrs.insert(
                         "context_limit".to_string(),
                         Value::Number(context_limit.into()),
@@ -3778,83 +3807,46 @@ impl AcpSdkDelegate {
                         "message_count".to_string(),
                         Value::Number(message_count.into()),
                     );
-                    attrs.insert("can_compact".to_string(), Value::Bool(can_compact));
                     attrs
                 });
             }
 
-            if can_compact {
-                // Perform compaction with aggressive settings for overflow scenario
-                let compaction_config = CompactionConfig {
-                    preserve_recent_messages: 2,
+            // LLM compaction with local fallback; installs the result and
+            // rewrites the transcript so a later resume does not reload the
+            // pre-compaction history.
+            let compaction = self
+                .inner
+                .tokio_runtime
+                .block_on(session.runtime.compact_in_place(CompactionConfig {
                     max_estimated_tokens: 0, // Force compaction
-                };
-                let result = compact_session_sync(session.runtime.session(), compaction_config);
-                if result.removed_message_count > 0 {
-                    auto_compacted = true;
-                    // Update session with compacted version
-                    *session.runtime.session_mut() = result.compacted_session.clone();
-                    // Persist the compacted state immediately. The end-of-turn save_to_path is
-                    // skipped by the still-over-limit early return below (and by any later turn
-                    // error), which would otherwise leave the on-disk JSONL holding the full
-                    // uncompacted history — so the next resume reloads the pre-compaction session
-                    // and overflows again. Best-effort: a persist hiccup must not abort the turn.
-                    if let Err(persist_err) =
-                        session.runtime.session().save_to_path(&session.handle.path)
-                    {
-                        if let Some(tracer) = session.runtime.session_tracer() {
-                            tracer.record("auto_compact_persist_error", {
-                                let mut attrs = Map::new();
-                                attrs.insert(
-                                    "error".to_string(),
-                                    Value::String(persist_err.to_string()),
-                                );
-                                attrs
-                            });
-                        }
-                    }
-                    if let Some(tracer) = session.runtime.session_tracer() {
-                        tracer.record("auto_compact_result", {
-                            let mut attrs = Map::new();
-                            attrs.insert(
-                                "removed_messages".to_string(),
-                                Value::Number(result.removed_message_count.into()),
-                            );
-                            attrs
-                        });
-                    }
+                    ..CompactionConfig::default()
+                }));
+            if let Some(event) = compaction {
+                auto_compacted = true;
+                if let Some(tracer) = session.runtime.session_tracer() {
+                    tracer.record("auto_compact_result", {
+                        let mut attrs = Map::new();
+                        attrs.insert(
+                            "removed_messages".to_string(),
+                            Value::Number(event.removed_message_count.into()),
+                        );
+                        attrs
+                    });
                 }
+            }
 
-                // Re-estimate after compaction
-                let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
-
-                // If still over limit after compaction, return friendly error
-                if new_estimated_tokens > context_limit {
-                    let user_message = format!(
-                        "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
-                        当前估算: {} tokens\n\
-                        模型限制: {} tokens\n\n\
-                        建议解决方案：\n\
-                        1. 开始新对话\n\
-                        2. 使用支持更大上下文的模型\n\
-                        3. 减少图片或大文本内容的发送",
-                        new_estimated_tokens, context_limit
-                    );
-                    return Err(runtime::AcpError::internal(user_message));
-                }
-            } else {
-                // No messages to compact, but request is too large
-                let user_message = format!(
-                    "[context_window_exceeded][single_request_too_large] 当前请求内容过大，超出模型处理限制。\n\n\
-                    当前估算: {} tokens\n\
-                    模型限制: {} tokens\n\n\
-                    建议解决方案：\n\
-                    1. 使用较小的图片（压缩或缩小图片尺寸）\n\
-                    2. 简化输入内容\n\
-                    3. 使用支持更大上下文的模型",
-                    estimated_tokens, context_limit
-                );
-                return Err(runtime::AcpError::internal(user_message));
+            // Re-estimate after compaction against the hard limit the
+            // preflight enforces. Still over → surface a classified error
+            // instead of sending a request that will be rejected.
+            let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
+            if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
+                > context_limit
+            {
+                return Err(runtime::AcpError::internal(context_overflow_user_message(
+                    session.runtime.session(),
+                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                    context_limit,
+                )));
             }
         }
         // Run the turn and get the TurnSummary directly
@@ -3865,6 +3857,19 @@ impl AcpSdkDelegate {
             .map_err(|e| {
                 if let Some(tracer) = session.runtime.session_tracer() {
                     tracer.record_prompt_error("runtime_error", e.to_string());
+                }
+                if e.is_context_window_blocked() {
+                    // The runtime already compacted and retried once; what is
+                    // left is either a tail that does not fit on its own or a
+                    // history it could not shrink. Classify from the session.
+                    let estimated = estimate_session_tokens(session.runtime.session())
+                        + overhead_tokens
+                        + max_output_tokens;
+                    return runtime::AcpError::internal(context_overflow_user_message(
+                        session.runtime.session(),
+                        estimated,
+                        context_limit,
+                    ));
                 }
                 runtime::AcpError::internal(e.to_string())
             })?;
@@ -3932,6 +3937,45 @@ impl AcpSdkDelegate {
             runtime::acp_sdk_server::AcpStopReason::EndTurn,
             prompt_usage,
         ))
+    }
+}
+
+/// User-facing message for a request that does not fit the context window,
+/// classified by what is left to shrink.
+///
+/// `[history_context_too_large]`: there is compactable history beyond the
+/// preserved tail, so compaction did not (or could not) bring the request
+/// under the limit. `[single_request_too_large]`: nothing but the summary
+/// and the most recent messages remain — the recent messages themselves are
+/// too large (typically a big paste or image), and compacting cannot help.
+fn context_overflow_user_message(
+    session: &Session,
+    estimated_tokens: usize,
+    context_limit: usize,
+) -> String {
+    let summary_prefix = usize::from(session.compaction.is_some());
+    let compactable = session.messages.len().saturating_sub(summary_prefix)
+        > CompactionConfig::default().preserve_recent_messages;
+    if compactable {
+        format!(
+            "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
+            当前估算: {estimated_tokens} tokens\n\
+            模型限制: {context_limit} tokens\n\n\
+            建议解决方案：\n\
+            1. 开始新对话\n\
+            2. 使用支持更大上下文的模型\n\
+            3. 减少图片或大文本内容的发送"
+        )
+    } else {
+        format!(
+            "[context_window_exceeded][single_request_too_large] 最近的消息内容过大，压缩历史也无法放入模型上下文。\n\n\
+            当前估算: {estimated_tokens} tokens\n\
+            模型限制: {context_limit} tokens\n\n\
+            建议解决方案：\n\
+            1. 使用较小的图片（压缩或缩小图片尺寸）\n\
+            2. 简化输入内容\n\
+            3. 使用支持更大上下文的模型"
+        )
     }
 }
 

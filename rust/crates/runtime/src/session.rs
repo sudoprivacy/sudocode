@@ -355,6 +355,19 @@ impl Session {
         Ok(())
     }
 
+    /// Rewrite the persisted transcript from the in-memory state.
+    ///
+    /// `push_message` appends incrementally, so any operation that *replaces*
+    /// `messages` (compaction, discarding an unanswered prompt) must call this
+    /// or the next load resurrects the pre-replacement history from disk.
+    /// A no-op for sessions without a persistence path.
+    pub fn rewrite_persisted(&self) -> Result<(), SessionError> {
+        match self.persistence_path() {
+            Some(path) => self.save_to_path(path.to_path_buf()),
+            None => Ok(()),
+        }
+    }
+
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         Self::load_from_path_with(&StdFsBackend, path)
     }

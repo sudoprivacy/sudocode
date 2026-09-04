@@ -272,6 +272,17 @@ impl std::error::Error for ToolError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     message: String,
+    kind: RuntimeErrorKind,
+}
+
+/// Coarse classification of a [`RuntimeError`], for the few failures the
+/// runtime can recover from itself rather than surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeErrorKind {
+    Generic,
+    /// The request was rejected — locally by the API client's preflight or
+    /// by the provider — because it does not fit the model's context window.
+    ContextWindowBlocked,
 }
 
 impl RuntimeError {
@@ -279,7 +290,23 @@ impl RuntimeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: RuntimeErrorKind::Generic,
         }
+    }
+
+    /// An error whose cause is the request exceeding the context window.
+    /// `run_turn` reacts to this by compacting history and retrying once.
+    #[must_use]
+    pub fn context_window_blocked(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: RuntimeErrorKind::ContextWindowBlocked,
+        }
+    }
+
+    #[must_use]
+    pub fn is_context_window_blocked(&self) -> bool {
+        self.kind == RuntimeErrorKind::ContextWindowBlocked
     }
 }
 
@@ -1027,6 +1054,8 @@ where
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
         let mut retried_empty_post_tool_deliverable = false;
+        let mut retried_context_window_overflow = false;
+        let mut overflow_compaction: Option<AutoCompactionEvent> = None;
         let mut response_model: Option<String> = None;
 
         loop {
@@ -1063,7 +1092,7 @@ where
             };
             // Race the API stream (which includes the retry loop) against
             // the abort signal so ESC/Ctrl-C cancels even during retries.
-            let mut stream = {
+            let stream_result = {
                 let abort = &self.hook_abort_signal;
                 tokio::select! {
                     biased;
@@ -1083,13 +1112,36 @@ where
                             response_model: None,
                         });
                     }
-                    result = self.api_client.stream(request) => match result {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            self.record_turn_failed(iterations, &error);
-                            return Err(error);
+                    result = self.api_client.stream(request) => result,
+                }
+            };
+            let mut stream = match stream_result {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // A context-window rejection is the one request failure
+                    // the runtime can fix on its own: compact the history and
+                    // resend. Once per turn — if the preserved tail is still
+                    // too large the error is real and must surface.
+                    if error.is_context_window_blocked() && !retried_context_window_overflow {
+                        retried_context_window_overflow = true;
+                        let config = CompactionConfig {
+                            max_estimated_tokens: 0,
+                            ..CompactionConfig::default()
+                        };
+                        if let Some(event) = self.compact_in_place(config).await {
+                            overflow_compaction =
+                                merge_auto_compaction(overflow_compaction, Some(event));
+                            continue;
                         }
                     }
+                    if error.is_context_window_blocked() && assistant_messages.is_empty() {
+                        // Nothing answered this prompt; keeping it would make
+                        // every retry start from a bigger history than the
+                        // one that was just rejected.
+                        self.discard_unanswered_user_turn();
+                    }
+                    self.record_turn_failed(iterations, &error);
+                    return Err(error);
                 }
             };
 
@@ -1181,7 +1233,10 @@ where
                             self.record_turn_failed(iterations, &error);
                             return Err(error);
                         }
-                        let auto_compaction = self.maybe_auto_compact().await;
+                        let auto_compaction = merge_auto_compaction(
+                            overflow_compaction,
+                            self.maybe_auto_compact().await,
+                        );
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
                         self.user_request_intent = None;
@@ -1630,7 +1685,8 @@ where
             }
         }
 
-        let auto_compaction = self.maybe_auto_compact().await;
+        let auto_compaction =
+            merge_auto_compaction(overflow_compaction, self.maybe_auto_compact().await);
 
         self.finish_current_turn_tracking();
 
@@ -1720,6 +1776,12 @@ where
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The system prompt sent with every request of this runtime.
+    #[must_use]
+    pub fn system_prompt(&self) -> &SystemPrompt {
+        &self.system_prompt
     }
 
     #[must_use]
@@ -1824,7 +1886,14 @@ where
     async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
         let model = self.session.model.as_deref().unwrap_or("claude-sonnet-4-6");
         let threshold = auto_compact_threshold_for_model(model);
-        if self.usage_tracker.cumulative_usage().input_tokens < threshold {
+        // Compare the context the provider actually processed on the latest
+        // response (uncached input + cache reads + cache writes) against the
+        // window. The session-wide cumulative input count is the wrong
+        // metric on both kinds of provider: with prompt caching it is a few
+        // hundred tokens per turn and never reaches the threshold; without
+        // caching it grows quadratically, never decreases, and re-compacts
+        // after every turn once crossed.
+        if self.usage_tracker.current_turn_usage().context_tokens() < threshold {
             return None;
         }
 
@@ -1840,15 +1909,37 @@ where
             max_estimated_tokens: 0,
             ..CompactionConfig::default()
         };
+        let event = self.compact_in_place(config).await;
+        if event.is_some() {
+            // Success → reset the noop counter so the breaker only trips on
+            // SUSTAINED inability to shrink, not on transient threshold dance.
+            self.consecutive_auto_compact_noops = 0;
+        } else {
+            self.consecutive_auto_compact_noops =
+                self.consecutive_auto_compact_noops.saturating_add(1);
+        }
+        event
+    }
 
-        // Resolve model for the compaction call
+    /// Compact the live session and install the result.
+    ///
+    /// Tries LLM compaction first and falls back to the local structural
+    /// summary when the API client does not support it or the call fails.
+    /// Re-injects recently read files after the summary, replaces the
+    /// in-memory session, and rewrites the persisted transcript so a later
+    /// resume does not reload the pre-compaction history. Returns `None`
+    /// when nothing could be removed (session too small, or the tail
+    /// protection kept everything).
+    pub async fn compact_in_place(
+        &mut self,
+        config: CompactionConfig,
+    ) -> Option<AutoCompactionEvent> {
         let model = self
             .session
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
-        // Try LLM-based compaction first; fall back to sync if unsupported
         let result = match compact_session(
             &self.session,
             config,
@@ -1859,27 +1950,20 @@ where
         .await
         {
             Ok(result) => result,
-            Err(CompactionError::NothingToCompact) => {
-                self.consecutive_auto_compact_noops =
-                    self.consecutive_auto_compact_noops.saturating_add(1);
-                return None;
-            }
+            // Nothing to shrink is not a failure; `maybe_auto_compact` counts
+            // the no-op toward its circuit-breaker from the `None` return.
+            Err(CompactionError::NothingToCompact) => return None,
             Err(error) => {
                 // LLM compaction failed (not supported or API error) — fall
-                // back to the synchronous local heuristic.
+                // back to the synchronous local heuristic, keeping the
+                // reason in `summary_source`.
                 compact_session_sync_after_llm_failure(&self.session, config, &error)
             }
         };
 
         if result.removed_message_count == 0 {
-            self.consecutive_auto_compact_noops =
-                self.consecutive_auto_compact_noops.saturating_add(1);
             return None;
         }
-
-        // Success → reset the noop counter so the breaker only trips on
-        // SUSTAINED inability to shrink, not on transient threshold dance.
-        self.consecutive_auto_compact_noops = 0;
 
         // Post-compact file restore: re-inject recently-read file content
         // so the model doesn't lose knowledge of files it just worked with.
@@ -1898,10 +1982,48 @@ where
             }
         }
         self.session = session;
+        // `push_message` appends to the transcript incrementally; the file
+        // still holds the removed messages until it is rewritten.
+        if let Err(error) = self.session.rewrite_persisted() {
+            self.record_session_persist_error("compaction", &error.to_string());
+        }
 
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,
         })
+    }
+
+    /// Drop the trailing user message of a turn that produced no assistant
+    /// output, and rewrite the transcript to match. Used when the request
+    /// was rejected for its size: leaving the prompt in place would make the
+    /// user's next attempt start from a larger history than the one that
+    /// just failed, and consecutive user messages would accumulate on disk.
+    fn discard_unanswered_user_turn(&mut self) {
+        if !self
+            .session
+            .messages
+            .last()
+            .is_some_and(|message| message.role == MessageRole::User)
+        {
+            return;
+        }
+        self.session.messages.pop();
+        if let Err(error) = self.session.rewrite_persisted() {
+            self.record_session_persist_error("discard_unanswered_user_turn", &error.to_string());
+        }
+    }
+
+    fn record_session_persist_error(&self, operation: &str, error: &str) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+        let mut attributes = Map::new();
+        attributes.insert(
+            "operation".to_string(),
+            Value::String(operation.to_string()),
+        );
+        attributes.insert("error".to_string(), Value::String(error.to_string()));
+        session_tracer.record("session_persist_error", attributes);
     }
 
     fn record_turn_started(&self, user_input: &str) {
@@ -2036,6 +2158,21 @@ where
         attributes.insert("iteration".to_string(), Value::from(iteration as u64));
         attributes.insert("error".to_string(), Value::String(error.to_string()));
         session_tracer.record("turn_failed", attributes);
+    }
+}
+
+/// Combine the compaction events of one turn (overflow recovery plus the
+/// post-turn auto-compaction) into the single event reported to callers.
+fn merge_auto_compaction(
+    first: Option<AutoCompactionEvent>,
+    second: Option<AutoCompactionEvent>,
+) -> Option<AutoCompactionEvent> {
+    match (first, second) {
+        (None, None) => None,
+        (Some(event), None) | (None, Some(event)) => Some(event),
+        (Some(a), Some(b)) => Some(AutoCompactionEvent {
+            removed_message_count: a.removed_message_count + b.removed_message_count,
+        }),
     }
 }
 
@@ -4076,10 +4213,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_compacts_when_cumulative_input_threshold_is_crossed() {
+    async fn auto_compacts_when_context_threshold_is_crossed() {
         let _g = env_guard();
         // Env-var override sets threshold to 100 — test-only, independent of SSOT.
-        // Mock reports 200 input tokens → crosses 100 → triggers auto-compact.
+        // Mock reports a 200-token context on the latest response → crosses
+        // 100 → triggers auto-compact.
         std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "100");
         struct SimpleApi;
         #[async_trait]

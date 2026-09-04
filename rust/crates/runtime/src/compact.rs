@@ -594,6 +594,11 @@ fn is_prompt_too_long(error_msg: &str) -> bool {
         || lower.contains("prompt_too_long")
         || lower.contains("maximum context length")
         || lower.contains("token limit")
+        // The API client's local preflight rejects an oversized compaction
+        // request before it leaves the process; treat it like the provider's
+        // own prompt-too-long so the head-truncation retry still applies.
+        || lower.contains("context_window_blocked")
+        || lower.contains("context window")
 }
 
 /// Drop the oldest ~20% of message groups from compaction input to make

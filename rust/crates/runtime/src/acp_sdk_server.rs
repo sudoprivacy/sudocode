@@ -28,16 +28,17 @@ use agent_client_protocol::{
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
 };
 use agent_client_protocol_schema::{
-    AgentCapabilities, CancelNotification, ClientRequest, CloseSessionRequest,
-    CloseSessionResponse, ContentBlock, ContentChunk, ExtRequest, Implementation,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptCapabilities, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    AgentCapabilities, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
+    CancelNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
+    ContentChunk, ExtRequest, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
     SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
     StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, Usage,
+    ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -268,13 +269,21 @@ pub trait SdkAcpDelegate: Send + Sync + 'static {
         prompter: Box<dyn QuestionPrompter>,
     ) -> Result<(), AcpError>;
 
-    /// Handle a slash command, returning text output.
+    /// Handle a slash command. Text output goes through `observer`; the
+    /// returned stop reason is `EndTurn` unless the command honoured a
+    /// `session/cancel` (then `Cancelled`).
     fn handle_slash_command(
         &self,
         session_id: &str,
         input: &str,
         observer: &mut SdkSessionObserver,
-    ) -> Result<(), AcpError>;
+    ) -> Result<StopReason, AcpError>;
+
+    /// The slash commands [`Self::handle_slash_command`] accepts. Broadcast
+    /// to the client as `available_commands_update` right after `session/new`
+    /// and `session/load` succeed, so it must describe exactly what the
+    /// delegate implements.
+    fn available_commands(&self) -> &'static [AcpSlashCommandSpec];
 
     /// List active session IDs with their cwds.
     fn list_sessions(&self) -> Vec<(String, PathBuf)>;
@@ -475,6 +484,10 @@ pub struct PromptUsage {
     pub cost_currency: Option<UsageCostCurrency>,
     /// Cumulative usage for the entire session, exposed via _meta.sudocode.cumulativeUsage
     pub cumulative_usage: Option<CumulativeUsage>,
+    /// `true` when the transcript was compacted automatically during this
+    /// turn (pre-turn overflow protection or the in-turn threshold path),
+    /// exposed via `_meta.sudocode.autoCompacted`.
+    pub auto_compacted: bool,
 }
 
 /// Cumulative token usage for the entire session.
@@ -485,6 +498,80 @@ pub struct CumulativeUsage {
     pub total_tokens: u64,
     pub cached_read_tokens: Option<u64>,
     pub cached_write_tokens: Option<u64>,
+}
+
+/// One slash command the ACP agent accepts inside `session/prompt`.
+///
+/// The single table of these (owned by the `commands` crate, wired in by the
+/// delegate) is the source of truth for three things at once: the
+/// `available_commands_update` notification, `/help` under ACP, and the
+/// unknown-command hint. Keep them in one place so they cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcpSlashCommandSpec {
+    /// Command name without the leading slash (`compact`, not `/compact`).
+    pub name: &'static str,
+    /// One-line, human-readable description shown by the client.
+    pub description: &'static str,
+    /// Placeholder for the argument text when the command takes any
+    /// (`<model-id>`); `None` for argument-less commands.
+    pub input_hint: Option<&'static str>,
+    /// `true` for commands that rebuild the session runtime (`/model`),
+    /// which is a runtime-construction path and therefore runs
+    /// under the process-cwd lease (see [`WorkspaceCwdLease`]). Everything
+    /// else — in particular `/compact`, which waits on a model round-trip —
+    /// runs outside the lease so it never stalls `session/new` / `session/load`
+    /// of sessions in other directories.
+    pub holds_cwd_lease: bool,
+}
+
+/// Whether the slash command in `prompt` (`/name …`) is one that must run
+/// under the process-cwd lease, per the delegate's command table. Unknown
+/// commands only ever print a hint, so they do not.
+fn slash_command_holds_cwd_lease(prompt: &str, specs: &[AcpSlashCommandSpec]) -> bool {
+    let name = prompt
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next());
+    name.is_some_and(|name| {
+        specs
+            .iter()
+            .any(|spec| spec.name == name && spec.holds_cwd_lease)
+    })
+}
+
+impl AcpSlashCommandSpec {
+    /// `/name <hint>` as the user would type it.
+    #[must_use]
+    pub fn usage(&self) -> String {
+        match self.input_hint {
+            Some(hint) => format!("/{} {hint}", self.name),
+            None => format!("/{}", self.name),
+        }
+    }
+}
+
+impl From<&AcpSlashCommandSpec> for AvailableCommand {
+    fn from(spec: &AcpSlashCommandSpec) -> Self {
+        AvailableCommand::new(spec.name, spec.description).input(
+            spec.input_hint.map(|hint| {
+                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(hint))
+            }),
+        )
+    }
+}
+
+/// The `session/update` notification advertising `specs` to the client
+/// (`sessionUpdate: "available_commands_update"`, `availableCommands: [...]`).
+fn available_commands_notification(
+    session_id: &str,
+    specs: &[AcpSlashCommandSpec],
+) -> SessionNotification {
+    SessionNotification::new(
+        session_id.to_string(),
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(
+            specs.iter().map(AvailableCommand::from).collect(),
+        )),
+    )
 }
 
 /// Build the `_meta` map for the `initialize` response. Currently advertises
@@ -587,6 +674,9 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
             }),
         );
     }
+    if u.auto_compacted {
+        sudocode_meta.insert("autoCompacted".to_string(), json!(true));
+    }
     sudocode_meta
 }
 
@@ -624,6 +714,7 @@ mod tests {
                 cached_read_tokens: Some(3),
                 cached_write_tokens: Some(0),
             }),
+            auto_compacted: false,
         });
 
         assert_eq!(meta["costUnits"], serde_json::json!(43_700));
@@ -1195,6 +1286,8 @@ pub(crate) async fn run_acp_on_transport(
                         };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
+                    let commands = delegate.available_commands();
+                    let cx_notify = cx.clone();
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
@@ -1217,7 +1310,13 @@ pub(crate) async fn run_acp_on_transport(
                         match result {
                             Ok((session_id, cwd, signal)) => {
                                 registry.register(session_id.clone(), signal, cwd);
-                                responder.respond(NewSessionResponse::new(session_id))?;
+                                responder.respond(NewSessionResponse::new(session_id.clone()))?;
+                                // Advertise the slash commands once the client
+                                // knows the session id (the response goes out
+                                // first on the same queue).
+                                let _ = cx_notify.send_notification(
+                                    available_commands_notification(&session_id, commands),
+                                );
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;
@@ -1262,6 +1361,7 @@ pub(crate) async fn run_acp_on_transport(
 
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
+                    let commands = delegate.available_commands();
                     let sid = req.session_id.to_string();
                     let cx_inner = cx.clone();
                     let cx_perm = cx.clone();
@@ -1273,6 +1373,8 @@ pub(crate) async fn run_acp_on_transport(
                         let session_cwd = registry.cwd(&sid);
                         let cwd_lease = registry.cwd_lease();
                         let is_slash_command = prompt_text.starts_with('/');
+                        let holds_cwd_lease =
+                            is_slash_command && slash_command_holds_cwd_lease(&prompt_text, commands);
 
                         // Set up permission-prompt bridge channels.
                         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -1304,13 +1406,15 @@ pub(crate) async fn run_acp_on_transport(
                             // no cwd and fall through to the delegate's
                             // `unknown sessionId` error.
                             let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
-                            // Slash commands are the exception: `/model`
-                            // rebuilds the session runtime, which is a
-                            // runtime-construction path (see
-                            // `WorkspaceCwdLease`), so they run under the
-                            // lease. They are short and never park on the
-                            // user.
-                            let _cwd_guard = match (is_slash_command, session_cwd) {
+                            // The slash commands that rebuild the session
+                            // runtime (`/model` — `holds_cwd_lease` in the
+                            // command table) are runtime-construction
+                            // paths (see `WorkspaceCwdLease`), so they run
+                            // under the lease: short, never parked on the
+                            // user. The others — notably `/compact`, which
+                            // waits on a model round-trip — run outside it so
+                            // they cannot stall other directories' sessions.
+                            let _cwd_guard = match (holds_cwd_lease, session_cwd) {
                                 (true, Some(cwd)) => Some(cwd_lease.acquire(&cwd).map_err(|e| {
                                     AcpError::internal(format!("failed to enter session cwd: {e}"))
                                 })?),
@@ -1337,7 +1441,7 @@ pub(crate) async fn run_acp_on_transport(
                                     &prompt_text_for_blocking,
                                     &mut observer,
                                 )
-                                .map(|()| (StopReason::EndTurn, None))
+                                .map(|stop| (stop, None))
                             } else {
                                 d.run_prompt_with_prompter(
                                     &sid_for_blocking,
@@ -1645,6 +1749,8 @@ pub(crate) async fn run_acp_on_transport(
                         };
                     let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
+                    let commands = delegate.available_commands();
+                    let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
                     cx.spawn(async move {
@@ -1667,8 +1773,13 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((session_id, cwd, signal)) => {
-                                registry.register(session_id, signal, cwd);
+                                registry.register(session_id.clone(), signal, cwd);
                                 responder.respond(LoadSessionResponse::new())?;
+                                // Same broadcast as `session/new`: a loaded
+                                // session accepts the same commands.
+                                let _ = cx_notify.send_notification(
+                                    available_commands_notification(&session_id, commands),
+                                );
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;

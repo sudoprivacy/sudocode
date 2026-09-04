@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::{InputContentBlock, MessageRequest, MessageResponse, OutputContentBlock, Usage};
 use serde_json::{json, Value};
@@ -160,7 +160,15 @@ enum Scenario {
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
     AskUserQuestionRoundtrip,
+    /// `streaming_text`, answered after [`DELAYED_TEXT_LATENCY`]. Gives a
+    /// test a window to cancel a request in flight — including an LLM
+    /// compaction request, since compaction requests are classified by the
+    /// markers of the messages being summarised.
+    DelayedText,
 }
+
+/// How long [`Scenario::DelayedText`] holds a request before answering.
+pub const DELAYED_TEXT_LATENCY: Duration = Duration::from_secs(3);
 
 impl Scenario {
     fn parse(value: &str) -> Option<Self> {
@@ -196,6 +204,7 @@ impl Scenario {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
             }
             "llm_compaction_roundtrip" => Some(Self::LlmCompactionRoundtrip),
+            "delayed_text" => Some(Self::DelayedText),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             _ => None,
         }
@@ -232,6 +241,7 @@ impl Scenario {
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
+            Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
         }
     }
@@ -260,6 +270,9 @@ async fn handle_connection(
         raw_body,
     });
 
+    if scenario == Scenario::DelayedText {
+        tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
+    }
     let response = build_http_response(&request, scenario);
     socket.write_all(response.as_bytes()).await?;
     Ok(())
@@ -467,7 +480,7 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
-        Scenario::StreamingText => streaming_text_sse(),
+        Scenario::StreamingText | Scenario::DelayedText => streaming_text_sse(),
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
@@ -781,7 +794,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
-        Scenario::StreamingText => text_message_response(
+        Scenario::StreamingText | Scenario::DelayedText => text_message_response(
             "msg_streaming_text",
             "Mock streaming says hello from the parity harness.",
         ),
@@ -1169,6 +1182,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::GrepChunkAssembly => "req_grep_chunk_assembly",

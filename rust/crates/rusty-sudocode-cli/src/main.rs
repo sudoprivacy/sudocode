@@ -61,13 +61,13 @@ use cli::export::{
     PromptHistoryEntry,
 };
 use cli::format::{
-    describe_tool_progress, first_visible_line, format_auth_report, format_auth_switch_report,
-    format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
-    format_commit_skipped_report, format_compact_report, format_cost_report,
-    format_internal_prompt_progress_line, format_issue_report, format_model_report,
-    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
-    format_permissions_switch_report, format_pr_report, format_resume_report,
-    format_sandbox_report, format_tool_call_start, format_tool_result,
+    describe_tool_progress, first_visible_line, format_acp_compact_report, format_auth_report,
+    format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
+    format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
+    format_cost_report, format_internal_prompt_progress_line, format_issue_report,
+    format_model_report, format_model_switch_report, format_permission_prompt_box,
+    format_permissions_report, format_permissions_switch_report, format_pr_report,
+    format_resume_report, format_sandbox_report, format_tool_call_start, format_tool_result,
     format_turn_status_line_with_branch, format_ultraplan_report, render_messages,
     render_resume_usage, render_version_report, truncate_for_summary,
 };
@@ -97,14 +97,15 @@ use cli::tool_executor::{
     clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
 };
 use commands::{
-    classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
+    acp_slash_commands, classify_skills_slash_command, format_acp_unsupported_slash_command,
+    handle_agents_slash_command, handle_agents_slash_command_json,
     handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
     handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_skills_prompt_section, render_slash_command_help, render_slash_command_help_filtered,
-    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
-    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
-    SkillSlashDispatch, SlashCommand,
+    render_acp_slash_command_help, render_skills_prompt_section, render_slash_command_help,
+    render_slash_command_help_filtered, resolve_skill_invocation,
+    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
+    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
@@ -2857,21 +2858,48 @@ impl AcpCliAgent {
         // this the resumed/switched session keeps its OLD model — which then drives the wrong
         // context-window in the pre-turn auto-compaction and can wedge the session on overflow.
         cloned_session.model = Some(resolved.clone());
+        session.runtime =
+            self.build_replacement_session_runtime(session, cloned_session, &resolved)?;
+        self.model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&resolved);
+
+        Ok(format_model_switch_report(
+            &previous,
+            &resolved,
+            message_count,
+        ))
+    }
+
+    /// Build a replacement runtime for `session` around `session_state` and
+    /// `model`, keeping everything else the session owns: cwd, handle,
+    /// injected MCP servers, prompt overrides, abort signal and the *active*
+    /// permission mode (a `session/setPermissionMode` must survive the
+    /// rebuild). The caller installs it with `session.runtime = …` once any
+    /// step that may still fail has succeeded. Used by `/model`; the caller
+    /// holds the session lock.
+    fn build_replacement_session_runtime(
+        &self,
+        session: &mut AcpCliSession,
+        session_state: Session,
+        model: &str,
+    ) -> Result<BuiltRuntime, AcpError> {
         let cwd = session.cwd.clone();
         let handle_id = session.handle.id.clone();
         let session_mcp = session.session_mcp_servers.clone();
+        let permission_mode = session.runtime.permission_policy_mut().active_mode();
 
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
-        let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let auth_mode = resolve_model_switch_auth_mode(&resolved, self.auth_mode, &sudocode_config)
+        let auth_mode = resolve_model_switch_auth_mode(model, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
         let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
         let mut runtime = build_runtime_for_cwd(
             &cwd,
-            cloned_session,
+            session_state,
             &handle_id,
             RuntimeConfig {
-                model: resolved.clone(),
+                model: model.to_string(),
                 system_prompt,
                 enable_tools: true,
                 emit_output: false,
@@ -2893,19 +2921,137 @@ impl AcpCliAgent {
                 .map_or(true, |cfg| cfg.thinking());
             rt.api_client_mut().set_thinking_enabled(thinking);
         }
+        Ok(runtime)
+    }
 
-        session.runtime = runtime;
-        self.model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone_from(&resolved);
-
-        Ok(format_model_switch_report(
-            &previous,
-            &resolved,
-            message_count,
+    /// `/compact` under ACP. Same strategy as the REPL command (LLM summary
+    /// first, local heuristic when that is unavailable) but with no token
+    /// threshold, because the user asked explicitly. The compacted transcript
+    /// is persisted at once (same reasoning as the pre-turn overflow path in
+    /// `run_prompt_impl`). A `session/cancel` during the model round-trip
+    /// drops the call; one that lands after it discards the result. Either
+    /// way the transcript in memory and on disk is left untouched and the
+    /// turn ends with `Cancelled`. The caller holds the session lock; the
+    /// server runs this *outside* the process-cwd lease.
+    fn handle_acp_compact(
+        &self,
+        session: &mut AcpCliSession,
+    ) -> Result<(String, runtime::acp_sdk_server::AcpStopReason), AcpError> {
+        use runtime::acp_sdk_server::AcpStopReason;
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        // Fresh turn: a cancel left over from an earlier turn must not abort
+        // this one (mirrors `run_prompt_impl`).
+        session.abort_signal.reset();
+        let abort_signal = session.abort_signal.clone();
+        let before_tokens = estimate_session_tokens(session.runtime.session());
+        let config = CompactionConfig {
+            max_estimated_tokens: 0,
+            ..CompactionConfig::default()
+        };
+        let compaction = self.tokio_runtime.block_on(async {
+            tokio::select! {
+                result = session.runtime.compact_with_method(config, None) => Some(result),
+                () = wait_for_abort(&abort_signal) => None,
+            }
+        });
+        let Some((result, method)) = compaction.filter(|_| !abort_signal.is_aborted()) else {
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record("slash_compact_cancelled", Map::new());
+            }
+            return Ok((
+                "Compact\n  Result           cancelled\n  Transcript       unchanged".to_string(),
+                AcpStopReason::Cancelled,
+            ));
+        };
+        let removed = result.removed_message_count;
+        if removed > 0 {
+            *session.runtime.session_mut() = result.compacted_session;
+            session
+                .runtime
+                .session()
+                .save_to_path(&session.handle.path)
+                .map_err(|e| {
+                    AcpError::internal(format!("failed to persist compacted session: {e}"))
+                })?;
+        }
+        let kept = session.runtime.session().messages.len();
+        let after_tokens = estimate_session_tokens(session.runtime.session());
+        if let Some(tracer) = session.runtime.session_tracer() {
+            tracer.record("slash_compact", {
+                let mut attrs = Map::new();
+                attrs.insert(
+                    "method".to_string(),
+                    Value::String(method.as_str().to_string()),
+                );
+                attrs.insert(
+                    "removed_messages".to_string(),
+                    Value::Number(removed.into()),
+                );
+                attrs.insert(
+                    "tokens_before".to_string(),
+                    Value::Number(before_tokens.into()),
+                );
+                attrs.insert(
+                    "tokens_after".to_string(),
+                    Value::Number(after_tokens.into()),
+                );
+                attrs
+            });
+        }
+        Ok((
+            format_acp_compact_report(
+                before_tokens,
+                after_tokens,
+                removed,
+                kept,
+                (removed > 0).then_some(method),
+            ),
+            AcpStopReason::EndTurn,
         ))
     }
+}
+
+/// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
+/// notification, so an `abort()` that races the subscription is still seen
+/// promptly.
+async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
+    loop {
+        if signal.is_aborted() {
+            return;
+        }
+        tokio::select! {
+            () = signal.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
+}
+
+/// Outcome of [`clear_session_state`].
+struct ClearedSession {
+    /// Empty transcript to rebuild the runtime around (persistence path set).
+    fresh: Session,
+    /// Where `fresh` lives.
+    handle: SessionHandle,
+    /// Where the previous transcript lives — a managed session, so it stays
+    /// resumable (`/resume <id>`).
+    previous: SessionHandle,
+}
+
+/// REPL `/clear` core: the previous transcript stays on disk under its own
+/// id, and a fresh one with a new id and file keeps the workspace root. The
+/// caller rebuilds its runtime around `fresh` (model and permission mode
+/// live in the runtime config, so they carry over).
+fn clear_session_state(
+    cwd: &Path,
+    current_handle: &SessionHandle,
+) -> Result<ClearedSession, Box<dyn std::error::Error>> {
+    let fresh = new_cli_session_for(cwd)?;
+    let handle = create_managed_session_handle_for(cwd, &fresh.session_id)?;
+    Ok(ClearedSession {
+        fresh: fresh.with_persistence_path(handle.path.clone()),
+        handle,
+        previous: current_handle.clone(),
+    })
 }
 
 fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
@@ -3197,15 +3343,24 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         session_id: &str,
         input: &str,
         observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<runtime::acp_sdk_server::AcpStopReason, runtime::AcpError> {
+        use runtime::acp_sdk_server::AcpStopReason;
         use runtime::RuntimeObserver as _;
-        let Ok(Some(command)) = SlashCommand::parse(input) else {
-            observer.on_text_delta(&format!(
-                "Unknown slash command: `{input}`. Type `/help` for available commands."
-            ));
-            return Ok(());
+        let command = match SlashCommand::parse(input) {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                observer.on_text_delta(&format_acp_unsupported_slash_command(input));
+                return Ok(AcpStopReason::EndTurn);
+            }
+            Err(error) => {
+                observer.on_text_delta(&format!(
+                    "{error}\n  Help             /help lists the commands available in ACP mode"
+                ));
+                return Ok(AcpStopReason::EndTurn);
+            }
         };
 
+        let mut stop = AcpStopReason::EndTurn;
         let response = match &command {
             SlashCommand::Model { model } => {
                 let locked = self.lock_session(session_id)?;
@@ -3213,7 +3368,14 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 self.inner
                     .handle_acp_model_switch(&mut session, model.clone())?
             }
-            SlashCommand::Help => render_repl_help(),
+            SlashCommand::Help => render_acp_slash_command_help(),
+            SlashCommand::Compact => {
+                let locked = self.lock_session(session_id)?;
+                let mut session = locked.get();
+                let (report, compact_stop) = self.inner.handle_acp_compact(&mut session)?;
+                stop = compact_stop;
+                report
+            }
             SlashCommand::Status => {
                 let locked = self.lock_session(session_id)?;
                 let session = locked.get();
@@ -3237,8 +3399,8 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Cost => {
                 let locked = self.lock_session(session_id)?;
                 let session = locked.get();
-                let usage = UsageTracker::from_session(session.runtime.session())
-                    .cumulative_usage();
+                let usage =
+                    UsageTracker::from_session(session.runtime.session()).cumulative_usage();
                 format!(
                     "Token usage: {} input, {} output, {} cache-create, {} cache-read",
                     usage.input_tokens,
@@ -3293,14 +3455,15 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     .map(|report| report.render())
                     .map_err(|e| runtime::AcpError::internal(e.to_string()))?
             }
-            _ => format!(
-                "`{}` is not supported in ACP mode. Available: /model, /status, /cost, /config, /diff, /doctor, /help",
-                input.split_whitespace().next().unwrap_or(input)
-            ),
+            _ => format_acp_unsupported_slash_command(input),
         };
 
         observer.on_text_delta(&response);
-        Ok(())
+        Ok(stop)
+    }
+
+    fn available_commands(&self) -> &'static [runtime::acp_sdk_server::AcpSlashCommandSpec] {
+        acp_slash_commands()
     }
 
     fn list_sessions(&self) -> Vec<(String, PathBuf)> {
@@ -3584,6 +3747,8 @@ impl AcpSdkDelegate {
         // Estimate current session tokens
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let threshold = (context_limit as f64 * 0.85) as usize; // 85% threshold
+                                                                // Surfaced to the client as `_meta.sudocode.autoCompacted`.
+        let mut auto_compacted = false;
 
         // If approaching limit, try auto-compact
         if estimated_tokens > threshold {
@@ -3620,6 +3785,7 @@ impl AcpSdkDelegate {
                 };
                 let result = compact_session_sync(session.runtime.session(), compaction_config);
                 if result.removed_message_count > 0 {
+                    auto_compacted = true;
                     // Update session with compacted version
                     *session.runtime.session_mut() = result.compacted_session.clone();
                     // Persist the compacted state immediately. The end-of-turn save_to_path is
@@ -3696,6 +3862,7 @@ impl AcpSdkDelegate {
                 }
                 runtime::AcpError::internal(e.to_string())
             })?;
+        auto_compacted |= turn_summary.auto_compaction.is_some();
         // Use turn_usage for PromptUsage, session_usage for cumulative
         let per_turn_usage =
             (turn_summary.turn_usage.total_tokens() > 0).then_some(turn_summary.turn_usage);
@@ -3720,6 +3887,7 @@ impl AcpSdkDelegate {
                 cached_read_tokens: Some(u64::from(cumulative_usage.cache_read_input_tokens)),
                 cached_write_tokens: Some(u64::from(cumulative_usage.cache_creation_input_tokens)),
             }),
+            auto_compacted,
         });
         // Record token usage to telemetry log
         if let Some(tracer) = session.runtime.session_tracer() {
@@ -5099,20 +5267,19 @@ impl LiveCli {
             return Ok(false);
         }
 
-        let previous_session = self.session.clone();
-        let session_state = new_cli_session()?;
-        let next_handle = create_managed_session_handle(&session_state.session_id)?;
+        let cwd = runtime::current_workspace_root()?;
+        let cleared = clear_session_state(&cwd, &self.session)?;
         let runtime = self.build_replacement_runtime(
-            session_state.with_persistence_path(next_handle.path.clone()),
-            next_handle.id.clone(),
+            cleared.fresh,
+            cleared.handle.id.clone(),
             self.config.clone(),
         )?;
-        self.session = next_handle;
+        self.session = cleared.handle;
         self.replace_runtime(runtime)?;
         self.out_println(format!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
-            previous_session.id,
-            previous_session.id,
+            cleared.previous.id,
+            cleared.previous.id,
             self.config.model,
             self.config.permission_mode.as_str(),
             self.session.id,

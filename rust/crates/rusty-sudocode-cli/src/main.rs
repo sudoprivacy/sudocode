@@ -5269,12 +5269,15 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
-                    let parsed_input: serde_json::Value = serde_json::from_str(input)
-                        .unwrap_or_else(|_| serde_json::Value::String(input.clone()));
+                    // Parity: `--output-format json` emits the tool input as the
+                    // raw argument STRING exactly as the model produced it — the
+                    // pre-seam `collect_tool_uses` serialized `ToolUse.input`
+                    // verbatim and the mock parity harness pins that shape. Do
+                    // NOT parse it into a nested object.
                     outcome.tool_uses.push(serde_json::json!({
                         "id": id,
                         "name": name,
-                        "input": parsed_input,
+                        "input": input,
                     }));
                 }
                 EngineEvent::ToolResult {

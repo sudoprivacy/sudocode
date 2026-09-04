@@ -1167,7 +1167,12 @@ fn run_resume_command(
             result.compacted_session.save_to_path(session_path)?;
             Ok(ResumeCommandOutcome {
                 session: result.compacted_session,
-                message: Some(format_compact_report(removed, kept, skipped)),
+                message: Some(format_compact_report(
+                    removed,
+                    kept,
+                    skipped,
+                    &result.summary_source,
+                )),
                 json: Some(serde_json::json!({
                     "kind": "compact",
                     "skipped": skipped,
@@ -2964,6 +2969,7 @@ impl AcpCliAgent {
             ));
         };
         let removed = result.removed_message_count;
+        let summary_source = result.summary_source;
         if removed > 0 {
             *session.runtime.session_mut() = result.compacted_session;
             session
@@ -3004,7 +3010,7 @@ impl AcpCliAgent {
                 after_tokens,
                 removed,
                 kept,
-                (removed > 0).then_some(method),
+                (removed > 0).then_some((method, &summary_source)),
             ),
             AcpStopReason::EndTurn,
         ))
@@ -5900,7 +5906,12 @@ impl LiveCli {
         )?;
         self.replace_runtime(runtime)?;
         self.persist_session()?;
-        self.out_println(format_compact_report(removed, kept, skipped));
+        self.out_println(format_compact_report(
+            removed,
+            kept,
+            skipped,
+            &result.summary_source,
+        ));
         Ok(())
     }
 

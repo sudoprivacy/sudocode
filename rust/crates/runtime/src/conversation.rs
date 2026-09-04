@@ -9,8 +9,9 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_sync, estimate_session_tokens,
-    CompactionConfig, CompactionResult, ReadFileTracker,
+    autocompact_buffer_tokens, compact_session, compact_session_sync,
+    compact_session_sync_after_llm_failure, estimate_session_tokens, CompactionConfig,
+    CompactionError, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -1652,7 +1653,9 @@ where
     }
 
     /// Compact using the LLM path. Falls back to sync if the API client
-    /// doesn't support `send_compaction`.
+    /// doesn't support `send_compaction` or the LLM call fails; the result's
+    /// `summary_source` records the fallback reason so the caller can
+    /// surface the lossier summary.
     pub async fn compact(
         &mut self,
         config: CompactionConfig,
@@ -1685,8 +1688,14 @@ where
         .await
         {
             Ok(result) => (result, CompactionMethod::LlmSummary),
-            Err(_) => (
+            Err(CompactionError::NothingToCompact) => (
                 compact_session_sync(&self.session, config),
+                CompactionMethod::LocalHeuristic,
+            ),
+            // LLM compaction failed (not supported or API error) — fall back
+            // to the local heuristic but keep the reason in `summary_source`.
+            Err(error) => (
+                compact_session_sync_after_llm_failure(&self.session, config, &error),
                 CompactionMethod::LocalHeuristic,
             ),
         }
@@ -1850,15 +1859,15 @@ where
         .await
         {
             Ok(result) => result,
-            Err(crate::compact::CompactionError::NothingToCompact) => {
+            Err(CompactionError::NothingToCompact) => {
                 self.consecutive_auto_compact_noops =
                     self.consecutive_auto_compact_noops.saturating_add(1);
                 return None;
             }
-            Err(_) => {
+            Err(error) => {
                 // LLM compaction failed (not supported or API error) — fall
                 // back to the synchronous local heuristic.
-                compact_session_sync(&self.session, config)
+                compact_session_sync_after_llm_failure(&self.session, config, &error)
             }
         };
 

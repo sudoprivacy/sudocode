@@ -501,6 +501,7 @@ pub(crate) fn format_compact_report(
     removed: usize,
     resulting_messages: usize,
     skipped: bool,
+    summary_source: &runtime::CompactionSummarySource,
 ) -> String {
     if skipped {
         format!(
@@ -514,25 +515,28 @@ pub(crate) fn format_compact_report(
             "Compact
   Result           compacted
   Messages removed {removed}
-  Messages kept    {resulting_messages}"
+  Messages kept    {resulting_messages}
+  Summary          {summary_source}"
         )
     }
 }
 
 /// `/compact` report under ACP: what happened, how, and the effect on the
-/// transcript. `method` is `None` when nothing was removed.
+/// transcript. `method` is `None` when nothing was removed; `summary_source`
+/// carries the LLM fallback reason (if any) alongside the method.
 pub(crate) fn format_acp_compact_report(
     before_tokens: usize,
     after_tokens: usize,
     removed: usize,
     kept: usize,
-    method: Option<runtime::CompactionMethod>,
+    method: Option<(runtime::CompactionMethod, &runtime::CompactionSummarySource)>,
 ) -> String {
     match method {
-        Some(method) => format!(
+        Some((method, summary_source)) => format!(
             "Compact
   Result           compacted
   Method           {}
+  Summary          {summary_source}
   Messages removed {removed}
   Messages kept    {kept}
   Estimated tokens {before_tokens} before, {after_tokens} after",

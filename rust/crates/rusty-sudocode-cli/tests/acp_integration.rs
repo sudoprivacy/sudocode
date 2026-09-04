@@ -383,9 +383,22 @@ fn spawn_stdio_client(workspace: &TestWorkspace) -> AcpTestClient {
 /// process, so a test can exercise the process-wide prompt flags a session's
 /// `_meta` overrides layer on top of.
 fn spawn_stdio_client_with_args(workspace: &TestWorkspace, extra: &[&str]) -> AcpTestClient {
+    spawn_stdio_client_with_args_and_env(workspace, extra, &[])
+}
+
+/// Like [`spawn_stdio_client_with_args`] but also sets extra environment
+/// variables on the `scode acp` process (`base_command` clears the
+/// environment, so runtime knobs such as the auto-compaction threshold have
+/// to be passed explicitly).
+fn spawn_stdio_client_with_args_and_env(
+    workspace: &TestWorkspace,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> AcpTestClient {
     let mut cmd = base_command(workspace);
     cmd.arg("acp")
         .args(extra)
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -3311,6 +3324,162 @@ async fn acp_stdio_tool_call_update_carries_content_and_raw_output() {
     assert_eq!(
         &rederived, raw_output,
         "content text must be the verbatim tool output that rawOutput was built from"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Collect `(index, tool_use ids)` for every message in an Anthropic request
+/// body that carries `tool_use` blocks.
+fn tool_use_ids_by_message(messages: &[Value]) -> Vec<(usize, Vec<String>)> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let ids = message["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|block| block["type"].as_str() == Some("tool_use"))
+                        .filter_map(|block| block["id"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (!ids.is_empty()).then_some((index, ids))
+        })
+        .collect()
+}
+
+/// Regression guard for LLM compaction of a conversation that contains a
+/// parallel tool call.
+///
+/// Anthropic requires every `tool_use` in an assistant message to be
+/// answered by a `tool_result` in the SAME next user message. The runtime
+/// stores each tool result as its own `Tool`-role message and relies on
+/// `convert_messages` to merge consecutive `Tool` messages into one user
+/// message; `build_compaction_messages` used to remap `Tool` to `User`
+/// before that merge, so the compaction request split the results across
+/// consecutive user messages and the API rejected it with
+/// `messages.N: tool_use ids were found without tool_result blocks
+/// immediately after`. The runtime then silently fell back to the lossy
+/// local summary. The mock does not validate pairing, so the assertion on
+/// the captured request body has to be explicit.
+#[tokio::test]
+async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-compaction-pairing");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    fs::write(workspace.root.join("fixture.txt"), "alpha parity line\n")
+        .expect("fixture.txt should be written");
+
+    // A one-token threshold makes the runtime's post-turn auto-compaction
+    // fire after every turn, which is the only way to drive the LLM
+    // compaction path over ACP.
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1")],
+    );
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+
+    // One parallel-tool turn followed by two plain text turns. Compaction
+    // preserves the last four messages and never splits a tool_use /
+    // tool_result exchange, so the first two compactions only remove the
+    // leading user prompt (or nothing); the compaction after the third turn
+    // is the one whose input spans the parallel tool_use / tool_result
+    // exchange.
+    for scenario in [
+        "multi_tool_turn_roundtrip",
+        "streaming_text",
+        "streaming_text",
+    ] {
+        let (_notifs, resp) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session,
+                    "prompt": [{
+                        "type": "text",
+                        "text": format!("{SCENARIO_PREFIX}{scenario}")
+                    }]
+                }),
+            )
+            .await;
+        assert!(
+            resp["result"].get("stopReason").is_some(),
+            "{scenario} turn should complete normally: {resp}"
+        );
+    }
+
+    // Compaction requests are identified by their system prompt rather than
+    // the mock's scenario tag: the transcript being summarised still carries
+    // the PARITY_SCENARIO marker, which wins the mock's scenario detection.
+    let compaction_bodies = server
+        .captured_requests()
+        .await
+        .iter()
+        .filter(|request| !request.path.contains("count_tokens"))
+        .filter_map(|request| serde_json::from_str::<Value>(&request.raw_body).ok())
+        .filter(|body| {
+            body["system"]
+                .as_str()
+                .is_some_and(|system| system.contains("summarizing conversations"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !compaction_bodies.is_empty(),
+        "auto-compaction should have sent at least one LLM compaction request"
+    );
+
+    let mut saw_parallel_tool_use = false;
+    for body in &compaction_bodies {
+        let messages = body["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("compaction request should carry messages: {body}"));
+        for (index, tool_use_ids) in tool_use_ids_by_message(messages) {
+            if tool_use_ids.len() > 1 {
+                saw_parallel_tool_use = true;
+            }
+            let next = messages.get(index + 1).unwrap_or_else(|| {
+                panic!("compaction request messages.{index} has tool_use blocks but no following message: {body}")
+            });
+            assert_eq!(
+                next["role"].as_str(),
+                Some("user"),
+                "compaction request messages.{} must be the user message carrying the tool_results: {body}",
+                index + 1
+            );
+            let result_ids = next["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|block| block["type"].as_str() == Some("tool_result"))
+                        .filter_map(|block| block["tool_use_id"].as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for id in &tool_use_ids {
+                assert!(
+                    result_ids.contains(id),
+                    "compaction request messages.{index}: tool_use {id} has no tool_result in the \
+                     immediately following user message (messages.{} carries {result_ids:?}); \
+                     Anthropic rejects this shape with 400 `tool_use ids were found without \
+                     tool_result blocks immediately after`. Request: {body}",
+                    index + 1
+                );
+            }
+        }
+    }
+    assert!(
+        saw_parallel_tool_use,
+        "at least one compaction request should include the parallel tool_use pair; bodies: {compaction_bodies:?}"
     );
 
     client.shutdown().await;

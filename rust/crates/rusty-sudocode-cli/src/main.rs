@@ -24,6 +24,11 @@ mod repl_async;
 mod repl_ui;
 mod vlm_describe;
 
+use engine_core::{
+    EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession, TurnComplete,
+};
+use render_engine::{EngineEventRenderer, RenderOutcome};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
@@ -536,15 +541,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 true,
                 allowed_tools,
                 permission_mode,
+                reasoning_effort,
                 auth_mode,
             )?;
-            cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 
             // Record token usage and session ended event for non-interactive prompt mode
             let duration_ms = session_start.elapsed().as_millis() as u64;
-            let usage = cli.runtime.usage().cumulative_usage();
-            let total_turns = cli.runtime.usage().turns();
+            let usage_tracker = cli.lifecycle.usage_snapshot();
+            let usage = usage_tracker.cumulative_usage();
+            let total_turns = usage_tracker.turns();
             if let Some(tracer) = cli.session_tracer() {
                 tracer.record_usage(
                     "session_summary".to_string(),
@@ -560,12 +566,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     duration_ms,
                 );
             }
-            // Initiate background shutdown of the tokio runtime so that
-            // lingering tasks (reqwest connection pool, fire-and-forget spawns)
-            // don't block the Runtime::drop that happens when `cli` goes out
-            // of scope.
-            cli.tokio_runtime
-                .shutdown_timeout(Duration::from_millis(500));
+            // The engine owns its tokio runtime and tears it down on Close /
+            // drop; the renderer keeps none, so there is nothing to shut down
+            // here.
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Acp {
@@ -1006,13 +1009,14 @@ fn run_resume(
         }
         // No commands — enter the interactive REPL with the restored session.
         let resolved_model = resolve_repl_model(model);
-        let mut cli = match LiveCli::new(resolved_model, true, None, permission_mode, auth_mode) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("failed to initialize: {e}");
-                std::process::exit(1);
-            }
-        };
+        let mut cli =
+            match LiveCli::new(resolved_model, true, None, permission_mode, None, auth_mode) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("failed to initialize: {e}");
+                    std::process::exit(1);
+                }
+            };
         // Load the restored session into the running CLI.
         let session_ref = resolved_path.display().to_string();
         if let Err(e) = cli.load_session(Some(session_ref)) {
@@ -1587,14 +1591,14 @@ fn run_repl(
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
     let resolved_model = resolve_repl_model(model);
-    let mut cli = LiveCli::new(
+    let cli = LiveCli::new(
         resolved_model,
         true,
         allowed_tools,
         permission_mode,
+        reasoning_effort,
         auth_mode,
     )?;
-    cli.set_reasoning_effort(reasoning_effort);
 
     // Env-gated opt-in to the async REPL that accepts input during a running
     // turn (see `repl_async` module docs and
@@ -1620,7 +1624,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
     // sessions (messages present → render + populate history).
-    let messages = &cli.runtime.session().messages;
+    let session = cli.lifecycle.session_snapshot();
+    let messages = &session.messages;
     if !messages.is_empty() {
         let term_width = crossterm::terminal::size()
             .map(|(cols, _)| cols as usize)
@@ -1662,7 +1667,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        input_chrome::print_before_prompt(cli.config.permission_mode.as_str());
+        input_chrome::print_before_prompt(cli.lifecycle.current_permission_mode().as_str());
         match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
                 // Clear the pre-printed bottom sep + footer. After
@@ -1700,10 +1705,11 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 // matches a known skill name, invoke it as `/skills <input>`
                 // rather than forwarding raw text to the LLM (ROADMAP #36).
                 let cwd = std::env::current_dir().unwrap_or_default();
+                let plugin_outcome = cli.lifecycle.plugin_load_outcome();
                 if let Some(prompt) = try_resolve_bare_skill_prompt_with_plugins(
                     &cwd,
                     &trimmed,
-                    Some(cli.runtime.plugin_load_outcome()),
+                    Some(&plugin_outcome),
                 ) {
                     cli.record_prompt_history(&trimmed);
                     if let Err(e) = cli.run_turn(&prompt) {
@@ -1725,8 +1731,9 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -1758,13 +1765,11 @@ fn run_repl_async_dispatch(
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
-    // Re-enable the raw-mode ESC/Ctrl-C listener (HookAbortMonitor).
-    // With prompt_ready gating, rustyline is NOT in readline during turns,
-    // so HookAbortMonitor can safely own stdin for abort key detection.
-    cli.esc_monitor_enabled = true;
-
-    let abort_signal = runtime::HookAbortSignal::new();
-    cli.persistent_abort_signal = Some(abort_signal.clone());
+    // Hold a command-channel clone so ESC/Ctrl-C can cancel the in-flight turn
+    // via the seam (EngineCommand::Cancel) without locking the LiveCli mutex the
+    // runner thread holds while it drives the turn. The engine's pump aborts the
+    // running turn on Cancel — no separate raw-mode HookAbortMonitor needed.
+    let commands = cli.engine_handle.commands.clone();
 
     // Shared atomic queue mode — the coordinator reads it each turn,
     // and `/config set auto-interrupt on|off` writes to it.
@@ -1772,18 +1777,20 @@ fn run_repl_async_dispatch(
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
     // ESC abort hook — wired into rustyline's ConditionalEventHandler so ESC
-    // cancels the running turn without a separate raw-mode stdin thread.
+    // cancels the running turn by sending Cancel across the seam.
     let esc_abort_hook: input::EscAbortHook = {
-        let sig = abort_signal.clone();
-        Arc::new(move || sig.abort())
+        let commands = commands.clone();
+        Arc::new(move || {
+            let _ = commands.send(EngineCommand::Cancel);
+        })
     };
 
-    let permission_label = cli.config.permission_mode.as_str().to_string();
+    let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
 
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
-        abort_signal,
+        commands,
     });
 
     let session_start = Instant::now();
@@ -1808,8 +1815,9 @@ fn run_repl_async_dispatch(
     // trailing block just above): record cumulative usage + duration so the
     // async path's users don't lose observability.
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -1836,7 +1844,11 @@ fn run_repl_async_dispatch(
 /// signal so `abort_current_turn` can fire without ever touching the mutex.
 struct LiveCliDriver {
     cli: std::sync::Arc<std::sync::Mutex<LiveCli>>,
-    abort_signal: runtime::HookAbortSignal,
+    /// Command-channel clone into the engine session. `abort_current_turn`
+    /// sends `Cancel` through it — no LiveCli lock needed (the runner thread
+    /// holds that lock while the turn streams), replacing the old detached
+    /// `HookAbortSignal`.
+    commands: std::sync::mpsc::Sender<EngineCommand>,
 }
 
 impl repl_async::TurnDriver for LiveCliDriver {
@@ -1883,10 +1895,10 @@ impl repl_async::TurnDriver for LiveCliDriver {
     }
 
     fn abort_current_turn(&self) {
-        // Idempotent by design (HookAbortSignal::abort just sets a bool +
-        // notifies waiters). No cli-lock needed — the runner thread already
-        // holds it while streaming, and would deadlock if we tried.
-        self.abort_signal.abort();
+        // Cancel crosses the seam on the command channel, not the LiveCli lock —
+        // the runner thread holds that lock while the turn streams and would
+        // deadlock if we tried. The pump aborts the in-flight turn on Cancel.
+        let _ = self.commands.send(EngineCommand::Cancel);
     }
 }
 
@@ -2076,17 +2088,12 @@ fn run_repl_iocraft_dispatch(
 ) -> Result<(), Box<dyn std::error::Error>> {
     cli.is_repl = true;
     let banner = cli.startup_banner();
-    let permission_label = cli.config.permission_mode.as_str().to_string();
+    let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
 
-    // iocraft owns stdin (raw mode), so:
-    // 1. ESC-key abort monitor must NOT compete for stdin.
-    // 2. Ignore SIGINT — iocraft delivers Ctrl-C as a key event in raw
-    //    mode. Without this, a Ctrl-C arriving before raw mode is entered
-    //    (timing race) kills the process.
-    cli.esc_monitor_enabled = false;
-
-    let abort_signal = runtime::HookAbortSignal::new();
-    cli.persistent_abort_signal = Some(abort_signal.clone());
+    // iocraft owns stdin (raw mode) and delivers Ctrl-C / ESC as key events;
+    // those `InputEvent::Abort`s cancel the in-flight turn by sending Cancel
+    // across the seam (no separate raw-mode HookAbortMonitor).
+    let commands = cli.engine_handle.commands.clone();
 
     let shared_mode = repl_async::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
@@ -2142,7 +2149,7 @@ fn run_repl_iocraft_dispatch(
                     cancel_pending_question_answer(&pending_question_answer);
                     repl.ui.clear_question();
                     if let Some(h) = runner_handle.take() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                         let _ = h.join();
                     }
                     break;
@@ -2163,7 +2170,6 @@ fn run_repl_iocraft_dispatch(
                             turn_active = true;
                             runner_handle = Some(spawn_iocraft_turn(
                                 Arc::clone(&cli_shared),
-                                &abort_signal,
                                 next.prompt,
                                 repl.output.clone(),
                                 repl.ui.clone(),
@@ -2180,7 +2186,7 @@ fn run_repl_iocraft_dispatch(
                     repl.ui.clear_question();
                     // Render loop exited — clean up runner if active.
                     if let Some(h) = runner_handle.take() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                         let _ = h.join();
                     }
                     break;
@@ -2195,7 +2201,7 @@ fn run_repl_iocraft_dispatch(
                 cancel_pending_question_answer(&pending_question_answer);
                 repl.ui.clear_question();
                 if let Some(h) = runner_handle.take() {
-                    abort_signal.abort();
+                    let _ = commands.send(EngineCommand::Cancel);
                     let _ = h.join();
                 }
                 let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
@@ -2209,7 +2215,7 @@ fn run_repl_iocraft_dispatch(
                 cancel_pending_question_answer(&pending_question_answer);
                 repl.ui.clear_question();
                 if runner_handle.is_some() {
-                    abort_signal.abort();
+                    let _ = commands.send(EngineCommand::Cancel);
                 }
             }
             repl_ui::InputEvent::Submit(text) => {
@@ -2217,7 +2223,7 @@ fn run_repl_iocraft_dispatch(
                     cancel_pending_question_answer(&pending_question_answer);
                     repl.ui.clear_question();
                     if runner_handle.is_some() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                     }
                     if let Some(h) = runner_handle.take() {
                         let _ = h.join();
@@ -2253,7 +2259,7 @@ fn run_repl_iocraft_dispatch(
                         let config_keys: Vec<String> =
                             sudocode_config.models.keys().cloned().collect();
                         let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-                        let current = cli_lock.config.model.clone();
+                        let current = cli_lock.lifecycle.current_model();
                         drop(cli_lock);
 
                         let options = models
@@ -2343,7 +2349,6 @@ fn run_repl_iocraft_dispatch(
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        &abort_signal,
                         next.prompt,
                         repl.output.clone(),
                         repl.ui.clone(),
@@ -2359,7 +2364,7 @@ fn run_repl_iocraft_dispatch(
                     match outcome {
                         input_queue::SubmitOutcome::Queued => {}
                         input_queue::SubmitOutcome::Interrupt => {
-                            abort_signal.abort();
+                            let _ = commands.send(EngineCommand::Cancel);
                         }
                         input_queue::SubmitOutcome::Rejected => {
                             repl.output.println(
@@ -2400,8 +2405,9 @@ fn run_repl_iocraft_dispatch(
     };
 
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -2430,7 +2436,6 @@ fn run_repl_iocraft_dispatch(
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    abort_signal: &runtime::HookAbortSignal,
     prompt: String,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
@@ -2438,11 +2443,11 @@ fn spawn_iocraft_turn(
     pending_question_answer: PendingQuestionAnswer,
     done_tx: mpsc::SyncSender<()>,
 ) -> thread::JoinHandle<()> {
-    let abort = abort_signal.clone();
+    // The engine owns the abort signal (reset at the start of each turn, fired
+    // by the pump on EngineCommand::Cancel), so the runner no longer manages it.
     thread::Builder::new()
         .name("repl-runner".into())
         .spawn(move || {
-            abort.reset();
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
             if let Err(e) =
                 cli.run_turn_iocraft(&prompt, &output, &ui, &spinner, pending_question_answer)
@@ -2454,31 +2459,26 @@ fn spawn_iocraft_turn(
         .expect("spawn repl-runner thread")
 }
 
+/// The composition root above the seam. Holds ONLY the turn handle + the
+/// session-lifecycle port — the engine owns the config/session/runtime SSOT
+/// (audit finding B). It physically cannot drive a turn except through
+/// `engine_handle` (no `EngineDelegate`), and cannot reach into the runtime.
 struct LiveCli {
-    config: RuntimeConfig,
-    runtime: BuiltRuntime,
-    session: SessionHandle,
+    /// The turn seam: `commands.send(Prompt/Cancel/PermissionAnswer/…)`,
+    /// `events.recv()`. The ONLY way turns cross.
+    engine_handle: EngineHandle,
+    /// Non-turn session lifecycle (model/permission/auth switch, /clear,
+    /// /resume, fork, compaction, reads). The engine holds the SSOT; this is
+    /// the renderer's port to it. `Arc<dyn SessionLifecycle>` gives NO access
+    /// to `run_turn` — the cut is compiler-enforced.
+    lifecycle: Arc<dyn SessionLifecycle>,
     prompt_history: Vec<PromptHistoryEntry>,
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
-    /// Shared tokio runtime used to drive async `run_turn` calls.
-    tokio_runtime: tokio::runtime::Runtime,
-    /// When false, `prepare_turn_runtime` spawns a no-op abort monitor instead
-    /// of the ESC-key stdin listener. Set by the async REPL dispatch so the
-    /// runner thread does NOT put stdin into raw mode — the input thread's
-    /// rustyline is the sole stdin consumer in that mode, and a competing
-    /// crossterm listener leaves the terminal wedged after the turn ends
-    /// (deadlocked the `/exit` path on POSIX CI runners in PR #298 v1).
-    esc_monitor_enabled: bool,
-    /// When `Some`, `prepare_turn_runtime` resets and reuses THIS signal
-    /// instead of creating a fresh one per turn. Set by the async REPL
-    /// dispatch so main can hold a clone and call `.abort()` mid-turn
-    /// without ever locking the `LiveCli` mutex — the runner thread holds
-    /// that lock while `run_turn` streams.
-    persistent_abort_signal: Option<runtime::HookAbortSignal>,
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
+    /// `Some` ⇔ async REPL mode is active.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
@@ -3554,7 +3554,9 @@ pub(crate) trait SessionLifecycle: Send + Sync + 'static {
     fn reload_features(&self) -> Result<(), String>;
     /// Run LLM-based history compaction and swap the compacted session in.
     /// Returns `(removed, kept, skipped)` for the renderer's report.
-    fn run_compaction(&self) -> Result<(usize, usize, bool), String>;
+    fn run_compaction(
+        &self,
+    ) -> Result<(usize, usize, bool, runtime::CompactionSummarySource), String>;
 }
 
 impl SessionLifecycle for SessionEngine {
@@ -3704,7 +3706,9 @@ impl SessionLifecycle for SessionEngine {
             .map_err(|e| e.to_string())
     }
 
-    fn run_compaction(&self) -> Result<(usize, usize, bool), String> {
+    fn run_compaction(
+        &self,
+    ) -> Result<(usize, usize, bool, runtime::CompactionSummarySource), String> {
         let mut session = self.lock_session();
         let cwd = session.cwd.clone();
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
@@ -3714,6 +3718,9 @@ impl SessionLifecycle for SessionEngine {
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
+        // Surface the summary provenance to the renderer's `/compact` report
+        // (LLM vs heuristic) — main's compaction hardening added this column.
+        let summary_source = result.summary_source;
         let handle = session.handle.clone();
         self.rebuild_locked(&mut session, result.compacted_session, handle)?;
         let path = session.handle.path.clone();
@@ -3722,7 +3729,7 @@ impl SessionLifecycle for SessionEngine {
             .session()
             .save_to_path(&path)
             .map_err(|e| e.to_string())?;
-        Ok((removed, kept, skipped))
+        Ok((removed, kept, skipped, summary_source))
     }
 }
 
@@ -5034,12 +5041,43 @@ fn strip_ansi_width(s: &str) -> usize {
     width
 }
 
+/// The renderer-side capture of one turn: the `TurnComplete` aggregate plus the
+/// JSON-output fields re-derived from the event stream (the old paths read these
+/// off `TurnSummary`, which `TurnComplete` no longer carries — message vecs were
+/// dropped from the seam type).
+#[derive(Default)]
+struct TurnOutcome {
+    complete: Option<TurnComplete>,
+    /// Set when the turn ended in an `EngineEvent::Error`; the non-interactive
+    /// paths surface it as an `Err` (the old paths propagated the runtime error).
+    error: Option<String>,
+    final_text: String,
+    tool_uses: Vec<serde_json::Value>,
+    tool_results: Vec<serde_json::Value>,
+    prompt_cache_events: Vec<serde_json::Value>,
+}
+
+/// A question prompter that declines to answer (empty selection). The
+/// non-interactive turn paths install no interactive question UI, but the seam's
+/// pump always sets a question adapter, so `AskUserQuestion` resolves to "no
+/// answer" instead of wedging on a prompt nobody will service.
+struct NoopQuestionPrompter;
+
+impl runtime::QuestionPrompter for NoopQuestionPrompter {
+    fn ask(
+        &mut self,
+        _request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        Ok(Vec::new())
+    }
+}
+
 impl LiveCli {
     /// True when the async REPL (queue mode) is active. In this mode the
     /// input thread owns stdin via rustyline, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.
     fn is_async_mode(&self) -> bool {
-        self.persistent_abort_signal.is_some()
+        self.shared_queue_mode.is_some()
     }
 
     fn out_println(&self, msg: impl AsRef<str>) {
@@ -5059,11 +5097,14 @@ impl LiveCli {
         enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
+        reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // The engine always builds with tools enabled for the interactive
+        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
+        // seam doesn't model (SessionEngine is single-purpose here).
+        let _ = enable_tools;
         let system_prompt = build_system_prompt()?;
-        let session_state = new_cli_session()?;
-        let session = create_managed_session_handle(&session_state.session_id)?;
         let cwd = env::current_dir()?;
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -5072,113 +5113,107 @@ impl LiveCli {
         let config_home = runtime::default_config_home();
         runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
 
-        let auth_mode = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
-        tools::set_global_auth_mode(auth_mode);
-        let config = RuntimeConfig {
-            model,
-            system_prompt,
-            enable_tools,
-            emit_output: true,
-            allowed_tools,
-            permission_mode,
-            progress_reporter: None,
-            auth_mode,
-            sudocode_config: sudocode_config.clone(),
-        };
-        let runtime = build_runtime(
-            session_state.with_persistence_path(session.path.clone()),
-            &session.id,
-            config.clone(),
-        )?;
-        let tokio_runtime = tokio::runtime::Runtime::new()?;
+        let auth_resolved = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
+        tools::set_global_auth_mode(auth_resolved);
 
         // Fire-and-forget: refresh model capabilities from sudorouter if stale.
+        // The engine owns its own tokio runtime; the renderer keeps none, so
+        // this rides a detached thread with its own short-lived current-thread rt.
         if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend) {
             if let Some((base_url, api_key)) = extract_sudorouter_credentials(&sudocode_config) {
                 let ch = config_home.clone();
-                tokio_runtime.spawn(async move {
-                    let client = match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(10))
+                std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
                         .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return,
+                    else {
+                        return;
                     };
-                    let url = format!("{}/models", base_url.trim_end_matches('/'));
-                    let resp = match client
-                        .get(&url)
-                        .header("Authorization", format!("Bearer {api_key}"))
-                        .send()
-                        .await
-                    {
-                        Ok(r) if r.status().is_success() => r,
-                        _ => return,
-                    };
-                    let body: serde_json::Value = match resp.json().await {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-                    let entries = runtime::model_capabilities::parse_api_response(&body);
-                    let _ = runtime::model_capabilities::merge_and_write(
-                        &ch,
-                        &runtime::fs_backend::StdFsBackend,
-                        &entries,
-                    );
+                    rt.block_on(async move {
+                        let client = match reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+                        let url = format!("{}/models", base_url.trim_end_matches('/'));
+                        let resp = match client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .send()
+                            .await
+                        {
+                            Ok(r) if r.status().is_success() => r,
+                            _ => return,
+                        };
+                        let body: serde_json::Value = match resp.json().await {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let entries = runtime::model_capabilities::parse_api_response(&body);
+                        let _ = runtime::model_capabilities::merge_and_write(
+                            &ch,
+                            &runtime::fs_backend::StdFsBackend,
+                            &entries,
+                        );
+                    });
                 });
             }
         }
 
-        let mut cli = Self {
-            config,
-            runtime,
-            session,
-            prompt_history: Vec::new(),
-            undone_tool_use_ids: std::collections::HashSet::new(),
-            tokio_runtime,
-            esc_monitor_enabled: true,
-            persistent_abort_signal: None,
-            shared_queue_mode: None,
-            is_repl: false,
-            iocraft_output: None,
-        };
+        // The one engine owns config + session + runtime SSOT (thinking config,
+        // persistence, tracer are all applied inside `SessionEngine::build`).
+        let mcp_servers = std::collections::BTreeMap::new();
+        let engine = Arc::new(
+            SessionEngine::build(
+                &cwd,
+                &mcp_servers,
+                runtime::SystemPromptOverrides::default(),
+                system_prompt,
+                model.clone(),
+                Some(model),
+                allowed_tools,
+                Some(permission_mode),
+                reasoning_effort,
+                auth_mode,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+        );
+        let engine_handle = EngineSession::spawn(engine.clone() as Arc<dyn EngineDelegate>);
+        let lifecycle = engine as Arc<dyn SessionLifecycle>;
 
-        // Apply thinking config from settings.json (default: enabled).
-        let thinking_enabled = ConfigLoader::default_for(&cwd)
-            .load()
-            .map_or(true, |cfg| cfg.thinking());
-        cli.set_thinking_enabled(thinking_enabled);
-
-        cli.persist_session()?;
-
-        // Record session started event
+        // Record session started event.
         let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
         let mode = if is_child_process {
             "child"
         } else {
             "standalone"
         };
-        if let Some(tracer) = cli.runtime.session_tracer() {
-            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &cli.config.model);
+        if let Some(tracer) = lifecycle.session_tracer() {
+            tracer.record_session_started(
+                VERSION,
+                cwd.to_string_lossy(),
+                mode,
+                &lifecycle.current_model(),
+            );
         }
 
-        Ok(cli)
+        Ok(Self {
+            engine_handle,
+            lifecycle,
+            prompt_history: Vec::new(),
+            undone_tool_use_ids: std::collections::HashSet::new(),
+            shared_queue_mode: None,
+            is_repl: false,
+            iocraft_output: None,
+        })
     }
 
-    /// Returns a reference to the session tracer, if available.
-    fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
-        self.runtime.session_tracer()
-    }
-
-    fn set_reasoning_effort(&mut self, effort: Option<String>) {
-        if let Some(rt) = self.runtime.runtime.as_mut() {
-            rt.api_client_mut().set_reasoning_effort(effort);
-        }
-    }
-
-    fn set_thinking_enabled(&mut self, enabled: bool) {
-        if let Some(rt) = self.runtime.runtime.as_mut() {
-            rt.api_client_mut().set_thinking_enabled(enabled);
-        }
+    /// A clone of the session tracer, if telemetry is active (owned — the
+    /// tracer is `Arc`-backed and cheap to clone).
+    fn session_tracer(&self) -> Option<telemetry::SessionTracer> {
+        self.lifecycle.session_tracer()
     }
 
     fn startup_banner(&self) -> String {
@@ -5195,24 +5230,24 @@ impl LiveCli {
             || "unknown".to_string(),
             |context| context.git_summary.headline(),
         );
-        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
-            |_| self.session.path.display().to_string(),
+        let handle = self.lifecycle.session_handle();
+        let model = self.lifecycle.current_model();
+        let auth_mode = self.lifecycle.current_auth_mode();
+        let permission_mode = self.lifecycle.current_permission_mode();
+        let sudocode_config = load_sudocode_config_for_current_dir();
+        let session_path = handle.path.strip_prefix(Path::new(&cwd)).map_or_else(
+            |_| handle.path.display().to_string(),
             |path| path.display().to_string(),
         );
 
         // Auth mode line.
-        let auth_mode_str = self.config.auth_mode.label().to_string();
+        let auth_mode_str = auth_mode.label().to_string();
 
         // Endpoint from config-driven resolution.
-        let config = &self.config.sudocode_config;
-        let endpoint = api::resolve_provider_from_config(
-            &self.config.model,
-            Some(self.config.auth_mode),
-            config,
-        )
-        .ok()
-        .map(|r| r.base_url)
-        .unwrap_or_default();
+        let endpoint = api::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
+            .ok()
+            .map(|r| r.base_url)
+            .unwrap_or_default();
 
         let t = theme();
         let logo_fg = ansi_fg(t.logo);
@@ -5228,17 +5263,17 @@ impl LiveCli {
         );
 
         let lines = [
-            format!("  {DIM}Model{RESET}            {}", self.config.model),
+            format!("  {DIM}Model{RESET}            {}", model),
             format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
             format!("  {DIM}Endpoint{RESET}         {}", endpoint),
             format!(
                 "  {DIM}Permissions{RESET}      {}",
-                self.config.permission_mode.as_str()
+                permission_mode.as_str()
             ),
             format!("  {DIM}Branch{RESET}           {}", git_branch),
             format!("  {DIM}Workspace{RESET}        {}", workspace),
             format!("  {DIM}Directory{RESET}        {}", cwd),
-            format!("  {DIM}Session{RESET}          {}", self.session.id),
+            format!("  {DIM}Session{RESET}          {}", handle.id),
             format!("  {DIM}Auto-save{RESET}        {}", session_path),
         ];
 
@@ -5276,9 +5311,10 @@ impl LiveCli {
     fn repl_completion_candidates(
         &self,
     ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let handle = self.lifecycle.session_handle();
         Ok(slash_command_completion_candidates_with_sessions(
-            &self.config.model,
-            Some(&self.session.id),
+            &self.lifecycle.current_model(),
+            Some(&handle.id),
             list_managed_sessions()?
                 .into_iter()
                 .map(|session| session.id)
@@ -5286,164 +5322,208 @@ impl LiveCli {
         ))
     }
 
-    fn prepare_turn_runtime(
-        &mut self,
-        emit_output: bool,
-    ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
-        // Async REPL mode installs a persistent abort signal so main can call
-        // `.abort()` mid-turn without racing the runner thread. Reset the flag
-        // here — the previous turn may have aborted it (that's how we got
-        // this new turn scheduled), and the runtime treats `is_aborted() ==
-        // true` as "cancel immediately", which would collapse the fresh turn.
-        let hook_abort_signal = match &self.persistent_abort_signal {
-            Some(sig) => {
-                sig.reset();
-                sig.clone()
-            }
-            None => runtime::HookAbortSignal::new(),
-        };
-        // `build_runtime` stamps `prompt_known_date` with today's local date,
-        // which is correct only for a freshly-created runtime. The REPL
-        // rebuilds the runtime on every turn, so without carrying this date
-        // forward a long-running session that crosses midnight would have its
-        // known date silently advanced to today on every turn — suppressing
-        // the date-rollover reminder added in #128 (see issue #135).
-        let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.shutdown_runtime_resources()?;
-        let mut runtime = build_runtime(
-            session,
-            &session_id,
-            RuntimeConfig {
-                emit_output,
-                ..self.config.clone()
-            },
-        )?
-        .with_hook_abort_signal(hook_abort_signal.clone());
-        if let Some(known) = inherited_known_date {
-            runtime = runtime.with_session_known_date(known);
-        }
-        let hook_abort_monitor = if self.esc_monitor_enabled {
-            HookAbortMonitor::spawn(hook_abort_signal)
-        } else {
-            // Async REPL mode: skip the ESC-key stdin listener. The input
-            // thread's rustyline is the only stdin consumer; a competing
-            // crossterm listener wedges the terminal on POSIX (raw mode is
-            // process-wide via termios). Waiter is a plain sleep loop that
-            // just observes the stop channel — no stdin touched.
-            HookAbortMonitor::spawn_with_waiter(hook_abort_signal, |stop_rx, _abort| loop {
-                match stop_rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
-                    Err(RecvTimeoutError::Timeout) => continue,
+    /// Drive one turn across the seam: send the prompt, pump events into the
+    /// renderer, and answer permission / question requests using the supplied
+    /// prompters (the SAME `CliPermissionPrompter` / `IocraftQuestionPrompter`
+    /// the old paths installed on the runtime — now consulted above the seam).
+    /// `output` routes the renderer to the iocraft `OutputSender` or bare stdout
+    /// (`None`). Returns the captured `TurnComplete` (`None` on error before
+    /// completion). The end-of-turn status line is the caller's job (it varies
+    /// per path).
+    fn drive_turn(
+        &self,
+        input: &str,
+        spinner_ref: Option<render::SpinnerRef>,
+        output: Option<&repl_ui::OutputSender>,
+        render: bool,
+        permission_prompter: &mut dyn runtime::PermissionPrompter,
+        question_prompter: &mut dyn runtime::QuestionPrompter,
+    ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+        // The interactive paths draw the stream; the `--output-format` paths
+        // collect silently (they print only the final text / JSON), so the
+        // renderer is optional. Without it we still detect the same outcomes
+        // (Done / permission / question) straight from the event kinds.
+        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        let blocks = vec![runtime::ContentBlock::Text {
+            text: input.to_string(),
+        }];
+        self.engine_handle
+            .commands
+            .send(EngineCommand::Prompt { blocks })?;
+
+        let mut outcome = TurnOutcome::default();
+        loop {
+            let Ok(ev) = self.engine_handle.events.recv() else {
+                break;
+            };
+            // Collect the JSON-output data from the event stream (the old paths
+            // read it off TurnSummary; TurnComplete drops the message vecs, so
+            // we re-derive here). `final_text` tracks the LAST assistant message
+            // only — reset it at each ToolCall (a message boundary), matching
+            // `final_assistant_text`'s "last message" semantics.
+            match &ev {
+                EngineEvent::TurnComplete(tc) => outcome.complete = Some(tc.clone()),
+                EngineEvent::Error { message } => outcome.error = Some(message.clone()),
+                EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
+                EngineEvent::ToolCall { id, name, input } => {
+                    outcome.final_text.clear();
+                    let parsed_input: serde_json::Value = serde_json::from_str(input)
+                        .unwrap_or_else(|_| serde_json::Value::String(input.clone()));
+                    outcome.tool_uses.push(serde_json::json!({
+                        "id": id,
+                        "name": name,
+                        "input": parsed_input,
+                    }));
                 }
-            })
-        };
-
-        Ok((runtime, hook_abort_monitor))
-    }
-
-    fn shutdown_runtime_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.shutdown_mcp()?;
-        self.runtime.shutdown_plugins()?;
-        Ok(())
-    }
-
-    fn build_replacement_runtime(
-        &mut self,
-        session: Session,
-        session_id: String,
-        config: RuntimeConfig,
-    ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-        self.shutdown_runtime_resources()?;
-        build_runtime(session, &session_id, config)
-    }
-
-    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
-        self.shutdown_runtime_resources()?;
-        self.runtime = runtime;
-        self.undone_tool_use_ids.clear();
-        Ok(())
+                EngineEvent::ToolResult {
+                    id,
+                    name,
+                    output,
+                    is_error,
+                } => outcome.tool_results.push(serde_json::json!({
+                    "tool_use_id": id,
+                    "tool_name": name,
+                    "output": output,
+                    "is_error": is_error,
+                })),
+                EngineEvent::PromptCache(event) => {
+                    outcome.prompt_cache_events.push(serde_json::json!({
+                        "unexpected": event.unexpected,
+                        "reason": event.reason,
+                        "previous_cache_read_input_tokens": event.previous_cache_read_input_tokens,
+                        "current_cache_read_input_tokens": event.current_cache_read_input_tokens,
+                        "token_drop": event.token_drop,
+                    }));
+                }
+                _ => {}
+            }
+            let action = match renderer.as_mut() {
+                Some(r) => r.render(ev),
+                None => match ev {
+                    EngineEvent::TurnComplete(_) | EngineEvent::Error { .. } => RenderOutcome::Done,
+                    EngineEvent::PermissionRequest { id, request } => {
+                        RenderOutcome::NeedPermission { id, request }
+                    }
+                    EngineEvent::QuestionRequest { id, request } => {
+                        RenderOutcome::NeedQuestion { id, request }
+                    }
+                    _ => RenderOutcome::Continue,
+                },
+            };
+            match action {
+                RenderOutcome::Continue => {}
+                RenderOutcome::NeedPermission { id, request } => {
+                    let decision = permission_prompter.decide(&request);
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::PermissionAnswer { id, decision })?;
+                }
+                RenderOutcome::NeedQuestion { id, request } => {
+                    let answers = question_prompter.ask(&request).unwrap_or_default();
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::QuestionAnswer { id, answers })?;
+                }
+                RenderOutcome::Done => break,
+            }
+        }
+        Ok(outcome)
     }
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
+        let model = self.lifecycle.current_model();
         let mut spinner = SpinnerHandle::new(
             "🦀 Thinking...",
-            Some(self.config.model.as_str()),
+            Some(model.as_str()),
             TerminalRenderer::new().color_theme(),
             token_budget,
         );
         let spinner_ref = spinner.spinner_ref();
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
-        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
 
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
+        let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
+            if io::stdin().is_terminal() {
+                Box::new(CliPermissionPrompter::new(
+                    self.lifecycle.current_permission_mode(),
+                ))
+            } else {
+                Box::new(AutoDenyPermissionPrompter)
+            };
+        let mut question_prompter = NoopQuestionPrompter;
+
+        let outcome = self.drive_turn(
             input,
-            Some(&mut permission_prompter),
+            Some(spinner_ref),
             None,
-        ));
-        hook_abort_monitor.stop();
-        match result {
-            Ok(summary) => {
-                self.replace_runtime(runtime)?;
-                if summary.cancelled {
-                    spinner.fail("⏹ Cancelled");
-                } else {
-                    spinner.clear();
-                    if let Some(event) = summary.auto_compaction {
-                        self.out_println(format_auto_compaction_notice(
-                            event.removed_message_count,
-                        ));
-                    }
-                    let elapsed = turn_start.elapsed();
-                    let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
-                    let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
-                    let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
-                    let branch = env::current_dir()
-                        .ok()
-                        .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    self.out_println(format_turn_status_line_with_branch(
-                        &self.config.model,
-                        turns,
-                        &usage,
-                        Some(&cumulative),
-                        Some(context_window),
-                        elapsed,
-                        branch.as_deref(),
-                    ));
+            true,
+            permission_prompter.as_mut(),
+            &mut question_prompter,
+        )?;
+
+        match outcome.complete {
+            Some(tc) if tc.cancelled => spinner.fail("⏹ Cancelled"),
+            Some(tc) => {
+                spinner.clear();
+                if let Some(event) = tc.auto_compaction {
+                    self.out_println(format_auto_compaction_notice(event.removed_message_count));
                 }
-                self.persist_session()?;
-                // If the plan confirmation dialog chose "clear context &
-                // execute", pick up the plan and re-run in a fresh session.
-                if let Some(plan) = take_pending_plan_execution() {
-                    let session = runtime::Session::new();
-                    let session_id = self.session.id.clone();
-                    let fresh =
-                        self.build_replacement_runtime(session, session_id, self.config.clone())?;
-                    self.replace_runtime(fresh)?;
-                    let prompt = format!("Implement the following plan:\n\n{plan}");
-                    return self.run_turn(&prompt);
-                }
-                Ok(())
+                self.print_turn_status_line(
+                    &model,
+                    tc.response_model.as_deref(),
+                    turn_start.elapsed(),
+                    None,
+                );
             }
-            Err(error) => {
+            None => {
                 clear_pending_plan_execution();
-                runtime.shutdown_mcp()?;
-                runtime.shutdown_plugins()?;
                 spinner.fail("❌ Request failed");
-                Err(Box::new(error))
             }
+        }
+
+        // If the plan confirmation dialog chose "clear context & execute", pick
+        // up the plan and re-run in a fresh session (the engine preserves the
+        // current model across the reset).
+        if let Some(plan) = take_pending_plan_execution() {
+            self.lifecycle.reset_session()?;
+            let prompt = format!("Implement the following plan:\n\n{plan}");
+            return self.run_turn(&prompt);
+        }
+        Ok(())
+    }
+
+    /// Print the end-of-turn status line. Usage/turns come from a lifecycle
+    /// snapshot (the engine's live `UsageTracker`), context-window from the
+    /// response model (falling back to the active model). Routes to the iocraft
+    /// `OutputSender` when present, else the plain `out_println`.
+    fn print_turn_status_line(
+        &self,
+        model: &str,
+        response_model: Option<&str>,
+        elapsed: Duration,
+        output: Option<&repl_ui::OutputSender>,
+    ) {
+        let usage_tracker = self.lifecycle.usage_snapshot();
+        let usage = usage_tracker.current_turn_usage();
+        let cumulative = usage_tracker.cumulative_usage();
+        let turns = usage_tracker.turns();
+        let model_for_caps = response_model.unwrap_or(model);
+        let context_window = runtime::model_capabilities::context_window_or_default(model_for_caps);
+        let branch = env::current_dir()
+            .ok()
+            .and_then(|cwd| resolve_git_branch_for(&cwd));
+        let line = format_turn_status_line_with_branch(
+            model,
+            turns,
+            &usage,
+            Some(&cumulative),
+            Some(context_window),
+            elapsed,
+            branch.as_deref(),
+        );
+        match output {
+            Some(out) => out.println(&line),
+            None => self.out_println(line),
         }
     }
 
@@ -5459,92 +5539,52 @@ impl LiveCli {
         pending_question_answer: PendingQuestionAnswer,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
+        let model = self.lifecycle.current_model();
 
-        // Activate the shared spinner state for the iocraft render loop.
-        spinner_state.start_turn(
-            "\u{1f980} Thinking...",
-            Some(self.config.model.as_str()),
-            token_budget,
-        );
-
-        // Wire the spinner state into the SpinnerRef API so the streaming
-        // and tool layers can update bytes + thinking flags atomically.
+        // Activate the shared spinner state for the iocraft render loop, then
+        // bridge it into the SpinnerRef the renderer drives (bytes + thinking).
+        spinner_state.start_turn("\u{1f980} Thinking...", Some(model.as_str()), token_budget);
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        runtime.api_client_mut().set_output_writer(output.clone());
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
-        runtime
-            .tool_executor_mut()
-            .set_output_writer(output.clone());
-        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
-        runtime.tool_executor_mut().set_ui_sender(ui.clone());
-        runtime
-            .tool_executor_mut()
-            .set_question_prompter(Box::new(IocraftQuestionPrompter::new(
-                ui.clone(),
-                pending_question_answer,
-            )));
 
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
+        let mut permission_prompter =
+            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let mut question_prompter =
+            IocraftQuestionPrompter::new(ui.clone(), pending_question_answer);
+
+        let outcome = self.drive_turn(
             input,
-            Some(&mut permission_prompter),
-            None,
-        ));
-        hook_abort_monitor.stop();
+            Some(spinner_ref),
+            Some(output),
+            true,
+            &mut permission_prompter,
+            &mut question_prompter,
+        )?;
         spinner_state.stop_turn();
 
-        match result {
-            Ok(summary) => {
-                self.replace_runtime(runtime)?;
-                if summary.cancelled {
-                    output.println(&format!(
-                        "{}\u{23f9} Cancelled{}",
-                        ansi_fg(theme().error),
-                        RESET
-                    ));
-                } else {
-                    if let Some(event) = summary.auto_compaction {
-                        output.println(&format_auto_compaction_notice(event.removed_message_count));
-                    }
-                    let elapsed = turn_start.elapsed();
-                    let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
-                    let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
-                    let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
-                    let branch = env::current_dir()
-                        .ok()
-                        .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    // The status line is part of the transcript: printed
-                    // once, in order, above the next prompt. Keeping a copy
-                    // in the sticky footer as well meant it showed twice
-                    // whenever the footer was redrawn under new scrollback.
-                    output.println(&format_turn_status_line_with_branch(
-                        &self.config.model,
-                        turns,
-                        &usage,
-                        Some(&cumulative),
-                        Some(context_window),
-                        elapsed,
-                        branch.as_deref(),
-                    ));
+        match outcome.complete {
+            Some(tc) if tc.cancelled => output.println(&format!(
+                "{}\u{23f9} Cancelled{}",
+                ansi_fg(theme().error),
+                RESET
+            )),
+            Some(tc) => {
+                if let Some(event) = tc.auto_compaction {
+                    output.println(&format_auto_compaction_notice(event.removed_message_count));
                 }
-                self.persist_session()?;
-                Ok(())
+                // The status line is part of the transcript: printed once, in
+                // order, above the next prompt.
+                self.print_turn_status_line(
+                    &model,
+                    tc.response_model.as_deref(),
+                    turn_start.elapsed(),
+                    Some(output),
+                );
             }
-            Err(error) => {
-                runtime.shutdown_mcp()?;
-                runtime.shutdown_plugins()?;
-                Err(Box::new(error))
-            }
+            // Error already rendered by the EngineEventRenderer (Error event).
+            None => {}
         }
+        Ok(())
     }
 
     fn run_turn_with_output(
@@ -5561,51 +5601,60 @@ impl LiveCli {
         }
     }
 
+    /// Drive one non-interactive turn (no stream render), returning the captured
+    /// outcome. Picks the permission prompter by TTY (interactive prompt vs
+    /// auto-deny) exactly as the old `--output-format` paths did, and surfaces a
+    /// turn error as an `Err` (parity with the old `result?`). The engine
+    /// persists the session itself, so callers only format the result.
+    fn run_noninteractive_turn(
+        &self,
+        input: &str,
+    ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+        let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
+            if io::stdin().is_terminal() {
+                Box::new(CliPermissionPrompter::new(
+                    self.lifecycle.current_permission_mode(),
+                ))
+            } else {
+                Box::new(AutoDenyPermissionPrompter)
+            };
+        let mut question_prompter = NoopQuestionPrompter;
+        let outcome = self.drive_turn(
+            input,
+            None,
+            None,
+            false,
+            permission_prompter.as_mut(),
+            &mut question_prompter,
+        )?;
+        if let Some(message) = outcome.error {
+            return Err(message.into());
+        }
+        Ok(outcome)
+    }
+
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let result = if io::stdin().is_terminal() {
-            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        } else {
-            let mut prompter = AutoDenyPermissionPrompter;
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        };
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
-        let final_text = final_assistant_text(&summary);
-        self.out_println(final_text);
+        let outcome = self.run_noninteractive_turn(input)?;
+        self.out_println(outcome.final_text);
         Ok(())
     }
 
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let result = if io::stdin().is_terminal() {
-            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        } else {
-            let mut prompter = AutoDenyPermissionPrompter;
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        };
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
+        let model = self.lifecycle.current_model();
+        let outcome = self.run_noninteractive_turn(input)?;
+        let tc = outcome
+            .complete
+            .ok_or_else(|| "engine turn did not complete".to_string())?;
         self.out_println(
             json!({
-                "message": final_assistant_text(&summary),
+                "message": outcome.final_text,
                 "compact": true,
-                "model": self.config.model,
+                "model": model,
                 "usage": {
-                    "input_tokens": summary.turn_usage.input_tokens,
-                    "output_tokens": summary.turn_usage.output_tokens,
-                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
+                    "input_tokens": tc.turn_usage.input_tokens,
+                    "output_tokens": tc.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
                 },
             })
             .to_string(),
@@ -5614,41 +5663,41 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
-            Some(&mut permission_prompter),
-            None,
-        ));
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
+        let model = self.lifecycle.current_model();
+        let outcome = self.run_noninteractive_turn(input)?;
+        let tc = outcome
+            .complete
+            .ok_or_else(|| "engine turn did not complete".to_string())?;
+        let auto_compaction_json = tc.auto_compaction.map(|event| {
+            json!({
+                "removed_messages": event.removed_message_count,
+                "notice": format_auto_compaction_notice(event.removed_message_count),
+            })
+        });
+        let estimated_cost = format_usd(
+            tc.turn_usage
+                .estimate_cost_usd_with_pricing(
+                    pricing_for_model(&model)
+                        .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
+                )
+                .total_cost_usd(),
+        );
         self.out_println(
             json!({
-                "message": final_assistant_text(&summary),
-                "model": self.config.model,
-                "iterations": summary.iterations,
-                "auto_compaction": summary.auto_compaction.map(|event| json!({
-                    "removed_messages": event.removed_message_count,
-                    "notice": format_auto_compaction_notice(event.removed_message_count),
-                })),
-                "tool_uses": collect_tool_uses(&summary),
-                "tool_results": collect_tool_results(&summary),
-                "prompt_cache_events": collect_prompt_cache_events(&summary),
+                "message": outcome.final_text,
+                "model": model,
+                "iterations": tc.iterations,
+                "auto_compaction": auto_compaction_json,
+                "tool_uses": outcome.tool_uses,
+                "tool_results": outcome.tool_results,
+                "prompt_cache_events": outcome.prompt_cache_events,
                 "usage": {
-                    "input_tokens": summary.turn_usage.input_tokens,
-                    "output_tokens": summary.turn_usage.output_tokens,
-                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
+                    "input_tokens": tc.turn_usage.input_tokens,
+                    "output_tokens": tc.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
                 },
-                "estimated_cost": format_usd(
-                    summary.turn_usage.estimate_cost_usd_with_pricing(
-                        pricing_for_model(&self.config.model)
-                            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
-                    ).total_cost_usd()
-                )
+                "estimated_cost": estimated_cost,
             })
             .to_string(),
         );
@@ -5716,10 +5765,12 @@ impl LiveCli {
             SlashCommand::Resume { session_path } => {
                 let resumed = self.load_session(session_path)?;
                 if resumed {
+                    let handle = self.lifecycle.session_handle();
+                    let session = self.lifecycle.session_snapshot();
                     self.out_println(format_resume_report(
-                        &self.session.path.display().to_string(),
-                        self.runtime.session().messages.len(),
-                        self.runtime.usage().turns(),
+                        &handle.path.display().to_string(),
+                        session.messages.len(),
+                        self.lifecycle.usage_snapshot().turns(),
                     ));
                 }
                 resumed
@@ -5741,24 +5792,14 @@ impl LiveCli {
                             self.out_println(format!("usage: /mcp {action_str} <server>"));
                             return Ok(false);
                         };
-                        if let Some(mcp_state) = &self.runtime.mcp_state {
-                            let mut mcp = mcp_state.lock().unwrap_or_else(|e| e.into_inner());
-                            let result = match action_str {
-                                "reconnect" => mcp.reconnect_server(server_name),
-                                "enable" => mcp.enable_server(server_name),
-                                "disable" => mcp.disable_server(server_name),
-                                _ => unreachable!(),
-                            };
-                            match result {
-                                Ok(msg) => self.out_println(msg),
-                                Err(err) => self.out_println(format!("Error: {err}")),
-                            }
-                        } else {
-                            self.out_println(
+                        match self.lifecycle.mcp_command(action_str, server_name) {
+                            Some(Ok(msg)) => self.out_println(msg),
+                            Some(Err(err)) => self.out_println(format!("Error: {err}")),
+                            None => self.out_println(
                                 "No MCP servers are running in this session.\n\
                                  Hint: if you just added a server via `/mcp add-json`, \
                                  restart scode to load it.",
-                            );
+                            ),
                         }
                     }
                     _ => {
@@ -5821,7 +5862,7 @@ impl LiveCli {
                 match resolve_skill_invocation_with_plugins(
                     &cwd,
                     args.as_deref(),
-                    Some(self.runtime.plugin_load_outcome()),
+                    Some(&self.lifecycle.plugin_load_outcome()),
                 )
                 .map_err(std::io::Error::other)?
                 {
@@ -5843,7 +5884,8 @@ impl LiveCli {
                 false
             }
             SlashCommand::Stats => {
-                let usage = UsageTracker::from_session(self.runtime.session()).cumulative_usage();
+                let session = self.lifecycle.session_snapshot();
+                let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
                 false
             }
@@ -5897,34 +5939,37 @@ impl LiveCli {
     }
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.session().save_to_path(&self.session.path)?;
-        Ok(())
+        self.lifecycle.persist().map_err(Into::into)
     }
 
     fn print_status(&self) {
-        let cumulative = self.runtime.usage().cumulative_usage();
-        let latest = self.runtime.usage().current_turn_usage();
+        let usage = self.lifecycle.usage_snapshot();
+        let cumulative = usage.cumulative_usage();
+        let latest = usage.current_turn_usage();
+        let session = self.lifecycle.session_snapshot();
+        let handle = self.lifecycle.session_handle();
         let report = format_status_report(
-            &self.config.model,
+            &self.lifecycle.current_model(),
             StatusUsage {
-                message_count: self.runtime.session().messages.len(),
-                turns: self.runtime.usage().turns(),
+                message_count: session.messages.len(),
+                turns: usage.turns(),
                 latest,
                 cumulative,
-                estimated_tokens: self.runtime.estimated_tokens(),
+                estimated_tokens: self.lifecycle.estimated_tokens(),
             },
-            self.config.permission_mode.as_str(),
-            &status_context(Some(&self.session.path)).expect("status context should load"),
+            self.lifecycle.current_permission_mode().as_str(),
+            &status_context(Some(&handle.path)).expect("status context should load"),
             None, // #148: REPL /status doesn't carry flag provenance
         );
         self.out_suspend(|| print_with_pager(&report));
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
+        let updated_at_ms = self.lifecycle.session_snapshot().updated_at_ms;
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
-            .map_or(self.runtime.session().updated_at_ms, |duration| {
+            .map_or(updated_at_ms, |duration| {
                 u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
             });
         let entry = PromptHistoryEntry {
@@ -5932,7 +5977,13 @@ impl LiveCli {
             text: prompt.to_string(),
         };
         self.prompt_history.push(entry);
-        if let Err(error) = self.runtime.session_mut().push_prompt_entry(prompt) {
+        let mut push_error = None;
+        self.lifecycle.with_session_mut(&mut |session| {
+            if let Err(error) = session.push_prompt_entry(prompt) {
+                push_error = Some(error.to_string());
+            }
+        });
+        if let Some(error) = push_error {
             eprintln!("warning: failed to persist prompt history: {error}");
         }
     }
@@ -5945,10 +5996,11 @@ impl LiveCli {
                 return;
             }
         };
-        let session_entries = &self.runtime.session().prompt_history;
+        let session = self.lifecycle.session_snapshot();
+        let session_entries = &session.prompt_history;
         let entries = if session_entries.is_empty() {
             if self.prompt_history.is_empty() {
-                collect_session_prompt_history(self.runtime.session())
+                collect_session_prompt_history(&session)
             } else {
                 self.prompt_history
                     .iter()
@@ -5987,10 +6039,8 @@ impl LiveCli {
             let sudocode_config = load_sudocode_config_for_current_dir();
             let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
             let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-            let default_idx = models
-                .iter()
-                .position(|m| *m == self.config.model)
-                .unwrap_or(0);
+            let current = self.lifecycle.current_model();
+            let default_idx = models.iter().position(|m| *m == current).unwrap_or(0);
             let selection = self.out_suspend(|| {
                 FuzzySelect::new()
                     .with_prompt("Select model (type to filter)")
@@ -6004,50 +6054,34 @@ impl LiveCli {
             };
         };
 
-        let model = resolve_model_alias_with_config(&model);
-
-        if model == self.config.model {
-            self.out_println(format_model_report(
-                &self.config.model,
-                self.runtime.session().messages.len(),
-                self.runtime.usage().turns(),
+        // The engine owns the switch (resolve + rebuild + keep session.model in
+        // sync); it returns report DATA and we format it.
+        let report = self.lifecycle.set_model(&model)?;
+        if report.changed {
+            self.undone_tool_use_ids.clear();
+            self.out_println(format_model_switch_report(
+                &report.previous,
+                &report.resolved,
+                report.message_count,
             ));
-            return Ok(false);
+            Ok(true)
+        } else {
+            self.out_println(format_model_report(
+                &report.resolved,
+                report.message_count,
+                report.turns,
+            ));
+            Ok(false)
         }
-
-        let previous = self.config.model.clone();
-        let mut session = self.runtime.session().clone();
-        // Keep the session's own model in sync with the switch (see handle_acp_model_switch): the
-        // runtime builder only fills `session.model` when None, so otherwise it would retain the
-        // old model and mis-compute the context window for auto-compaction.
-        session.model = Some(model.clone());
-        let session_id = self.session.id.clone();
-        let message_count = session.messages.len();
-        let cwd = env::current_dir().unwrap_or_default();
-        let system_prompt = build_system_prompt_for(&cwd)?;
-        let runtime = self.build_replacement_runtime(
-            session,
-            session_id,
-            RuntimeConfig {
-                model: model.clone(),
-                system_prompt,
-                ..self.config.clone()
-            },
-        )?;
-        self.replace_runtime(runtime)?;
-        self.config.model.clone_from(&model);
-        self.out_println(format_model_switch_report(&previous, &model, message_count));
-        Ok(true)
     }
 
     fn set_permissions(
         &mut self,
         mode: Option<String>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        let current = self.lifecycle.current_permission_mode();
         let Some(mode) = mode else {
-            self.out_println(format_permissions_report(
-                self.config.permission_mode.as_str(),
-            ));
+            self.out_println(format_permissions_report(current.as_str()));
             return Ok(false);
         };
 
@@ -6057,23 +6091,20 @@ impl LiveCli {
             )
         })?;
 
-        if normalized == self.config.permission_mode.as_str() {
+        if normalized == current.as_str() {
             self.out_println(format_permissions_report(normalized));
             return Ok(false);
         }
 
-        let previous = self.config.permission_mode.as_str().to_string();
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.config.permission_mode = permission_mode_from_label(normalized);
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
+        let previous = current.as_str().to_string();
+        self.lifecycle
+            .set_permission_mode(permission_mode_from_label(normalized))?;
         self.out_println(format_permissions_switch_report(&previous, normalized));
         Ok(true)
     }
 
     fn set_auth(&mut self, mode: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
-        let current_str = self.config.auth_mode.as_str().to_string();
+        let current_str = self.lifecycle.current_auth_mode().as_str().to_string();
 
         let Some(mode) = mode else {
             self.out_println(format_auth_report(&current_str));
@@ -6088,11 +6119,7 @@ impl LiveCli {
         }
 
         let previous = current_str;
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.config.auth_mode = parsed;
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
+        self.lifecycle.set_auth(parsed)?;
         self.out_println(format_auth_switch_report(&previous, parsed.as_str()));
         Ok(true)
     }
@@ -6105,35 +6132,30 @@ impl LiveCli {
             return Ok(false);
         }
 
-        let cwd = runtime::current_workspace_root()?;
-        let cleared = clear_session_state(&cwd, &self.session)?;
-        let runtime = self.build_replacement_runtime(
-            cleared.fresh,
-            cleared.handle.id.clone(),
-            self.config.clone(),
-        )?;
-        self.session = cleared.handle;
-        self.replace_runtime(runtime)?;
+        let previous_session = self.lifecycle.session_handle();
+        let model = self.lifecycle.current_model();
+        let permission_mode = self.lifecycle.current_permission_mode();
+        let new_handle = self.lifecycle.reset_session()?;
+        self.undone_tool_use_ids.clear();
         self.out_println(format!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
-            cleared.previous.id,
-            cleared.previous.id,
-            self.config.model,
-            self.config.permission_mode.as_str(),
-            self.session.id,
-            self.session.path.display(),
+            previous_session.id,
+            previous_session.id,
+            model,
+            permission_mode.as_str(),
+            new_handle.id,
+            new_handle.path.display(),
         ));
         Ok(true)
     }
 
     fn print_cost(&self) {
-        let cumulative = self.runtime.usage().cumulative_usage();
+        let cumulative = self.lifecycle.usage_snapshot().cumulative_usage();
         self.out_println(format_cost_report(cumulative));
     }
 
-    /// Load a session by reference (id, path, or "latest"), replacing the
-    /// current runtime. Pure data operation — no terminal output.
-    /// Callers decide how to report the result.
+    /// Load a session by reference (id, path, or "latest") — the engine loads
+    /// it and swaps it in. Pure data operation; callers report the result.
     fn load_session(
         &mut self,
         session_path: Option<String>,
@@ -6161,33 +6183,20 @@ impl LiveCli {
             };
         };
 
-        let (handle, session) = load_session_reference(&session_ref)?;
-        let message_count = session.messages.len();
-        let session_id = session.session_id.clone();
-        let runtime =
-            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.session = SessionHandle {
-            id: session_id,
-            path: handle.path,
-        };
+        self.lifecycle.resume_session(&session_ref)?;
+        self.undone_tool_use_ids.clear();
         Ok(true)
     }
 
-    /// Replace the current session with a pre-loaded one (for `--resume`).
+    /// Resume a pre-resolved session (for `--resume` at startup). The engine
+    /// reloads it by reference and swaps it in.
     fn replace_with_session(
         &mut self,
-        session: runtime::Session,
+        _session: runtime::Session,
         handle: SessionHandle,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let session_id = session.session_id.clone();
-        let runtime =
-            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.session = SessionHandle {
-            id: session_id,
-            path: handle.path,
-        };
+        self.lifecycle.resume_session(&handle.id)?;
+        self.undone_tool_use_ids.clear();
         Ok(())
     }
 
@@ -6411,12 +6420,8 @@ impl LiveCli {
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
-        print_skills_for_outcome(
-            args,
-            output_format,
-            &cwd,
-            Some(self.runtime.plugin_load_outcome()),
-        )
+        let outcome = self.lifecycle.plugin_load_outcome();
+        print_skills_for_outcome(args, output_format, &cwd, Some(&outcome))
     }
 
     fn print_plugins(
@@ -6511,7 +6516,8 @@ impl LiveCli {
     }
 
     fn handle_undo(&mut self) {
-        let messages = &self.runtime.session().messages;
+        let session = self.lifecycle.session_snapshot();
+        let messages = &session.messages;
         match crate::cli::undo::find_last_undoable_edit(messages, &self.undone_tool_use_ids) {
             None => {
                 self.out_println(
@@ -6538,12 +6544,13 @@ impl LiveCli {
         &self,
         requested_path: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let export_path = resolve_export_path(requested_path, self.runtime.session())?;
-        fs::write(&export_path, render_export_text(self.runtime.session()))?;
+        let session = self.lifecycle.session_snapshot();
+        let export_path = resolve_export_path(requested_path, &session)?;
+        fs::write(&export_path, render_export_text(&session))?;
         self.out_println(format!(
             "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}",
             export_path.display(),
-            self.runtime.session().messages.len(),
+            session.messages.len(),
         ));
         Ok(())
     }
@@ -6561,16 +6568,21 @@ impl LiveCli {
                 if io::stdin().is_terminal() && io::stdout().is_terminal() {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
-                        self.out_println(render_session_list(&self.session.id)?);
+                        self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
                         return Ok(false);
                     }
                     let default_idx = sessions
                         .iter()
-                        .position(|session| session.id == self.session.id)
+                        .position(|session| session.id == self.lifecycle.session_handle().id)
                         .unwrap_or(0);
                     let items: Vec<String> = sessions
                         .iter()
-                        .map(|session| format_session_picker_entry(session, &self.session.id))
+                        .map(|session| {
+                            format_session_picker_entry(
+                                session,
+                                &self.lifecycle.session_handle().id,
+                            )
+                        })
                         .collect();
                     let selection = self.out_suspend(|| {
                         FuzzySelect::new()
@@ -6583,13 +6595,13 @@ impl LiveCli {
                         return Ok(false);
                     };
                     let target = sessions[idx].id.clone();
-                    if target == self.session.id {
+                    if target == self.lifecycle.session_handle().id {
                         self.out_println(format!("Session unchanged (already active: {target})."));
                         return Ok(false);
                     }
                     return self.handle_session_command(Some("switch"), Some(&target));
                 }
-                self.out_println(render_session_list(&self.session.id)?);
+                self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
                 Ok(false)
             }
             Some("switch") => {
@@ -6597,48 +6609,27 @@ impl LiveCli {
                     self.out_println("Usage: /session switch <session-id>");
                     return Ok(false);
                 };
-                let (handle, session) = load_session_reference(target)?;
-                let message_count = session.messages.len();
-                let session_id = session.session_id.clone();
-                let runtime = self.build_replacement_runtime(
-                    session,
-                    handle.id.clone(),
-                    self.config.clone(),
-                )?;
-                self.replace_runtime(runtime)?;
-                self.session = SessionHandle {
-                    id: session_id,
-                    path: handle.path,
-                };
+                let (handle, message_count) = self.lifecycle.resume_session(target)?;
+                self.undone_tool_use_ids.clear();
                 self.out_println(format!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
-                    self.session.id,
-                    self.session.path.display(),
+                    handle.id,
+                    handle.path.display(),
                     message_count,
                 ));
                 Ok(true)
             }
             Some("fork") => {
-                let forked = self.runtime.fork_session(target.map(ToOwned::to_owned));
-                let parent_session_id = self.session.id.clone();
-                let handle = create_managed_session_handle(&forked.session_id)?;
-                let branch_name = forked
-                    .fork
-                    .as_ref()
-                    .and_then(|fork| fork.branch_name.clone());
-                let forked = forked.with_persistence_path(handle.path.clone());
-                let message_count = forked.messages.len();
-                forked.save_to_path(&handle.path)?;
-                let runtime =
-                    self.build_replacement_runtime(forked, handle.id.clone(), self.config.clone())?;
-                self.replace_runtime(runtime)?;
-                self.session = handle;
+                let parent_session_id = self.lifecycle.session_handle().id;
+                let (handle, message_count, branch_name) =
+                    self.lifecycle.fork_session(target.map(ToOwned::to_owned))?;
+                self.undone_tool_use_ids.clear();
                 self.out_println(format!(
                     "Session forked\n  Parent session   {}\n  Active session   {}\n  Branch           {}\n  File             {}\n  Messages         {}",
                     parent_session_id,
-                    self.session.id,
+                    handle.id,
                     branch_name.as_deref().unwrap_or("(unnamed)"),
-                    self.session.path.display(),
+                    handle.path.display(),
                     message_count,
                 ));
                 Ok(true)
@@ -6649,7 +6640,7 @@ impl LiveCli {
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                if handle.id == self.lifecycle.session_handle().id {
                     self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
@@ -6674,7 +6665,7 @@ impl LiveCli {
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                if handle.id == self.lifecycle.session_handle().id {
                     self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
@@ -6716,73 +6707,13 @@ impl LiveCli {
     }
 
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()
+        self.lifecycle.reload_features().map_err(Into::into)
     }
 
     fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self
-            .tokio_runtime
-            .block_on(self.runtime.compact(CompactionConfig::default(), None));
-        let removed = result.removed_message_count;
-        let kept = result.compacted_session.messages.len();
-        let skipped = removed == 0;
-        let session_id = self.session.id.clone();
-        let runtime = self.build_replacement_runtime(
-            result.compacted_session,
-            session_id,
-            self.config.clone(),
-        )?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
-        self.out_println(format_compact_report(
-            removed,
-            kept,
-            skipped,
-            &result.summary_source,
-        ));
+        let (removed, kept, skipped, summary_source) = self.lifecycle.run_compaction()?;
+        self.out_println(format_compact_report(removed, kept, skipped, &summary_source));
         Ok(())
-    }
-
-    fn run_internal_prompt_text_with_progress(
-        &mut self,
-        prompt: &str,
-        enable_tools: bool,
-        progress: Option<InternalPromptProgressReporter>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        let mut runtime = self.build_replacement_runtime(
-            session,
-            session_id,
-            RuntimeConfig {
-                enable_tools,
-                emit_output: false,
-                progress_reporter: progress,
-                ..self.config.clone()
-            },
-        )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let summary = self.tokio_runtime.block_on(runtime.run_turn(
-            prompt,
-            Some(&mut permission_prompter),
-            None,
-        ))?;
-        let text = final_assistant_text(&summary).trim().to_string();
-        runtime.shutdown_mcp()?;
-        runtime.shutdown_plugins()?;
-        Ok(text)
-    }
-
-    fn run_internal_prompt_text(
-        &mut self,
-        prompt: &str,
-        enable_tools: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.run_internal_prompt_text_with_progress(prompt, enable_tools, None)
     }
 
     fn run_bughunter(&self, scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -6807,7 +6738,8 @@ impl LiveCli {
 
     fn run_debug_tool_call(&self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         validate_no_args("/debug-tool-call", args)?;
-        self.out_println(render_last_tool_debug_report(self.runtime.session())?);
+        let session = self.lifecycle.session_snapshot();
+        self.out_println(render_last_tool_debug_report(&session)?);
         Ok(())
     }
 

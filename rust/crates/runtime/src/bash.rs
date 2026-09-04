@@ -540,11 +540,10 @@ fn prepare_command(
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
 ) -> Command {
-    if create_dirs {
-        prepare_sandbox_dirs(cwd);
-    }
-
     if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
+        if create_dirs {
+            prepare_sandbox_dirs(cwd);
+        }
         let mut prepared = Command::new(launcher.program);
         prepared.args(launcher.args);
         prepared.current_dir(cwd);
@@ -552,12 +551,14 @@ fn prepare_command(
         return prepared;
     }
 
+    // Fallback path: no real sandbox is available (always the case off
+    // Linux — `build_linux_sandbox_command` is namespace-based). HOME and
+    // TMPDIR must stay untouched here: remapping them provides zero
+    // isolation while breaking every external tool that resolves `~`
+    // (auth configs, keychains, CLIs like `suh`). Only the real Linux
+    // launcher above redirects HOME, via `launcher.env`.
     let mut prepared = Command::new("sh");
     prepared.arg("-lc").arg(command).current_dir(cwd);
-    if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
-    }
     prepared
 }
 
@@ -567,23 +568,19 @@ fn prepare_tokio_command(
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
 ) -> TokioCommand {
-    if create_dirs {
-        prepare_sandbox_dirs(cwd);
-    }
-
     let mut prepared =
         if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
+            if create_dirs {
+                prepare_sandbox_dirs(cwd);
+            }
             let mut cmd = TokioCommand::new(launcher.program);
             cmd.args(launcher.args);
             cmd.envs(launcher.env);
             cmd
         } else {
+            // No real sandbox: leave HOME/TMPDIR alone (see prepare_command).
             let mut cmd = TokioCommand::new("sh");
             cmd.arg("-lc").arg(command);
-            if sandbox_status.filesystem_active {
-                cmd.env("HOME", cwd.join(".sandbox-home"));
-                cmd.env("TMPDIR", cwd.join(".sandbox-tmp"));
-            }
             cmd
         };
 

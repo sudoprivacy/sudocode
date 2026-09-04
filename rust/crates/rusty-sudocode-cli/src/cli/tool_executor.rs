@@ -9,9 +9,6 @@ use runtime::{
 use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
-use super::format::format_tool_result;
-use crate::render::{ansi_bold_fg, ansi_fg, theme, SpinnerRef, TerminalRenderer, BOLD, DIM, RESET};
-use crate::repl_ui::OutputSender;
 use crate::{AllowedToolSet, RuntimeMcpState};
 
 // ---------------------------------------------------------------------------
@@ -88,7 +85,6 @@ pub(crate) struct GetMcpPromptRequest {
 }
 
 pub(crate) struct CliToolExecutor {
-    renderer: TerminalRenderer,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -99,8 +95,6 @@ pub(crate) struct CliToolExecutor {
     // correct — the CLI turn loop is single-threaded.
     question_prompter: RefCell<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
-    /// Optional UI command sender for ContextSlot updates (Task* → UI).
-    ui_sender: Option<crate::repl_ui::UiCommandSender>,
     /// Optional nexus A2A send capability. When set (nexus-A2A configured),
     /// `send_message` writes to the peer's `/agents/<to>/chat-with-me`
     /// DT_STREAM over gRPC (the node stamps `from`) via the SAME shared
@@ -116,13 +110,11 @@ impl CliToolExecutor {
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
-            renderer: TerminalRenderer::new(),
             allowed_tools,
             tool_registry,
             mcp_state,
             question_prompter: RefCell::new(None),
             abort_signal: None,
-            ui_sender: None,
             mailbox_sender: None,
         }
     }
@@ -133,10 +125,6 @@ impl CliToolExecutor {
     /// `send_message` is not advertised to the model.
     pub(crate) fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
         self.mailbox_sender = Some(sender);
-    }
-
-    pub(crate) fn set_ui_sender(&mut self, sender: crate::repl_ui::UiCommandSender) {
-        self.ui_sender = Some(sender);
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -326,17 +314,9 @@ impl ToolExecutor for CliToolExecutor {
         if is_mcp_tool {
             runtime::clear_mcp_progress_callback();
         }
-        // After any Task* mutation succeeds, push the full task list
-        // to the ContextSlot so the UI renders live progress.
-        if matches!(
-            tool_name,
-            "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskStop"
-        ) {
-            if let (Ok(_), Some(ref ui)) = (&result, &self.ui_sender) {
-                let tasks = tools::global_task_list();
-                ui.update_context(tasks);
-            }
-        }
+        // Task-list panel updates are a RENDERER concern: the renderer derives
+        // them from `EngineEvent::ToolResult` for the Task* tools (which it
+        // already receives across the seam), NOT from an engine-side side-channel.
         // Tool results reach the renderer via RuntimeObserver::on_tool_result
         // -> EngineEvent::ToolResult -> EngineEventRenderer (the seam). The
         // executor stays renderer-agnostic and never writes to the terminal.

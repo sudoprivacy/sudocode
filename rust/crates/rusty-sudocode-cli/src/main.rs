@@ -1718,13 +1718,13 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     Some(&plugin_outcome),
                 ) {
                     cli.record_prompt_history(&trimmed);
-                    if let Err(e) = cli.run_turn(&prompt) {
+                    if let Err(e) = cli.run_turn_interactive(&prompt) {
                         eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                     }
                     continue;
                 }
                 cli.record_prompt_history(&trimmed);
-                if let Err(e) = cli.run_turn(&trimmed) {
+                if let Err(e) = cli.run_turn_interactive(&trimmed) {
                     eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                 }
             }
@@ -2161,6 +2161,314 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
         }
         self.ui.clear_question();
         Ok(answers)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Sync-REPL per-turn cancel monitor.
+//
+// The sync rustyline REPL runs a turn by blocking on the engine seam, so it
+// needs a side channel to catch ESC / Ctrl-C mid-turn and cancel. On Unix a
+// bare ESC (0x1b) can't be reliably read through crossterm's event system
+// after rustyline toggles raw mode, so we poll termios directly — exactly what
+// the pre-seam HookAbortMonitor did. The only change: the sink is now the seam
+// (`EngineCommand::Cancel`), not a raw abort-signal handle.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+std::thread_local! {
+    static ORIGINAL_TERMIOS: std::cell::RefCell<Option<nix::sys::termios::Termios>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Enable raw mode via `nix::sys::termios` (no crossterm). Returns `true` on
+/// success; call `disable_raw_mode_unix()` to restore.
+#[cfg(unix)]
+fn enable_raw_mode_unix() -> bool {
+    use nix::sys::termios::{self, SetArg, SpecialCharacterIndices};
+
+    let stdin = std::io::stdin();
+    let Ok(original) = termios::tcgetattr(&stdin) else {
+        return false;
+    };
+    ORIGINAL_TERMIOS.with(|cell| *cell.borrow_mut() = Some(original.clone()));
+
+    let mut raw = original;
+    termios::cfmakeraw(&mut raw);
+    // Non-blocking: VMIN=0, VTIME=0 → read() returns immediately with 0 bytes
+    // when nothing is available; poll() handles the wait.
+    raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
+    raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+    termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw).is_ok()
+}
+
+/// Restore terminal settings saved by `enable_raw_mode_unix`.
+#[cfg(unix)]
+fn disable_raw_mode_unix() {
+    use nix::sys::termios::{self, SetArg};
+
+    let stdin = std::io::stdin();
+    ORIGINAL_TERMIOS.with(|cell| {
+        if let Some(original) = cell.borrow().as_ref() {
+            let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, original);
+        }
+    });
+}
+
+/// Which abort key `poll_abort_key` detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortKey {
+    None,
+    /// ESC (0x1b) — cancels the current turn, never exits.
+    Esc,
+    /// Ctrl-C (0x03) — cancels the current turn; a second press within 800ms
+    /// exits the process (CC parity).
+    CtrlC,
+}
+
+/// Poll stdin for an abort key (ESC = 0x1b, Ctrl-C = 0x03) on Unix.
+#[cfg(unix)]
+fn poll_abort_key(timeout: Duration) -> AbortKey {
+    use nix::poll::{self, PollFd, PollFlags, PollTimeout};
+    use std::os::fd::AsFd;
+    use std::os::unix::io::AsRawFd;
+
+    let stdin = std::io::stdin();
+    let poll_timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::from(50u16));
+    let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+    let ready = poll::poll(&mut fds, poll_timeout).unwrap_or(0);
+    if ready <= 0 {
+        return AbortKey::None;
+    }
+    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+    if !revents.contains(PollFlags::POLLIN) {
+        return AbortKey::None;
+    }
+    let mut buf = [0u8; 1];
+    match nix::unistd::read(stdin.as_raw_fd(), &mut buf) {
+        Ok(1) if buf[0] == 0x03 => AbortKey::CtrlC,
+        Ok(1) if buf[0] == 0x1b => AbortKey::Esc,
+        _ => AbortKey::None,
+    }
+}
+
+/// Poll stdin for an abort key via crossterm's event system (Windows).
+#[cfg(not(unix))]
+fn poll_abort_key(timeout: Duration) -> AbortKey {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    if !event::poll(timeout).unwrap_or(false) {
+        return AbortKey::None;
+    }
+    if let Ok(Event::Key(key)) = event::read() {
+        if key.kind != KeyEventKind::Press {
+            return AbortKey::None;
+        }
+        if key.code == KeyCode::Esc {
+            return AbortKey::Esc;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return AbortKey::CtrlC;
+        }
+    }
+    AbortKey::None
+}
+
+#[derive(Default)]
+struct MonitorInner {
+    /// Set by `suspend()` — the monitor should stop polling + restore cooked mode.
+    suspend_requested: bool,
+    /// Set by the monitor once it has parked (cooked mode restored).
+    suspended: bool,
+    /// Set by `Drop` — the monitor should exit.
+    stop: bool,
+}
+
+struct MonitorCtl {
+    inner: Mutex<MonitorInner>,
+    cv: std::sync::Condvar,
+}
+
+/// A per-turn ESC / Ctrl-C monitor for the sync REPL. Polls the terminal on a
+/// dedicated thread and sends `EngineCommand::Cancel` across the seam when the
+/// user aborts. `suspend()`/`resume()` let the turn hand stdin to an interactive
+/// prompter (permission / question dialog) without the monitor eating the reply.
+struct ReplTurnCancelMonitor {
+    ctl: Arc<MonitorCtl>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl ReplTurnCancelMonitor {
+    fn install(commands: mpsc::Sender<EngineCommand>) -> Self {
+        let ctl = Arc::new(MonitorCtl {
+            inner: Mutex::new(MonitorInner::default()),
+            cv: std::sync::Condvar::new(),
+        });
+        let ctl_thread = Arc::clone(&ctl);
+        let join = thread::Builder::new()
+            .name("repl-cancel-monitor".into())
+            .spawn(move || {
+                // Without an interactive terminal there is nothing to poll; mark
+                // parked so `suspend()` never blocks, and idle until stopped.
+                if !io::stdin().is_terminal() {
+                    let mut guard = ctl_thread
+                        .inner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.suspended = true;
+                    ctl_thread.cv.notify_all();
+                    while !guard.stop {
+                        guard = ctl_thread
+                            .cv
+                            .wait(guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    return;
+                }
+
+                #[cfg(unix)]
+                let mut raw = enable_raw_mode_unix();
+                #[cfg(not(unix))]
+                let mut raw = crossterm::terminal::enable_raw_mode().is_ok();
+
+                loop {
+                    {
+                        let mut guard = ctl_thread
+                            .inner
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if guard.stop {
+                            break;
+                        }
+                        if guard.suspend_requested {
+                            if raw {
+                                #[cfg(unix)]
+                                disable_raw_mode_unix();
+                                #[cfg(not(unix))]
+                                {
+                                    let _ = crossterm::terminal::disable_raw_mode();
+                                }
+                                raw = false;
+                            }
+                            guard.suspended = true;
+                            ctl_thread.cv.notify_all();
+                            while guard.suspend_requested && !guard.stop {
+                                guard = ctl_thread
+                                    .cv
+                                    .wait(guard)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                            guard.suspended = false;
+                            if guard.stop {
+                                break;
+                            }
+                            #[cfg(unix)]
+                            {
+                                raw = enable_raw_mode_unix();
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                raw = crossterm::terminal::enable_raw_mode().is_ok();
+                            }
+                            continue;
+                        }
+                    }
+                    match poll_abort_key(Duration::from_millis(50)) {
+                        AbortKey::None => {}
+                        AbortKey::Esc => {
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                        AbortKey::CtrlC => {
+                            if cancel::is_double_ctrlc() {
+                                if raw {
+                                    #[cfg(unix)]
+                                    disable_raw_mode_unix();
+                                    #[cfg(not(unix))]
+                                    {
+                                        let _ = crossterm::terminal::disable_raw_mode();
+                                    }
+                                }
+                                eprintln!();
+                                std::process::exit(0);
+                            }
+                            cancel::record_ctrlc();
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                    }
+                }
+
+                if raw {
+                    #[cfg(unix)]
+                    disable_raw_mode_unix();
+                    #[cfg(not(unix))]
+                    {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                    }
+                }
+            })
+            .expect("spawn repl-cancel-monitor thread");
+        Self {
+            ctl,
+            join: Some(join),
+        }
+    }
+
+    /// Pause polling + restore cooked mode so an interactive prompter can read
+    /// stdin. Blocks until the monitor has parked (or already inert).
+    fn suspend(&self) {
+        let mut guard = self
+            .ctl
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.stop {
+            return;
+        }
+        guard.suspend_requested = true;
+        self.ctl.cv.notify_all();
+        while !guard.suspended && !guard.stop {
+            guard = self
+                .ctl
+                .cv
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Resume key polling after an interactive prompt.
+    fn resume(&self) {
+        let mut guard = self
+            .ctl
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.suspend_requested = false;
+        self.ctl.cv.notify_all();
+    }
+}
+
+impl Drop for ReplTurnCancelMonitor {
+    fn drop(&mut self) {
+        {
+            let mut guard = self
+                .ctl
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.stop = true;
+            self.ctl.cv.notify_all();
+        }
+        if let Some(join) = self.join.take() {
+            // The monitor wakes within ~50ms of the stop signal. Bound the wait
+            // so a wedged terminal can't hang the REPL between turns.
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while !join.is_finished() {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            let _ = join.join();
+        }
     }
 }
 
@@ -5240,6 +5548,7 @@ impl LiveCli {
         render: bool,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
+        cancel_monitor: Option<&ReplTurnCancelMonitor>,
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
@@ -5318,13 +5627,27 @@ impl LiveCli {
             match action {
                 RenderOutcome::Continue => {}
                 RenderOutcome::NeedPermission { id, request } => {
+                    // The prompter reads stdin (cooked mode); pause the sync-REPL
+                    // key monitor so it doesn't steal the approval keystrokes.
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.suspend();
+                    }
                     let decision = permission_prompter.decide(&request);
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.resume();
+                    }
                     self.engine_handle
                         .commands
                         .send(EngineCommand::PermissionAnswer { id, decision })?;
                 }
                 RenderOutcome::NeedQuestion { id, request } => {
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.suspend();
+                    }
                     let answers = question_prompter.ask(&request).unwrap_or_default();
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.resume();
+                    }
                     self.engine_handle
                         .commands
                         .send(EngineCommand::QuestionAnswer { id, answers })?;
@@ -5335,7 +5658,26 @@ impl LiveCli {
         Ok(outcome)
     }
 
+    /// Async-REPL driver entrypoint: no interactive key monitor (the async
+    /// iocraft REPL owns stdin and cancels via its own input path).
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_impl(input, false)
+    }
+
+    /// Interactive-terminal entrypoint (sync REPL + one-shot text): install a
+    /// per-turn ESC / Ctrl-C key monitor that cancels the turn across the seam.
+    /// The turn otherwise blocks on the engine with no key reader; the monitor
+    /// is inert off a pipe, so non-interactive runs are unaffected (they cancel
+    /// via SIGINT through the `SignalCancelGuard`).
+    fn run_turn_interactive(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_impl(input, true)
+    }
+
+    fn run_turn_impl(
+        &mut self,
+        input: &str,
+        interactive_cancel: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let token_budget = crate::render::parse_token_budget(input);
         let model = self.lifecycle.current_model();
@@ -5363,6 +5705,11 @@ impl LiveCli {
             Box::new(NoopQuestionPrompter)
         };
 
+        // Sync REPL only: catch ESC / Ctrl-C during the (otherwise blocking)
+        // turn and cancel across the seam. Dropped right after the turn so the
+        // next rustyline prompt owns stdin again.
+        let cancel_monitor = interactive_cancel
+            .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
             input,
             Some(spinner_ref),
@@ -5370,7 +5717,9 @@ impl LiveCli {
             true,
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
+            cancel_monitor.as_ref(),
         )?;
+        drop(cancel_monitor);
 
         match outcome.complete {
             Some(tc) if tc.cancelled => spinner.fail("⏹ Cancelled"),
@@ -5398,7 +5747,7 @@ impl LiveCli {
         if let Some(plan) = take_pending_plan_execution() {
             self.lifecycle.reset_session()?;
             let prompt = format!("Implement the following plan:\n\n{plan}");
-            return self.run_turn(&prompt);
+            return self.run_turn_impl(&prompt, interactive_cancel);
         }
         Ok(())
     }
@@ -5470,6 +5819,7 @@ impl LiveCli {
             true,
             &mut permission_prompter,
             &mut question_prompter,
+            None,
         )?;
         spinner_state.stop_turn();
 
@@ -5507,7 +5857,7 @@ impl LiveCli {
         match output_format {
             CliOutputFormat::Json if compact => self.run_prompt_compact_json(input),
             CliOutputFormat::Text if compact => self.run_prompt_compact(input),
-            CliOutputFormat::Text => self.run_turn(input),
+            CliOutputFormat::Text => self.run_turn_interactive(input),
             CliOutputFormat::Json => self.run_prompt_json(input),
         }
     }
@@ -5533,6 +5883,7 @@ impl LiveCli {
             false,
             permission_prompter,
             &mut question_prompter,
+            None,
         )?;
         if let Some(message) = outcome.error {
             return Err(message.into());

@@ -6,7 +6,7 @@
 //! engine↔renderer seam: the pure client is now `engine_core::EngineApiClient`,
 //! the display half is `render_engine::EngineEventRenderer`, and friendly
 //! API-error formatting lives in the `api` crate
-//! (`api::format_user_visible_api_error`). What remains are small pure helpers
+//! (`engine_core::format_user_visible_api_error`). What remains are small pure helpers
 //! that shape a finished [`runtime::TurnSummary`] into the JSON the one-shot /
 //! status paths emit — no I/O, no rendering.
 
@@ -89,5 +89,5 @@ pub(crate) fn collect_prompt_cache_events(
 }
 
 pub(crate) fn max_tokens_for_model(model: &str) -> u32 {
-    api::max_tokens_for_model(model)
+    engine_core::max_tokens_for_model(model)
 }

@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use api::AuthMode;
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::{
     classify_skills_slash_command, resolve_skill_invocation, resolve_skill_invocation_with_plugins,
     slash_command_specs, SkillSlashDispatch, SlashCommand,
 };
+use engine_core::AuthMode;
 use plugins::PluginLoadOutcome;
 use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 use tools::GlobalToolRegistry;
@@ -1152,7 +1152,7 @@ pub(crate) fn resolve_model_alias_with_config(model: &str) -> String {
     resolve_model_alias(trimmed).to_string()
 }
 
-fn resolve_config_model_alias(model: &str, config: &api::SudoCodeConfig) -> Option<String> {
+fn resolve_config_model_alias(model: &str, config: &engine_core::SudoCodeConfig) -> Option<String> {
     let trimmed = model.trim();
     let entry = config.models.get(&trimmed.to_ascii_lowercase())?;
     if entry.alias.trim().is_empty() {
@@ -1174,7 +1174,7 @@ pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
         _ => {}
     }
     let config = load_sudocode_config_for_current_dir();
-    if api::resolve_model(&config, trimmed).is_some() {
+    if engine_core::resolve_model(&config, trimmed).is_some() {
         return Ok(());
     }
     // If a proxy provider is configured, accept any bare model ID —
@@ -1225,21 +1225,23 @@ fn config_alias_for_current_dir(alias: &str) -> Option<String> {
     config.aliases().get(alias).cloned()
 }
 
-pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
+pub(crate) fn load_sudocode_config_for_current_dir() -> engine_core::SudoCodeConfig {
     let Ok(cwd) = runtime::current_workspace_root() else {
-        return api::SudoCodeConfig::default();
+        return engine_core::SudoCodeConfig::default();
     };
     load_sudocode_config_for_cwd(&cwd)
 }
 
-pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> api::SudoCodeConfig {
+pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> engine_core::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
     let config = loader.load_sudocode_config().unwrap_or_default();
     runtime::model_capabilities::apply_config_limits(&config);
     config
 }
 
-pub(crate) fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<api::SudoCodeConfig, String> {
+pub(crate) fn require_sudocode_config_for_cwd(
+    cwd: &Path,
+) -> Result<engine_core::SudoCodeConfig, String> {
     let loader = ConfigLoader::default_for(cwd);
     let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
     // Seed the capability overrides here rather than at each startup site:
@@ -1361,7 +1363,7 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(
             "api-key".to_string(),
-            api::ModelProviderMapping {
+            engine_core::ModelProviderMapping {
                 provider: "custom-openai".to_string(),
                 model: "gpt-5.4".to_string(),
                 api: Some("openai-completions".to_string()),
@@ -1371,7 +1373,7 @@ mod tests {
         let mut models = BTreeMap::new();
         models.insert(
             "custom-openai/gpt-5.4".to_string(),
-            api::ModelConfigEntry {
+            engine_core::ModelConfigEntry {
                 alias: "custom-openai/gpt-5.4".to_string(),
                 name: "custom-openai/gpt-5.4".to_string(),
                 input: vec!["text".to_string()],
@@ -1380,7 +1382,7 @@ mod tests {
             },
         );
 
-        let config = api::SudoCodeConfig {
+        let config = engine_core::SudoCodeConfig {
             auth_modes: BTreeMap::new(),
             models,
             web_search: Default::default(),

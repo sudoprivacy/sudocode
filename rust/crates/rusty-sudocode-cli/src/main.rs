@@ -44,11 +44,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use api::{
-    base_url_for_mode, resolve_startup_auth_source, AnthropicClient, AuthMode, AuthSource,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+use engine_core::{
+    base_url_for_mode, resolve_startup_auth_source, AuthMode, AuthSource, ProviderKind,
 };
 
 use cli::api_client::{
@@ -426,7 +423,9 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
 }
 
 /// Extract sudorouter base URL and API key from the sudocode config.
-fn extract_sudorouter_credentials(config: &api::SudoCodeConfig) -> Option<(String, String)> {
+fn extract_sudorouter_credentials(
+    config: &engine_core::SudoCodeConfig,
+) -> Option<(String, String)> {
     let proxy = config.auth_modes.get("proxy")?;
     let sr = proxy.get("sudorouter")?;
     let base_url = &sr.base_url;
@@ -2901,7 +2900,7 @@ struct RuntimeConfig {
     permission_mode: PermissionMode,
     progress_reporter: Option<InternalPromptProgressReporter>,
     auth_mode: AuthMode,
-    sudocode_config: api::SudoCodeConfig,
+    sudocode_config: engine_core::SudoCodeConfig,
 }
 
 struct BuiltRuntime {
@@ -4959,8 +4958,8 @@ impl AcpSdkDelegate {
         //
         // The request the provider sees is history + system prompt + tool
         // definitions, and the window must also hold `max_tokens` of output.
-        // The API client's local preflight (`api::preflight_message_request`)
-        // rejects on exactly that sum, so history is budgeted against it here
+        // The API client's local preflight rejects on exactly that sum, so
+        // history is budgeted against it here
         // rather than against a bare percentage of the window: with the old
         // 85% rule a long history sailed past this check and was then
         // rejected by the preflight with no compaction ever having run —
@@ -5490,10 +5489,11 @@ impl LiveCli {
         let auth_mode_str = auth_mode.label().to_string();
 
         // Endpoint from config-driven resolution.
-        let endpoint = api::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
-            .ok()
-            .map(|r| r.base_url)
-            .unwrap_or_default();
+        let endpoint =
+            engine_core::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
+                .ok()
+                .map(|r| r.base_url)
+                .unwrap_or_default();
 
         let t = theme();
         let logo_fg = ansi_fg(t.logo);
@@ -8104,7 +8104,7 @@ fn slash_command_completion_candidates_with_sessions(
 fn resolve_auth_mode(
     model: &str,
     explicit: Option<AuthMode>,
-    config: &api::SudoCodeConfig,
+    config: &engine_core::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
     if let Some(mode) = explicit {
         return Ok(mode);
@@ -8115,9 +8115,9 @@ fn resolve_auth_mode(
 fn resolve_model_switch_auth_mode(
     model: &str,
     explicit: Option<AuthMode>,
-    config: &api::SudoCodeConfig,
+    config: &engine_core::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    let Some(entry) = api::resolve_model(config, model) else {
+    let Some(entry) = engine_core::resolve_model(config, model) else {
         if let Some(mode) = explicit {
             return Ok(mode);
         }
@@ -8142,9 +8142,9 @@ fn resolve_model_switch_auth_mode(
 
 fn resolve_configured_auth_mode(
     model: &str,
-    config: &api::SudoCodeConfig,
+    config: &engine_core::SudoCodeConfig,
 ) -> Result<AuthMode, String> {
-    if let Some(entry) = api::resolve_model(config, model) {
+    if let Some(entry) = engine_core::resolve_model(config, model) {
         return resolve_configured_auth_mode_for_entry(model, entry);
     }
     // Model not in sudocode.json — if a proxy provider is configured,
@@ -8162,7 +8162,7 @@ fn resolve_configured_auth_mode(
 
 fn resolve_configured_auth_mode_for_entry(
     model: &str,
-    entry: &api::ModelConfigEntry,
+    entry: &engine_core::ModelConfigEntry,
 ) -> Result<AuthMode, String> {
     const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
     for mode_str in PRIORITY {
@@ -8181,8 +8181,8 @@ mod auth_mode_tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn connection(base_url: &str) -> api::ProviderConnectionConfig {
-        api::ProviderConnectionConfig {
+    fn connection(base_url: &str) -> engine_core::ProviderConnectionConfig {
+        engine_core::ProviderConnectionConfig {
             base_url: base_url.to_string(),
             api_key: Some("test-key".to_string()),
             api_key_env: None,
@@ -8198,18 +8198,18 @@ mod auth_mode_tests {
         provider: &str,
         wire_model: &str,
         api_format: &str,
-    ) -> api::ModelConfigEntry {
+    ) -> engine_core::ModelConfigEntry {
         let mut providers = BTreeMap::new();
         providers.insert(
             mode.to_string(),
-            api::ModelProviderMapping {
+            engine_core::ModelProviderMapping {
                 provider: provider.to_string(),
                 model: wire_model.to_string(),
                 api: Some(api_format.to_string()),
             },
         );
 
-        api::ModelConfigEntry {
+        engine_core::ModelConfigEntry {
             alias: alias.to_string(),
             name: alias.to_string(),
             input: vec!["text".to_string()],
@@ -8218,7 +8218,7 @@ mod auth_mode_tests {
         }
     }
 
-    fn mixed_auth_config() -> api::SudoCodeConfig {
+    fn mixed_auth_config() -> engine_core::SudoCodeConfig {
         let mut auth_modes = BTreeMap::new();
         auth_modes.insert(
             "proxy".to_string(),
@@ -8257,7 +8257,7 @@ mod auth_mode_tests {
             ),
         );
 
-        api::SudoCodeConfig {
+        engine_core::SudoCodeConfig {
             auth_modes,
             models,
             ..Default::default()

@@ -87,19 +87,20 @@ pub use engine_events::{EngineCommand, EngineEvent, EngineState, RequestId, Turn
 
 // --- Config / provider / error surface (the renderer's `api::` SSOT) ---------
 //
-// These 16 symbols are every `api::` item the renderer crate uses that is NOT a
+// These 17 symbols are every `api::` item the renderer crate uses that is NOT a
 // wire/streaming type. Re-exported verbatim so `rusty-sudocode-cli` /
 // `engine-acp` can flip `api::X` → `engine_core::X` and remove `api` from their
 // Cargo.toml.
 pub use api::{
     // Provider/base-url resolution + constants.
     base_url_for_mode,
+    // Error surface (raw type + the human-facing formatter the CLI renders).
+    format_user_visible_api_error,
     max_tokens_for_model,
     read_base_url,
     resolve_model,
     resolve_provider_from_config,
     resolve_startup_auth_source,
-    // Error surface.
     ApiError,
     // Auth / provider enums + sources.
     AuthMode,

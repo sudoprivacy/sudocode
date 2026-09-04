@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use api::{self, AuthMode, ProviderKind};
+use engine_core::{AuthMode, ProviderKind};
 use runtime::{self, TokenUsage};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -259,13 +259,13 @@ pub(crate) fn format_connected_line_with_mode(model: &str, mode: Option<AuthMode
 pub(crate) fn format_connected_line_with_config(
     model: &str,
     mode: Option<AuthMode>,
-    sudocode_config: &api::SudoCodeConfig,
+    sudocode_config: &engine_core::SudoCodeConfig,
 ) -> String {
     // Try to get provider label from sudocode.json config.
     let resolved_mode = mode.or_else(|| {
         // Auto-detect from model config: first available in priority order.
         const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
-        let entry = api::resolve_model(sudocode_config, model)?;
+        let entry = engine_core::resolve_model(sudocode_config, model)?;
         let mode_str = PRIORITY
             .iter()
             .find(|m| entry.providers.contains_key(**m))?;
@@ -274,7 +274,7 @@ pub(crate) fn format_connected_line_with_config(
     let provider = {
         // Look up provider name from config entry's mapping for the resolved mode.
         let mode_key = resolved_mode.map(|m| m.label().to_string());
-        api::resolve_model(sudocode_config, model)
+        engine_core::resolve_model(sudocode_config, model)
             .and_then(|entry| {
                 let mapping = if let Some(key) = &mode_key {
                     entry.providers.get(key.as_str())
@@ -290,10 +290,10 @@ pub(crate) fn format_connected_line_with_config(
         None => String::new(),
     };
     let base_url = match mode {
-        Some(m) => api::base_url_for_mode(m),
-        None => api::read_base_url(),
+        Some(m) => engine_core::base_url_for_mode(m),
+        None => engine_core::read_base_url(),
     };
-    let endpoint_hint = if base_url == api::DEFAULT_BASE_URL {
+    let endpoint_hint = if base_url == engine_core::DEFAULT_BASE_URL {
         String::new()
     } else {
         format!("\nEndpoint:  {base_url}")
@@ -1951,7 +1951,7 @@ mod tests {
 
     #[test]
     fn openai_configured_limit_errors_are_rendered_as_context_window_guidance() {
-        let error = api::ApiError::Api {
+        let error = engine_core::ApiError::Api {
             status: "400".parse().expect("status"),
             error_type: Some("invalid_request_error".to_string()),
             message: Some(
@@ -1965,7 +1965,7 @@ mod tests {
             retry_after: None,
         };
 
-        let rendered = api::format_user_visible_api_error("session-issue-32", &error);
+        let rendered = engine_core::format_user_visible_api_error("session-issue-32", &error);
         assert!(rendered.contains("Context window blocked"), "{rendered}");
         assert!(rendered.contains("context_window_blocked"), "{rendered}");
         assert!(

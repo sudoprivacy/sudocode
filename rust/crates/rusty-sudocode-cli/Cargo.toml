@@ -10,7 +10,6 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
-api = { path = "../api" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"

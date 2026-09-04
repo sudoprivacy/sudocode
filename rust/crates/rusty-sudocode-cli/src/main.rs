@@ -5575,6 +5575,7 @@ impl LiveCli {
         input: &str,
         spinner_ref: Option<render::SpinnerRef>,
         output: Option<&repl_ui::OutputSender>,
+        ui: Option<&repl_ui::UiCommandSender>,
         render: bool,
         permission_prompter: &mut dyn runtime::PermissionPrompter,
         question_prompter: &mut dyn runtime::QuestionPrompter,
@@ -5624,12 +5625,29 @@ impl LiveCli {
                     name,
                     output,
                     is_error,
-                } => outcome.tool_results.push(serde_json::json!({
-                    "tool_use_id": id,
-                    "tool_name": name,
-                    "output": output,
-                    "is_error": is_error,
-                })),
+                } => {
+                    // A successful Task* mutation changes the shared task list.
+                    // The iocraft REPL's context panel derives live from the
+                    // tool-result stream it already receives across the seam —
+                    // NOT from an engine-side side-channel into the executor
+                    // (that was a boundary leak, removed with `set_ui_sender`).
+                    if let Some(ui) = ui {
+                        if !*is_error
+                            && matches!(
+                                name.as_str(),
+                                "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskStop"
+                            )
+                        {
+                            ui.update_context(tools::global_task_list());
+                        }
+                    }
+                    outcome.tool_results.push(serde_json::json!({
+                        "tool_use_id": id,
+                        "tool_name": name,
+                        "output": output,
+                        "is_error": is_error,
+                    }));
+                }
                 EngineEvent::PromptCache(event) => {
                     outcome.prompt_cache_events.push(serde_json::json!({
                         "unexpected": event.unexpected,
@@ -5744,6 +5762,7 @@ impl LiveCli {
             input,
             Some(spinner_ref),
             None,
+            None,
             true,
             permission_prompter.as_mut(),
             question_prompter.as_mut(),
@@ -5846,6 +5865,7 @@ impl LiveCli {
             input,
             Some(spinner_ref),
             Some(output),
+            Some(&ui),
             true,
             &mut permission_prompter,
             &mut question_prompter,
@@ -5908,6 +5928,7 @@ impl LiveCli {
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
             input,
+            None,
             None,
             None,
             false,

@@ -3759,37 +3759,66 @@ impl engine_core::EngineDelegate for SessionEngine {
         session.abort_signal.reset();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
 
-        // Pre-send auto-compaction. The session's own model is the SSOT for the
-        // context-window lookup (build + set_model both keep it current).
+        // Pre-send auto-compaction, budgeted the way the API preflight is
+        // (context window minus max output, the fixed per-request overhead, and
+        // the autocompact buffer) so a too-large request never reaches the
+        // provider — the #545 wedge fix, on the engine turn path. The session's
+        // own model is the SSOT for the context-window lookup (build + set_model
+        // keep it current). Compacts through the LLM path and rewrites the
+        // persisted transcript; the runtime also compacts-and-resends once
+        // reactively inside run_turn if the provider still rejects.
         let model = session.runtime.session().model.clone().unwrap_or_default();
         let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
+        let max_output_tokens = max_tokens_for_model(&model) as usize;
+        let overhead_tokens = session
+            .runtime
+            .api_client()
+            .fixed_request_overhead_tokens(session.runtime.system_prompt());
+        let buffer_tokens = runtime::autocompact_buffer_tokens(&model) as usize;
+        let history_budget =
+            context_limit.saturating_sub(max_output_tokens + overhead_tokens + buffer_tokens);
+        let prompt_tokens: usize = blocks.iter().map(estimate_block_tokens).sum();
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
-        let threshold = (context_limit as f64 * 0.85) as usize;
-        if estimated_tokens > threshold {
-            let message_count = session.runtime.session().messages.len();
-            if message_count > 4 {
-                let result = compact_session_sync(
+        let mut pre_send_compaction = None;
+        if estimated_tokens + prompt_tokens > history_budget {
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record("auto_compact_check", {
+                    let mut attrs = Map::new();
+                    attrs.insert(
+                        "estimated_tokens".to_string(),
+                        Value::Number(estimated_tokens.into()),
+                    );
+                    attrs.insert(
+                        "prompt_tokens".to_string(),
+                        Value::Number(prompt_tokens.into()),
+                    );
+                    attrs.insert(
+                        "history_budget".to_string(),
+                        Value::Number(history_budget.into()),
+                    );
+                    attrs.insert(
+                        "context_limit".to_string(),
+                        Value::Number(context_limit.into()),
+                    );
+                    attrs
+                });
+            }
+            pre_send_compaction = self
+                .tokio_runtime
+                .block_on(session.runtime.compact_in_place(CompactionConfig {
+                    max_estimated_tokens: 0, // force compaction
+                    ..CompactionConfig::default()
+                }));
+            // Re-estimate against the hard limit the preflight enforces. Still
+            // over → classified error instead of a request that will be rejected.
+            let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
+            if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
+                > context_limit
+            {
+                return Err(context_overflow_user_message(
                     session.runtime.session(),
-                    CompactionConfig {
-                        preserve_recent_messages: 2,
-                        max_estimated_tokens: 0,
-                    },
-                );
-                if result.removed_message_count > 0 {
-                    *session.runtime.session_mut() = result.compacted_session.clone();
-                    let path = session.handle.path.clone();
-                    let _ = session.runtime.session().save_to_path(&path);
-                }
-                if estimate_session_tokens(session.runtime.session()) > context_limit {
-                    return Err(format!(
-                        "[context_window_exceeded][history_context_too_large] estimated {} tokens exceeds model limit {} even after compaction",
-                        estimate_session_tokens(session.runtime.session()),
-                        context_limit
-                    ));
-                }
-            } else {
-                return Err(format!(
-                    "[context_window_exceeded][single_request_too_large] estimated {estimated_tokens} tokens exceeds model limit {context_limit}"
+                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                    context_limit,
                 ));
             }
         }
@@ -3816,7 +3845,8 @@ impl engine_core::EngineDelegate for SessionEngine {
             session_usage: turn_summary.session_usage,
             cancelled: turn_summary.cancelled,
             response_model: turn_summary.response_model,
-            auto_compaction: turn_summary.auto_compaction,
+            // Prefer the pre-send compaction event; else the runtime's in-turn one.
+            auto_compaction: pre_send_compaction.or(turn_summary.auto_compaction),
         })
     }
 

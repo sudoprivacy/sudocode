@@ -5513,29 +5513,25 @@ impl LiveCli {
     }
 
     /// Drive one non-interactive turn (no stream render), returning the captured
-    /// outcome. Picks the permission prompter by TTY (interactive prompt vs
-    /// auto-deny) exactly as the old `--output-format` paths did, and surfaces a
-    /// turn error as an `Err` (parity with the old `result?`). The engine
-    /// persists the session itself, so callers only format the result.
+    /// outcome. The caller supplies the permission prompter because the parity
+    /// contract differs per format: `--output-format json` ALWAYS uses the
+    /// interactive `CliPermissionPrompter` (it prints the permission box + reads
+    /// y/N from stdin, piped or TTY), whereas the compact paths auto-deny off a
+    /// pipe so the prompt can't corrupt the single-line output. Surfaces a turn
+    /// error as an `Err` (parity with the old `result?`). The engine persists the
+    /// session itself, so callers only format the result.
     fn run_noninteractive_turn(
         &self,
         input: &str,
+        permission_prompter: &mut dyn runtime::PermissionPrompter,
     ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
-        let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
-            if io::stdin().is_terminal() {
-                Box::new(CliPermissionPrompter::new(
-                    self.lifecycle.current_permission_mode(),
-                ))
-            } else {
-                Box::new(AutoDenyPermissionPrompter)
-            };
         let mut question_prompter = NoopQuestionPrompter;
         let outcome = self.drive_turn(
             input,
             None,
             None,
             false,
-            permission_prompter.as_mut(),
+            permission_prompter,
             &mut question_prompter,
         )?;
         if let Some(message) = outcome.error {
@@ -5544,15 +5540,31 @@ impl LiveCli {
         Ok(outcome)
     }
 
+    /// Permission prompter for the compact one-shot paths: interactive when
+    /// stdin is a TTY, else auto-deny (an approval box printed to a pipe would
+    /// corrupt compact mode's single-line stdout). Matches the pre-seam
+    /// `run_prompt_compact*` selection.
+    fn compact_permission_prompter(&self) -> Box<dyn runtime::PermissionPrompter> {
+        if io::stdin().is_terminal() {
+            Box::new(CliPermissionPrompter::new(
+                self.lifecycle.current_permission_mode(),
+            ))
+        } else {
+            Box::new(AutoDenyPermissionPrompter)
+        }
+    }
+
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let outcome = self.run_noninteractive_turn(input)?;
+        let mut permission_prompter = self.compact_permission_prompter();
+        let outcome = self.run_noninteractive_turn(input, permission_prompter.as_mut())?;
         self.out_println(outcome.final_text);
         Ok(())
     }
 
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let model = self.lifecycle.current_model();
-        let outcome = self.run_noninteractive_turn(input)?;
+        let mut permission_prompter = self.compact_permission_prompter();
+        let outcome = self.run_noninteractive_turn(input, permission_prompter.as_mut())?;
         let tc = outcome
             .complete
             .ok_or_else(|| "engine turn did not complete".to_string())?;
@@ -5575,7 +5587,13 @@ impl LiveCli {
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let model = self.lifecycle.current_model();
-        let outcome = self.run_noninteractive_turn(input)?;
+        // Parity: the JSON one-shot ALWAYS uses the interactive permission
+        // prompter, even off a pipe — it prints the permission box and reads
+        // the y/N approval from stdin (the mock parity harness feeds "y\n" and
+        // asserts "Permission required" / "Approve this tool call?" on stdout).
+        let mut permission_prompter =
+            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let outcome = self.run_noninteractive_turn(input, &mut permission_prompter)?;
         let tc = outcome
             .complete
             .ok_or_else(|| "engine turn did not complete".to_string())?;

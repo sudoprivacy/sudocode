@@ -1,0 +1,11 @@
+# Sudo Code v0.2.2
+
+## What's New
+
+### Features
+- **ACP slash commands: `/compact`, `/clear`, `/help`, `available_commands_update`** (#547) — `scode acp` now owns a single slash-command table shared by `/help`, the unknown-command hint, and a `session/update { sessionUpdate: "available_commands_update" }` broadcast sent right after every `session/new` / `session/load`. `/compact` mirrors the REPL command (LLM summary first, local heuristic fallback, persisted immediately). `/clear` resets the session in place — same session id, cwd, model and permission mode — and archives the old transcript as a loadable `cleared` fork. `session/prompt` responses carry `_meta.sudocode.autoCompacted: true` when a turn compacted automatically. `/compact` runs outside the cwd lease and honours `session/cancel`.
+
+### Fixes
+- **Compact before a context-window rejection wedges the session** (#545) — long ACP sessions used to hit `context_window_blocked` with no compaction ever running: the pre-send check compacted at 85% of the window while the API preflight rejects at roughly 65% (history + system + tools + `max_tokens`). The ACP pre-send check now budgets the way the preflight does, auto-compaction triggers on the latest response's actual context size (works with prompt caching), `run_turn` compacts and resends once on a context-window rejection and drops the unanswered prompt if it still fails, and `compact_in_place` rewrites the persisted transcript so a resume no longer reloads pre-compaction history. Context-window errors are now classified as `history_context_too_large` vs `single_request_too_large`.
+- **Keep tool role in compaction messages so `tool_result`s stay paired** (#546) — LLM compaction silently fell back to the lossy local summary whenever the summarised conversation contained a parallel tool call, because `build_compaction_messages` remapped `Tool` messages to `User` and broke the `tool_use` / `tool_result` pairing Anthropic requires. Only `System -> User` is remapped now. `CompactionResult` carries a `summary_source`, and the `/compact` report prints a `Summary` line (`llm`, `local`, or `local (LLM compaction failed: ...)`) so any degradation is visible.
+- **PTY test deflake** (#544) — `iocraft_repl_ctrlc_hint` settles before sending Ctrl-C.

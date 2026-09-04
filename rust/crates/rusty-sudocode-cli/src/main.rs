@@ -4833,6 +4833,65 @@ impl runtime::QuestionPrompter for NoopQuestionPrompter {
     }
 }
 
+/// Renderer-side question prompter for the SYNC REPL. Draws the question +
+/// numbered options and reads the choice via rustyline — a raw
+/// `io::stdin().read_line` is unreliable under Windows ConPTY (it silently
+/// dropped stdin writes during the old ExitPlanMode dialog); rustyline reads the
+/// console the same Windows-safe way the REPL prompt does. Answers both
+/// `AskUserQuestion` and the `ExitPlanMode` "Choose an action" dialog, now that
+/// both cross the seam as `QuestionRequest`s.
+struct CliQuestionPrompter;
+
+impl runtime::QuestionPrompter for CliQuestionPrompter {
+    fn ask(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        if let Some(title) = &request.title {
+            println!();
+            println!("{title}");
+        }
+        if let Some(description) = &request.description {
+            for line in description.lines() {
+                println!("  {line}");
+            }
+        }
+        let mut answers = Vec::new();
+        for field in &request.fields {
+            if !field.prompt.is_empty() && request.title.as_deref() != Some(field.prompt.as_str()) {
+                println!();
+                println!("{}", field.prompt);
+            }
+            for (idx, option) in field.options.iter().enumerate() {
+                println!("  [{}] {}", idx + 1, option.label);
+            }
+            let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
+            let line = editor
+                .readline("Your choice: ")
+                .map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            // A 1-indexed digit picks the option's value; otherwise the raw text
+            // (custom-input fields).
+            let value = trimmed
+                .parse::<usize>()
+                .ok()
+                .and_then(|idx| field.options.get(idx.wrapping_sub(1)))
+                .map_or_else(|| trimmed.to_string(), |option| option.value.clone());
+            let label = field
+                .options
+                .iter()
+                .find(|option| option.value == value)
+                .map(|option| option.label.clone());
+            answers.push(runtime::QuestionPromptAnswer {
+                id: field.id.clone(),
+                value,
+                label,
+            });
+        }
+        Ok(answers)
+    }
+}
+
 impl LiveCli {
     /// True when the async REPL (queue mode) is active. In this mode the
     /// input thread owns stdin via rustyline, so interactive widgets
@@ -5211,7 +5270,13 @@ impl LiveCli {
             } else {
                 Box::new(AutoDenyPermissionPrompter)
             };
-        let mut question_prompter = NoopQuestionPrompter;
+        // Interactive REPL: draw AskUserQuestion / ExitPlanMode dialogs and read
+        // the choice (Windows-safe via rustyline). One-shot: no interactive user.
+        let mut question_prompter: Box<dyn runtime::QuestionPrompter> = if self.is_repl {
+            Box::new(CliQuestionPrompter)
+        } else {
+            Box::new(NoopQuestionPrompter)
+        };
 
         let outcome = self.drive_turn(
             input,
@@ -5219,7 +5284,7 @@ impl LiveCli {
             None,
             true,
             permission_prompter.as_mut(),
-            &mut question_prompter,
+            question_prompter.as_mut(),
         )?;
 
         match outcome.complete {
@@ -7107,7 +7172,6 @@ fn build_runtime_with_plugin_state(
         client,
         CliToolExecutor::new(
             config.allowed_tools,
-            emit_output,
             tool_registry.clone(),
             mcp_state.clone(),
         ),

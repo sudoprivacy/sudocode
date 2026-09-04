@@ -15,35 +15,39 @@ use crate::repl_ui::OutputSender;
 use crate::{AllowedToolSet, RuntimeMcpState};
 
 // ---------------------------------------------------------------------------
-// Thread-local side-channel for "clear context & execute plan" flow.
+// Global side-channel for the "clear context & execute plan" flow.
 //
 // When the user chooses option 1 ("Clear context & execute") in the
-// ExitPlanMode confirmation dialog, the tool executor stores the plan text
-// here. After `runtime.run_turn()` returns, `LiveCli::run_turn()` checks
-// this value and, if set, clears the session and re-runs with the plan as
-// the new prompt.
+// ExitPlanMode confirmation dialog, the tool executor (running on the ENGINE
+// thread, deep in tool dispatch) stores the plan text here. After the turn,
+// `LiveCli::run_turn()` (the RENDERER thread) reads it and, if set, clears the
+// session and re-runs with the plan as the new prompt. It is a *global* Mutex
+// (not a thread-local) precisely because it must cross the engine↔renderer
+// thread boundary of the seam — and survive tools that dispatch on a worker
+// thread (parallel read-only tools). scode runs one turn at a time, so there is
+// no cross-turn race.
 // ---------------------------------------------------------------------------
-thread_local! {
-    static PENDING_PLAN_EXECUTION: RefCell<Option<String>> = const { RefCell::new(None) };
+static PENDING_PLAN_EXECUTION: Mutex<Option<String>> = Mutex::new(None);
+
+fn plan_execution_slot() -> std::sync::MutexGuard<'static, Option<String>> {
+    PENDING_PLAN_EXECUTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Store a plan for the `run_turn` caller to pick up after the turn.
+/// Store a plan for `LiveCli::run_turn` to pick up after the turn.
 fn set_pending_plan_execution(plan: String) {
-    PENDING_PLAN_EXECUTION.with(|cell| {
-        *cell.borrow_mut() = Some(plan);
-    });
+    *plan_execution_slot() = Some(plan);
 }
 
-/// Take the pending plan (if any), clearing the thread-local.
+/// Take the pending plan (if any), clearing the slot.
 pub(crate) fn take_pending_plan_execution() -> Option<String> {
-    PENDING_PLAN_EXECUTION.with(|cell| cell.borrow_mut().take())
+    plan_execution_slot().take()
 }
 
 /// Clear the pending plan without returning it.
 pub(crate) fn clear_pending_plan_execution() {
-    PENDING_PLAN_EXECUTION.with(|cell| {
-        cell.borrow_mut().take();
-    });
+    *plan_execution_slot() = None;
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,8 +89,6 @@ pub(crate) struct GetMcpPromptRequest {
 
 pub(crate) struct CliToolExecutor {
     renderer: TerminalRenderer,
-    emit_output: bool,
-    is_repl: bool,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -110,14 +112,11 @@ pub(crate) struct CliToolExecutor {
 impl CliToolExecutor {
     pub(crate) fn new(
         allowed_tools: Option<AllowedToolSet>,
-        emit_output: bool,
         tool_registry: GlobalToolRegistry,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
         Self {
             renderer: TerminalRenderer::new(),
-            emit_output,
-            is_repl: false,
             allowed_tools,
             tool_registry,
             mcp_state,
@@ -138,10 +137,6 @@ impl CliToolExecutor {
 
     pub(crate) fn set_ui_sender(&mut self, sender: crate::repl_ui::UiCommandSender) {
         self.ui_sender = Some(sender);
-    }
-
-    pub(crate) fn set_repl_mode(&mut self, is_repl: bool) {
-        self.is_repl = is_repl;
     }
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -281,10 +276,13 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == "AskUserQuestion" && self.question_prompter.borrow().is_some() {
             return self.execute_ask_user_question(value);
         }
-        // In REPL mode, intercept ExitPlanMode to show a confirmation
-        // dialog. In one-shot mode, skip the dialog and let ExitPlanMode
-        // execute normally — there is no interactive user to ask.
-        if tool_name == "ExitPlanMode" && self.emit_output && self.is_repl {
+        // Intercept ExitPlanMode to ask the user (across the seam) how to
+        // proceed. The confirmation crosses via `question_prompter` — the pump's
+        // QuestionAdapter emits a QuestionRequest the renderer answers — so it
+        // works on every renderer (REPL dialog, iocraft, ACP client) and on
+        // Windows (no raw stdin read_line). `handle_exit_plan_mode` itself falls
+        // back to "execute normally" for non-interactive / no-prompter contexts.
+        if tool_name == "ExitPlanMode" && self.question_prompter.borrow().is_some() {
             return self.handle_exit_plan_mode(&value, ctx);
         }
         // Live bash/MCP progress crosses the seam: when the renderer supplied a
@@ -535,115 +533,109 @@ impl CliToolExecutor {
             plan_text.clone()
         };
 
-        // Non-interactive: default to option 2 (keep context & execute).
-        if !io::stdin().is_terminal() {
-            return self
-                .tool_registry
+        // Execute ExitPlanMode normally (restores the previous permission mode).
+        let execute_normally = || {
+            self.tool_registry
                 .execute_with_abort_and_context(
                     "ExitPlanMode",
                     value,
                     self.abort_signal.as_ref(),
                     Some(ctx),
                 )
-                .map_err(ToolError::new);
-        }
-
-        // Show plan summary and prompt the user.
-        let print_line = |line: &str| {
-            let _ = writeln!(io::stdout(), "{line}");
+                .map_err(ToolError::new)
         };
 
-        print_line("");
-        print_line(&format!("{BOLD}\u{1f4cb} Plan ready for review:{RESET}"));
-        print_line("");
-
-        let lines: Vec<&str> = plan_display.lines().collect();
-        let display_limit = 20;
-        for line in lines.iter().take(display_limit) {
-            print_line(&format!("  {DIM}{line}{RESET}"));
-        }
-        if lines.len() > display_limit {
-            print_line(&format!(
-                "  {DIM}... ({} more lines){RESET}",
-                lines.len() - display_limit
-            ));
+        // Non-interactive: no user to ask — keep context & execute.
+        if !io::stdin().is_terminal() {
+            return execute_normally();
         }
 
-        print_line("");
-        let info = ansi_fg(theme().info);
-        print_line(&format!("{BOLD}Choose an action:{RESET}"));
-        print_line(&format!("  {info}[1]{RESET} Clear context & execute plan"));
-        print_line(&format!("  {info}[2]{RESET} Keep context & execute"));
-        print_line(&format!(
-            "  {info}[3]{RESET} Keep planning (provide feedback)"
-        ));
-        print_line("");
+        // Truncate the plan to a summary for the confirmation dialog.
+        let plan_summary = {
+            let lines: Vec<&str> = plan_display.lines().collect();
+            let display_limit = 20;
+            let mut summary = lines
+                .iter()
+                .take(display_limit)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if lines.len() > display_limit {
+                summary.push_str(&format!(
+                    "\n... ({} more lines)",
+                    lines.len() - display_limit
+                ));
+            }
+            summary
+        };
 
-        // Read the choice from the user.
-        print!("{BOLD}Your choice (1/2/3): {RESET}");
-        io::stdout()
-            .flush()
-            .map_err(|e| ToolError::new(e.to_string()))?;
-        let mut choice = String::new();
-        io::stdin()
-            .read_line(&mut choice)
-            .map_err(|e| ToolError::new(e.to_string()))?;
-        let choice = choice.trim();
+        // Ask the user how to proceed — ACROSS THE SEAM. The pump's
+        // QuestionAdapter turns this into a QuestionRequest the renderer answers
+        // (the REPL / iocraft / ACP each draw the dialog + read the choice their
+        // own way), so it works on Windows too (no raw stdin read_line here).
+        let request = QuestionPromptRequest {
+            title: Some("Choose an action".to_string()),
+            description: Some(plan_summary),
+            fields: vec![QuestionField {
+                id: "action".to_string(),
+                prompt: "Choose an action".to_string(),
+                kind: QuestionKind::SingleSelect,
+                required: true,
+                allow_custom_input: false,
+                custom_input_hint: None,
+                options: vec![
+                    QuestionOption {
+                        label: "Clear context & execute plan".to_string(),
+                        value: "1".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                    QuestionOption {
+                        label: "Keep context & execute".to_string(),
+                        value: "2".to_string(),
+                        description: None,
+                        recommended: true,
+                    },
+                    QuestionOption {
+                        label: "Keep planning (provide feedback)".to_string(),
+                        value: "3".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                ],
+            }],
+        };
 
-        match choice {
+        // Compute the choice, dropping the prompter borrow before we act on it.
+        let choice = {
+            let mut guard = self.question_prompter.borrow_mut();
+            let Some(prompter) = guard.as_mut() else {
+                return execute_normally();
+            };
+            let answers = prompter.ask(&request).map_err(ToolError::new)?;
+            answers
+                .first()
+                .map_or_else(|| "2".to_string(), |answer| answer.value.clone())
+        };
+
+        match choice.as_str() {
             "1" => {
-                // Execute ExitPlanMode to restore the previous permission mode.
-                let result = self
-                    .tool_registry
-                    .execute_with_abort_and_context(
-                        "ExitPlanMode",
-                        &value,
-                        self.abort_signal.as_ref(),
-                        Some(ctx),
-                    )
-                    .map_err(ToolError::new)?;
-
-                // Store the plan text for run_turn to pick up.
+                let result = execute_normally()?;
+                // Store the plan for LiveCli::run_turn to pick up: it clears the
+                // session and re-runs with the plan as the new prompt.
                 let plan_for_execution = if plan_text.is_empty() {
-                    // Fallback: use the full plan display.
                     plan_display
                 } else {
                     plan_text
                 };
                 set_pending_plan_execution(plan_for_execution);
-
-                let success = ansi_fg(theme().success);
-                print_line(&format!(
-                    "{success}\u{2714} Plan confirmed. Will clear context and execute...{RESET}"
-                ));
                 Ok(result)
             }
-            "2" => {
-                // Normal ExitPlanMode execution — keep context.
-                let result = self
-                    .tool_registry
-                    .execute_with_abort_and_context(
-                        "ExitPlanMode",
-                        &value,
-                        self.abort_signal.as_ref(),
-                        Some(ctx),
-                    )
-                    .map_err(ToolError::new)?;
-
-                let success = ansi_fg(theme().success);
-                print_line(&format!(
-                    "{success}\u{2714} Exiting plan mode, keeping context.{RESET}"
-                ));
-                Ok(result)
-            }
-            _ => {
-                // Choice 3 or any other input: stay in plan mode.
-                let warning = ansi_fg(theme().warning);
-                print_line(&format!("{warning}\u{21a9} Staying in plan mode. Provide feedback to refine the plan.{RESET}"));
-                Err(ToolError::new(
-                    "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",
-                ))
-            }
+            "3" => Err(ToolError::new(
+                "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",
+            )),
+            // "2" or any unrecognized answer: keep context & execute.
+            _ => execute_normally(),
         }
     }
 }

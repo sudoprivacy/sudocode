@@ -26,11 +26,11 @@ use common::TestEnv;
 /// Mock mode: deterministic — the mock scenario always calls ExitPlanMode.
 /// Live mode: the model may not reliably call ExitPlanMode from a prompt
 /// alone (no plan context), so we skip if the dialog doesn't appear.
-// Windows PTY does not reliably deliver stdin writes to the child's
-// `read_line` during the interactive dialog; the test hangs waiting
-// for the post-choice output. macOS + Linux cover the same code path.
+//
+// Runs on Windows too: the confirmation now crosses the engine↔renderer seam
+// as a QuestionRequest answered above the seam by CliQuestionPrompter (rustyline),
+// replacing the old raw stdin `read_line` that ConPTY didn't reliably feed.
 #[test]
-#[cfg_attr(windows, ignore)]
 fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
     let env = TestEnv::new("plan-confirm");
 
@@ -80,7 +80,6 @@ fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
 /// Choice 3 (keep planning) should reject the tool call and let
 /// the model continue in plan mode.
 #[test]
-#[cfg_attr(windows, ignore)]
 fn exit_plan_mode_choice_keep_planning_rejects_tool() {
     let env = TestEnv::new("plan-keep");
 

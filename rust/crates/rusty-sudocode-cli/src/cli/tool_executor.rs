@@ -90,7 +90,6 @@ pub(crate) struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    spinner: Option<SpinnerRef>,
     // Single-threaded interior mutability: `execute` is `&self` (so a
     // concurrency-safe batch can share the dispatcher), but the interactive
     // AskUserQuestion prompter needs `&mut` to drive a prompt. AskUserQuestion
@@ -98,9 +97,6 @@ pub(crate) struct CliToolExecutor {
     // correct — the CLI turn loop is single-threaded.
     question_prompter: RefCell<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
-    /// Optional channel-backed writer that routes output through the iocraft
-    /// render loop instead of writing directly to stdout.
-    output_writer: Option<OutputSender>,
     /// Optional UI command sender for ContextSlot updates (Task* → UI).
     ui_sender: Option<crate::repl_ui::UiCommandSender>,
     /// Optional nexus A2A send capability. When set (nexus-A2A configured),
@@ -125,17 +121,11 @@ impl CliToolExecutor {
             allowed_tools,
             tool_registry,
             mcp_state,
-            spinner: None,
             question_prompter: RefCell::new(None),
             abort_signal: None,
-            output_writer: None,
             ui_sender: None,
             mailbox_sender: None,
         }
-    }
-
-    pub(crate) fn set_spinner(&mut self, ref_: SpinnerRef) {
-        self.spinner = Some(ref_);
     }
 
     /// Enable nexus A2A: `send_message` now routes to the peer's replicated
@@ -144,10 +134,6 @@ impl CliToolExecutor {
     /// `send_message` is not advertised to the model.
     pub(crate) fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
         self.mailbox_sender = Some(sender);
-    }
-
-    pub(crate) fn set_output_writer(&mut self, writer: OutputSender) {
-        self.output_writer = Some(writer);
     }
 
     pub(crate) fn set_ui_sender(&mut self, sender: crate::repl_ui::UiCommandSender) {
@@ -160,83 +146,6 @@ impl CliToolExecutor {
 
     pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
         *self.question_prompter.get_mut() = Some(prompter);
-    }
-
-    /// Pause the spinner and clear its line before writing content.
-    fn pause_spinner(&self) {
-        if let Some(s) = &self.spinner {
-            s.pause();
-        }
-    }
-
-    /// Resume the spinner after content has been written.
-    fn resume_spinner(&self) {
-        if let Some(s) = &self.spinner {
-            s.resume();
-        }
-    }
-
-    /// Build a progress callback that prints MCP tool progress notifications
-    /// to the terminal. Returns `None` when no spinner ref is configured.
-    fn make_mcp_progress_callback(&self) -> Option<runtime::McpProgressCallback> {
-        let spinner = self.spinner.clone()?;
-        let output_writer = self.output_writer.clone();
-        Some(Box::new(
-            move |progress: runtime::McpProgressNotification| {
-                let mut status = String::new();
-                if let Some(total) = progress.total {
-                    if total > 0.0 {
-                        let pct = (progress.progress / total * 100.0).min(100.0);
-                        status = format!(" ({pct:.0}%)");
-                    }
-                }
-                let line = if let Some(msg) = &progress.message {
-                    format!("  {DIM}\u{27f3} {msg}{status}{RESET}")
-                } else {
-                    format!(
-                        "  {DIM}\u{27f3} progress: {:.0}{status}{RESET}",
-                        progress.progress
-                    )
-                };
-                if let Some(ref writer) = output_writer {
-                    writer.println(&line);
-                } else {
-                    spinner.suspend(|| {
-                        let _ = writeln!(io::stdout(), "{line}");
-                        let _ = io::stdout().flush();
-                    });
-                }
-            },
-        ))
-    }
-
-    fn make_bash_progress_callback(&self) -> Option<runtime::BashProgressCallback> {
-        let spinner = self.spinner.clone()?;
-        let output_writer = self.output_writer.clone();
-        Some(Box::new(move |progress: runtime::BashProgress<'_>| {
-            let trimmed = progress.output.trim_end();
-            if trimmed.is_empty() {
-                return;
-            }
-            let last_line = trimmed.lines().next_back().unwrap_or("");
-            let bytes_display = if progress.total_bytes >= 1024 {
-                format!("{:.1} KB", progress.total_bytes as f64 / 1024.0)
-            } else {
-                format!("{} B", progress.total_bytes)
-            };
-            let line = format!(
-                "  {DIM}\u{27f3} {last_line}  ({} lines, {bytes_display}){RESET}",
-                progress.total_lines,
-            );
-            if let Some(ref writer) = output_writer {
-                writer.println(&line);
-            } else {
-                spinner.suspend(|| {
-                    let _ = writeln!(io::stdout(), "{line}");
-                    let _ = io::stdout().flush();
-                });
-            }
-        }))
     }
 
     fn execute_search_tool(&self, value: serde_json::Value) -> Result<String, ToolError> {
@@ -378,19 +287,13 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == "ExitPlanMode" && self.emit_output && self.is_repl {
             return self.handle_exit_plan_mode(&value, ctx);
         }
-        // For bash tool calls, install a streaming progress callback so the
-        // user sees output as it is produced rather than only after the child
-        // process exits. When a renderer supplied a seam progress sink
-        // (`ctx.progress_sink`), forward STRUCTURED progress to it (the renderer
-        // formats + draws — the seam way). Otherwise fall back to the legacy
-        // direct-to-terminal path used by the one-shot / pre-seam REPL flow.
+        // Live bash/MCP progress crosses the seam: when the renderer supplied a
+        // progress sink (`ctx.progress_sink`), forward STRUCTURED progress to it
+        // and the renderer formats + draws it (EngineEvent::ToolProgress). The
+        // executor never writes progress to the terminal itself.
         if tool_name == "bash" {
             if let Some(sink) = ctx.progress_sink.clone() {
                 runtime::set_bash_progress_callback(bash_progress_forward(sink));
-            } else if self.emit_output {
-                if let Some(cb) = self.make_bash_progress_callback() {
-                    runtime::set_bash_progress_callback(cb);
-                }
             }
         }
 
@@ -398,10 +301,6 @@ impl ToolExecutor for CliToolExecutor {
         if is_mcp_tool {
             if let Some(sink) = ctx.progress_sink.clone() {
                 runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
-            } else if self.emit_output {
-                if let Some(cb) = self.make_mcp_progress_callback() {
-                    runtime::set_mcp_progress_callback(cb);
-                }
             }
         }
 
@@ -440,42 +339,10 @@ impl ToolExecutor for CliToolExecutor {
                 ui.update_context(tasks);
             }
         }
-        match result {
-            Ok(output) => {
-                if self.emit_output {
-                    self.pause_spinner();
-                    let interrupted = self
-                        .abort_signal
-                        .as_ref()
-                        .is_some_and(runtime::HookAbortSignal::is_aborted);
-                    let formatted = format_tool_result(tool_name, &output, interrupted);
-                    if let Some(ref writer) = self.output_writer {
-                        writer.println(&formatted);
-                    } else {
-                        writeln!(io::stdout(), "{formatted}")
-                            .and_then(|()| io::stdout().flush())
-                            .map_err(|error| ToolError::new(error.to_string()))?;
-                    }
-                    self.resume_spinner();
-                }
-                Ok(output)
-            }
-            Err(error) => {
-                if self.emit_output {
-                    self.pause_spinner();
-                    let formatted = format_tool_result(tool_name, &error.to_string(), true);
-                    if let Some(ref writer) = self.output_writer {
-                        writer.println(&formatted);
-                    } else {
-                        writeln!(io::stdout(), "{formatted}")
-                            .and_then(|()| io::stdout().flush())
-                            .map_err(|error| ToolError::new(error.to_string()))?;
-                    }
-                    self.resume_spinner();
-                }
-                Err(error)
-            }
-        }
+        // Tool results reach the renderer via RuntimeObserver::on_tool_result
+        // -> EngineEvent::ToolResult -> EngineEventRenderer (the seam). The
+        // executor stays renderer-agnostic and never writes to the terminal.
+        result
     }
 
     fn set_abort_signal(&mut self, abort_signal: runtime::HookAbortSignal) {
@@ -686,8 +553,6 @@ impl CliToolExecutor {
             let _ = writeln!(io::stdout(), "{line}");
         };
 
-        self.pause_spinner();
-
         print_line("");
         print_line(&format!("{BOLD}\u{1f4cb} Plan ready for review:{RESET}"));
         print_line("");
@@ -751,7 +616,6 @@ impl CliToolExecutor {
                 print_line(&format!(
                     "{success}\u{2714} Plan confirmed. Will clear context and execute...{RESET}"
                 ));
-                self.resume_spinner();
                 Ok(result)
             }
             "2" => {
@@ -770,14 +634,12 @@ impl CliToolExecutor {
                 print_line(&format!(
                     "{success}\u{2714} Exiting plan mode, keeping context.{RESET}"
                 ));
-                self.resume_spinner();
                 Ok(result)
             }
             _ => {
                 // Choice 3 or any other input: stay in plan mode.
                 let warning = ansi_fg(theme().warning);
                 print_line(&format!("{warning}\u{21a9} Staying in plan mode. Provide feedback to refine the plan.{RESET}"));
-                self.resume_spinner();
                 Err(ToolError::new(
                     "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",
                 ))

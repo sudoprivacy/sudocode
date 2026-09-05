@@ -433,6 +433,21 @@ impl RuntimeObserver for ObserverAdapter {
                 .send(EngineEvent::ToolProgress(event));
         }))
     }
+
+    fn hook_progress_sink(&self) -> Option<runtime::HookProgressSink> {
+        // Plugin-hook progress fires from the pre/post-tool hook runners, which
+        // the runtime forwards through a `Send + Sync` reporter — so, exactly as
+        // for `tool_progress_sink`, hand it a sink wrapping the same session
+        // event channel (`std::sync::mpsc::Sender` is `Send` but not `Sync`, so
+        // wrap it to satisfy the `Send + Sync` bound).
+        let tx = Arc::new(Mutex::new(self.tx.clone()));
+        Some(runtime::HookProgressSink::new(move |event| {
+            let _ = tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(EngineEvent::HookProgress(event));
+        }))
+    }
 }
 
 /// `PermissionPrompter::decide` → emit [`EngineEvent::PermissionRequest`], park

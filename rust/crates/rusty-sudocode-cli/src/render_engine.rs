@@ -12,7 +12,8 @@
 use std::io::{self, Write};
 
 use engine_events::{
-    EngineEvent, PermissionRequest, QuestionPromptRequest, RequestId, ToolProgressEvent,
+    EngineEvent, HookProgressEvent, PermissionRequest, QuestionPromptRequest, RequestId,
+    ToolProgressEvent,
 };
 
 use crate::cli::format::{format_tool_call_start, format_tool_result};
@@ -161,6 +162,10 @@ impl EngineEventRenderer {
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
+            EngineEvent::HookProgress(ev) => {
+                render_hook_progress(&ev);
+                RenderOutcome::Continue
+            }
             EngineEvent::Notice { text } => {
                 if !text.is_empty() {
                     self.write_out(&format!("{text}\n"));
@@ -241,5 +246,74 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
                 format!("  {DIM}\u{27f3} progress: {progress:.0}{status}{RESET}")
             }
         }
+    }
+}
+
+/// Render one live plugin-hook progress event to stderr. This is the render
+/// half of the pre-seam build-time `CliHookProgressReporter`: hook progress now
+/// rides the seam as [`EngineEvent::HookProgress`] and the stderr formatting
+/// lives here, above the seam. Kept byte-identical to the pre-seam output
+/// (`[hook <event>] <tool>: <cmd>` lines, with `(SudoCode plugin <id>)`
+/// attribution) for PTY parity.
+fn render_hook_progress(event: &HookProgressEvent) {
+    // Format SudoCode plugin attribution once; each outcome line includes it so
+    // the user sees *who* ran the hook in addition to *what* happened.
+    fn attribution(plugin_source: Option<&str>) -> String {
+        match plugin_source {
+            Some(plugin_id) => format!(" (SudoCode plugin {plugin_id})"),
+            None => String::new(),
+        }
+    }
+    match event {
+        HookProgressEvent::Started {
+            event,
+            tool_name,
+            command,
+            plugin_source,
+        } => eprintln!(
+            "[hook {event_name}] {tool_name}: {command}{attr}",
+            event_name = event.as_str(),
+            attr = attribution(plugin_source.as_deref())
+        ),
+        HookProgressEvent::Completed {
+            event,
+            tool_name,
+            command,
+            plugin_source,
+        } => eprintln!(
+            "[hook done {event_name}] {tool_name}: {command}{attr}",
+            event_name = event.as_str(),
+            attr = attribution(plugin_source.as_deref())
+        ),
+        HookProgressEvent::Denied {
+            event,
+            tool_name,
+            command,
+            plugin_source,
+        } => eprintln!(
+            "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
+            event_name = event.as_str(),
+            attr = attribution(plugin_source.as_deref())
+        ),
+        HookProgressEvent::Failed {
+            event,
+            tool_name,
+            command,
+            plugin_source,
+        } => eprintln!(
+            "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
+            event_name = event.as_str(),
+            attr = attribution(plugin_source.as_deref())
+        ),
+        HookProgressEvent::Cancelled {
+            event,
+            tool_name,
+            command,
+            plugin_source,
+        } => eprintln!(
+            "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
+            event_name = event.as_str(),
+            attr = attribution(plugin_source.as_deref())
+        ),
     }
 }

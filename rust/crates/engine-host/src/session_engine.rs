@@ -135,7 +135,6 @@ impl SessionEngine {
                 model: resolved_model.clone(),
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: allowed_tools.clone(),
                 permission_mode,
                 auth_mode: resolved_auth,
@@ -144,7 +143,6 @@ impl SessionEngine {
             mcp_servers,
             abort_signal.clone(),
             reasoning_effort.clone(),
-            None,
         )
         .map_err(|e| format!("failed to build runtime: {e}"))?;
         runtime
@@ -214,7 +212,6 @@ impl SessionEngine {
                 model,
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.allowed_tools.clone(),
                 permission_mode,
                 auth_mode,
@@ -223,7 +220,6 @@ impl SessionEngine {
             &session.session_mcp_servers,
             session.abort_signal.clone(),
             self.reasoning_effort.clone(),
-            None,
         )
         .map_err(|e| e.to_string())?;
         session.runtime = runtime;

@@ -4,8 +4,9 @@
 //! `RuntimeConfig` / `RuntimePluginState` inputs threaded through construction,
 //! and the `build_runtime*` chain that assembles plugins, MCP, permission
 //! policy, the system prompt, and the `EngineApiClient`. Both renderers build a
-//! session through here; the renderer-owned hook-progress reporter is injected
-//! as a parameter so this crate never names a renderer type.
+//! session through here. Live plugin-hook progress rides the engine↔renderer
+//! seam as `EngineEvent::HookProgress` (installed per-turn from the observer),
+//! so no renderer type is named below the seam.
 
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -42,7 +43,6 @@ pub struct RuntimeConfig {
     pub model: String,
     pub system_prompt: SystemPrompt,
     pub enable_tools: bool,
-    pub emit_output: bool,
     pub allowed_tools: Option<AllowedToolSet>,
     pub permission_mode: PermissionMode,
     pub auth_mode: AuthMode,
@@ -279,16 +279,8 @@ pub fn build_engine_runtime(
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
     abort_signal: runtime::HookAbortSignal,
     reasoning_effort: Option<String>,
-    hook_progress_reporter: Option<Box<dyn runtime::HookProgressReporter>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let mut runtime = build_runtime_for_cwd(
-        cwd,
-        session,
-        handle_id,
-        config,
-        session_mcp,
-        hook_progress_reporter,
-    )?;
+    let mut runtime = build_runtime_for_cwd(cwd, session, handle_id, config, session_mcp)?;
     runtime = runtime.with_hook_abort_signal(abort_signal);
     if let Some(rt) = runtime.runtime.as_mut() {
         rt.api_client_mut().set_reasoning_effort(reasoning_effort);
@@ -306,7 +298,6 @@ pub fn build_runtime_for_cwd(
     session_id: &str,
     config: RuntimeConfig,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-    hook_progress_reporter: Option<Box<dyn runtime::HookProgressReporter>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     let loader = ConfigLoader::default_for(cwd);
     let file_config = loader.load()?;
@@ -319,7 +310,6 @@ pub fn build_runtime_for_cwd(
         config,
         runtime_plugin_state,
         session_mcp,
-        hook_progress_reporter,
     )
 }
 
@@ -330,7 +320,6 @@ pub(crate) fn build_runtime_with_plugin_state(
     mut config: RuntimeConfig,
     runtime_plugin_state: RuntimePluginState,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-    hook_progress_reporter: Option<Box<dyn runtime::HookProgressReporter>>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     // Persist the model in session metadata so resumed sessions can report it.
     if session.model.is_none() {
@@ -439,13 +428,10 @@ pub(crate) fn build_runtime_with_plugin_state(
             .tool_executor_mut()
             .set_mailbox_sender(session.sender());
     }
-    // The renderer owns hook-progress output; the reporter (a renderer type) is
-    // injected, so this crate never names it. `emit_output` on `RuntimeConfig` is
-    // preserved for the config surface; all current callers pass `None` here, so
-    // the reporter is never installed — identical to today.
-    if let Some(reporter) = hook_progress_reporter {
-        runtime = runtime.with_hook_progress_reporter(reporter);
-    }
+    // Live plugin-hook progress rides the seam: the observer (the seam's
+    // `engine-core` adapter) installs its `HookProgressSink` as the runtime's
+    // `hook_progress_reporter` at the start of each turn, so no reporter is
+    // injected here.
     if let Err(error) = plugin_registry.initialize() {
         shutdown_mcp_state_best_effort(&mcp_state);
         return Err(Box::new(error));

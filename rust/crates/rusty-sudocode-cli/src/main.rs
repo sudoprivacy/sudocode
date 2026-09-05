@@ -2966,7 +2966,6 @@ impl AcpCliAgent {
                 model: model.clone(),
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.allowed_tools.clone(),
                 permission_mode,
                 auth_mode,
@@ -2975,7 +2974,6 @@ impl AcpCliAgent {
             mcp_servers,
             abort_signal.clone(),
             self.reasoning_effort.clone(),
-            None,
         )
         .map_err(|error| AcpError::internal(format!("failed to build runtime: {error}")))?;
         runtime
@@ -3109,7 +3107,6 @@ impl AcpCliAgent {
                 model: model.to_string(),
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.allowed_tools.clone(),
                 permission_mode,
                 auth_mode,
@@ -3118,7 +3115,6 @@ impl AcpCliAgent {
             &session_mcp,
             session.abort_signal.clone(),
             self.reasoning_effort.clone(),
-            None,
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
         Ok(runtime)
@@ -4006,14 +4002,12 @@ impl AcpSdkDelegate {
                 model,
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.inner.allowed_tools.clone(),
                 permission_mode,
                 auth_mode,
                 sudocode_config,
             },
             &mcp_servers,
-            None,
         )
         .map_err(|e| engine_acp::AcpError::internal(format!("failed to build runtime: {e}")))?;
 
@@ -6483,73 +6477,6 @@ impl InternalPromptProgressRun {
 impl Drop for InternalPromptProgressRun {
     fn drop(&mut self) {
         self.stop_heartbeat();
-    }
-}
-
-struct CliHookProgressReporter;
-
-impl runtime::HookProgressReporter for CliHookProgressReporter {
-    fn on_event(&mut self, event: &runtime::HookProgressEvent) {
-        // Format SudoCode plugin attribution once; each outcome line includes
-        // it so the user sees *who* ran the hook in addition to *what* happened.
-        fn attribution(plugin_source: Option<&str>) -> String {
-            match plugin_source {
-                Some(plugin_id) => format!(" (SudoCode plugin {plugin_id})"),
-                None => String::new(),
-            }
-        }
-        match event {
-            runtime::HookProgressEvent::Started {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Completed {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook done {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Denied {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Failed {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Cancelled {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-        }
     }
 }
 

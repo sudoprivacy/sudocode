@@ -14,7 +14,9 @@ use crate::compact::{
     CompactionError, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
+use crate::hooks::{
+    HookAbortSignal, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,
+};
 use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
@@ -189,6 +191,23 @@ pub trait RuntimeObserver {
     fn tool_progress_sink(&self) -> Option<ProgressSink> {
         None
     }
+
+    /// Optional `Send + Sync` sink for live plugin-hook progress (the
+    /// PreToolUse / PostToolUse / PostToolUseFailure lifecycle lines that used
+    /// to be eprintln'd by the CLI's build-time hook reporter).
+    ///
+    /// Mirrors [`tool_progress_sink`](Self::tool_progress_sink): default `None`
+    /// leaves existing observers unchanged, while the seam's `engine-core`
+    /// adapter returns a sink so hook progress rides the seam as
+    /// `EngineEvent::HookProgress`. Installed into the runtime's
+    /// `hook_progress_reporter` at the start of each turn (see
+    /// `run_turn_with_blocks`), so the pre/post-tool hook runners forward every
+    /// lifecycle event through it. Like tool progress it can't ride the `&mut
+    /// self` hooks above: the reporter is invoked from the (synchronous) hook
+    /// runner, so it needs a `Send + Sync` value, not a borrow of the observer.
+    fn hook_progress_sink(&self) -> Option<HookProgressSink> {
+        None
+    }
 }
 
 /// A live progress report from a running tool. Structured, not rendered — the
@@ -243,6 +262,45 @@ impl ProgressSink {
 impl std::fmt::Debug for ProgressSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ProgressSink(..)")
+    }
+}
+
+/// A `Send + Sync` sink a renderer installs (via
+/// [`RuntimeObserver::hook_progress_sink`]) to receive [`HookProgressEvent`]s
+/// as plugin hooks run. The seam analogue of [`ProgressSink`] for the
+/// pre/post-tool hook lifecycle: the runtime wraps it in a
+/// [`HookProgressReporter`] and installs it for the turn, so each hook outcome
+/// is reported as structured data (the renderer above the seam formats it).
+#[derive(Clone)]
+pub struct HookProgressSink(std::sync::Arc<dyn Fn(HookProgressEvent) + Send + Sync>);
+
+impl HookProgressSink {
+    /// Wrap a hook-progress handler.
+    pub fn new(f: impl Fn(HookProgressEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Report one hook-progress event to the renderer.
+    pub fn emit(&self, event: HookProgressEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for HookProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HookProgressSink(..)")
+    }
+}
+
+/// Adapter that turns a [`HookProgressSink`] (from the observer) into a
+/// [`HookProgressReporter`] the runtime can install for the turn. Every
+/// `on_event` callback is forwarded to the sink, so plugin-hook progress
+/// reaches the renderer through the seam instead of a build-time stderr sink.
+struct SinkHookReporter(HookProgressSink);
+
+impl crate::hooks::HookProgressReporter for SinkHookReporter {
+    fn on_event(&mut self, event: &HookProgressEvent) {
+        self.0.emit(event.clone());
     }
 }
 
@@ -1145,6 +1203,22 @@ where
         self.session
             .push_user_blocks(blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
+
+        // Route live plugin-hook progress through the seam: when the observer
+        // (the seam's `engine-core` adapter) supplies a hook-progress sink,
+        // install it as this turn's `hook_progress_reporter` so
+        // `run_pre_tool_use_hook` / `run_post_tool_use_hook` /
+        // `run_post_tool_use_failure_hook` forward each lifecycle event to the
+        // renderer. Rebuilt each turn (the ObserverAdapter carrying the live
+        // event channel changes per turn); this overwrites the build-time
+        // reporter, which is `None` on the seam path. Uses the same accessor
+        // (`observer.as_deref()`) the `tool_progress_sink` install below uses.
+        if let Some(sink) = observer
+            .as_deref()
+            .and_then(RuntimeObserver::hook_progress_sink)
+        {
+            self.hook_progress_reporter = Some(Box::new(SinkHookReporter(sink)));
+        }
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();

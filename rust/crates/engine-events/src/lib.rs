@@ -41,6 +41,9 @@ pub use runtime::{
     // The content-block vocabulary a renderer sends back in an
     // `EngineCommand::Prompt` (text, images, …).
     ContentBlock,
+    // Structured live plugin-hook progress (PreToolUse / PostToolUse /
+    // PostToolUseFailure lifecycle). The renderer formats it — no ANSI crosses.
+    HookProgressEvent,
     PermissionMode,
     PermissionPromptDecision,
     // Permission channel payloads (was `runtime::PermissionPrompter`).
@@ -158,6 +161,11 @@ pub enum EngineEvent {
     /// the CLI `ToolExecutor`'s progress callbacks. Structured; the renderer
     /// formats it.
     ToolProgress(ToolProgressEvent),
+    /// Live progress from a running plugin hook (the PreToolUse / PostToolUse /
+    /// PostToolUseFailure lifecycle) — was the build-time
+    /// `CliHookProgressReporter` stderr sink in the REPL, now surfaced through
+    /// the seam. Structured; the renderer formats it.
+    HookProgress(HookProgressEvent),
     /// Incremental token usage for the in-flight assistant message (was
     /// `AssistantEvent::Usage`, previously only reaching `TurnSummary`).
     Usage(TokenUsage),

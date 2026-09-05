@@ -40,3 +40,8 @@ pub mod config;
 /// their tools on an isolated runtime, and dispatches MCP tool calls. The
 /// renderer holds an `Arc<Mutex<RuntimeMcpState>>` and drives it by method.
 pub mod mcp;
+
+/// Session construction / resolution / persistence over `runtime::SessionStore`
+/// (the transcript store the turn loop reads and writes). The renderer keeps
+/// only the session-list / picker / confirmation UI.
+pub mod session;

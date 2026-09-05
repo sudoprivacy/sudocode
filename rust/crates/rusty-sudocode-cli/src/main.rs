@@ -87,10 +87,8 @@ use cli::help::{
 };
 use cli::pager::print_with_pager;
 use cli::session::{
-    confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
-    delete_managed_session, format_session_picker_entry, list_managed_sessions,
-    load_session_reference, new_cli_session, new_cli_session_for, render_session_list,
-    resolve_session_reference, write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
+    confirm_session_deletion, format_session_picker_entry, list_managed_sessions,
+    render_session_list, LATEST_SESSION_REFERENCE,
 };
 use cli::status::{
     format_status_report, print_sandbox_status_snapshot, print_status_snapshot, print_version,
@@ -114,6 +112,11 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use engine_host::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
+use engine_host::session::{
+    create_managed_session_handle, create_managed_session_handle_for, delete_managed_session,
+    load_session_reference, new_cli_session, new_cli_session_for, resolve_session_reference,
+    write_session_clear_backup, SessionHandle,
+};
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use render::{

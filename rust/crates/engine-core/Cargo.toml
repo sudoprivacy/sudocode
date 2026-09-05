@@ -1,0 +1,37 @@
+[package]
+name = "engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# engine-core sits just BELOW the seam on the engine side. It owns the driver
+# (`EngineSession`) that turns runtime callbacks into `engine_events` and
+# re-exports the `api` config/provider/error surface so renderer crates
+# (rusty-sudocode-cli, engine-acp) can drop their direct `api` dependency and
+# still name `SudoCodeConfig`, `resolve_model`, `ApiError`, … . `api::StreamEvent`
+# and the other wire types are deliberately NOT re-exported: they stay internal
+# to the engine side so a renderer can never name them.
+api = { path = "../api" }
+# The seam data types (EngineEvent / EngineCommand) the driver pumps across the
+# channel, plus the runtime payload types they carry.
+engine-events = { path = "../engine-events" }
+runtime = { path = "../runtime" }
+# The pure `EngineApiClient` builds tool specs from the tool registry.
+tools = { path = "../tools" }
+# The driver runs each turn on its own multi-thread runtime and bridges the
+# synchronous permission/question prompters to the async command pump via
+# `block_in_place` + oneshot (the proven ACP mechanism).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+# `EngineApiClient` implements the async `runtime::ApiClient` trait and drives an
+# incremental provider stream (no rendering — that is the renderer's job).
+async-trait = "0.1"
+futures = "0.3"
+# Session tracing attached to the provider client (parity with the CLI client).
+telemetry = { path = "../telemetry" }
+# Tool-use input parsing + fallback JSON in the wire-message conversion.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -458,6 +458,107 @@ pub(crate) fn truncate_body_snippet(body: &str, max_chars: usize) -> String {
     }
 }
 
+/// Render a provider [`ApiError`] as a user-facing message. Context-window
+/// rejections get the detailed recovery block; other fatal wrappers get a
+/// classified one-line summary with session + trace qualifiers; everything else
+/// falls through to the error's own `Display`. Lives in `api` (not the CLI) so
+/// every renderer — the engine's `EngineApiClient`, the CLI, future consumers —
+/// shares one formatter.
+#[must_use]
+pub fn format_user_visible_api_error(session_id: &str, error: &ApiError) -> String {
+    if error.is_context_window_failure() {
+        format_context_window_blocked_error(session_id, error)
+    } else if error.is_generic_fatal_wrapper() {
+        let mut qualifiers = vec![format!("session {session_id}")];
+        if let Some(request_id) = error.request_id() {
+            qualifiers.push(format!("trace {request_id}"));
+        }
+        format!(
+            "{} ({}): {}",
+            error.safe_failure_class(),
+            qualifiers.join(", "),
+            error
+        )
+    } else {
+        error.to_string()
+    }
+}
+
+/// The detailed "Context window blocked" report with a token breakdown and a
+/// recovery checklist (compact / resume-compact / fresh session / reduce scope).
+#[must_use]
+pub fn format_context_window_blocked_error(session_id: &str, error: &ApiError) -> String {
+    let mut lines = vec![
+        "Context window blocked".to_string(),
+        "  Failure class    context_window_blocked".to_string(),
+        format!("  Session          {session_id}"),
+    ];
+
+    if let Some(request_id) = error.request_id() {
+        lines.push(format!("  Trace            {request_id}"));
+    }
+
+    match error {
+        ApiError::ContextWindowExceeded {
+            model,
+            estimated_input_tokens,
+            requested_output_tokens,
+            estimated_total_tokens,
+            context_window_tokens,
+        } => {
+            lines.push(format!("  Model            {model}"));
+            lines.push(format!(
+                "  Input estimate   ~{estimated_input_tokens} tokens (heuristic)"
+            ));
+            lines.push(format!(
+                "  Requested output {requested_output_tokens} tokens"
+            ));
+            lines.push(format!(
+                "  Total estimate   ~{estimated_total_tokens} tokens (heuristic)"
+            ));
+            lines.push(format!("  Context window   {context_window_tokens} tokens"));
+        }
+        ApiError::Api { message, body, .. } => {
+            let detail = message.as_deref().unwrap_or(body).trim();
+            if !detail.is_empty() {
+                lines.push(format!(
+                    "  Detail           {}",
+                    truncate_body_snippet(detail, 120)
+                ));
+            }
+        }
+        ApiError::RetriesExhausted { last_error, .. } => {
+            let detail = match last_error.as_ref() {
+                ApiError::Api { message, body, .. } => message.as_deref().unwrap_or(body),
+                other => return format_context_window_blocked_error(session_id, other),
+            }
+            .trim();
+            if !detail.is_empty() {
+                lines.push(format!(
+                    "  Detail           {}",
+                    truncate_body_snippet(detail, 120)
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    lines.push(String::new());
+    lines.push("Recovery".to_string());
+    lines.push("  Compact          /compact".to_string());
+    lines.push(format!(
+        "  Resume compact   scode --resume {session_id} /compact"
+    ));
+    lines.push("  Fresh session    /clear --confirm".to_string());
+    lines.push(
+        "  Reduce scope     remove large pasted context/files or ask for a smaller slice"
+            .to_string(),
+    );
+    lines.push("  Retry            rerun after compacting or reducing the request".to_string());
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{truncate_body_snippet, ApiError};

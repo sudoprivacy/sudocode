@@ -1368,6 +1368,62 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
+name = "engine-acp"
+version = "0.2.2"
+dependencies = [
+ "agent-client-protocol",
+ "agent-client-protocol-schema",
+ "agent-client-protocol-tokio",
+ "async-trait",
+ "axum",
+ "commands",
+ "futures",
+ "nix 0.29.0",
+ "runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "engine-core"
+version = "0.2.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "engine-events",
+ "futures",
+ "runtime",
+ "serde_json",
+ "telemetry",
+ "tokio",
+ "tools",
+]
+
+[[package]]
+name = "engine-events"
+version = "0.2.2"
+dependencies = [
+ "runtime",
+]
+
+[[package]]
+name = "engine-host"
+version = "0.2.2"
+dependencies = [
+ "commands",
+ "engine-core",
+ "nexus-vfs-client",
+ "plugins",
+ "runtime",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tokio",
+ "tools",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3901,7 +3957,6 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "rusty-sudocode-cli"
 version = "0.2.2"
 dependencies = [
- "api",
  "arboard",
  "async-trait",
  "base64",
@@ -3910,6 +3965,10 @@ dependencies = [
  "compat-harness",
  "crossterm 0.28.1",
  "dialoguer",
+ "engine-acp",
+ "engine-core",
+ "engine-events",
+ "engine-host",
  "flate2",
  "futures",
  "futures-util",

@@ -2,7 +2,7 @@
 //!
 //! Holds the one daemon connection an interactive `scode` process makes,
 //! lazily dialed from [`runtime::nexus_mailbox::Config::from_env`]. The send
-//! half feeds [`crate::cli::tool_executor::CliToolExecutor`] via the shared
+//! half feeds [`crate::tool_executor::CliToolExecutor`] via the shared
 //! [`MailboxSender`] (the same handler the co-host uses); the receive half is
 //! a background poller that surfaces peer messages into the REPL as they
 //! arrive.
@@ -30,7 +30,7 @@ use runtime::HookAbortSignal;
 const INBOX_WAIT_MS: u64 = 500;
 
 /// The resolved, connected standalone A2A session.
-pub(crate) struct Session {
+pub struct Session {
     config: Config,
     /// The one daemon connection: `ensure_inbox`, the send half, the CLI tool
     /// executor, and the blocking receive tail all share it. Safe to share
@@ -45,13 +45,13 @@ pub(crate) struct Session {
 
 impl Session {
     /// Clone the shared send capability for the CLI tool executor.
-    pub(crate) fn sender(&self) -> MailboxSender {
+    pub fn sender(&self) -> MailboxSender {
         Arc::clone(&self.sender)
     }
 
     /// The peer-awareness system-prompt section (self identity + how to
     /// reach peers). Single source: [`Config::peer_system_prompt`].
-    pub(crate) fn peer_system_prompt(&self) -> String {
+    pub fn peer_system_prompt(&self) -> String {
         self.config.peer_system_prompt()
     }
 }
@@ -67,7 +67,7 @@ static SESSION: OnceLock<Result<Option<Session>, String>> = OnceLock::new();
 /// dialed. The result is cached, so repeated calls are cheap and never
 /// re-dial. Callers propagate the `Err` up their existing `Result` chain so a
 /// misconfiguration fails startup loudly rather than silently disabling A2A.
-pub(crate) fn session() -> Result<Option<&'static Session>, String> {
+pub fn session() -> Result<Option<&'static Session>, String> {
     SESSION
         .get_or_init(|| match Config::from_env()? {
             None => Ok(None),
@@ -104,7 +104,7 @@ pub(crate) fn session() -> Result<Option<&'static Session>, String> {
 /// next inbox write, then drains the burst. The block returns empty at the
 /// `INBOX_WAIT_MS` deadline so the loop can re-check `abort`. No `sleep` spin —
 /// an idle receiver costs one parked RPC, replacing the former poll interval.
-pub(crate) fn spawn_poller(
+pub fn spawn_poller(
     session: &'static Session,
     abort: HookAbortSignal,
     sink: impl Fn(&Inbound) + Send + 'static,

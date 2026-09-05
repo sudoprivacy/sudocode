@@ -6,20 +6,27 @@ use runtime::{McpServerManager, McpTool, PermissionMode, ToolError};
 use serde_json::json;
 use tools::RuntimeToolDefinition;
 
-pub(crate) type RuntimePluginStateBuildOutput = (
+pub type RuntimePluginStateBuildOutput = (
     Option<Arc<Mutex<RuntimeMcpState>>>,
     Vec<RuntimeToolDefinition>,
 );
 
-pub(crate) struct RuntimeMcpState {
-    pub(crate) runtime: tokio::runtime::Runtime,
+pub struct RuntimeMcpState {
+    /// The MCP servers' isolated Tokio runtime. `Option` so `Drop` can take it
+    /// and `shutdown_background()` it: an ACP/one-shot session's `SessionEngine`
+    /// (→ `BuiltRuntime` → this state) is dropped by the seam pump from inside
+    /// its own async context (`rt.block_on(drive)`), and a plain
+    /// `tokio::runtime::Runtime` drop there panics ("Cannot drop a runtime in a
+    /// context where blocking is not allowed"). Mirrors `SessionEngine`'s own
+    /// teardown fix.
+    pub(crate) runtime: Option<tokio::runtime::Runtime>,
     pub(crate) manager: McpServerManager,
     pub(crate) pending_servers: Vec<String>,
     pub(crate) degraded_report: Option<runtime::McpDegradedReport>,
 }
 
 impl RuntimeMcpState {
-    pub(crate) fn new(
+    pub fn new(
         runtime_config: &runtime::RuntimeConfig,
         plugin_load_outcome: &PluginLoadOutcome,
         session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
@@ -108,7 +115,7 @@ impl RuntimeMcpState {
 
         Ok(Some((
             Self {
-                runtime,
+                runtime: Some(runtime),
                 manager,
                 pending_servers,
                 degraded_report,
@@ -117,21 +124,38 @@ impl RuntimeMcpState {
         )))
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.block_on(self.manager.shutdown())?;
+    pub fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Runs at teardown, which for an ACP/one-shot session happens inside the
+        // seam pump's async context. A bare `self.runtime.block_on` there panics
+        // ("Cannot start a runtime from within a runtime"); `block_on_isolated`
+        // drives the shutdown on a scoped thread that has no entered runtime,
+        // exactly as every other MCP method below already does.
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.shutdown(),
+        )?;
         Ok(())
     }
 
-    pub(crate) fn pending_servers(&self) -> Option<Vec<String>> {
+    pub fn pending_servers(&self) -> Option<Vec<String>> {
         (!self.pending_servers.is_empty()).then(|| self.pending_servers.clone())
     }
 
-    pub(crate) fn degraded_report(&self) -> Option<runtime::McpDegradedReport> {
+    pub fn degraded_report(&self) -> Option<runtime::McpDegradedReport> {
         self.degraded_report.clone()
     }
 
-    pub(crate) fn server_names(&self) -> Vec<String> {
+    pub fn server_names(&self) -> Vec<String> {
         self.manager.server_names()
+    }
+
+    /// The discovered `(tool_name, server_name)` pairs across all live servers.
+    /// The renderer folds these into the `--allowedTools` set so session MCP
+    /// tools stay reachable under an explicit tool restriction.
+    pub fn tools_with_server(&self) -> Vec<(String, String)> {
+        self.manager.tools_with_server()
     }
 
     /// Drives `future` to completion on a dedicated OS thread instead of
@@ -159,23 +183,33 @@ impl RuntimeMcpState {
         })
     }
 
-    pub(crate) fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        Self::block_on_isolated(&self.runtime, self.manager.reconnect_server(server_name))
-            .map_err(|e| ToolError::new(e.to_string()))?;
+    pub fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.reconnect_server(server_name),
+        )
+        .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
             "MCP server reconnected\n  Server           {server_name}"
         ))
     }
 
-    pub(crate) fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        Self::block_on_isolated(&self.runtime, self.manager.disable_server(server_name))
-            .map_err(|e| ToolError::new(e.to_string()))?;
+    pub fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.disable_server(server_name),
+        )
+        .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
             "MCP server disabled\n  Server           {server_name}"
         ))
     }
 
-    pub(crate) fn enable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+    pub fn enable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         self.manager
             .enable_server(server_name)
             .map_err(|e| ToolError::new(e.to_string()))?;
@@ -184,13 +218,15 @@ impl RuntimeMcpState {
         ))
     }
 
-    pub(crate) fn call_tool(
+    pub fn call_tool(
         &mut self,
         qualified_tool_name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<String, ToolError> {
         let response = Self::block_on_isolated(
-            &self.runtime,
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
             self.manager.call_tool(qualified_tool_name, arguments),
         )
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -209,13 +245,14 @@ impl RuntimeMcpState {
         serde_json::to_string_pretty(&result).map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_resources_for_server(
-        &mut self,
-        server_name: &str,
-    ) -> Result<String, ToolError> {
-        let result =
-            Self::block_on_isolated(&self.runtime, self.manager.list_resources(server_name))
-                .map_err(|error| ToolError::new(error.to_string()))?;
+    pub fn list_resources_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.list_resources(server_name),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "resources": result.resources,
@@ -223,13 +260,17 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_resources_for_all_servers(&mut self) -> Result<String, ToolError> {
+    pub fn list_resources_for_all_servers(&mut self) -> Result<String, ToolError> {
         let mut resources = Vec::new();
         let mut failures = Vec::new();
 
         for server_name in self.server_names() {
-            match Self::block_on_isolated(&self.runtime, self.manager.list_resources(&server_name))
-            {
+            match Self::block_on_isolated(
+                self.runtime
+                    .as_ref()
+                    .expect("mcp state tokio runtime present until drop"),
+                self.manager.list_resources(&server_name),
+            ) {
                 Ok(result) => resources.push(json!({
                     "server": server_name,
                     "resources": result.resources,
@@ -257,14 +298,14 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn read_resource(
-        &mut self,
-        server_name: &str,
-        uri: &str,
-    ) -> Result<String, ToolError> {
-        let result =
-            Self::block_on_isolated(&self.runtime, self.manager.read_resource(server_name, uri))
-                .map_err(|error| ToolError::new(error.to_string()))?;
+    pub fn read_resource(&mut self, server_name: &str, uri: &str) -> Result<String, ToolError> {
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.read_resource(server_name, uri),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "contents": result.contents,
@@ -272,12 +313,14 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_prompts_for_server(
-        &mut self,
-        server_name: &str,
-    ) -> Result<String, ToolError> {
-        let result = Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+    pub fn list_prompts_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.list_prompts(server_name),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "prompts": result.prompts,
@@ -285,12 +328,17 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_prompts_for_all_servers(&mut self) -> Result<String, ToolError> {
+    pub fn list_prompts_for_all_servers(&mut self) -> Result<String, ToolError> {
         let mut prompts = Vec::new();
         let mut failures = Vec::new();
 
         for server_name in self.server_names() {
-            match Self::block_on_isolated(&self.runtime, self.manager.list_prompts(&server_name)) {
+            match Self::block_on_isolated(
+                self.runtime
+                    .as_ref()
+                    .expect("mcp state tokio runtime present until drop"),
+                self.manager.list_prompts(&server_name),
+            ) {
                 Ok(result) => prompts.push(json!({
                     "server": server_name,
                     "prompts": result.prompts,
@@ -318,14 +366,16 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn get_prompt(
+    pub fn get_prompt(
         &mut self,
         server_name: &str,
         name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<String, ToolError> {
         let result = Self::block_on_isolated(
-            &self.runtime,
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
             self.manager.get_prompt(server_name, name, arguments),
         )
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -335,6 +385,23 @@ impl RuntimeMcpState {
             "messages": result.messages,
         }))
         .map_err(|error| ToolError::new(error.to_string()))
+    }
+}
+
+impl Drop for RuntimeMcpState {
+    fn drop(&mut self) {
+        // `BuiltRuntime::Drop::shutdown_mcp` already drove `manager.shutdown()`
+        // to completion (via `block_on_isolated`), but the MCP runtime itself is
+        // still dropped here — and for an ACP/one-shot session that drop runs
+        // inside the seam pump's async context (`rt.block_on(drive)`), where a
+        // plain `tokio::runtime::Runtime` drop panics ("Cannot drop a runtime in
+        // a context where blocking is not allowed"). `shutdown_background` tears
+        // it down without blocking, so it is safe in an async context; on the
+        // normal (main-thread) drop no MCP tasks remain in flight, so it is
+        // equivalent. Mirrors `SessionEngine`'s own teardown fix.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -374,7 +441,7 @@ pub(crate) fn apply_session_mcp_servers(
 /// servers, for extending an active `--allowedTools` allow-list. Tools are
 /// attributed by their original (pre-normalization) server name, so names that
 /// normalize identically (e.g. `github.com` vs `github_com`) do not collide.
-pub(crate) fn session_mcp_tool_names(
+pub fn session_mcp_tool_names(
     all_tools: impl IntoIterator<Item = (String, String)>,
     session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> BTreeSet<String> {
@@ -385,7 +452,7 @@ pub(crate) fn session_mcp_tool_names(
         .collect()
 }
 
-pub(crate) fn build_runtime_mcp_state(
+pub fn build_runtime_mcp_state(
     runtime_config: &runtime::RuntimeConfig,
     plugin_load_outcome: &PluginLoadOutcome,
     session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
@@ -539,6 +606,18 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
         .and_then(|annotations| annotations.get(key))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Shut the MCP servers down (blocking, best-effort) when tearing a runtime
+/// down. A poisoned lock or a failed shutdown is swallowed: teardown must not
+/// abort the surrounding cleanup path.
+pub fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    if let Some(state) = mcp_state {
+        let _ = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
+    }
 }
 
 #[cfg(test)]

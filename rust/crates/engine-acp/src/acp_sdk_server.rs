@@ -9,20 +9,12 @@ use std::path::PathBuf;
 use std::sync::Arc as StdArc;
 use std::sync::{Arc, Mutex};
 
+use commands::AcpSlashCommandSpec;
+
 use agent_client_protocol::role::acp::{Agent, Client};
 // NOTE: `ConnectTo` and `ConnectionTo` are different SDK concepts:
 //   - `ConnectTo<R>`:    trait for wiring up a transport (Stdio, Lines, etc.)
 //   - `ConnectionTo<R>`: runtime handle passed to handlers for sending messages
-use crate::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
-use crate::conversation::RuntimeObserver;
-use crate::hooks::HookAbortSignal;
-use crate::permissions::{
-    PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
-    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
-};
-use crate::prompt::SystemPromptOverrides;
-use crate::usage::UsageCostCurrency;
-use crate::workspace_root::WorkspaceRootScope;
 use agent_client_protocol::{
     on_receive_dispatch, on_receive_notification, on_receive_request, ConnectTo, ConnectionTo,
     Dispatch, Error, Handled, JsonRpcRequest, JsonRpcResponse, Responder,
@@ -39,6 +31,16 @@ use agent_client_protocol_schema::{
     SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
     StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage,
+};
+use runtime::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
+use runtime::workspace_root::WorkspaceRootScope;
+use runtime::HookAbortSignal;
+use runtime::RuntimeObserver;
+use runtime::SystemPromptOverrides;
+use runtime::UsageCostCurrency;
+use runtime::{
+    PermissionMode, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
@@ -226,7 +228,7 @@ fn acp_mcp_servers_to_scoped(
 ///   (see [`SessionRegistry`]), so the delegate only needs per-session
 ///   locking for memory safety, not for ordering;
 /// * every session-scoped call is made with the calling thread's
-///   [`crate::workspace_root`] scope set to that session's working
+///   [`runtime::workspace_root`] scope set to that session's working
 ///   directory, and the delegate must resolve paths through it (never through
 ///   the process cwd) — that is what keeps concurrent turns of sessions in
 ///   different directories from seeing each other's files.
@@ -522,30 +524,6 @@ pub struct CumulativeUsage {
     pub cached_write_tokens: Option<u64>,
 }
 
-/// One slash command the ACP agent accepts inside `session/prompt`.
-///
-/// The single table of these (owned by the `commands` crate, wired in by the
-/// delegate) is the source of truth for three things at once: the
-/// `available_commands_update` notification, `/help` under ACP, and the
-/// unknown-command hint. Keep them in one place so they cannot drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AcpSlashCommandSpec {
-    /// Command name without the leading slash (`compact`, not `/compact`).
-    pub name: &'static str,
-    /// One-line, human-readable description shown by the client.
-    pub description: &'static str,
-    /// Placeholder for the argument text when the command takes any
-    /// (`<model-id>`); `None` for argument-less commands.
-    pub input_hint: Option<&'static str>,
-    /// `true` for commands that rebuild the session runtime (`/model`),
-    /// which is a runtime-construction path and therefore runs
-    /// under the process-cwd lease (see [`WorkspaceCwdLease`]). Everything
-    /// else — in particular `/compact`, which waits on a model round-trip —
-    /// runs outside the lease so it never stalls `session/new` / `session/load`
-    /// of sessions in other directories.
-    pub holds_cwd_lease: bool,
-}
-
 /// Whether the slash command in `prompt` (`/name …`) is one that must run
 /// under the process-cwd lease, per the delegate's command table. Unknown
 /// commands only ever print a hint, so they do not.
@@ -561,25 +539,15 @@ fn slash_command_holds_cwd_lease(prompt: &str, specs: &[AcpSlashCommandSpec]) ->
     })
 }
 
-impl AcpSlashCommandSpec {
-    /// `/name <hint>` as the user would type it.
-    #[must_use]
-    pub fn usage(&self) -> String {
-        match self.input_hint {
-            Some(hint) => format!("/{} {hint}", self.name),
-            None => format!("/{}", self.name),
-        }
-    }
-}
-
-impl From<&AcpSlashCommandSpec> for AvailableCommand {
-    fn from(spec: &AcpSlashCommandSpec) -> Self {
-        AvailableCommand::new(spec.name, spec.description).input(
-            spec.input_hint.map(|hint| {
-                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(hint))
-            }),
-        )
-    }
+/// Translate a slash-command spec into the ACP `AvailableCommand` advertised in
+/// `available_commands_update`. A free function (not a `From` impl) because
+/// `AcpSlashCommandSpec` lives in `commands` and `AvailableCommand` in the ACP
+/// SDK — neither is local to this crate, so the orphan rule forbids the impl.
+fn available_command_from_spec(spec: &AcpSlashCommandSpec) -> AvailableCommand {
+    AvailableCommand::new(spec.name, spec.description).input(
+        spec.input_hint
+            .map(|hint| AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(hint))),
+    )
 }
 
 /// The `session/update` notification advertising `specs` to the client
@@ -591,7 +559,7 @@ fn available_commands_notification(
     SessionNotification::new(
         session_id.to_string(),
         SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(
-            specs.iter().map(AvailableCommand::from).collect(),
+            specs.iter().map(available_command_from_spec).collect(),
         )),
     )
 }
@@ -601,10 +569,10 @@ fn available_commands_notification(
 /// so ACP clients (sudowork) can downsample / route around oversized + wrong-
 /// model image cases without surfacing a user-visible error.
 ///
-/// See [`crate::image_registry::capability`] for the source of truth; design
+/// See [`runtime::image_registry::capability`] for the source of truth; design
 /// rationale in `docs/design/image-handling-non-user-facing.html`.
 fn initialize_meta() -> Map<String, serde_json::Value> {
-    let cap = crate::image_registry::capability();
+    let cap = runtime::image_registry::capability();
     let mut sudocode_ns = Map::new();
     sudocode_ns.insert(
         "imageCapability".to_string(),
@@ -771,13 +739,13 @@ mod tests {
         acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage,
         SdkSessionObserver,
     };
-    use crate::config::{ConfigSource, McpServerConfig};
-    use crate::conversation::RuntimeObserver;
-    use crate::usage::UsageCostCurrency;
     use agent_client_protocol_schema::{
         ContentBlock, EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
         SessionUpdate,
     };
+    use runtime::config::{ConfigSource, McpServerConfig};
+    use runtime::RuntimeObserver;
+    use runtime::UsageCostCurrency;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -931,7 +899,7 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 ///   their JSON-RPC traffic would corrupt the protocol, so this ordering is a
 ///   hard invariant, not a performance choice;
 /// * the working directory of each session: every turn runs with it as the
-///   thread's [`crate::workspace_root`] scope, and the runtime-construction
+///   thread's [`runtime::workspace_root`] scope, and the runtime-construction
 ///   paths additionally take the [`WorkspaceCwdLease`] for it (see there).
 #[derive(Default)]
 pub struct SessionRegistry {
@@ -1015,7 +983,7 @@ impl SessionRegistry {
 ///
 /// Turns no longer touch the process cwd at all: everything a turn does —
 /// the tool loop, hooks, config, the session store — resolves paths against
-/// the session's [`crate::workspace_root`] scope, so turns of sessions in
+/// the session's [`runtime::workspace_root`] scope, so turns of sessions in
 /// different directories run fully concurrently. What still resolves against
 /// the process cwd is *runtime construction*: `session/new`, `session/load`,
 /// `session/setModel` and the `/model` slash command rebuild a session's
@@ -1132,7 +1100,7 @@ impl PermissionPrompter for AcpPermissionBridge {
         //
         // While this thread is parked the turn holds nothing shared: its
         // workspace root is a thread-scoped value (see
-        // `crate::workspace_root`), so a parked session cannot hold up any
+        // `runtime::workspace_root`), so a parked session cannot hold up any
         // other session.
         tokio::task::block_in_place(|| {
             response_rx
@@ -1500,7 +1468,7 @@ pub(crate) async fn run_acp_on_transport(
                         let blocking_handle = tokio::task::spawn_blocking(move || {
                             // This thread works in the session's directory for
                             // the whole turn through the workspace-root scope
-                            // (see `crate::workspace_root`): a thread-scoped
+                            // (see `runtime::workspace_root`): a thread-scoped
                             // value, so turns of sessions in other directories
                             // run at the same time on their own threads. The
                             // process cwd is not touched. Unknown sessions have

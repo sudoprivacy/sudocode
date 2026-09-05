@@ -14,7 +14,9 @@ use crate::compact::{
     CompactionError, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
-use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
+use crate::hooks::{
+    HookAbortSignal, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,
+};
 use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
@@ -137,6 +139,16 @@ pub trait ApiClient: Send {
 }
 
 /// Optional observer for runtime events emitted while processing a turn.
+///
+/// All methods default to empty so existing implementations
+/// (e.g. `SdkSessionObserver`) are unaffected when new hooks are added. The
+/// streaming loop in `run_turn_with_blocks` forwards each [`AssistantEvent`]
+/// to the matching hook in real time, so a renderer built on this trait sees
+/// every event as it arrives (not only the end-of-turn [`TurnSummary`]
+/// aggregate). This is the producer side of the engine↔renderer seam: the
+/// `engine-core` adapter that turns these callbacks into
+/// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
+/// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
     fn on_thinking_delta(&mut self, _delta: &str) {}
 
@@ -151,6 +163,144 @@ pub trait RuntimeObserver {
         _output: &str,
         _is_error: bool,
     ) {
+    }
+
+    /// Wire model id resolved from `message_start` (`AssistantEvent::Model`).
+    fn on_model(&mut self, _wire_model: &str) {}
+
+    /// Incremental token usage for the in-flight assistant message
+    /// (`AssistantEvent::Usage`).
+    fn on_usage(&mut self, _usage: &TokenUsage) {}
+
+    /// Prompt-cache telemetry (`AssistantEvent::PromptCache`).
+    fn on_prompt_cache(&mut self, _event: &PromptCacheEvent) {}
+
+    /// End of one assistant message in the stream (`AssistantEvent::MessageStop`).
+    fn on_message_stop(&mut self) {}
+
+    /// Optional `Send + Sync` sink for live tool-execution progress (streaming
+    /// `bash` output, MCP progress notifications).
+    ///
+    /// Default `None`: existing observers (incl. the ACP `SdkSessionObserver`)
+    /// see no live progress, exactly as before. An observer that wants it (the
+    /// seam's `engine-core` adapter) returns a sink; the runtime hands it to the
+    /// tool executor via [`ToolDispatchContext::progress_sink`], which installs
+    /// it around a single tool call. Progress can't ride the other `&mut self`
+    /// hooks: it fires from deep inside tool execution, off the loop thread, so
+    /// it needs a `Send + Sync` value, not a borrow of the observer.
+    fn tool_progress_sink(&self) -> Option<ProgressSink> {
+        None
+    }
+
+    /// Optional `Send + Sync` sink for live plugin-hook progress (the
+    /// PreToolUse / PostToolUse / PostToolUseFailure lifecycle lines that used
+    /// to be eprintln'd by the CLI's build-time hook reporter).
+    ///
+    /// Mirrors [`tool_progress_sink`](Self::tool_progress_sink): default `None`
+    /// leaves existing observers unchanged, while the seam's `engine-core`
+    /// adapter returns a sink so hook progress rides the seam as
+    /// `EngineEvent::HookProgress`. Installed into the runtime's
+    /// `hook_progress_reporter` at the start of each turn (see
+    /// `run_turn_with_blocks`), so the pre/post-tool hook runners forward every
+    /// lifecycle event through it. Like tool progress it can't ride the `&mut
+    /// self` hooks above: the reporter is invoked from the (synchronous) hook
+    /// runner, so it needs a `Send + Sync` value, not a borrow of the observer.
+    fn hook_progress_sink(&self) -> Option<HookProgressSink> {
+        None
+    }
+}
+
+/// A live progress report from a running tool. Structured, not rendered — the
+/// renderer above the seam formats it; the runtime and tool executor only
+/// report data (no ANSI, no terminal writes).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolProgressEvent {
+    /// Streaming `bash` output progress.
+    Bash {
+        /// The most recent output line (already extracted; may be empty).
+        last_line: String,
+        /// Cumulative line count so far.
+        total_lines: usize,
+        /// Cumulative byte count so far.
+        total_bytes: usize,
+    },
+    /// MCP tool progress notification.
+    Mcp {
+        /// Human-readable status, if the server sent one.
+        message: Option<String>,
+        /// Progress value.
+        progress: f64,
+        /// Total, if known (enables a percentage).
+        total: Option<f64>,
+    },
+}
+
+/// A `Send + Sync` sink a renderer installs (via
+/// [`RuntimeObserver::tool_progress_sink`]) to receive [`ToolProgressEvent`]s
+/// during tool execution.
+///
+/// Threaded through [`ToolDispatchContext`] so the tool executor installs it
+/// **narrowly, at dispatch time**. A thread-local progress callback set for the
+/// whole async turn would be invisible once the turn future hops worker threads;
+/// installing it right before the (synchronous-ish) tool call keeps it on the
+/// executing thread.
+#[derive(Clone)]
+pub struct ProgressSink(std::sync::Arc<dyn Fn(ToolProgressEvent) + Send + Sync>);
+
+impl ProgressSink {
+    /// Wrap a progress handler.
+    pub fn new(f: impl Fn(ToolProgressEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Report one progress event to the renderer.
+    pub fn emit(&self, event: ToolProgressEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink(..)")
+    }
+}
+
+/// A `Send + Sync` sink a renderer installs (via
+/// [`RuntimeObserver::hook_progress_sink`]) to receive [`HookProgressEvent`]s
+/// as plugin hooks run. The seam analogue of [`ProgressSink`] for the
+/// pre/post-tool hook lifecycle: the runtime wraps it in a
+/// [`HookProgressReporter`] and installs it for the turn, so each hook outcome
+/// is reported as structured data (the renderer above the seam formats it).
+#[derive(Clone)]
+pub struct HookProgressSink(std::sync::Arc<dyn Fn(HookProgressEvent) + Send + Sync>);
+
+impl HookProgressSink {
+    /// Wrap a hook-progress handler.
+    pub fn new(f: impl Fn(HookProgressEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Report one hook-progress event to the renderer.
+    pub fn emit(&self, event: HookProgressEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for HookProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HookProgressSink(..)")
+    }
+}
+
+/// Adapter that turns a [`HookProgressSink`] (from the observer) into a
+/// [`HookProgressReporter`] the runtime can install for the turn. Every
+/// `on_event` callback is forwarded to the sink, so plugin-hook progress
+/// reaches the renderer through the seam instead of a build-time stderr sink.
+struct SinkHookReporter(HookProgressSink);
+
+impl crate::hooks::HookProgressReporter for SinkHookReporter {
+    fn on_event(&mut self, event: &HookProgressEvent) {
+        self.0.emit(event.clone());
     }
 }
 
@@ -191,6 +341,11 @@ pub struct ToolDispatchContext {
     /// only ever names the opaque tool_use id, so the physical path never
     /// crosses the model boundary. `None` for in-memory sessions.
     pub tool_results_dir: Option<std::path::PathBuf>,
+    /// Optional live-progress sink for streaming tools (`bash`/MCP). `None`
+    /// when no renderer wants live progress (the observer returned no sink, or
+    /// there is no observer). The tool executor installs it narrowly around a
+    /// single tool call — see [`ProgressSink`].
+    pub progress_sink: Option<ProgressSink>,
 }
 
 impl ToolDispatchContext {
@@ -1049,6 +1204,22 @@ where
             .push_user_blocks(blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
+        // Route live plugin-hook progress through the seam: when the observer
+        // (the seam's `engine-core` adapter) supplies a hook-progress sink,
+        // install it as this turn's `hook_progress_reporter` so
+        // `run_pre_tool_use_hook` / `run_post_tool_use_hook` /
+        // `run_post_tool_use_failure_hook` forward each lifecycle event to the
+        // renderer. Rebuilt each turn (the ObserverAdapter carrying the live
+        // event channel changes per turn); this overwrites the build-time
+        // reporter, which is `None` on the seam path. Uses the same accessor
+        // (`observer.as_deref()`) the `tool_progress_sink` install below uses.
+        if let Some(sink) = observer
+            .as_deref()
+            .and_then(RuntimeObserver::hook_progress_sink)
+        {
+            self.hook_progress_reporter = Some(Box::new(SinkHookReporter(sink)));
+        }
+
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
         let mut prompt_cache_events = Vec::new();
@@ -1189,7 +1360,18 @@ where
                                             AssistantEvent::ToolUse { id, name, input, .. } => {
                                                 obs.on_tool_use(id, name, input);
                                             }
-                                            _ => {}
+                                            AssistantEvent::Model(model) => {
+                                                obs.on_model(model);
+                                            }
+                                            AssistantEvent::Usage(usage) => {
+                                                obs.on_usage(usage);
+                                            }
+                                            AssistantEvent::PromptCache(cache_event) => {
+                                                obs.on_prompt_cache(cache_event);
+                                            }
+                                            AssistantEvent::MessageStop => {
+                                                obs.on_message_stop();
+                                            }
                                         }
                                     }
                                     collected.push(event);
@@ -1301,6 +1483,12 @@ where
                 parent_assistant_message: Some(assistant_message),
                 parent_session_messages: self.session.messages.clone(),
                 tool_results_dir: self.session.tool_results_dir(),
+                // Live-progress sink for streaming tools, if the renderer wants
+                // it. Rebuilt each assistant turn (cheap Arc clone); `None` for
+                // observers that don't override `tool_progress_sink` (default).
+                progress_sink: observer
+                    .as_deref()
+                    .and_then(RuntimeObserver::tool_progress_sink),
             };
 
             let mut batch_start = 0usize;

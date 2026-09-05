@@ -10,13 +10,18 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
-api = { path = "../api" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
+engine-core = { path = "../engine-core" }
+engine-events = { path = "../engine-events" }
+# The engine side below the seam (config/model/permission resolution today; the
+# session builder + delegate as more engine code moves in). The REPL renderer
+# re-imports these so it never owns a second copy of the engine's config SSOT.
+engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
@@ -25,6 +30,8 @@ dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"
 runtime = { path = "../runtime" }
+# ACP renderer (server + stdio/ws transports) moved out of `runtime`.
+engine-acp = { path = "../engine-acp" }
 nexus-vfs-client = { path = "../nexus-vfs-client" }
 plugins = { path = "../plugins" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

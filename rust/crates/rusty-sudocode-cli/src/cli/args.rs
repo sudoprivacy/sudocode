@@ -1,25 +1,32 @@
-use std::collections::BTreeSet;
-use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use api::AuthMode;
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::{
     classify_skills_slash_command, resolve_skill_invocation, resolve_skill_invocation_with_plugins,
     slash_command_specs, SkillSlashDispatch, SlashCommand,
 };
+use engine_core::AuthMode;
 use plugins::PluginLoadOutcome;
-use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
+use runtime::{ConfigLoader, PermissionMode};
 use tools::GlobalToolRegistry;
 
 use super::session::LATEST_SESSION_REFERENCE;
-use crate::{lookup_default_model, normalize_permission_mode, DEFAULT_MODEL};
+use crate::{normalize_permission_mode, DEFAULT_MODEL};
 
-pub(crate) type AllowedToolSet = BTreeSet<String>;
+// The config / model / permission web now lives below the seam in
+// `engine_host::config`. Re-export the symbols the rest of the CLI reaches
+// through `cli::args::` (and the ones this module still calls) from there, so
+// the move is invisible at every existing call site.
+pub(crate) use engine_host::config::{
+    config_model_for_current_dir, default_permission_mode, load_sudocode_config_for_current_dir,
+    load_sudocode_config_for_cwd, permission_mode_from_label, require_sudocode_config_for_cwd,
+    resolve_config_model_alias, resolve_model_alias, resolve_model_alias_with_config,
+    resolve_repl_model, AllowedToolSet,
+};
 
 // ---------------------------------------------------------------------------
 // clap-derived CLI definition
@@ -1131,37 +1138,6 @@ pub(crate) fn try_resolve_bare_skill_prompt_with_plugins(
 // Model / alias resolution
 // ---------------------------------------------------------------------------
 
-pub(crate) fn resolve_model_alias(model: &str) -> &str {
-    match model {
-        "auto" | "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
-        "claude-opus" | "opus" => "claude-opus-4-6",
-        "claude-haiku" | "haiku" => "claude-haiku-4-5-20251213",
-        _ => model,
-    }
-}
-
-pub(crate) fn resolve_model_alias_with_config(model: &str) -> String {
-    let trimmed = model.trim();
-    let config = load_sudocode_config_for_current_dir();
-    if let Some(alias) = resolve_config_model_alias(trimmed, &config) {
-        return alias;
-    }
-    if let Some(resolved) = config_alias_for_current_dir(trimmed) {
-        return resolve_model_alias(&resolved).to_string();
-    }
-    resolve_model_alias(trimmed).to_string()
-}
-
-fn resolve_config_model_alias(model: &str, config: &api::SudoCodeConfig) -> Option<String> {
-    let trimmed = model.trim();
-    let entry = config.models.get(&trimmed.to_ascii_lowercase())?;
-    if entry.alias.trim().is_empty() {
-        Some(trimmed.to_string())
-    } else {
-        Some(entry.alias.clone())
-    }
-}
-
 pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -1174,7 +1150,7 @@ pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
         _ => {}
     }
     let config = load_sudocode_config_for_current_dir();
-    if api::resolve_model(&config, trimmed).is_some() {
+    if engine_core::resolve_model(&config, trimmed).is_some() {
         return Ok(());
     }
     // If a proxy provider is configured, accept any bare model ID —
@@ -1215,41 +1191,6 @@ pub(crate) fn validate_model_syntax(model: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn config_alias_for_current_dir(alias: &str) -> Option<String> {
-    if alias.is_empty() {
-        return None;
-    }
-    let cwd = runtime::current_workspace_root().ok()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    let config = loader.load().ok()?;
-    config.aliases().get(alias).cloned()
-}
-
-pub(crate) fn load_sudocode_config_for_current_dir() -> api::SudoCodeConfig {
-    let Ok(cwd) = runtime::current_workspace_root() else {
-        return api::SudoCodeConfig::default();
-    };
-    load_sudocode_config_for_cwd(&cwd)
-}
-
-pub(crate) fn load_sudocode_config_for_cwd(cwd: &Path) -> api::SudoCodeConfig {
-    let loader = ConfigLoader::default_for(cwd);
-    let config = loader.load_sudocode_config().unwrap_or_default();
-    runtime::model_capabilities::apply_config_limits(&config);
-    config
-}
-
-pub(crate) fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<api::SudoCodeConfig, String> {
-    let loader = ConfigLoader::default_for(cwd);
-    let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
-    // Seed the capability overrides here rather than at each startup site:
-    // every entry point (REPL, --print, acp, subagents) reaches the config
-    // through this pair, and a forgotten seeding call is invisible until a
-    // provider rejects `max_tokens` at request time.
-    runtime::model_capabilities::apply_config_limits(&config);
-    Ok(config)
-}
-
 // ---------------------------------------------------------------------------
 // Allowed tools
 // ---------------------------------------------------------------------------
@@ -1267,7 +1208,7 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
     let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
         std::collections::BTreeMap::new();
-    let state = super::super::build_runtime_plugin_state_with_loader(
+    let state = engine_host::build_runtime_plugin_state_with_loader(
         &cwd,
         &loader,
         &runtime_config,
@@ -1283,62 +1224,6 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(registry)
-}
-
-// ---------------------------------------------------------------------------
-// Permission mode helpers
-// ---------------------------------------------------------------------------
-
-pub(crate) fn permission_mode_from_label(mode: &str) -> PermissionMode {
-    match mode {
-        "read-only" => PermissionMode::ReadOnly,
-        "workspace-write" => PermissionMode::WorkspaceWrite,
-        "danger-full-access" => PermissionMode::DangerFullAccess,
-        other => panic!("unsupported permission mode label: {other}"),
-    }
-}
-
-pub(crate) fn permission_mode_from_resolved(mode: ResolvedPermissionMode) -> PermissionMode {
-    match mode {
-        ResolvedPermissionMode::ReadOnly => PermissionMode::ReadOnly,
-        ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
-        ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
-    }
-}
-
-pub(crate) fn default_permission_mode() -> PermissionMode {
-    env::var("SUDO_CODE_PERMISSION_MODE")
-        .ok()
-        .as_deref()
-        .and_then(normalize_permission_mode)
-        .map(permission_mode_from_label)
-        .or_else(config_permission_mode_for_current_dir)
-        .unwrap_or(PermissionMode::DangerFullAccess)
-}
-
-fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
-    let cwd = runtime::current_workspace_root().ok()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    loader
-        .load()
-        .ok()?
-        .permission_mode()
-        .map(permission_mode_from_resolved)
-}
-
-pub(crate) fn config_model_for_current_dir() -> Option<String> {
-    let cwd = runtime::current_workspace_root().ok()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    loader.load().ok()?.model().map(ToOwned::to_owned)
-}
-
-pub(crate) fn resolve_repl_model(cli_model: String) -> String {
-    if cli_model != DEFAULT_MODEL {
-        return cli_model;
-    }
-    lookup_default_model()
-        .map(|(resolved, _, _)| resolved)
-        .unwrap_or(cli_model)
 }
 
 #[cfg(test)]
@@ -1361,7 +1246,7 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(
             "api-key".to_string(),
-            api::ModelProviderMapping {
+            engine_core::ModelProviderMapping {
                 provider: "custom-openai".to_string(),
                 model: "gpt-5.4".to_string(),
                 api: Some("openai-completions".to_string()),
@@ -1371,7 +1256,7 @@ mod tests {
         let mut models = BTreeMap::new();
         models.insert(
             "custom-openai/gpt-5.4".to_string(),
-            api::ModelConfigEntry {
+            engine_core::ModelConfigEntry {
                 alias: "custom-openai/gpt-5.4".to_string(),
                 name: "custom-openai/gpt-5.4".to_string(),
                 input: vec!["text".to_string()],
@@ -1380,7 +1265,7 @@ mod tests {
             },
         );
 
-        let config = api::SudoCodeConfig {
+        let config = engine_core::SudoCodeConfig {
             auth_modes: BTreeMap::new(),
             models,
             web_search: Default::default(),

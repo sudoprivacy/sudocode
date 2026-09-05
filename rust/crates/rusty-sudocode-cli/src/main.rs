@@ -19,9 +19,17 @@ mod input;
 mod input_chrome;
 mod input_queue;
 mod render;
+mod render_engine;
 mod repl_async;
 mod repl_ui;
 mod vlm_describe;
+
+use engine_acp::AcpError;
+use engine_core::{
+    EngineApiClient, EngineCommand, EngineDelegate, EngineEvent, EngineHandle, EngineSession,
+    TurnComplete,
+};
+use render_engine::{EngineEventRenderer, RenderOutcome};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -36,17 +44,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use api::{
-    base_url_for_mode, resolve_startup_auth_source, AnthropicClient, AuthMode, AuthSource,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+use engine_core::{
+    base_url_for_mode, resolve_startup_auth_source, AuthMode, AuthSource, ProviderKind,
 };
 
-use cli::api_client::{
-    collect_prompt_cache_events, collect_tool_results, collect_tool_uses, final_assistant_text,
-    max_tokens_for_model, AnthropicRuntimeClient,
-};
 use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
@@ -80,21 +81,15 @@ use cli::help::{
     render_diff_report, render_diff_report_for, render_last_tool_debug_report, render_memory_json,
     render_memory_report, render_repl_help, render_teleport_report, validate_no_args,
 };
-use cli::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
 use cli::pager::print_with_pager;
 use cli::session::{
-    confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
-    delete_managed_session, format_session_picker_entry, list_managed_sessions,
-    load_session_reference, new_cli_session, new_cli_session_for, render_session_list,
-    resolve_session_reference, write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
+    confirm_session_deletion, format_session_picker_entry, list_managed_sessions,
+    render_session_list, LATEST_SESSION_REFERENCE,
 };
 use cli::status::{
-    format_status_report, normalize_permission_mode, print_sandbox_status_snapshot,
-    print_status_snapshot, print_version, sandbox_json_value, status_context, status_json_value,
-    version_json_value, StatusContext, StatusUsage,
-};
-use cli::tool_executor::{
-    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
+    format_status_report, print_sandbox_status_snapshot, print_status_snapshot, print_version,
+    sandbox_json_value, status_context, status_json_value, version_json_value, StatusContext,
+    StatusUsage,
 };
 use commands::{
     acp_slash_commands, classify_skills_slash_command, format_acp_unsupported_slash_command,
@@ -109,6 +104,37 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
+use engine_host::config::{resolve_auth_mode, resolve_model_switch_auth_mode};
+use engine_host::mcp::{
+    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_state_best_effort,
+    RuntimeMcpState,
+};
+use engine_host::prompt::{
+    apply_cli_prompt_overrides, build_acp_system_prompt, build_system_prompt_for,
+    set_cli_prompt_overrides,
+};
+use engine_host::session::{
+    canonical_session_cwd, context_overflow_user_message, create_managed_session_handle,
+    create_managed_session_handle_for, delete_managed_session, load_session_reference,
+    new_cli_session, new_cli_session_for, resolve_session_reference, write_session_clear_backup,
+    SessionHandle,
+};
+use engine_host::tool_executor::{
+    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
+};
+// The engine CORE cluster now lives below the seam in `engine-host`
+// (`runtime_build` + `session_engine`, re-exported at the crate root). The
+// renderer names these to build a session (`SessionEngine`), drive its non-turn
+// lifecycle (`SessionLifecycle`), and — on the ACP path only — construct/hold a
+// runtime directly (`BuiltRuntime` / `RuntimeConfig` / `AcpCliSession` + the
+// `build_*` helpers). `RuntimeConfig` is the engine-side config struct; it does
+// not shadow `runtime::RuntimeConfig` (always named fully-qualified).
+use engine_host::{
+    build_engine_runtime, build_plugin_manager, build_runtime_for_cwd,
+    build_runtime_plugin_state_with_loader, plugin_load_outcome_for_cwd, AcpCliSession,
+    BuiltRuntime, ModelSwitchReport, RuntimeConfig, RuntimePluginState, SessionEngine,
+    SessionLifecycle,
+};
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use render::{
@@ -117,12 +143,12 @@ use render::{
 use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
-    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, AcpError,
-    ApiClient, ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource,
-    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
-    McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode, PermissionPolicy,
-    ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SystemPrompt,
-    TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool,
+    MessageRole, ModelPricing, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
+    ResolvedPermissionMode, RuntimeError, Session, SystemPrompt, TokenUsage, ToolError,
+    ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -130,35 +156,13 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
-
-/// #148: Model provenance for `scode status` JSON/text output. Records where
-/// the resolved model string came from so consumers don't have to re-read argv
-/// to audit whether their `--model` flag was honored vs falling back to env
-/// or config or default.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModelSource {
-    /// Explicit `--model` / `--model=` CLI flag.
-    Flag,
-    /// ANTHROPIC_MODEL environment variable (when no flag was passed).
-    Env,
-    /// `model` key in `.scode.json` / `.nexus/sudocode/settings.json` (when neither
-    /// flag nor env set it).
-    Config,
-    /// Compiled-in DEFAULT_MODEL fallback.
-    Default,
-}
-
-impl ModelSource {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            ModelSource::Flag => "flag",
-            ModelSource::Env => "env",
-            ModelSource::Config => "config",
-            ModelSource::Default => "default",
-        }
-    }
-}
+// The config / model / permission web moved below the seam into
+// `engine_host::config`. Re-export the handful the CLI names by their bare
+// (`crate::`) path so the renderer keeps one import surface for them; the
+// resolution logic itself is the engine's input, not the renderer's concern.
+pub(crate) use engine_host::config::{
+    lookup_default_model, normalize_permission_mode, ModelSource, DEFAULT_MODEL,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelProvenance {
@@ -201,31 +205,6 @@ impl ModelProvenance {
     }
 }
 
-/// Single source of truth for the env-or-config default model lookup. Returns
-/// `(resolved, raw, source)` when env or config wins, `None` to defer to the
-/// compiled-in default.
-pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
-    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return Some((
-            resolve_model_alias_with_config(&env_model),
-            env_model,
-            ModelSource::Env,
-        ));
-    }
-    if let Some(config_model) = config_model_for_current_dir() {
-        return Some((
-            resolve_model_alias_with_config(&config_model),
-            config_model,
-            ModelSource::Config,
-        ));
-    }
-    None
-}
-
 // Build-time constants injected by build.rs (fall back to static values when
 // build.rs hasn't run, e.g. in doc-test or unusual toolchain environments).
 pub(crate) const DEFAULT_DATE: &str = match option_env!("BUILD_DATE") {
@@ -243,10 +222,6 @@ const LEGACY_SESSION_EXTENSION: &str = "json";
 pub(crate) const OFFICIAL_REPO_URL: &str = "https://github.com/sudoprivacy/sudocode";
 pub(crate) const OFFICIAL_REPO_SLUG: &str = "sudoprivacy/sudocode";
 pub(crate) const DEPRECATED_INSTALL_COMMAND: &str = "cargo install sudocode";
-type RuntimePluginStateBuildOutput = (
-    Option<Arc<Mutex<RuntimeMcpState>>>,
-    Vec<RuntimeToolDefinition>,
-);
 
 /// Enable ANSI/VT escape-sequence processing on the Windows console.
 ///
@@ -418,7 +393,9 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
 }
 
 /// Extract sudorouter base URL and API key from the sudocode config.
-fn extract_sudorouter_credentials(config: &api::SudoCodeConfig) -> Option<(String, String)> {
+fn extract_sudorouter_credentials(
+    config: &engine_core::SudoCodeConfig,
+) -> Option<(String, String)> {
     let proxy = config.auth_modes.get("proxy")?;
     let sr = proxy.get("sudorouter")?;
     let base_url = &sr.base_url;
@@ -433,7 +410,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let (action, prompt_overrides) = parse_args_with_prompt_overrides(&args)?;
     // Only writer in the process; a second `set` cannot happen.
-    let _ = CLI_PROMPT_OVERRIDES.set(prompt_overrides);
+    set_cli_prompt_overrides(prompt_overrides);
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
     // If an ensure_authenticated() call is ever added below this point it
@@ -535,15 +512,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 true,
                 allowed_tools,
                 permission_mode,
+                reasoning_effort,
                 auth_mode,
             )?;
-            cli.set_reasoning_effort(reasoning_effort);
+            // Non-interactive one-shot: SIGINT / Ctrl-C must gracefully cancel
+            // the turn across the seam (the running tool returns interrupted and
+            // the turn ends cancelled) rather than hard-kill the process. The
+            // REPL wires this through its input path; the one-shot path has no
+            // key reader, so install a scoped signal→Cancel monitor here.
+            let _cancel_guard = SignalCancelGuard::install(cli.engine_handle.commands.clone());
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
 
             // Record token usage and session ended event for non-interactive prompt mode
             let duration_ms = session_start.elapsed().as_millis() as u64;
-            let usage = cli.runtime.usage().cumulative_usage();
-            let total_turns = cli.runtime.usage().turns();
+            let usage_tracker = cli.lifecycle.usage_snapshot();
+            let usage = usage_tracker.cumulative_usage();
+            let total_turns = usage_tracker.turns();
             if let Some(tracer) = cli.session_tracer() {
                 tracer.record_usage(
                     "session_summary".to_string(),
@@ -559,12 +543,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     duration_ms,
                 );
             }
-            // Initiate background shutdown of the tokio runtime so that
-            // lingering tasks (reqwest connection pool, fire-and-forget spawns)
-            // don't block the Runtime::drop that happens when `cli` goes out
-            // of scope.
-            cli.tokio_runtime
-                .shutdown_timeout(Duration::from_millis(500));
+            // The engine owns its tokio runtime and tears it down on Close /
+            // drop; the renderer keeps none, so there is nothing to shut down
+            // here.
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
         CliAction::Acp {
@@ -1005,13 +986,14 @@ fn run_resume(
         }
         // No commands — enter the interactive REPL with the restored session.
         let resolved_model = resolve_repl_model(model);
-        let mut cli = match LiveCli::new(resolved_model, true, None, permission_mode, auth_mode) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("failed to initialize: {e}");
-                std::process::exit(1);
-            }
-        };
+        let mut cli =
+            match LiveCli::new(resolved_model, true, None, permission_mode, None, auth_mode) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("failed to initialize: {e}");
+                    std::process::exit(1);
+                }
+            };
         // Load the restored session into the running CLI.
         let session_ref = resolved_path.display().to_string();
         if let Err(e) = cli.load_session(Some(session_ref)) {
@@ -1586,14 +1568,14 @@ fn run_repl(
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
     let resolved_model = resolve_repl_model(model);
-    let mut cli = LiveCli::new(
+    let cli = LiveCli::new(
         resolved_model,
         true,
         allowed_tools,
         permission_mode,
+        reasoning_effort,
         auth_mode,
     )?;
-    cli.set_reasoning_effort(reasoning_effort);
 
     // Env-gated opt-in to the async REPL that accepts input during a running
     // turn (see `repl_async` module docs and
@@ -1619,7 +1601,8 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
     // sessions (messages present → render + populate history).
-    let messages = &cli.runtime.session().messages;
+    let session = cli.lifecycle.session_snapshot();
+    let messages = &session.messages;
     if !messages.is_empty() {
         let term_width = crossterm::terminal::size()
             .map(|(cols, _)| cols as usize)
@@ -1661,7 +1644,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
-        input_chrome::print_before_prompt(cli.config.permission_mode.as_str());
+        input_chrome::print_before_prompt(cli.lifecycle.current_permission_mode().as_str());
         match editor.read_line()? {
             input::ReadOutcome::Submit(input) => {
                 // Clear the pre-printed bottom sep + footer. After
@@ -1699,19 +1682,20 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 // matches a known skill name, invoke it as `/skills <input>`
                 // rather than forwarding raw text to the LLM (ROADMAP #36).
                 let cwd = std::env::current_dir().unwrap_or_default();
+                let plugin_outcome = cli.lifecycle.plugin_load_outcome();
                 if let Some(prompt) = try_resolve_bare_skill_prompt_with_plugins(
                     &cwd,
                     &trimmed,
-                    Some(cli.runtime.plugin_load_outcome()),
+                    Some(&plugin_outcome),
                 ) {
                     cli.record_prompt_history(&trimmed);
-                    if let Err(e) = cli.run_turn(&prompt) {
+                    if let Err(e) = cli.run_turn_interactive(&prompt) {
                         eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                     }
                     continue;
                 }
                 cli.record_prompt_history(&trimmed);
-                if let Err(e) = cli.run_turn(&trimmed) {
+                if let Err(e) = cli.run_turn_interactive(&trimmed) {
                     eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
                 }
             }
@@ -1724,8 +1708,9 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -1757,13 +1742,11 @@ fn run_repl_async_dispatch(
     let banner = cli.startup_banner();
     let completions = cli.repl_completion_candidates().unwrap_or_default();
 
-    // Re-enable the raw-mode ESC/Ctrl-C listener (HookAbortMonitor).
-    // With prompt_ready gating, rustyline is NOT in readline during turns,
-    // so HookAbortMonitor can safely own stdin for abort key detection.
-    cli.esc_monitor_enabled = true;
-
-    let abort_signal = runtime::HookAbortSignal::new();
-    cli.persistent_abort_signal = Some(abort_signal.clone());
+    // Hold a command-channel clone so ESC/Ctrl-C can cancel the in-flight turn
+    // via the seam (EngineCommand::Cancel) without locking the LiveCli mutex the
+    // runner thread holds while it drives the turn. The engine's pump aborts the
+    // running turn on Cancel — no separate raw-mode HookAbortMonitor needed.
+    let commands = cli.engine_handle.commands.clone();
 
     // Shared atomic queue mode — the coordinator reads it each turn,
     // and `/config set auto-interrupt on|off` writes to it.
@@ -1771,18 +1754,20 @@ fn run_repl_async_dispatch(
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
     // ESC abort hook — wired into rustyline's ConditionalEventHandler so ESC
-    // cancels the running turn without a separate raw-mode stdin thread.
+    // cancels the running turn by sending Cancel across the seam.
     let esc_abort_hook: input::EscAbortHook = {
-        let sig = abort_signal.clone();
-        Arc::new(move || sig.abort())
+        let commands = commands.clone();
+        Arc::new(move || {
+            let _ = commands.send(EngineCommand::Cancel);
+        })
     };
 
-    let permission_label = cli.config.permission_mode.as_str().to_string();
+    let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
 
     let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
     let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
         cli: std::sync::Arc::clone(&cli_shared),
-        abort_signal,
+        commands,
     });
 
     let session_start = Instant::now();
@@ -1807,8 +1792,9 @@ fn run_repl_async_dispatch(
     // trailing block just above): record cumulative usage + duration so the
     // async path's users don't lose observability.
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -1835,7 +1821,11 @@ fn run_repl_async_dispatch(
 /// signal so `abort_current_turn` can fire without ever touching the mutex.
 struct LiveCliDriver {
     cli: std::sync::Arc<std::sync::Mutex<LiveCli>>,
-    abort_signal: runtime::HookAbortSignal,
+    /// Command-channel clone into the engine session. `abort_current_turn`
+    /// sends `Cancel` through it — no LiveCli lock needed (the runner thread
+    /// holds that lock while the turn streams), replacing the old detached
+    /// `HookAbortSignal`.
+    commands: std::sync::mpsc::Sender<EngineCommand>,
 }
 
 impl repl_async::TurnDriver for LiveCliDriver {
@@ -1882,10 +1872,86 @@ impl repl_async::TurnDriver for LiveCliDriver {
     }
 
     fn abort_current_turn(&self) {
-        // Idempotent by design (HookAbortSignal::abort just sets a bool +
-        // notifies waiters). No cli-lock needed — the runner thread already
-        // holds it while streaming, and would deadlock if we tried.
-        self.abort_signal.abort();
+        // Cancel crosses the seam on the command channel, not the LiveCli lock —
+        // the runner thread holds that lock while the turn streams and would
+        // deadlock if we tried. The pump aborts the in-flight turn on Cancel.
+        let _ = self.commands.send(EngineCommand::Cancel);
+    }
+}
+
+/// Installs a process SIGINT / Ctrl-C handler for the duration of a
+/// **non-interactive one-shot turn** (`scode <prompt>`, incl. `--output-format
+/// json`), translating the signal into an `EngineCommand::Cancel` across the
+/// seam. The pump then aborts the in-flight turn — the running tool returns an
+/// interrupted result and the turn ends `cancelled`, so the process still
+/// prints its final text / JSON and exits cleanly (exit 0), matching the
+/// pre-seam behavior that the old `HookAbortMonitor` provided.
+///
+/// Interactive REPL turns cancel through the input path
+/// (`LiveCliDriver::abort_current_turn`), so this guard is scoped to the
+/// one-shot entrypoint, which has no key-reader thread and would otherwise take
+/// SIGINT's default disposition (hard-kill, non-zero exit, no output).
+///
+/// The monitor runs on its own current-thread tokio runtime (the renderer is
+/// otherwise tokio-free). Dropping the guard stops it: the stop channel wakes
+/// the blocking waiter, which wins the `select!` and lets the runtime unwind.
+struct SignalCancelGuard {
+    stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SignalCancelGuard {
+    fn install(commands: std::sync::mpsc::Sender<EngineCommand>) -> Self {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let join_handle = thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                // Blocking waiter for the drop signal; it returns the moment the
+                // guard is dropped (or its sender disconnects), ending the turn.
+                let stop = tokio::task::spawn_blocking(move || {
+                    let _ = stop_rx.recv();
+                });
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if result.is_ok() {
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                    }
+                    _ = stop => {}
+                }
+            });
+        });
+        Self {
+            stop_tx: Some(stop_tx),
+            join_handle: Some(join_handle),
+        }
+    }
+}
+
+impl Drop for SignalCancelGuard {
+    fn drop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            // The monitor exits within a few ms of the stop signal (or right
+            // after it delivered a Cancel). Bound the wait so a wedged signal
+            // driver can never hang process teardown — mirrors the old
+            // HookAbortMonitor's timed join.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while !join_handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let _ = join_handle.join();
+        }
     }
 }
 
@@ -2069,23 +2135,326 @@ impl runtime::QuestionPrompter for IocraftQuestionPrompter {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Sync-REPL per-turn cancel monitor.
+//
+// The sync rustyline REPL runs a turn by blocking on the engine seam, so it
+// needs a side channel to catch ESC / Ctrl-C mid-turn and cancel. On Unix a
+// bare ESC (0x1b) can't be reliably read through crossterm's event system
+// after rustyline toggles raw mode, so we poll termios directly — exactly what
+// the pre-seam HookAbortMonitor did. The only change: the sink is now the seam
+// (`EngineCommand::Cancel`), not a raw abort-signal handle.
+// ──────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+std::thread_local! {
+    static ORIGINAL_TERMIOS: std::cell::RefCell<Option<nix::sys::termios::Termios>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Enable raw mode via `nix::sys::termios` (no crossterm). Returns `true` on
+/// success; call `disable_raw_mode_unix()` to restore.
+#[cfg(unix)]
+fn enable_raw_mode_unix() -> bool {
+    use nix::sys::termios::{self, SetArg, SpecialCharacterIndices};
+
+    let stdin = std::io::stdin();
+    let Ok(original) = termios::tcgetattr(&stdin) else {
+        return false;
+    };
+    ORIGINAL_TERMIOS.with(|cell| *cell.borrow_mut() = Some(original.clone()));
+
+    let mut raw = original;
+    termios::cfmakeraw(&mut raw);
+    // Non-blocking: VMIN=0, VTIME=0 → read() returns immediately with 0 bytes
+    // when nothing is available; poll() handles the wait.
+    raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
+    raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+    termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw).is_ok()
+}
+
+/// Restore terminal settings saved by `enable_raw_mode_unix`.
+#[cfg(unix)]
+fn disable_raw_mode_unix() {
+    use nix::sys::termios::{self, SetArg};
+
+    let stdin = std::io::stdin();
+    ORIGINAL_TERMIOS.with(|cell| {
+        if let Some(original) = cell.borrow().as_ref() {
+            let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, original);
+        }
+    });
+}
+
+/// Which abort key `poll_abort_key` detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortKey {
+    None,
+    /// ESC (0x1b) — cancels the current turn, never exits.
+    Esc,
+    /// Ctrl-C (0x03) — cancels the current turn; a second press within 800ms
+    /// exits the process (CC parity).
+    CtrlC,
+}
+
+/// Poll stdin for an abort key (ESC = 0x1b, Ctrl-C = 0x03) on Unix.
+#[cfg(unix)]
+fn poll_abort_key(timeout: Duration) -> AbortKey {
+    use nix::poll::{self, PollFd, PollFlags, PollTimeout};
+    use std::os::fd::AsFd;
+    use std::os::unix::io::AsRawFd;
+
+    let stdin = std::io::stdin();
+    let poll_timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::from(50u16));
+    let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+    let ready = poll::poll(&mut fds, poll_timeout).unwrap_or(0);
+    if ready <= 0 {
+        return AbortKey::None;
+    }
+    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+    if !revents.contains(PollFlags::POLLIN) {
+        return AbortKey::None;
+    }
+    let mut buf = [0u8; 1];
+    match nix::unistd::read(stdin.as_raw_fd(), &mut buf) {
+        Ok(1) if buf[0] == 0x03 => AbortKey::CtrlC,
+        Ok(1) if buf[0] == 0x1b => AbortKey::Esc,
+        _ => AbortKey::None,
+    }
+}
+
+/// Poll stdin for an abort key via crossterm's event system (Windows).
+#[cfg(not(unix))]
+fn poll_abort_key(timeout: Duration) -> AbortKey {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    if !event::poll(timeout).unwrap_or(false) {
+        return AbortKey::None;
+    }
+    if let Ok(Event::Key(key)) = event::read() {
+        if key.kind != KeyEventKind::Press {
+            return AbortKey::None;
+        }
+        if key.code == KeyCode::Esc {
+            return AbortKey::Esc;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return AbortKey::CtrlC;
+        }
+    }
+    AbortKey::None
+}
+
+#[derive(Default)]
+struct MonitorInner {
+    /// Set by `suspend()` — the monitor should stop polling + restore cooked mode.
+    suspend_requested: bool,
+    /// Set by the monitor once it has parked (cooked mode restored).
+    suspended: bool,
+    /// Set by `Drop` — the monitor should exit.
+    stop: bool,
+}
+
+struct MonitorCtl {
+    inner: Mutex<MonitorInner>,
+    cv: std::sync::Condvar,
+}
+
+/// A per-turn ESC / Ctrl-C monitor for the sync REPL. Polls the terminal on a
+/// dedicated thread and sends `EngineCommand::Cancel` across the seam when the
+/// user aborts. `suspend()`/`resume()` let the turn hand stdin to an interactive
+/// prompter (permission / question dialog) without the monitor eating the reply.
+struct ReplTurnCancelMonitor {
+    ctl: Arc<MonitorCtl>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl ReplTurnCancelMonitor {
+    fn install(commands: mpsc::Sender<EngineCommand>) -> Self {
+        let ctl = Arc::new(MonitorCtl {
+            inner: Mutex::new(MonitorInner::default()),
+            cv: std::sync::Condvar::new(),
+        });
+        let ctl_thread = Arc::clone(&ctl);
+        let join = thread::Builder::new()
+            .name("repl-cancel-monitor".into())
+            .spawn(move || {
+                // Without an interactive terminal there is nothing to poll; mark
+                // parked so `suspend()` never blocks, and idle until stopped.
+                if !io::stdin().is_terminal() {
+                    let mut guard = ctl_thread
+                        .inner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.suspended = true;
+                    ctl_thread.cv.notify_all();
+                    while !guard.stop {
+                        guard = ctl_thread
+                            .cv
+                            .wait(guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    return;
+                }
+
+                #[cfg(unix)]
+                let mut raw = enable_raw_mode_unix();
+                #[cfg(not(unix))]
+                let mut raw = crossterm::terminal::enable_raw_mode().is_ok();
+
+                loop {
+                    {
+                        let mut guard = ctl_thread
+                            .inner
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if guard.stop {
+                            break;
+                        }
+                        if guard.suspend_requested {
+                            if raw {
+                                #[cfg(unix)]
+                                disable_raw_mode_unix();
+                                #[cfg(not(unix))]
+                                {
+                                    let _ = crossterm::terminal::disable_raw_mode();
+                                }
+                                raw = false;
+                            }
+                            guard.suspended = true;
+                            ctl_thread.cv.notify_all();
+                            while guard.suspend_requested && !guard.stop {
+                                guard = ctl_thread
+                                    .cv
+                                    .wait(guard)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                            guard.suspended = false;
+                            if guard.stop {
+                                break;
+                            }
+                            #[cfg(unix)]
+                            {
+                                raw = enable_raw_mode_unix();
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                raw = crossterm::terminal::enable_raw_mode().is_ok();
+                            }
+                            continue;
+                        }
+                    }
+                    match poll_abort_key(Duration::from_millis(50)) {
+                        AbortKey::None => {}
+                        AbortKey::Esc => {
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                        AbortKey::CtrlC => {
+                            if cancel::is_double_ctrlc() {
+                                if raw {
+                                    #[cfg(unix)]
+                                    disable_raw_mode_unix();
+                                    #[cfg(not(unix))]
+                                    {
+                                        let _ = crossterm::terminal::disable_raw_mode();
+                                    }
+                                }
+                                eprintln!();
+                                std::process::exit(0);
+                            }
+                            cancel::record_ctrlc();
+                            let _ = commands.send(EngineCommand::Cancel);
+                        }
+                    }
+                }
+
+                if raw {
+                    #[cfg(unix)]
+                    disable_raw_mode_unix();
+                    #[cfg(not(unix))]
+                    {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                    }
+                }
+            })
+            .expect("spawn repl-cancel-monitor thread");
+        Self {
+            ctl,
+            join: Some(join),
+        }
+    }
+
+    /// Pause polling + restore cooked mode so an interactive prompter can read
+    /// stdin. Blocks until the monitor has parked (or already inert).
+    fn suspend(&self) {
+        let mut guard = self
+            .ctl
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.stop {
+            return;
+        }
+        guard.suspend_requested = true;
+        self.ctl.cv.notify_all();
+        while !guard.suspended && !guard.stop {
+            guard = self
+                .ctl
+                .cv
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Resume key polling after an interactive prompt.
+    fn resume(&self) {
+        let mut guard = self
+            .ctl
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.suspend_requested = false;
+        self.ctl.cv.notify_all();
+    }
+}
+
+impl Drop for ReplTurnCancelMonitor {
+    fn drop(&mut self) {
+        {
+            let mut guard = self
+                .ctl
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.stop = true;
+            self.ctl.cv.notify_all();
+        }
+        if let Some(join) = self.join.take() {
+            // The monitor wakes within ~50ms of the stop signal. Bound the wait
+            // so a wedged terminal can't hang the REPL between turns.
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while !join.is_finished() {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            let _ = join.join();
+        }
+    }
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cli.is_repl = true;
     let banner = cli.startup_banner();
-    let permission_label = cli.config.permission_mode.as_str().to_string();
+    let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
 
-    // iocraft owns stdin (raw mode), so:
-    // 1. ESC-key abort monitor must NOT compete for stdin.
-    // 2. Ignore SIGINT — iocraft delivers Ctrl-C as a key event in raw
-    //    mode. Without this, a Ctrl-C arriving before raw mode is entered
-    //    (timing race) kills the process.
-    cli.esc_monitor_enabled = false;
-
-    let abort_signal = runtime::HookAbortSignal::new();
-    cli.persistent_abort_signal = Some(abort_signal.clone());
+    // iocraft owns stdin (raw mode) and delivers Ctrl-C / ESC as key events;
+    // those `InputEvent::Abort`s cancel the in-flight turn by sending Cancel
+    // across the seam (no separate raw-mode HookAbortMonitor).
+    let commands = cli.engine_handle.commands.clone();
 
     let shared_mode = repl_async::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
@@ -2106,9 +2475,9 @@ fn run_repl_iocraft_dispatch(
     // dispatch (the render-loop thread is left the same way), so it needs no
     // explicit shutdown. The session was already dialed in
     // `build_runtime_for_cwd`, so this just reuses the cached handle.
-    if let Ok(Some(a2a_session)) = cli::nexus_a2a::session() {
+    if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
         let output = repl.output.clone();
-        let _poller = cli::nexus_a2a::spawn_poller(
+        let _poller = engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             runtime::HookAbortSignal::new(),
             move |msg| {
@@ -2141,7 +2510,7 @@ fn run_repl_iocraft_dispatch(
                     cancel_pending_question_answer(&pending_question_answer);
                     repl.ui.clear_question();
                     if let Some(h) = runner_handle.take() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                         let _ = h.join();
                     }
                     break;
@@ -2162,7 +2531,6 @@ fn run_repl_iocraft_dispatch(
                             turn_active = true;
                             runner_handle = Some(spawn_iocraft_turn(
                                 Arc::clone(&cli_shared),
-                                &abort_signal,
                                 next.prompt,
                                 repl.output.clone(),
                                 repl.ui.clone(),
@@ -2179,7 +2547,7 @@ fn run_repl_iocraft_dispatch(
                     repl.ui.clear_question();
                     // Render loop exited — clean up runner if active.
                     if let Some(h) = runner_handle.take() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                         let _ = h.join();
                     }
                     break;
@@ -2194,7 +2562,7 @@ fn run_repl_iocraft_dispatch(
                 cancel_pending_question_answer(&pending_question_answer);
                 repl.ui.clear_question();
                 if let Some(h) = runner_handle.take() {
-                    abort_signal.abort();
+                    let _ = commands.send(EngineCommand::Cancel);
                     let _ = h.join();
                 }
                 let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
@@ -2208,7 +2576,7 @@ fn run_repl_iocraft_dispatch(
                 cancel_pending_question_answer(&pending_question_answer);
                 repl.ui.clear_question();
                 if runner_handle.is_some() {
-                    abort_signal.abort();
+                    let _ = commands.send(EngineCommand::Cancel);
                 }
             }
             repl_ui::InputEvent::Submit(text) => {
@@ -2216,7 +2584,7 @@ fn run_repl_iocraft_dispatch(
                     cancel_pending_question_answer(&pending_question_answer);
                     repl.ui.clear_question();
                     if runner_handle.is_some() {
-                        abort_signal.abort();
+                        let _ = commands.send(EngineCommand::Cancel);
                     }
                     if let Some(h) = runner_handle.take() {
                         let _ = h.join();
@@ -2252,7 +2620,7 @@ fn run_repl_iocraft_dispatch(
                         let config_keys: Vec<String> =
                             sudocode_config.models.keys().cloned().collect();
                         let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-                        let current = cli_lock.config.model.clone();
+                        let current = cli_lock.lifecycle.current_model();
                         drop(cli_lock);
 
                         let options = models
@@ -2342,7 +2710,6 @@ fn run_repl_iocraft_dispatch(
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        &abort_signal,
                         next.prompt,
                         repl.output.clone(),
                         repl.ui.clone(),
@@ -2358,7 +2725,7 @@ fn run_repl_iocraft_dispatch(
                     match outcome {
                         input_queue::SubmitOutcome::Queued => {}
                         input_queue::SubmitOutcome::Interrupt => {
-                            abort_signal.abort();
+                            let _ = commands.send(EngineCommand::Cancel);
                         }
                         input_queue::SubmitOutcome::Rejected => {
                             repl.output.println(
@@ -2399,8 +2766,9 @@ fn run_repl_iocraft_dispatch(
     };
 
     let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage = cli.runtime.usage().cumulative_usage();
-    let total_turns = cli.runtime.usage().turns();
+    let usage_tracker = cli.lifecycle.usage_snapshot();
+    let usage = usage_tracker.cumulative_usage();
+    let total_turns = usage_tracker.turns();
     if let Some(tracer) = cli.session_tracer() {
         tracer.record_usage(
             "session_summary".to_string(),
@@ -2429,7 +2797,6 @@ fn run_repl_iocraft_dispatch(
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    abort_signal: &runtime::HookAbortSignal,
     prompt: String,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
@@ -2437,11 +2804,11 @@ fn spawn_iocraft_turn(
     pending_question_answer: PendingQuestionAnswer,
     done_tx: mpsc::SyncSender<()>,
 ) -> thread::JoinHandle<()> {
-    let abort = abort_signal.clone();
+    // The engine owns the abort signal (reset at the start of each turn, fired
+    // by the pump on EngineCommand::Cancel), so the runner no longer manages it.
     thread::Builder::new()
         .name("repl-runner".into())
         .spawn(move || {
-            abort.reset();
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
             if let Err(e) =
                 cli.run_turn_iocraft(&prompt, &output, &ui, &spinner, pending_question_answer)
@@ -2453,31 +2820,26 @@ fn spawn_iocraft_turn(
         .expect("spawn repl-runner thread")
 }
 
+/// The composition root above the seam. Holds ONLY the turn handle + the
+/// session-lifecycle port — the engine owns the config/session/runtime SSOT
+/// (audit finding B). It physically cannot drive a turn except through
+/// `engine_handle` (no `EngineDelegate`), and cannot reach into the runtime.
 struct LiveCli {
-    config: RuntimeConfig,
-    runtime: BuiltRuntime,
-    session: SessionHandle,
+    /// The turn seam: `commands.send(Prompt/Cancel/PermissionAnswer/…)`,
+    /// `events.recv()`. The ONLY way turns cross.
+    engine_handle: EngineHandle,
+    /// Non-turn session lifecycle (model/permission/auth switch, /clear,
+    /// /resume, fork, compaction, reads). The engine holds the SSOT; this is
+    /// the renderer's port to it. `Arc<dyn SessionLifecycle>` gives NO access
+    /// to `run_turn` — the cut is compiler-enforced.
+    lifecycle: Arc<dyn SessionLifecycle>,
     prompt_history: Vec<PromptHistoryEntry>,
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
-    /// Shared tokio runtime used to drive async `run_turn` calls.
-    tokio_runtime: tokio::runtime::Runtime,
-    /// When false, `prepare_turn_runtime` spawns a no-op abort monitor instead
-    /// of the ESC-key stdin listener. Set by the async REPL dispatch so the
-    /// runner thread does NOT put stdin into raw mode — the input thread's
-    /// rustyline is the sole stdin consumer in that mode, and a competing
-    /// crossterm listener leaves the terminal wedged after the turn ends
-    /// (deadlocked the `/exit` path on POSIX CI runners in PR #298 v1).
-    esc_monitor_enabled: bool,
-    /// When `Some`, `prepare_turn_runtime` resets and reuses THIS signal
-    /// instead of creating a fresh one per turn. Set by the async REPL
-    /// dispatch so main can hold a clone and call `.abort()` mid-turn
-    /// without ever locking the `LiveCli` mutex — the runner thread holds
-    /// that lock while `run_turn` streams.
-    persistent_abort_signal: Option<runtime::HookAbortSignal>,
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
+    /// `Some` ⇔ async REPL mode is active.
     shared_queue_mode: Option<repl_async::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
@@ -2485,158 +2847,6 @@ struct LiveCli {
     /// `println!`. Set by the iocraft REPL dispatch so slash command output
     /// goes through `split_for_iocraft` and renders correctly in raw mode.
     iocraft_output: Option<repl_ui::OutputSender>,
-}
-
-pub(crate) struct RuntimePluginState {
-    pub(crate) feature_config: runtime::RuntimeFeatureConfig,
-    pub(crate) tool_registry: GlobalToolRegistry,
-    pub(crate) plugin_registry: PluginRegistry,
-    pub(crate) plugin_load_outcome: PluginLoadOutcome,
-    pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-}
-
-/// Groups the non-session parameters threaded through the `build_runtime*`
-/// call chain so that adding a new knob only touches one struct instead of
-/// 3-4 function signatures and 10+ call sites.
-#[derive(Clone)]
-struct RuntimeConfig {
-    model: String,
-    system_prompt: SystemPrompt,
-    enable_tools: bool,
-    emit_output: bool,
-    allowed_tools: Option<AllowedToolSet>,
-    permission_mode: PermissionMode,
-    progress_reporter: Option<InternalPromptProgressReporter>,
-    auth_mode: AuthMode,
-    sudocode_config: api::SudoCodeConfig,
-}
-
-struct BuiltRuntime {
-    runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
-    plugin_registry: PluginRegistry,
-    plugin_load_outcome: PluginLoadOutcome,
-    plugins_active: bool,
-    mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    mcp_active: bool,
-}
-
-impl BuiltRuntime {
-    fn new(
-        runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
-        plugin_registry: PluginRegistry,
-        plugin_load_outcome: PluginLoadOutcome,
-        mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    ) -> Self {
-        Self {
-            runtime: Some(runtime),
-            plugin_registry,
-            plugin_load_outcome,
-            plugins_active: true,
-            mcp_state,
-            mcp_active: true,
-        }
-    }
-
-    fn with_hook_abort_signal(mut self, hook_abort_signal: runtime::HookAbortSignal) -> Self {
-        let runtime = self
-            .runtime
-            .take()
-            .expect("runtime should exist before installing hook abort signal");
-        self.runtime = Some(runtime.with_hook_abort_signal(hook_abort_signal));
-        self
-    }
-
-    fn with_session_known_date(mut self, date: impl Into<String>) -> Self {
-        let runtime = self
-            .runtime
-            .take()
-            .expect("runtime should exist before overriding session known date");
-        self.runtime = Some(runtime.with_session_known_date(date));
-        self
-    }
-
-    /// Set the trace ID for the next request.
-    fn set_trace_id(&mut self, trace_id: impl Into<String>) {
-        if let Some(ref mut runtime) = self.runtime {
-            runtime.set_trace_id(trace_id);
-        }
-    }
-
-    fn plugin_load_outcome(&self) -> &PluginLoadOutcome {
-        &self.plugin_load_outcome
-    }
-
-    fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.plugins_active {
-            self.plugin_registry.shutdown()?;
-            self.plugins_active = false;
-        }
-        Ok(())
-    }
-
-    fn shutdown_mcp(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.mcp_active {
-            if let Some(mcp_state) = &self.mcp_state {
-                mcp_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .shutdown()?;
-            }
-            self.mcp_active = false;
-        }
-        Ok(())
-    }
-
-    /// Returns a reference to the session tracer, if available.
-    fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
-        self.runtime
-            .as_ref()
-            .expect("runtime should exist while built runtime is alive")
-            .api_client()
-            .session_tracer()
-    }
-}
-
-impl Deref for BuiltRuntime {
-    type Target = ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>;
-
-    fn deref(&self) -> &Self::Target {
-        self.runtime
-            .as_ref()
-            .expect("runtime should exist while built runtime is alive")
-    }
-}
-
-impl DerefMut for BuiltRuntime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.runtime
-            .as_mut()
-            .expect("runtime should exist while built runtime is alive")
-    }
-}
-
-impl Drop for BuiltRuntime {
-    fn drop(&mut self) {
-        let _ = self.shutdown_mcp();
-        let _ = self.shutdown_plugins();
-    }
-}
-
-struct AcpCliSession {
-    cwd: PathBuf,
-    handle: SessionHandle,
-    runtime: BuiltRuntime,
-    abort_signal: runtime::HookAbortSignal,
-    /// Session start time for duration tracking.
-    started_at: Instant,
-    /// per-session injected MCP servers (from session/new or session/load),
-    /// reused when the runtime is rebuilt (e.g. model switch) so they
-    /// survive across the session's lifetime.
-    session_mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-    /// Caller-supplied system-prompt adjustments (`_meta.sudocode.systemPrompt`
-    /// / `appendSystemPrompt` on session/new or session/load). Kept on the
-    /// session so a runtime rebuild (model switch) re-applies them.
-    prompt_overrides: runtime::SystemPromptOverrides,
 }
 
 /// One live ACP session as held by [`AcpCliAgent`].
@@ -2731,52 +2941,41 @@ impl AcpCliAgent {
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<AcpCliSession, AcpError> {
-        let cwd = canonical_session_cwd(cwd)?;
+        let cwd = canonical_session_cwd(cwd).map_err(AcpError::invalid_params)?;
         // Config, plugin/MCP state and the API client's `.env` lookup all
         // resolve against the workspace root (see `runtime::workspace_root`).
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let model = self.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &prompt_overrides).map_err(AcpError::internal)?;
         let session_state = new_cli_session_for(&cwd)
             .map_err(|error| AcpError::internal(format!("failed to create session: {error}")))?;
         let handle = create_managed_session_handle_for(&cwd, &session_state.session_id).map_err(
             |error| AcpError::internal(format!("failed to create session handle: {error}")),
         )?;
-        let mut runtime = build_runtime_for_cwd(
+        let abort_signal = runtime::HookAbortSignal::new();
+        let sudocode_config = require_sudocode_config_for_cwd(&cwd).map_err(AcpError::internal)?;
+        let auth_mode = resolve_auth_mode(&model, self.auth_mode, &sudocode_config)
+            .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
+        let runtime = build_engine_runtime(
             &cwd,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
-            {
-                let sudocode_config =
-                    require_sudocode_config_for_cwd(&cwd).map_err(AcpError::internal)?;
-                let auth_mode = resolve_auth_mode(&model, self.auth_mode, &sudocode_config)
-                    .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-                RuntimeConfig {
-                    model: model.clone(),
-                    system_prompt,
-                    enable_tools: true,
-                    emit_output: false,
-                    allowed_tools: self.allowed_tools.clone(),
-                    permission_mode,
-                    progress_reporter: None,
-                    auth_mode,
-                    sudocode_config,
-                }
+            RuntimeConfig {
+                model: model.clone(),
+                system_prompt,
+                enable_tools: true,
+                allowed_tools: self.allowed_tools.clone(),
+                permission_mode,
+                auth_mode,
+                sudocode_config,
             },
             mcp_servers,
+            abort_signal.clone(),
+            self.reasoning_effort.clone(),
         )
         .map_err(|error| AcpError::internal(format!("failed to build runtime: {error}")))?;
-        let abort_signal = runtime::HookAbortSignal::new();
-        runtime = runtime.with_hook_abort_signal(abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
-            rt.api_client_mut()
-                .set_reasoning_effort(self.reasoning_effort.clone());
-            let thinking = ConfigLoader::default_for(&cwd)
-                .load()
-                .map_or(true, |cfg| cfg.thinking());
-            rt.api_client_mut().set_thinking_enabled(thinking);
-        }
         runtime
             .session()
             .save_to_path(&handle.path)
@@ -2898,8 +3097,9 @@ impl AcpCliAgent {
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
         let auth_mode = resolve_model_switch_auth_mode(model, self.auth_mode, &sudocode_config)
             .map_err(|e| AcpError::internal(format!("failed to resolve auth mode: {e}")))?;
-        let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
-        let mut runtime = build_runtime_for_cwd(
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &session.prompt_overrides).map_err(AcpError::internal)?;
+        let runtime = build_engine_runtime(
             &cwd,
             session_state,
             &handle_id,
@@ -2907,25 +3107,16 @@ impl AcpCliAgent {
                 model: model.to_string(),
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.allowed_tools.clone(),
                 permission_mode,
-                progress_reporter: None,
                 auth_mode,
                 sudocode_config,
             },
             &session_mcp,
+            session.abort_signal.clone(),
+            self.reasoning_effort.clone(),
         )
         .map_err(|e| AcpError::internal(e.to_string()))?;
-        runtime = runtime.with_hook_abort_signal(session.abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
-            rt.api_client_mut()
-                .set_reasoning_effort(self.reasoning_effort.clone());
-            let thinking = ConfigLoader::default_for(&cwd)
-                .load()
-                .map_or(true, |cfg| cfg.thinking());
-            rt.api_client_mut().set_thinking_enabled(thinking);
-        }
         Ok(runtime)
     }
 
@@ -2941,8 +3132,8 @@ impl AcpCliAgent {
     fn handle_acp_compact(
         &self,
         session: &mut AcpCliSession,
-    ) -> Result<(String, runtime::acp_sdk_server::AcpStopReason), AcpError> {
-        use runtime::acp_sdk_server::AcpStopReason;
+    ) -> Result<(String, engine_acp::acp_sdk_server::AcpStopReason), AcpError> {
+        use engine_acp::acp_sdk_server::AcpStopReason;
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         // Fresh turn: a cancel left over from an earlier turn must not abort
         // this one (mirrors `run_prompt_impl`).
@@ -3092,16 +3283,6 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
-    let canonical = fs::canonicalize(cwd).map_err(|error| {
-        AcpError::invalid_params(format!("params.cwd is not accessible: {error}"))
-    })?;
-    if !canonical.is_dir() {
-        return Err(AcpError::invalid_params("params.cwd must be a directory"));
-    }
-    Ok(canonical)
-}
-
 fn run_acp_server(
     model: String,
     model_flag_raw: Option<String>,
@@ -3121,7 +3302,7 @@ fn run_acp_server(
     let config_home = runtime::default_config_home();
     runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
 
-    let config = runtime::acp_sdk_server::SdkAcpConfig {
+    let config = engine_acp::acp_sdk_server::SdkAcpConfig {
         agent_version: VERSION.to_string(),
         model: model.clone(),
         model_flag_raw: model_flag_raw.clone(),
@@ -3138,11 +3319,11 @@ fn run_acp_server(
     ));
     let rt = tokio::runtime::Runtime::new()?;
     if let Some(port) = ws_port {
-        rt.block_on(runtime::acp_ws_server::run_acp_ws_server(
+        rt.block_on(engine_acp::acp_ws_server::run_acp_ws_server(
             config, delegate, port,
         ))
     } else {
-        rt.block_on(runtime::acp_stdio_server::run_acp_stdio_server(
+        rt.block_on(engine_acp::acp_stdio_server::run_acp_stdio_server(
             config, delegate,
         ))
     }
@@ -3276,20 +3457,20 @@ impl AcpSdkDelegate {
     /// sessions lock independently, so a session parked on user input never
     /// holds up another one; the ACP server serializes calls on the same
     /// session, so this normally never waits.
-    fn lock_session(&self, session_id: &str) -> Result<LockedAcpSession, runtime::AcpError> {
+    fn lock_session(&self, session_id: &str) -> Result<LockedAcpSession, engine_acp::AcpError> {
         let handle = self.inner.session_handle(session_id)?;
         Ok(LockedAcpSession { handle })
     }
 
     /// The working directory of a session, read from the registry slot so
     /// it never waits on the session's own lock.
-    fn session_cwd(&self, session_id: &str) -> Result<PathBuf, runtime::AcpError> {
+    fn session_cwd(&self, session_id: &str) -> Result<PathBuf, engine_acp::AcpError> {
         self.inner
             .lock_sessions()
             .get(session_id)
             .map(|slot| slot.cwd.clone())
             .ok_or_else(|| {
-                runtime::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
+                engine_acp::AcpError::invalid_params(format!("unknown sessionId: {session_id}"))
             })
     }
 }
@@ -3308,13 +3489,13 @@ impl LockedAcpSession {
     }
 }
 
-impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
+impl engine_acp::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
     fn new_session(
         &self,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let session = self
             .inner
             .build_session(&cwd, &mcp_servers, prompt_overrides)?;
@@ -3329,14 +3510,14 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
@@ -3347,15 +3528,15 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         prompter: &mut dyn runtime::PermissionPrompter,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
@@ -3366,7 +3547,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         prompter: Box<dyn runtime::QuestionPrompter>,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         locked
             .get()
@@ -3380,9 +3561,9 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         input: &str,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
-    ) -> Result<runtime::acp_sdk_server::AcpStopReason, runtime::AcpError> {
-        use runtime::acp_sdk_server::AcpStopReason;
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
+    ) -> Result<engine_acp::acp_sdk_server::AcpStopReason, engine_acp::AcpError> {
+        use engine_acp::acp_sdk_server::AcpStopReason;
         use runtime::RuntimeObserver as _;
         let command = match SlashCommand::parse(input) {
             Ok(Some(command)) => command,
@@ -3430,7 +3611,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     },
                     default_permission_mode().as_str(),
                     &status_context(Some(&session.handle.path))
-                        .map_err(|e| runtime::AcpError::internal(e.to_string()))?,
+                        .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?,
                     None,
                 )
             }
@@ -3450,7 +3631,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             SlashCommand::Config { section } => {
                 let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
                 render_config_report(section.as_deref())
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?
             }
             SlashCommand::ConfigSet { .. } => {
                 "/config set is only available in interactive REPL mode".to_string()
@@ -3461,13 +3642,13 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                     .args(["diff", "--cached", "--no-color"])
                     .current_dir(&cwd)
                     .output()
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
                 let cached = String::from_utf8_lossy(&output.stdout);
                 let output2 = std::process::Command::new("git")
                     .args(["diff", "--no-color"])
                     .current_dir(&cwd)
                     .output()
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
                 let unstaged = String::from_utf8_lossy(&output2.stdout);
                 if cached.is_empty() && unstaged.is_empty() {
                     "No changes detected.".to_string()
@@ -3491,7 +3672,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
                 render_doctor_report()
                     .map(|report| report.render())
-                    .map_err(|e| runtime::AcpError::internal(e.to_string()))?
+                    .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?
             }
             _ => format_acp_unsupported_slash_command(input),
         };
@@ -3500,7 +3681,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         Ok(stop)
     }
 
-    fn available_commands(&self) -> &'static [runtime::acp_sdk_server::AcpSlashCommandSpec] {
+    fn available_commands(&self) -> &'static [commands::AcpSlashCommandSpec] {
         acp_slash_commands()
     }
 
@@ -3548,7 +3729,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         true
     }
 
-    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, runtime::AcpError> {
+    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
         self.inner
@@ -3571,10 +3752,10 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         mode: PermissionMode,
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         let locked = self.lock_session(session_id)?;
         let mut session = locked.get();
-        if let Some(rt) = session.runtime.runtime.as_mut() {
+        if let Some(rt) = session.runtime.runtime_mut() {
             rt.permission_policy_mut().set_active_mode(mode);
         }
         Ok(())
@@ -3584,7 +3765,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         &self,
         session_id: &str,
         images: &[(String, String)],
-    ) -> Result<(), runtime::AcpError> {
+    ) -> Result<(), engine_acp::AcpError> {
         eprintln!(
             "[push_images] entered — session={session_id}, {} images",
             images.len()
@@ -3660,7 +3841,7 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
                 .runtime
                 .session_mut()
                 .push_message(msg)
-                .map_err(|e| runtime::AcpError::internal(e.to_string()))?;
+                .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?;
         }
         Ok(())
     }
@@ -3671,25 +3852,25 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
-        let cwd = canonical_session_cwd(&cwd)?;
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
+        let cwd = canonical_session_cwd(&cwd).map_err(AcpError::invalid_params)?;
         // The session store, config and system prompt all resolve against
         // the workspace root; scope this thread to the requested cwd.
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
 
         let (handle, session) = load_session_reference(session_id)
-            .map_err(|e| runtime::AcpError::internal(format!("failed to load session: {e}")))?;
+            .map_err(|e| engine_acp::AcpError::internal(format!("failed to load session: {e}")))?;
         self.open_persisted_session(handle, session, cwd, mcp_servers, prompt_overrides)
     }
 
     fn fork_session(
         &self,
-        source: runtime::acp_sdk_server::SessionForkSource,
+        source: engine_acp::acp_sdk_server::SessionForkSource,
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
-        let cwd = canonical_session_cwd(&cwd)?;
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
+        let cwd = canonical_session_cwd(&cwd).map_err(AcpError::invalid_params)?;
         // Read the source before entering the new cwd's scope: a persisted
         // source resolves through *its* directory's session store.
         let parent = self.resolve_fork_source(&source)?;
@@ -3703,11 +3884,11 @@ impl runtime::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         let forked = parent.fork(None).with_workspace_root(cwd.clone());
         let handle =
             create_managed_session_handle_for(&cwd, &forked.session_id).map_err(|error| {
-                runtime::AcpError::internal(format!("failed to create session handle: {error}"))
+                engine_acp::AcpError::internal(format!("failed to create session handle: {error}"))
             })?;
         let forked = forked.with_persistence_path(handle.path.clone());
         forked.save_to_path(&handle.path).map_err(|error| {
-            runtime::AcpError::internal(format!("failed to persist fork: {error}"))
+            engine_acp::AcpError::internal(format!("failed to persist fork: {error}"))
         })?;
         // Offloaded tool results live beside the transcript and are
         // referenced from it by id; carry them over so the fork's
@@ -3738,9 +3919,9 @@ impl AcpSdkDelegate {
     /// workspace root exactly like `session/load`.
     fn resolve_fork_source(
         &self,
-        source: &runtime::acp_sdk_server::SessionForkSource,
-    ) -> Result<runtime::Session, runtime::AcpError> {
-        let invalid = |message: String| runtime::AcpError::invalid_params(message);
+        source: &engine_acp::acp_sdk_server::SessionForkSource,
+    ) -> Result<runtime::Session, engine_acp::AcpError> {
+        let invalid = |message: String| engine_acp::AcpError::invalid_params(message);
         let source_cwd = source
             .cwd
             .as_deref()
@@ -3801,15 +3982,16 @@ impl AcpSdkDelegate {
         cwd: PathBuf,
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
+    ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
         let model = self.inner.resolve_model_for_cwd(&cwd)?;
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
-        let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &prompt_overrides).map_err(AcpError::internal)?;
         let sudocode_config =
-            require_sudocode_config_for_cwd(&cwd).map_err(runtime::AcpError::internal)?;
+            require_sudocode_config_for_cwd(&cwd).map_err(engine_acp::AcpError::internal)?;
         let auth_mode =
             resolve_auth_mode(&model, self.inner.auth_mode, &sudocode_config).map_err(|e| {
-                runtime::AcpError::internal(format!("failed to resolve auth mode: {e}"))
+                engine_acp::AcpError::internal(format!("failed to resolve auth mode: {e}"))
             })?;
 
         let mut runtime = build_runtime_for_cwd(
@@ -3820,20 +4002,18 @@ impl AcpSdkDelegate {
                 model,
                 system_prompt,
                 enable_tools: true,
-                emit_output: false,
                 allowed_tools: self.inner.allowed_tools.clone(),
                 permission_mode,
-                progress_reporter: None,
                 auth_mode,
                 sudocode_config,
             },
             &mcp_servers,
         )
-        .map_err(|e| runtime::AcpError::internal(format!("failed to build runtime: {e}")))?;
+        .map_err(|e| engine_acp::AcpError::internal(format!("failed to build runtime: {e}")))?;
 
         let abort_signal = runtime::HookAbortSignal::new();
         runtime = runtime.with_hook_abort_signal(abort_signal.clone());
-        if let Some(rt) = runtime.runtime.as_mut() {
+        if let Some(rt) = runtime.runtime_mut() {
             rt.api_client_mut()
                 .set_reasoning_effort(self.inner.reasoning_effort.clone());
             let thinking = ConfigLoader::default_for(&cwd)
@@ -3866,15 +4046,15 @@ impl AcpSdkDelegate {
         &self,
         session: &mut AcpCliSession,
         prompt: String,
-        observer: &mut runtime::acp_sdk_server::SdkSessionObserver,
+        observer: &mut engine_acp::acp_sdk_server::SdkSessionObserver,
         prompter: Option<&mut dyn runtime::PermissionPrompter>,
         trace_id: Option<&str>,
     ) -> Result<
         (
-            runtime::acp_sdk_server::AcpStopReason,
-            Option<runtime::acp_sdk_server::PromptUsage>,
+            engine_acp::acp_sdk_server::AcpStopReason,
+            Option<engine_acp::acp_sdk_server::PromptUsage>,
         ),
-        runtime::AcpError,
+        engine_acp::AcpError,
     > {
         // Reset abort signal for this new turn.
         session.abort_signal.reset();
@@ -3896,8 +4076,8 @@ impl AcpSdkDelegate {
         //
         // The request the provider sees is history + system prompt + tool
         // definitions, and the window must also hold `max_tokens` of output.
-        // The API client's local preflight (`api::preflight_message_request`)
-        // rejects on exactly that sum, so history is budgeted against it here
+        // The API client's local preflight rejects on exactly that sum, so
+        // history is budgeted against it here
         // rather than against a bare percentage of the window: with the old
         // 85% rule a long history sailed past this check and was then
         // rejected by the preflight with no compaction ever having run —
@@ -3913,7 +4093,7 @@ impl AcpSdkDelegate {
         // Context window comes from the model-capabilities SSOT file (per-model
         // entry, else the file's `default`). No hardcoded fallback here.
         let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
-        let max_output_tokens = max_tokens_for_model(&model) as usize;
+        let max_output_tokens = engine_core::max_tokens_for_model(&model) as usize;
         let overhead_tokens = session
             .runtime
             .api_client()
@@ -3996,11 +4176,13 @@ impl AcpSdkDelegate {
             if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
                 > context_limit
             {
-                return Err(runtime::AcpError::internal(context_overflow_user_message(
-                    session.runtime.session(),
-                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
-                    context_limit,
-                )));
+                return Err(engine_acp::AcpError::internal(
+                    context_overflow_user_message(
+                        session.runtime.session(),
+                        new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                        context_limit,
+                    ),
+                ));
             }
         }
         // Run the turn and get the TurnSummary directly
@@ -4019,13 +4201,13 @@ impl AcpSdkDelegate {
                     let estimated = estimate_session_tokens(session.runtime.session())
                         + overhead_tokens
                         + max_output_tokens;
-                    return runtime::AcpError::internal(context_overflow_user_message(
+                    return engine_acp::AcpError::internal(context_overflow_user_message(
                         session.runtime.session(),
                         estimated,
                         context_limit,
                     ));
                 }
-                runtime::AcpError::internal(e.to_string())
+                engine_acp::AcpError::internal(e.to_string())
             })?;
         auto_compacted |= turn_summary.auto_compaction.is_some();
         // Use turn_usage for PromptUsage, session_usage for cumulative
@@ -4033,7 +4215,7 @@ impl AcpSdkDelegate {
             (turn_summary.turn_usage.total_tokens() > 0).then_some(turn_summary.turn_usage);
         let cumulative_usage = turn_summary.session_usage;
         // Build PromptUsage if we have per-turn data, otherwise return None for usage
-        let prompt_usage = per_turn_usage.map(|u| runtime::acp_sdk_server::PromptUsage {
+        let prompt_usage = per_turn_usage.map(|u| engine_acp::acp_sdk_server::PromptUsage {
             input_tokens: u64::from(u.input_tokens),
             output_tokens: u64::from(u.output_tokens),
             total_tokens: u64::from(u.total_tokens()),
@@ -4045,7 +4227,7 @@ impl AcpSdkDelegate {
             ),
             cost_units: u.cost_units,
             cost_currency: u.cost_currency,
-            cumulative_usage: Some(runtime::acp_sdk_server::CumulativeUsage {
+            cumulative_usage: Some(engine_acp::acp_sdk_server::CumulativeUsage {
                 input_tokens: u64::from(cumulative_usage.input_tokens),
                 output_tokens: u64::from(cumulative_usage.output_tokens),
                 total_tokens: u64::from(cumulative_usage.total_tokens()),
@@ -4086,9 +4268,11 @@ impl AcpSdkDelegate {
             .runtime
             .session()
             .save_to_path(&session.handle.path)
-            .map_err(|e| runtime::AcpError::internal(format!("failed to persist session: {e}")))?;
+            .map_err(|e| {
+                engine_acp::AcpError::internal(format!("failed to persist session: {e}"))
+            })?;
         Ok((
-            runtime::acp_sdk_server::AcpStopReason::EndTurn,
+            engine_acp::acp_sdk_server::AcpStopReason::EndTurn,
             prompt_usage,
         ))
     }
@@ -4102,36 +4286,6 @@ impl AcpSdkDelegate {
 /// under the limit. `[single_request_too_large]`: nothing but the summary
 /// and the most recent messages remain — the recent messages themselves are
 /// too large (typically a big paste or image), and compacting cannot help.
-fn context_overflow_user_message(
-    session: &Session,
-    estimated_tokens: usize,
-    context_limit: usize,
-) -> String {
-    let summary_prefix = usize::from(session.compaction.is_some());
-    let compactable = session.messages.len().saturating_sub(summary_prefix)
-        > CompactionConfig::default().preserve_recent_messages;
-    if compactable {
-        format!(
-            "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
-            当前估算: {estimated_tokens} tokens\n\
-            模型限制: {context_limit} tokens\n\n\
-            建议解决方案：\n\
-            1. 开始新对话\n\
-            2. 使用支持更大上下文的模型\n\
-            3. 减少图片或大文本内容的发送"
-        )
-    } else {
-        format!(
-            "[context_window_exceeded][single_request_too_large] 最近的消息内容过大，压缩历史也无法放入模型上下文。\n\n\
-            当前估算: {estimated_tokens} tokens\n\
-            模型限制: {context_limit} tokens\n\n\
-            建议解决方案：\n\
-            1. 使用较小的图片（压缩或缩小图片尺寸）\n\
-            2. 简化输入内容\n\
-            3. 使用支持更大上下文的模型"
-        )
-    }
-}
 
 /// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`
 /// (case-insensitive). Returns `None` for unrecognized input.
@@ -4141,245 +4295,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
         "off" | "false" | "0" => Some(false),
         _ => None,
     }
-}
-
-struct HookAbortMonitor {
-    stop_tx: Option<Sender<()>>,
-    join_handle: Option<JoinHandle<()>>,
-}
-
-impl HookAbortMonitor {
-    fn spawn(abort_signal: runtime::HookAbortSignal) -> Self {
-        Self::spawn_with_waiter(abort_signal, move |stop_rx, abort_signal| {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-
-            let is_tty = io::stdin().is_terminal();
-
-            // On Unix, bypass crossterm for raw mode and key detection.
-            // Crossterm's lazy global `InternalEventSource` becomes stale
-            // after rustyline (which also uses crossterm internally) toggles
-            // raw mode on the main thread between REPL prompts — causing
-            // `event::poll` to miss keypresses in subsequent turns.
-            // Reading raw bytes via termios + `poll(2)` is immune to this.
-            #[cfg(unix)]
-            let raw_enabled = is_tty && enable_raw_mode_unix();
-
-            #[cfg(not(unix))]
-            let raw_enabled = is_tty && crossterm::terminal::enable_raw_mode().is_ok();
-
-            runtime.block_on(async move {
-                let esc_abort = abort_signal.clone();
-                let wait_for_esc_or_stop = tokio::task::spawn_blocking(move || loop {
-                    if stop_rx.try_recv().is_ok() {
-                        return;
-                    }
-                    if !raw_enabled {
-                        match stop_rx.recv_timeout(Duration::from_millis(50)) {
-                            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
-                            Err(RecvTimeoutError::Timeout) => continue,
-                        }
-                    }
-                    match poll_abort_key(Duration::from_millis(50)) {
-                        AbortKey::None => {}
-                        AbortKey::Esc => {
-                            esc_abort.abort();
-                            return;
-                        }
-                        AbortKey::CtrlC => {
-                            if cancel::is_double_ctrlc() {
-                                #[cfg(unix)]
-                                disable_raw_mode_unix();
-                                #[cfg(not(unix))]
-                                let _ = crossterm::terminal::disable_raw_mode();
-                                eprintln!();
-                                std::process::exit(0);
-                            }
-                            cancel::record_ctrlc();
-                            esc_abort.abort();
-                            return;
-                        }
-                    }
-                });
-
-                tokio::select! {
-                    result = tokio::signal::ctrl_c() => {
-                        if result.is_ok() {
-                            if cancel::is_double_ctrlc() {
-                                #[cfg(unix)]
-                                disable_raw_mode_unix();
-                                #[cfg(not(unix))]
-                                let _ = crossterm::terminal::disable_raw_mode();
-                                eprintln!();
-                                std::process::exit(0);
-                            }
-                            cancel::record_ctrlc();
-                            abort_signal.abort();
-                        }
-                    }
-                    _ = wait_for_esc_or_stop => {}
-                }
-            });
-
-            #[cfg(unix)]
-            if raw_enabled {
-                disable_raw_mode_unix();
-            }
-
-            #[cfg(not(unix))]
-            if raw_enabled {
-                let _ = crossterm::terminal::disable_raw_mode();
-            }
-        })
-    }
-
-    fn spawn_with_waiter<F>(abort_signal: runtime::HookAbortSignal, wait_for_interrupt: F) -> Self
-    where
-        F: FnOnce(Receiver<()>, runtime::HookAbortSignal) + Send + 'static,
-    {
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let join_handle = thread::spawn(move || wait_for_interrupt(stop_rx, abort_signal));
-
-        Self {
-            stop_tx: Some(stop_tx),
-            join_handle: Some(join_handle),
-        }
-    }
-
-    fn stop(mut self) {
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-        if let Some(join_handle) = self.join_handle.take() {
-            // Timed join: the monitor thread should exit within 100ms
-            // after receiving the stop signal. If it hangs (e.g. tokio
-            // signal handler keeping the runtime alive), abandon it.
-            let deadline = std::time::Instant::now() + Duration::from_millis(200);
-            while !join_handle.is_finished() {
-                if std::time::Instant::now() >= deadline {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            let _ = join_handle.join();
-        }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Raw-mode helpers for `HookAbortMonitor`
-//
-// On Unix, we manage raw mode via `nix` (safe termios wrappers) instead
-// of crossterm to avoid the stale-event-source bug described in
-// `HookAbortMonitor::spawn`. On Windows, crossterm is used unchanged.
-// ──────────────────────────────────────────────────────────────────────
-
-// Thread-local storage for the original termios settings saved by
-// `enable_raw_mode_unix`. Each monitor thread saves its own copy so
-// concurrent monitors (hypothetical) don't clobber each other.
-#[cfg(unix)]
-std::thread_local! {
-    static ORIGINAL_TERMIOS: std::cell::RefCell<Option<nix::sys::termios::Termios>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Enable raw mode via `nix::sys::termios` — no crossterm involvement.
-/// Returns `true` on success. Call `disable_raw_mode_unix()` to restore.
-#[cfg(unix)]
-fn enable_raw_mode_unix() -> bool {
-    use nix::sys::termios::{self, SetArg, SpecialCharacterIndices};
-    use std::os::fd::AsFd;
-
-    let stdin = std::io::stdin();
-    let Ok(original) = termios::tcgetattr(&stdin) else {
-        return false;
-    };
-    ORIGINAL_TERMIOS.with(|cell| *cell.borrow_mut() = Some(original.clone()));
-
-    let mut raw = original;
-    termios::cfmakeraw(&mut raw);
-    // Non-blocking: VMIN=0, VTIME=0 means read() returns immediately
-    // with 0 bytes if nothing is available — poll() handles the wait.
-    raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
-    raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
-    termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw).is_ok()
-}
-
-/// Restore original terminal settings saved by `enable_raw_mode_unix`.
-#[cfg(unix)]
-fn disable_raw_mode_unix() {
-    use nix::sys::termios::{self, SetArg};
-    use std::os::fd::AsFd;
-
-    let stdin = std::io::stdin();
-    ORIGINAL_TERMIOS.with(|cell| {
-        if let Some(original) = cell.borrow().as_ref() {
-            let _ = termios::tcsetattr(&stdin, SetArg::TCSANOW, original);
-        }
-    });
-}
-
-/// Which abort key was detected by `poll_abort_key`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AbortKey {
-    /// No abort key pressed within the poll window.
-    None,
-    /// ESC (0x1b) — cancels the current turn but never triggers exit.
-    Esc,
-    /// Ctrl-C (0x03) — cancels the current turn; double-press within
-    /// 800ms exits the process (CC parity).
-    CtrlC,
-}
-
-/// Poll stdin for an abort key (ESC = 0x1b, Ctrl-C = 0x03).
-#[cfg(unix)]
-fn poll_abort_key(timeout: Duration) -> AbortKey {
-    use nix::poll::{self, PollFd, PollFlags, PollTimeout};
-    use std::os::fd::AsFd;
-    use std::os::unix::io::AsRawFd;
-
-    let stdin = std::io::stdin();
-    let poll_timeout = PollTimeout::try_from(timeout).unwrap_or(PollTimeout::from(50u16));
-    let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
-    let ready = poll::poll(&mut fds, poll_timeout).unwrap_or(0);
-    if ready <= 0 {
-        return AbortKey::None;
-    }
-    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
-    if !revents.contains(PollFlags::POLLIN) {
-        return AbortKey::None;
-    }
-    let mut buf = [0u8; 1];
-    match nix::unistd::read(stdin.as_raw_fd(), &mut buf) {
-        Ok(1) if buf[0] == 0x03 => AbortKey::CtrlC,
-        Ok(1) if buf[0] == 0x1b => AbortKey::Esc,
-        _ => AbortKey::None,
-    }
-}
-
-/// Poll stdin for an abort key using crossterm's event system (Windows).
-#[cfg(not(unix))]
-fn poll_abort_key(timeout: Duration) -> AbortKey {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-    if !event::poll(timeout).unwrap_or(false) {
-        return AbortKey::None;
-    }
-    if let Ok(Event::Key(key)) = event::read() {
-        if key.kind != KeyEventKind::Press {
-            return AbortKey::None;
-        }
-        if key.code == KeyCode::Esc {
-            return AbortKey::Esc;
-        }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
-            return AbortKey::CtrlC;
-        }
-    }
-    AbortKey::None
 }
 
 /// Measure visible string width by stripping ANSI escape sequences.
@@ -4400,12 +4315,102 @@ fn strip_ansi_width(s: &str) -> usize {
     width
 }
 
+/// The renderer-side capture of one turn: the `TurnComplete` aggregate plus the
+/// JSON-output fields re-derived from the event stream (the old paths read these
+/// off `TurnSummary`, which `TurnComplete` no longer carries — message vecs were
+/// dropped from the seam type).
+#[derive(Default)]
+struct TurnOutcome {
+    complete: Option<TurnComplete>,
+    /// Set when the turn ended in an `EngineEvent::Error`; the non-interactive
+    /// paths surface it as an `Err` (the old paths propagated the runtime error).
+    error: Option<String>,
+    final_text: String,
+    tool_uses: Vec<serde_json::Value>,
+    tool_results: Vec<serde_json::Value>,
+    prompt_cache_events: Vec<serde_json::Value>,
+}
+
+/// A question prompter that declines to answer (empty selection). The
+/// non-interactive turn paths install no interactive question UI, but the seam's
+/// pump always sets a question adapter, so `AskUserQuestion` resolves to "no
+/// answer" instead of wedging on a prompt nobody will service.
+struct NoopQuestionPrompter;
+
+impl runtime::QuestionPrompter for NoopQuestionPrompter {
+    fn ask(
+        &mut self,
+        _request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// Renderer-side question prompter for the SYNC REPL. Draws the question +
+/// numbered options and reads the choice via rustyline — a raw
+/// `io::stdin().read_line` is unreliable under Windows ConPTY (it silently
+/// dropped stdin writes during the old ExitPlanMode dialog); rustyline reads the
+/// console the same Windows-safe way the REPL prompt does. Answers both
+/// `AskUserQuestion` and the `ExitPlanMode` "Choose an action" dialog, now that
+/// both cross the seam as `QuestionRequest`s.
+struct CliQuestionPrompter;
+
+impl runtime::QuestionPrompter for CliQuestionPrompter {
+    fn ask(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
+        if let Some(title) = &request.title {
+            println!();
+            println!("{title}");
+        }
+        if let Some(description) = &request.description {
+            for line in description.lines() {
+                println!("  {line}");
+            }
+        }
+        let mut answers = Vec::new();
+        for field in &request.fields {
+            if !field.prompt.is_empty() && request.title.as_deref() != Some(field.prompt.as_str()) {
+                println!();
+                println!("{}", field.prompt);
+            }
+            for (idx, option) in field.options.iter().enumerate() {
+                println!("  [{}] {}", idx + 1, option.label);
+            }
+            let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
+            let line = editor
+                .readline("Your choice: ")
+                .map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            // A 1-indexed digit picks the option's value; otherwise the raw text
+            // (custom-input fields).
+            let value = trimmed
+                .parse::<usize>()
+                .ok()
+                .and_then(|idx| field.options.get(idx.wrapping_sub(1)))
+                .map_or_else(|| trimmed.to_string(), |option| option.value.clone());
+            let label = field
+                .options
+                .iter()
+                .find(|option| option.value == value)
+                .map(|option| option.label.clone());
+            answers.push(runtime::QuestionPromptAnswer {
+                id: field.id.clone(),
+                value,
+                label,
+            });
+        }
+        Ok(answers)
+    }
+}
+
 impl LiveCli {
     /// True when the async REPL (queue mode) is active. In this mode the
     /// input thread owns stdin via rustyline, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.
     fn is_async_mode(&self) -> bool {
-        self.persistent_abort_signal.is_some()
+        self.shared_queue_mode.is_some()
     }
 
     fn out_println(&self, msg: impl AsRef<str>) {
@@ -4425,11 +4430,14 @@ impl LiveCli {
         enable_tools: bool,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
+        reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // The engine always builds with tools enabled for the interactive
+        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
+        // seam doesn't model (SessionEngine is single-purpose here).
+        let _ = enable_tools;
         let system_prompt = build_system_prompt()?;
-        let session_state = new_cli_session()?;
-        let session = create_managed_session_handle(&session_state.session_id)?;
         let cwd = env::current_dir()?;
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -4438,113 +4446,107 @@ impl LiveCli {
         let config_home = runtime::default_config_home();
         runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
 
-        let auth_mode = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
-        tools::set_global_auth_mode(auth_mode);
-        let config = RuntimeConfig {
-            model,
-            system_prompt,
-            enable_tools,
-            emit_output: true,
-            allowed_tools,
-            permission_mode,
-            progress_reporter: None,
-            auth_mode,
-            sudocode_config: sudocode_config.clone(),
-        };
-        let runtime = build_runtime(
-            session_state.with_persistence_path(session.path.clone()),
-            &session.id,
-            config.clone(),
-        )?;
-        let tokio_runtime = tokio::runtime::Runtime::new()?;
+        let auth_resolved = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
+        tools::set_global_auth_mode(auth_resolved);
 
         // Fire-and-forget: refresh model capabilities from sudorouter if stale.
+        // The engine owns its own tokio runtime; the renderer keeps none, so
+        // this rides a detached thread with its own short-lived current-thread rt.
         if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend) {
             if let Some((base_url, api_key)) = extract_sudorouter_credentials(&sudocode_config) {
                 let ch = config_home.clone();
-                tokio_runtime.spawn(async move {
-                    let client = match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(10))
+                std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
                         .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return,
+                    else {
+                        return;
                     };
-                    let url = format!("{}/models", base_url.trim_end_matches('/'));
-                    let resp = match client
-                        .get(&url)
-                        .header("Authorization", format!("Bearer {api_key}"))
-                        .send()
-                        .await
-                    {
-                        Ok(r) if r.status().is_success() => r,
-                        _ => return,
-                    };
-                    let body: serde_json::Value = match resp.json().await {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-                    let entries = runtime::model_capabilities::parse_api_response(&body);
-                    let _ = runtime::model_capabilities::merge_and_write(
-                        &ch,
-                        &runtime::fs_backend::StdFsBackend,
-                        &entries,
-                    );
+                    rt.block_on(async move {
+                        let client = match reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+                        let url = format!("{}/models", base_url.trim_end_matches('/'));
+                        let resp = match client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .send()
+                            .await
+                        {
+                            Ok(r) if r.status().is_success() => r,
+                            _ => return,
+                        };
+                        let body: serde_json::Value = match resp.json().await {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let entries = runtime::model_capabilities::parse_api_response(&body);
+                        let _ = runtime::model_capabilities::merge_and_write(
+                            &ch,
+                            &runtime::fs_backend::StdFsBackend,
+                            &entries,
+                        );
+                    });
                 });
             }
         }
 
-        let mut cli = Self {
-            config,
-            runtime,
-            session,
-            prompt_history: Vec::new(),
-            undone_tool_use_ids: std::collections::HashSet::new(),
-            tokio_runtime,
-            esc_monitor_enabled: true,
-            persistent_abort_signal: None,
-            shared_queue_mode: None,
-            is_repl: false,
-            iocraft_output: None,
-        };
+        // The one engine owns config + session + runtime SSOT (thinking config,
+        // persistence, tracer are all applied inside `SessionEngine::build`).
+        let mcp_servers = std::collections::BTreeMap::new();
+        let engine = Arc::new(
+            SessionEngine::build(
+                &cwd,
+                &mcp_servers,
+                runtime::SystemPromptOverrides::default(),
+                system_prompt,
+                model.clone(),
+                Some(model),
+                allowed_tools,
+                Some(permission_mode),
+                reasoning_effort,
+                auth_mode,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+        );
+        let engine_handle = EngineSession::spawn(engine.clone() as Arc<dyn EngineDelegate>);
+        let lifecycle = engine as Arc<dyn SessionLifecycle>;
 
-        // Apply thinking config from settings.json (default: enabled).
-        let thinking_enabled = ConfigLoader::default_for(&cwd)
-            .load()
-            .map_or(true, |cfg| cfg.thinking());
-        cli.set_thinking_enabled(thinking_enabled);
-
-        cli.persist_session()?;
-
-        // Record session started event
+        // Record session started event.
         let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
         let mode = if is_child_process {
             "child"
         } else {
             "standalone"
         };
-        if let Some(tracer) = cli.runtime.session_tracer() {
-            tracer.record_session_started(VERSION, cwd.to_string_lossy(), mode, &cli.config.model);
+        if let Some(tracer) = lifecycle.session_tracer() {
+            tracer.record_session_started(
+                VERSION,
+                cwd.to_string_lossy(),
+                mode,
+                &lifecycle.current_model(),
+            );
         }
 
-        Ok(cli)
+        Ok(Self {
+            engine_handle,
+            lifecycle,
+            prompt_history: Vec::new(),
+            undone_tool_use_ids: std::collections::HashSet::new(),
+            shared_queue_mode: None,
+            is_repl: false,
+            iocraft_output: None,
+        })
     }
 
-    /// Returns a reference to the session tracer, if available.
-    fn session_tracer(&self) -> Option<&telemetry::SessionTracer> {
-        self.runtime.session_tracer()
-    }
-
-    fn set_reasoning_effort(&mut self, effort: Option<String>) {
-        if let Some(rt) = self.runtime.runtime.as_mut() {
-            rt.api_client_mut().set_reasoning_effort(effort);
-        }
-    }
-
-    fn set_thinking_enabled(&mut self, enabled: bool) {
-        if let Some(rt) = self.runtime.runtime.as_mut() {
-            rt.api_client_mut().set_thinking_enabled(enabled);
-        }
+    /// A clone of the session tracer, if telemetry is active (owned — the
+    /// tracer is `Arc`-backed and cheap to clone).
+    fn session_tracer(&self) -> Option<telemetry::SessionTracer> {
+        self.lifecycle.session_tracer()
     }
 
     fn startup_banner(&self) -> String {
@@ -4561,24 +4563,25 @@ impl LiveCli {
             || "unknown".to_string(),
             |context| context.git_summary.headline(),
         );
-        let session_path = self.session.path.strip_prefix(Path::new(&cwd)).map_or_else(
-            |_| self.session.path.display().to_string(),
+        let handle = self.lifecycle.session_handle();
+        let model = self.lifecycle.current_model();
+        let auth_mode = self.lifecycle.current_auth_mode();
+        let permission_mode = self.lifecycle.current_permission_mode();
+        let sudocode_config = load_sudocode_config_for_current_dir();
+        let session_path = handle.path.strip_prefix(Path::new(&cwd)).map_or_else(
+            |_| handle.path.display().to_string(),
             |path| path.display().to_string(),
         );
 
         // Auth mode line.
-        let auth_mode_str = self.config.auth_mode.label().to_string();
+        let auth_mode_str = auth_mode.label().to_string();
 
         // Endpoint from config-driven resolution.
-        let config = &self.config.sudocode_config;
-        let endpoint = api::resolve_provider_from_config(
-            &self.config.model,
-            Some(self.config.auth_mode),
-            config,
-        )
-        .ok()
-        .map(|r| r.base_url)
-        .unwrap_or_default();
+        let endpoint =
+            engine_core::resolve_provider_from_config(&model, Some(auth_mode), &sudocode_config)
+                .ok()
+                .map(|r| r.base_url)
+                .unwrap_or_default();
 
         let t = theme();
         let logo_fg = ansi_fg(t.logo);
@@ -4594,17 +4597,17 @@ impl LiveCli {
         );
 
         let lines = [
-            format!("  {DIM}Model{RESET}            {}", self.config.model),
+            format!("  {DIM}Model{RESET}            {}", model),
             format!("  {DIM}Auth mode{RESET}        {}", auth_mode_str),
             format!("  {DIM}Endpoint{RESET}         {}", endpoint),
             format!(
                 "  {DIM}Permissions{RESET}      {}",
-                self.config.permission_mode.as_str()
+                permission_mode.as_str()
             ),
             format!("  {DIM}Branch{RESET}           {}", git_branch),
             format!("  {DIM}Workspace{RESET}        {}", workspace),
             format!("  {DIM}Directory{RESET}        {}", cwd),
-            format!("  {DIM}Session{RESET}          {}", self.session.id),
+            format!("  {DIM}Session{RESET}          {}", handle.id),
             format!("  {DIM}Auto-save{RESET}        {}", session_path),
         ];
 
@@ -4642,9 +4645,10 @@ impl LiveCli {
     fn repl_completion_candidates(
         &self,
     ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let handle = self.lifecycle.session_handle();
         Ok(slash_command_completion_candidates_with_sessions(
-            &self.config.model,
-            Some(&self.session.id),
+            &self.lifecycle.current_model(),
+            Some(&handle.id),
             list_managed_sessions()?
                 .into_iter()
                 .map(|session| session.id)
@@ -4652,164 +4656,277 @@ impl LiveCli {
         ))
     }
 
-    fn prepare_turn_runtime(
-        &mut self,
-        emit_output: bool,
-    ) -> Result<(BuiltRuntime, HookAbortMonitor), Box<dyn std::error::Error>> {
-        // Async REPL mode installs a persistent abort signal so main can call
-        // `.abort()` mid-turn without racing the runner thread. Reset the flag
-        // here — the previous turn may have aborted it (that's how we got
-        // this new turn scheduled), and the runtime treats `is_aborted() ==
-        // true` as "cancel immediately", which would collapse the fresh turn.
-        let hook_abort_signal = match &self.persistent_abort_signal {
-            Some(sig) => {
-                sig.reset();
-                sig.clone()
-            }
-            None => runtime::HookAbortSignal::new(),
-        };
-        // `build_runtime` stamps `prompt_known_date` with today's local date,
-        // which is correct only for a freshly-created runtime. The REPL
-        // rebuilds the runtime on every turn, so without carrying this date
-        // forward a long-running session that crosses midnight would have its
-        // known date silently advanced to today on every turn — suppressing
-        // the date-rollover reminder added in #128 (see issue #135).
-        let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.shutdown_runtime_resources()?;
-        let mut runtime = build_runtime(
-            session,
-            &session_id,
-            RuntimeConfig {
-                emit_output,
-                ..self.config.clone()
-            },
-        )?
-        .with_hook_abort_signal(hook_abort_signal.clone());
-        if let Some(known) = inherited_known_date {
-            runtime = runtime.with_session_known_date(known);
-        }
-        let hook_abort_monitor = if self.esc_monitor_enabled {
-            HookAbortMonitor::spawn(hook_abort_signal)
-        } else {
-            // Async REPL mode: skip the ESC-key stdin listener. The input
-            // thread's rustyline is the only stdin consumer; a competing
-            // crossterm listener wedges the terminal on POSIX (raw mode is
-            // process-wide via termios). Waiter is a plain sleep loop that
-            // just observes the stop channel — no stdin touched.
-            HookAbortMonitor::spawn_with_waiter(hook_abort_signal, |stop_rx, _abort| loop {
-                match stop_rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
-                    Err(RecvTimeoutError::Timeout) => continue,
+    /// Drive one turn across the seam: send the prompt, pump events into the
+    /// renderer, and answer permission / question requests using the supplied
+    /// prompters (the SAME `CliPermissionPrompter` / `IocraftQuestionPrompter`
+    /// the old paths installed on the runtime — now consulted above the seam).
+    /// `output` routes the renderer to the iocraft `OutputSender` or bare stdout
+    /// (`None`). Returns the captured `TurnComplete` (`None` on error before
+    /// completion). The end-of-turn status line is the caller's job (it varies
+    /// per path).
+    fn drive_turn(
+        &self,
+        input: &str,
+        spinner_ref: Option<render::SpinnerRef>,
+        output: Option<&repl_ui::OutputSender>,
+        ui: Option<&repl_ui::UiCommandSender>,
+        render: bool,
+        permission_prompter: &mut dyn runtime::PermissionPrompter,
+        question_prompter: &mut dyn runtime::QuestionPrompter,
+        cancel_monitor: Option<&ReplTurnCancelMonitor>,
+    ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+        // The interactive paths draw the stream; the `--output-format` paths
+        // collect silently (they print only the final text / JSON), so the
+        // renderer is optional. Without it we still detect the same outcomes
+        // (Done / permission / question) straight from the event kinds.
+        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        let blocks = vec![runtime::ContentBlock::Text {
+            text: input.to_string(),
+        }];
+        self.engine_handle
+            .commands
+            .send(EngineCommand::Prompt { blocks })?;
+
+        let mut outcome = TurnOutcome::default();
+        loop {
+            let Ok(ev) = self.engine_handle.events.recv() else {
+                break;
+            };
+            // Collect the JSON-output data from the event stream (the old paths
+            // read it off the finished turn; TurnComplete drops the message
+            // vecs, so we re-derive here). `final_text` tracks the LAST assistant
+            // message only — reset it at each ToolCall (a message boundary), the
+            // last-assistant-message semantics the JSON output has always used.
+            match &ev {
+                EngineEvent::TurnComplete(tc) => outcome.complete = Some(tc.clone()),
+                EngineEvent::Error { message } => outcome.error = Some(message.clone()),
+                EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
+                EngineEvent::ToolCall { id, name, input } => {
+                    outcome.final_text.clear();
+                    // Parity: `--output-format json` emits the tool input as the
+                    // raw argument STRING exactly as the model produced it — the
+                    // pre-seam `collect_tool_uses` serialized `ToolUse.input`
+                    // verbatim and the mock parity harness pins that shape. Do
+                    // NOT parse it into a nested object.
+                    outcome.tool_uses.push(serde_json::json!({
+                        "id": id,
+                        "name": name,
+                        "input": input,
+                    }));
                 }
-            })
-        };
-
-        Ok((runtime, hook_abort_monitor))
+                EngineEvent::ToolResult {
+                    id,
+                    name,
+                    output,
+                    is_error,
+                } => {
+                    // A successful Task* mutation changes the shared task list.
+                    // The iocraft REPL's context panel derives live from the
+                    // tool-result stream it already receives across the seam —
+                    // NOT from an engine-side side-channel into the executor
+                    // (that was a boundary leak, removed with `set_ui_sender`).
+                    if let Some(ui) = ui {
+                        if !*is_error
+                            && matches!(
+                                name.as_str(),
+                                "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskStop"
+                            )
+                        {
+                            ui.update_context(tools::global_task_list());
+                        }
+                    }
+                    outcome.tool_results.push(serde_json::json!({
+                        "tool_use_id": id,
+                        "tool_name": name,
+                        "output": output,
+                        "is_error": is_error,
+                    }));
+                }
+                EngineEvent::PromptCache(event) => {
+                    outcome.prompt_cache_events.push(serde_json::json!({
+                        "unexpected": event.unexpected,
+                        "reason": event.reason,
+                        "previous_cache_read_input_tokens": event.previous_cache_read_input_tokens,
+                        "current_cache_read_input_tokens": event.current_cache_read_input_tokens,
+                        "token_drop": event.token_drop,
+                    }));
+                }
+                _ => {}
+            }
+            let action = match renderer.as_mut() {
+                Some(r) => r.render(ev),
+                None => match ev {
+                    EngineEvent::TurnComplete(_) | EngineEvent::Error { .. } => RenderOutcome::Done,
+                    EngineEvent::PermissionRequest { id, request } => {
+                        RenderOutcome::NeedPermission { id, request }
+                    }
+                    EngineEvent::QuestionRequest { id, request } => {
+                        RenderOutcome::NeedQuestion { id, request }
+                    }
+                    _ => RenderOutcome::Continue,
+                },
+            };
+            match action {
+                RenderOutcome::Continue => {}
+                RenderOutcome::NeedPermission { id, request } => {
+                    // The prompter reads stdin (cooked mode); pause the sync-REPL
+                    // key monitor so it doesn't steal the approval keystrokes.
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.suspend();
+                    }
+                    let decision = permission_prompter.decide(&request);
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.resume();
+                    }
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::PermissionAnswer { id, decision })?;
+                }
+                RenderOutcome::NeedQuestion { id, request } => {
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.suspend();
+                    }
+                    let answers = question_prompter.ask(&request).unwrap_or_default();
+                    if let Some(monitor) = cancel_monitor {
+                        monitor.resume();
+                    }
+                    self.engine_handle
+                        .commands
+                        .send(EngineCommand::QuestionAnswer { id, answers })?;
+                }
+                RenderOutcome::Done => break,
+            }
+        }
+        Ok(outcome)
     }
 
-    fn shutdown_runtime_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.shutdown_mcp()?;
-        self.runtime.shutdown_plugins()?;
-        Ok(())
-    }
-
-    fn build_replacement_runtime(
-        &mut self,
-        session: Session,
-        session_id: String,
-        config: RuntimeConfig,
-    ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-        self.shutdown_runtime_resources()?;
-        build_runtime(session, &session_id, config)
-    }
-
-    fn replace_runtime(&mut self, runtime: BuiltRuntime) -> Result<(), Box<dyn std::error::Error>> {
-        self.shutdown_runtime_resources()?;
-        self.runtime = runtime;
-        self.undone_tool_use_ids.clear();
-        Ok(())
-    }
-
+    /// Async-REPL driver entrypoint: no interactive key monitor (the async
+    /// iocraft REPL owns stdin and cancels via its own input path).
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_impl(input, false)
+    }
+
+    /// Interactive-terminal entrypoint (sync REPL + one-shot text): install a
+    /// per-turn ESC / Ctrl-C key monitor that cancels the turn across the seam.
+    /// The turn otherwise blocks on the engine with no key reader; the monitor
+    /// is inert off a pipe, so non-interactive runs are unaffected (they cancel
+    /// via SIGINT through the `SignalCancelGuard`).
+    fn run_turn_interactive(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.run_turn_impl(input, true)
+    }
+
+    fn run_turn_impl(
+        &mut self,
+        input: &str,
+        interactive_cancel: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
+        let model = self.lifecycle.current_model();
         let mut spinner = SpinnerHandle::new(
             "🦀 Thinking...",
-            Some(self.config.model.as_str()),
+            Some(model.as_str()),
             TerminalRenderer::new().color_theme(),
             token_budget,
         );
         let spinner_ref = spinner.spinner_ref();
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
-        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
 
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
+        let mut permission_prompter: Box<dyn runtime::PermissionPrompter> =
+            if io::stdin().is_terminal() {
+                Box::new(CliPermissionPrompter::new(
+                    self.lifecycle.current_permission_mode(),
+                ))
+            } else {
+                Box::new(AutoDenyPermissionPrompter)
+            };
+        // Interactive REPL: draw AskUserQuestion / ExitPlanMode dialogs and read
+        // the choice (Windows-safe via rustyline). One-shot: no interactive user.
+        let mut question_prompter: Box<dyn runtime::QuestionPrompter> = if self.is_repl {
+            Box::new(CliQuestionPrompter)
+        } else {
+            Box::new(NoopQuestionPrompter)
+        };
+
+        // Sync REPL only: catch ESC / Ctrl-C during the (otherwise blocking)
+        // turn and cancel across the seam. Dropped right after the turn so the
+        // next rustyline prompt owns stdin again.
+        let cancel_monitor = interactive_cancel
+            .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
+        let outcome = self.drive_turn(
             input,
-            Some(&mut permission_prompter),
+            Some(spinner_ref),
             None,
-        ));
-        hook_abort_monitor.stop();
-        match result {
-            Ok(summary) => {
-                self.replace_runtime(runtime)?;
-                if summary.cancelled {
-                    spinner.fail("⏹ Cancelled");
-                } else {
-                    spinner.clear();
-                    if let Some(event) = summary.auto_compaction {
-                        self.out_println(format_auto_compaction_notice(
-                            event.removed_message_count,
-                        ));
-                    }
-                    let elapsed = turn_start.elapsed();
-                    let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
-                    let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
-                    let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
-                    let branch = env::current_dir()
-                        .ok()
-                        .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    self.out_println(format_turn_status_line_with_branch(
-                        &self.config.model,
-                        turns,
-                        &usage,
-                        Some(&cumulative),
-                        Some(context_window),
-                        elapsed,
-                        branch.as_deref(),
-                    ));
+            None,
+            true,
+            permission_prompter.as_mut(),
+            question_prompter.as_mut(),
+            cancel_monitor.as_ref(),
+        )?;
+        drop(cancel_monitor);
+
+        match outcome.complete {
+            Some(tc) if tc.cancelled => spinner.fail("⏹ Cancelled"),
+            Some(tc) => {
+                spinner.clear();
+                if let Some(event) = tc.auto_compaction {
+                    self.out_println(format_auto_compaction_notice(event.removed_message_count));
                 }
-                self.persist_session()?;
-                // If the plan confirmation dialog chose "clear context &
-                // execute", pick up the plan and re-run in a fresh session.
-                if let Some(plan) = take_pending_plan_execution() {
-                    let session = runtime::Session::new();
-                    let session_id = self.session.id.clone();
-                    let fresh =
-                        self.build_replacement_runtime(session, session_id, self.config.clone())?;
-                    self.replace_runtime(fresh)?;
-                    let prompt = format!("Implement the following plan:\n\n{plan}");
-                    return self.run_turn(&prompt);
-                }
-                Ok(())
+                self.print_turn_status_line(
+                    &model,
+                    tc.response_model.as_deref(),
+                    turn_start.elapsed(),
+                    None,
+                );
             }
-            Err(error) => {
+            None => {
                 clear_pending_plan_execution();
-                runtime.shutdown_mcp()?;
-                runtime.shutdown_plugins()?;
                 spinner.fail("❌ Request failed");
-                Err(Box::new(error))
             }
+        }
+
+        // If the plan confirmation dialog chose "clear context & execute", pick
+        // up the plan and re-run in a fresh session (the engine preserves the
+        // current model across the reset).
+        if let Some(plan) = take_pending_plan_execution() {
+            self.lifecycle.reset_session()?;
+            let prompt = format!("Implement the following plan:\n\n{plan}");
+            return self.run_turn_impl(&prompt, interactive_cancel);
+        }
+        Ok(())
+    }
+
+    /// Print the end-of-turn status line. Usage/turns come from a lifecycle
+    /// snapshot (the engine's live `UsageTracker`), context-window from the
+    /// response model (falling back to the active model). Routes to the iocraft
+    /// `OutputSender` when present, else the plain `out_println`.
+    fn print_turn_status_line(
+        &self,
+        model: &str,
+        response_model: Option<&str>,
+        elapsed: Duration,
+        output: Option<&repl_ui::OutputSender>,
+    ) {
+        let usage_tracker = self.lifecycle.usage_snapshot();
+        let usage = usage_tracker.current_turn_usage();
+        let cumulative = usage_tracker.cumulative_usage();
+        let turns = usage_tracker.turns();
+        let model_for_caps = response_model.unwrap_or(model);
+        let context_window = runtime::model_capabilities::context_window_or_default(model_for_caps);
+        let branch = env::current_dir()
+            .ok()
+            .and_then(|cwd| resolve_git_branch_for(&cwd));
+        let line = format_turn_status_line_with_branch(
+            model,
+            turns,
+            &usage,
+            Some(&cumulative),
+            Some(context_window),
+            elapsed,
+            branch.as_deref(),
+        );
+        match output {
+            Some(out) => out.println(&line),
+            None => self.out_println(line),
         }
     }
 
@@ -4825,92 +4942,54 @@ impl LiveCli {
         pending_question_answer: PendingQuestionAnswer,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
         let token_budget = crate::render::parse_token_budget(input);
+        let model = self.lifecycle.current_model();
 
-        // Activate the shared spinner state for the iocraft render loop.
-        spinner_state.start_turn(
-            "\u{1f980} Thinking...",
-            Some(self.config.model.as_str()),
-            token_budget,
-        );
-
-        // Wire the spinner state into the SpinnerRef API so the streaming
-        // and tool layers can update bytes + thinking flags atomically.
+        // Activate the shared spinner state for the iocraft render loop, then
+        // bridge it into the SpinnerRef the renderer drives (bytes + thinking).
+        spinner_state.start_turn("\u{1f980} Thinking...", Some(model.as_str()), token_budget);
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
-        runtime.api_client_mut().set_spinner(spinner_ref.clone());
-        runtime.api_client_mut().set_output_writer(output.clone());
-        runtime.tool_executor_mut().set_spinner(spinner_ref);
-        runtime
-            .tool_executor_mut()
-            .set_output_writer(output.clone());
-        runtime.tool_executor_mut().set_repl_mode(self.is_repl);
-        runtime.tool_executor_mut().set_ui_sender(ui.clone());
-        runtime
-            .tool_executor_mut()
-            .set_question_prompter(Box::new(IocraftQuestionPrompter::new(
-                ui.clone(),
-                pending_question_answer,
-            )));
 
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
+        let mut permission_prompter =
+            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let mut question_prompter =
+            IocraftQuestionPrompter::new(ui.clone(), pending_question_answer);
+
+        let outcome = self.drive_turn(
             input,
-            Some(&mut permission_prompter),
+            Some(spinner_ref),
+            Some(output),
+            Some(&ui),
+            true,
+            &mut permission_prompter,
+            &mut question_prompter,
             None,
-        ));
-        hook_abort_monitor.stop();
+        )?;
         spinner_state.stop_turn();
 
-        match result {
-            Ok(summary) => {
-                self.replace_runtime(runtime)?;
-                if summary.cancelled {
-                    output.println(&format!(
-                        "{}\u{23f9} Cancelled{}",
-                        ansi_fg(theme().error),
-                        RESET
-                    ));
-                } else {
-                    if let Some(event) = summary.auto_compaction {
-                        output.println(&format_auto_compaction_notice(event.removed_message_count));
-                    }
-                    let elapsed = turn_start.elapsed();
-                    let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
-                    let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
-                    let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
-                    let branch = env::current_dir()
-                        .ok()
-                        .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    // The status line is part of the transcript: printed
-                    // once, in order, above the next prompt. Keeping a copy
-                    // in the sticky footer as well meant it showed twice
-                    // whenever the footer was redrawn under new scrollback.
-                    output.println(&format_turn_status_line_with_branch(
-                        &self.config.model,
-                        turns,
-                        &usage,
-                        Some(&cumulative),
-                        Some(context_window),
-                        elapsed,
-                        branch.as_deref(),
-                    ));
+        match outcome.complete {
+            Some(tc) if tc.cancelled => output.println(&format!(
+                "{}\u{23f9} Cancelled{}",
+                ansi_fg(theme().error),
+                RESET
+            )),
+            Some(tc) => {
+                if let Some(event) = tc.auto_compaction {
+                    output.println(&format_auto_compaction_notice(event.removed_message_count));
                 }
-                self.persist_session()?;
-                Ok(())
+                // The status line is part of the transcript: printed once, in
+                // order, above the next prompt.
+                self.print_turn_status_line(
+                    &model,
+                    tc.response_model.as_deref(),
+                    turn_start.elapsed(),
+                    Some(output),
+                );
             }
-            Err(error) => {
-                runtime.shutdown_mcp()?;
-                runtime.shutdown_plugins()?;
-                Err(Box::new(error))
-            }
+            // Error already rendered by the EngineEventRenderer (Error event).
+            None => {}
         }
+        Ok(())
     }
 
     fn run_turn_with_output(
@@ -4922,56 +5001,79 @@ impl LiveCli {
         match output_format {
             CliOutputFormat::Json if compact => self.run_prompt_compact_json(input),
             CliOutputFormat::Text if compact => self.run_prompt_compact(input),
-            CliOutputFormat::Text => self.run_turn(input),
+            CliOutputFormat::Text => self.run_turn_interactive(input),
             CliOutputFormat::Json => self.run_prompt_json(input),
         }
     }
 
-    fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let result = if io::stdin().is_terminal() {
-            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
+    /// Drive one non-interactive turn (no stream render), returning the captured
+    /// outcome. The caller supplies the permission prompter because the parity
+    /// contract differs per format: `--output-format json` ALWAYS uses the
+    /// interactive `CliPermissionPrompter` (it prints the permission box + reads
+    /// y/N from stdin, piped or TTY), whereas the compact paths auto-deny off a
+    /// pipe so the prompt can't corrupt the single-line output. Surfaces a turn
+    /// error as an `Err` (parity with the old `result?`). The engine persists the
+    /// session itself, so callers only format the result.
+    fn run_noninteractive_turn(
+        &self,
+        input: &str,
+        permission_prompter: &mut dyn runtime::PermissionPrompter,
+    ) -> Result<TurnOutcome, Box<dyn std::error::Error>> {
+        let mut question_prompter = NoopQuestionPrompter;
+        let outcome = self.drive_turn(
+            input,
+            None,
+            None,
+            None,
+            false,
+            permission_prompter,
+            &mut question_prompter,
+            None,
+        )?;
+        if let Some(message) = outcome.error {
+            return Err(message.into());
+        }
+        Ok(outcome)
+    }
+
+    /// Permission prompter for the compact one-shot paths: interactive when
+    /// stdin is a TTY, else auto-deny (an approval box printed to a pipe would
+    /// corrupt compact mode's single-line stdout). Matches the pre-seam
+    /// `run_prompt_compact*` selection.
+    fn compact_permission_prompter(&self) -> Box<dyn runtime::PermissionPrompter> {
+        if io::stdin().is_terminal() {
+            Box::new(CliPermissionPrompter::new(
+                self.lifecycle.current_permission_mode(),
+            ))
         } else {
-            let mut prompter = AutoDenyPermissionPrompter;
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        };
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
-        let final_text = final_assistant_text(&summary);
-        self.out_println(final_text);
+            Box::new(AutoDenyPermissionPrompter)
+        }
+    }
+
+    fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut permission_prompter = self.compact_permission_prompter();
+        let outcome = self.run_noninteractive_turn(input, permission_prompter.as_mut())?;
+        self.out_println(outcome.final_text);
         Ok(())
     }
 
     fn run_prompt_compact_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let result = if io::stdin().is_terminal() {
-            let mut prompter = CliPermissionPrompter::new(self.config.permission_mode);
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        } else {
-            let mut prompter = AutoDenyPermissionPrompter;
-            self.tokio_runtime
-                .block_on(runtime.run_turn(input, Some(&mut prompter), None))
-        };
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
+        let model = self.lifecycle.current_model();
+        let mut permission_prompter = self.compact_permission_prompter();
+        let outcome = self.run_noninteractive_turn(input, permission_prompter.as_mut())?;
+        let tc = outcome
+            .complete
+            .ok_or_else(|| "engine turn did not complete".to_string())?;
         self.out_println(
             json!({
-                "message": final_assistant_text(&summary),
+                "message": outcome.final_text,
                 "compact": true,
-                "model": self.config.model,
+                "model": model,
                 "usage": {
-                    "input_tokens": summary.turn_usage.input_tokens,
-                    "output_tokens": summary.turn_usage.output_tokens,
-                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
+                    "input_tokens": tc.turn_usage.input_tokens,
+                    "output_tokens": tc.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
                 },
             })
             .to_string(),
@@ -4980,41 +5082,47 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let result = self.tokio_runtime.block_on(runtime.run_turn(
-            input,
-            Some(&mut permission_prompter),
-            None,
-        ));
-        hook_abort_monitor.stop();
-        let summary = result?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
+        let model = self.lifecycle.current_model();
+        // Parity: the JSON one-shot ALWAYS uses the interactive permission
+        // prompter, even off a pipe — it prints the permission box and reads
+        // the y/N approval from stdin (the mock parity harness feeds "y\n" and
+        // asserts "Permission required" / "Approve this tool call?" on stdout).
+        let mut permission_prompter =
+            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
+        let outcome = self.run_noninteractive_turn(input, &mut permission_prompter)?;
+        let tc = outcome
+            .complete
+            .ok_or_else(|| "engine turn did not complete".to_string())?;
+        let auto_compaction_json = tc.auto_compaction.map(|event| {
+            json!({
+                "removed_messages": event.removed_message_count,
+                "notice": format_auto_compaction_notice(event.removed_message_count),
+            })
+        });
+        let estimated_cost = format_usd(
+            tc.turn_usage
+                .estimate_cost_usd_with_pricing(
+                    pricing_for_model(&model)
+                        .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
+                )
+                .total_cost_usd(),
+        );
         self.out_println(
             json!({
-                "message": final_assistant_text(&summary),
-                "model": self.config.model,
-                "iterations": summary.iterations,
-                "auto_compaction": summary.auto_compaction.map(|event| json!({
-                    "removed_messages": event.removed_message_count,
-                    "notice": format_auto_compaction_notice(event.removed_message_count),
-                })),
-                "tool_uses": collect_tool_uses(&summary),
-                "tool_results": collect_tool_results(&summary),
-                "prompt_cache_events": collect_prompt_cache_events(&summary),
+                "message": outcome.final_text,
+                "model": model,
+                "iterations": tc.iterations,
+                "auto_compaction": auto_compaction_json,
+                "tool_uses": outcome.tool_uses,
+                "tool_results": outcome.tool_results,
+                "prompt_cache_events": outcome.prompt_cache_events,
                 "usage": {
-                    "input_tokens": summary.turn_usage.input_tokens,
-                    "output_tokens": summary.turn_usage.output_tokens,
-                    "cache_creation_input_tokens": summary.turn_usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": summary.turn_usage.cache_read_input_tokens,
+                    "input_tokens": tc.turn_usage.input_tokens,
+                    "output_tokens": tc.turn_usage.output_tokens,
+                    "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
                 },
-                "estimated_cost": format_usd(
-                    summary.turn_usage.estimate_cost_usd_with_pricing(
-                        pricing_for_model(&self.config.model)
-                            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier)
-                    ).total_cost_usd()
-                )
+                "estimated_cost": estimated_cost,
             })
             .to_string(),
         );
@@ -5082,10 +5190,12 @@ impl LiveCli {
             SlashCommand::Resume { session_path } => {
                 let resumed = self.load_session(session_path)?;
                 if resumed {
+                    let handle = self.lifecycle.session_handle();
+                    let session = self.lifecycle.session_snapshot();
                     self.out_println(format_resume_report(
-                        &self.session.path.display().to_string(),
-                        self.runtime.session().messages.len(),
-                        self.runtime.usage().turns(),
+                        &handle.path.display().to_string(),
+                        session.messages.len(),
+                        self.lifecycle.usage_snapshot().turns(),
                     ));
                 }
                 resumed
@@ -5107,24 +5217,14 @@ impl LiveCli {
                             self.out_println(format!("usage: /mcp {action_str} <server>"));
                             return Ok(false);
                         };
-                        if let Some(mcp_state) = &self.runtime.mcp_state {
-                            let mut mcp = mcp_state.lock().unwrap_or_else(|e| e.into_inner());
-                            let result = match action_str {
-                                "reconnect" => mcp.reconnect_server(server_name),
-                                "enable" => mcp.enable_server(server_name),
-                                "disable" => mcp.disable_server(server_name),
-                                _ => unreachable!(),
-                            };
-                            match result {
-                                Ok(msg) => self.out_println(msg),
-                                Err(err) => self.out_println(format!("Error: {err}")),
-                            }
-                        } else {
-                            self.out_println(
+                        match self.lifecycle.mcp_command(action_str, server_name) {
+                            Some(Ok(msg)) => self.out_println(msg),
+                            Some(Err(err)) => self.out_println(format!("Error: {err}")),
+                            None => self.out_println(
                                 "No MCP servers are running in this session.\n\
                                  Hint: if you just added a server via `/mcp add-json`, \
                                  restart scode to load it.",
-                            );
+                            ),
                         }
                     }
                     _ => {
@@ -5187,7 +5287,7 @@ impl LiveCli {
                 match resolve_skill_invocation_with_plugins(
                     &cwd,
                     args.as_deref(),
-                    Some(self.runtime.plugin_load_outcome()),
+                    Some(&self.lifecycle.plugin_load_outcome()),
                 )
                 .map_err(std::io::Error::other)?
                 {
@@ -5209,7 +5309,8 @@ impl LiveCli {
                 false
             }
             SlashCommand::Stats => {
-                let usage = UsageTracker::from_session(self.runtime.session()).cumulative_usage();
+                let session = self.lifecycle.session_snapshot();
+                let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
                 false
             }
@@ -5263,34 +5364,37 @@ impl LiveCli {
     }
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.session().save_to_path(&self.session.path)?;
-        Ok(())
+        self.lifecycle.persist().map_err(Into::into)
     }
 
     fn print_status(&self) {
-        let cumulative = self.runtime.usage().cumulative_usage();
-        let latest = self.runtime.usage().current_turn_usage();
+        let usage = self.lifecycle.usage_snapshot();
+        let cumulative = usage.cumulative_usage();
+        let latest = usage.current_turn_usage();
+        let session = self.lifecycle.session_snapshot();
+        let handle = self.lifecycle.session_handle();
         let report = format_status_report(
-            &self.config.model,
+            &self.lifecycle.current_model(),
             StatusUsage {
-                message_count: self.runtime.session().messages.len(),
-                turns: self.runtime.usage().turns(),
+                message_count: session.messages.len(),
+                turns: usage.turns(),
                 latest,
                 cumulative,
-                estimated_tokens: self.runtime.estimated_tokens(),
+                estimated_tokens: self.lifecycle.estimated_tokens(),
             },
-            self.config.permission_mode.as_str(),
-            &status_context(Some(&self.session.path)).expect("status context should load"),
+            self.lifecycle.current_permission_mode().as_str(),
+            &status_context(Some(&handle.path)).expect("status context should load"),
             None, // #148: REPL /status doesn't carry flag provenance
         );
         self.out_suspend(|| print_with_pager(&report));
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
+        let updated_at_ms = self.lifecycle.session_snapshot().updated_at_ms;
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
-            .map_or(self.runtime.session().updated_at_ms, |duration| {
+            .map_or(updated_at_ms, |duration| {
                 u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
             });
         let entry = PromptHistoryEntry {
@@ -5298,7 +5402,13 @@ impl LiveCli {
             text: prompt.to_string(),
         };
         self.prompt_history.push(entry);
-        if let Err(error) = self.runtime.session_mut().push_prompt_entry(prompt) {
+        let mut push_error = None;
+        self.lifecycle.with_session_mut(&mut |session| {
+            if let Err(error) = session.push_prompt_entry(prompt) {
+                push_error = Some(error.to_string());
+            }
+        });
+        if let Some(error) = push_error {
             eprintln!("warning: failed to persist prompt history: {error}");
         }
     }
@@ -5311,10 +5421,11 @@ impl LiveCli {
                 return;
             }
         };
-        let session_entries = &self.runtime.session().prompt_history;
+        let session = self.lifecycle.session_snapshot();
+        let session_entries = &session.prompt_history;
         let entries = if session_entries.is_empty() {
             if self.prompt_history.is_empty() {
-                collect_session_prompt_history(self.runtime.session())
+                collect_session_prompt_history(&session)
             } else {
                 self.prompt_history
                     .iter()
@@ -5353,10 +5464,8 @@ impl LiveCli {
             let sudocode_config = load_sudocode_config_for_current_dir();
             let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
             let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-            let default_idx = models
-                .iter()
-                .position(|m| *m == self.config.model)
-                .unwrap_or(0);
+            let current = self.lifecycle.current_model();
+            let default_idx = models.iter().position(|m| *m == current).unwrap_or(0);
             let selection = self.out_suspend(|| {
                 FuzzySelect::new()
                     .with_prompt("Select model (type to filter)")
@@ -5370,50 +5479,34 @@ impl LiveCli {
             };
         };
 
-        let model = resolve_model_alias_with_config(&model);
-
-        if model == self.config.model {
-            self.out_println(format_model_report(
-                &self.config.model,
-                self.runtime.session().messages.len(),
-                self.runtime.usage().turns(),
+        // The engine owns the switch (resolve + rebuild + keep session.model in
+        // sync); it returns report DATA and we format it.
+        let report = self.lifecycle.set_model(&model)?;
+        if report.changed {
+            self.undone_tool_use_ids.clear();
+            self.out_println(format_model_switch_report(
+                &report.previous,
+                &report.resolved,
+                report.message_count,
             ));
-            return Ok(false);
+            Ok(true)
+        } else {
+            self.out_println(format_model_report(
+                &report.resolved,
+                report.message_count,
+                report.turns,
+            ));
+            Ok(false)
         }
-
-        let previous = self.config.model.clone();
-        let mut session = self.runtime.session().clone();
-        // Keep the session's own model in sync with the switch (see handle_acp_model_switch): the
-        // runtime builder only fills `session.model` when None, so otherwise it would retain the
-        // old model and mis-compute the context window for auto-compaction.
-        session.model = Some(model.clone());
-        let session_id = self.session.id.clone();
-        let message_count = session.messages.len();
-        let cwd = env::current_dir().unwrap_or_default();
-        let system_prompt = build_system_prompt_for(&cwd)?;
-        let runtime = self.build_replacement_runtime(
-            session,
-            session_id,
-            RuntimeConfig {
-                model: model.clone(),
-                system_prompt,
-                ..self.config.clone()
-            },
-        )?;
-        self.replace_runtime(runtime)?;
-        self.config.model.clone_from(&model);
-        self.out_println(format_model_switch_report(&previous, &model, message_count));
-        Ok(true)
     }
 
     fn set_permissions(
         &mut self,
         mode: Option<String>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        let current = self.lifecycle.current_permission_mode();
         let Some(mode) = mode else {
-            self.out_println(format_permissions_report(
-                self.config.permission_mode.as_str(),
-            ));
+            self.out_println(format_permissions_report(current.as_str()));
             return Ok(false);
         };
 
@@ -5423,23 +5516,20 @@ impl LiveCli {
             )
         })?;
 
-        if normalized == self.config.permission_mode.as_str() {
+        if normalized == current.as_str() {
             self.out_println(format_permissions_report(normalized));
             return Ok(false);
         }
 
-        let previous = self.config.permission_mode.as_str().to_string();
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.config.permission_mode = permission_mode_from_label(normalized);
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
+        let previous = current.as_str().to_string();
+        self.lifecycle
+            .set_permission_mode(permission_mode_from_label(normalized))?;
         self.out_println(format_permissions_switch_report(&previous, normalized));
         Ok(true)
     }
 
     fn set_auth(&mut self, mode: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
-        let current_str = self.config.auth_mode.as_str().to_string();
+        let current_str = self.lifecycle.current_auth_mode().as_str().to_string();
 
         let Some(mode) = mode else {
             self.out_println(format_auth_report(&current_str));
@@ -5454,11 +5544,7 @@ impl LiveCli {
         }
 
         let previous = current_str;
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        self.config.auth_mode = parsed;
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
+        self.lifecycle.set_auth(parsed)?;
         self.out_println(format_auth_switch_report(&previous, parsed.as_str()));
         Ok(true)
     }
@@ -5471,35 +5557,30 @@ impl LiveCli {
             return Ok(false);
         }
 
-        let cwd = runtime::current_workspace_root()?;
-        let cleared = clear_session_state(&cwd, &self.session)?;
-        let runtime = self.build_replacement_runtime(
-            cleared.fresh,
-            cleared.handle.id.clone(),
-            self.config.clone(),
-        )?;
-        self.session = cleared.handle;
-        self.replace_runtime(runtime)?;
+        let previous_session = self.lifecycle.session_handle();
+        let model = self.lifecycle.current_model();
+        let permission_mode = self.lifecycle.current_permission_mode();
+        let new_handle = self.lifecycle.reset_session()?;
+        self.undone_tool_use_ids.clear();
         self.out_println(format!(
             "Session cleared\n  Mode             fresh session\n  Previous session {}\n  Resume previous  /resume {}\n  Preserved model  {}\n  Permission mode  {}\n  New session      {}\n  Session file     {}",
-            cleared.previous.id,
-            cleared.previous.id,
-            self.config.model,
-            self.config.permission_mode.as_str(),
-            self.session.id,
-            self.session.path.display(),
+            previous_session.id,
+            previous_session.id,
+            model,
+            permission_mode.as_str(),
+            new_handle.id,
+            new_handle.path.display(),
         ));
         Ok(true)
     }
 
     fn print_cost(&self) {
-        let cumulative = self.runtime.usage().cumulative_usage();
+        let cumulative = self.lifecycle.usage_snapshot().cumulative_usage();
         self.out_println(format_cost_report(cumulative));
     }
 
-    /// Load a session by reference (id, path, or "latest"), replacing the
-    /// current runtime. Pure data operation — no terminal output.
-    /// Callers decide how to report the result.
+    /// Load a session by reference (id, path, or "latest") — the engine loads
+    /// it and swaps it in. Pure data operation; callers report the result.
     fn load_session(
         &mut self,
         session_path: Option<String>,
@@ -5527,33 +5608,20 @@ impl LiveCli {
             };
         };
 
-        let (handle, session) = load_session_reference(&session_ref)?;
-        let message_count = session.messages.len();
-        let session_id = session.session_id.clone();
-        let runtime =
-            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.session = SessionHandle {
-            id: session_id,
-            path: handle.path,
-        };
+        self.lifecycle.resume_session(&session_ref)?;
+        self.undone_tool_use_ids.clear();
         Ok(true)
     }
 
-    /// Replace the current session with a pre-loaded one (for `--resume`).
+    /// Resume a pre-resolved session (for `--resume` at startup). The engine
+    /// reloads it by reference and swaps it in.
     fn replace_with_session(
         &mut self,
-        session: runtime::Session,
+        _session: runtime::Session,
         handle: SessionHandle,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let session_id = session.session_id.clone();
-        let runtime =
-            self.build_replacement_runtime(session, handle.id.clone(), self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.session = SessionHandle {
-            id: session_id,
-            path: handle.path,
-        };
+        self.lifecycle.resume_session(&handle.id)?;
+        self.undone_tool_use_ids.clear();
         Ok(())
     }
 
@@ -5777,12 +5845,8 @@ impl LiveCli {
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
-        print_skills_for_outcome(
-            args,
-            output_format,
-            &cwd,
-            Some(self.runtime.plugin_load_outcome()),
-        )
+        let outcome = self.lifecycle.plugin_load_outcome();
+        print_skills_for_outcome(args, output_format, &cwd, Some(&outcome))
     }
 
     fn print_plugins(
@@ -5877,7 +5941,8 @@ impl LiveCli {
     }
 
     fn handle_undo(&mut self) {
-        let messages = &self.runtime.session().messages;
+        let session = self.lifecycle.session_snapshot();
+        let messages = &session.messages;
         match crate::cli::undo::find_last_undoable_edit(messages, &self.undone_tool_use_ids) {
             None => {
                 self.out_println(
@@ -5904,12 +5969,13 @@ impl LiveCli {
         &self,
         requested_path: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let export_path = resolve_export_path(requested_path, self.runtime.session())?;
-        fs::write(&export_path, render_export_text(self.runtime.session()))?;
+        let session = self.lifecycle.session_snapshot();
+        let export_path = resolve_export_path(requested_path, &session)?;
+        fs::write(&export_path, render_export_text(&session))?;
         self.out_println(format!(
             "Export\n  Result           wrote transcript\n  File             {}\n  Messages         {}",
             export_path.display(),
-            self.runtime.session().messages.len(),
+            session.messages.len(),
         ));
         Ok(())
     }
@@ -5927,16 +5993,21 @@ impl LiveCli {
                 if io::stdin().is_terminal() && io::stdout().is_terminal() {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
-                        self.out_println(render_session_list(&self.session.id)?);
+                        self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
                         return Ok(false);
                     }
                     let default_idx = sessions
                         .iter()
-                        .position(|session| session.id == self.session.id)
+                        .position(|session| session.id == self.lifecycle.session_handle().id)
                         .unwrap_or(0);
                     let items: Vec<String> = sessions
                         .iter()
-                        .map(|session| format_session_picker_entry(session, &self.session.id))
+                        .map(|session| {
+                            format_session_picker_entry(
+                                session,
+                                &self.lifecycle.session_handle().id,
+                            )
+                        })
                         .collect();
                     let selection = self.out_suspend(|| {
                         FuzzySelect::new()
@@ -5949,13 +6020,13 @@ impl LiveCli {
                         return Ok(false);
                     };
                     let target = sessions[idx].id.clone();
-                    if target == self.session.id {
+                    if target == self.lifecycle.session_handle().id {
                         self.out_println(format!("Session unchanged (already active: {target})."));
                         return Ok(false);
                     }
                     return self.handle_session_command(Some("switch"), Some(&target));
                 }
-                self.out_println(render_session_list(&self.session.id)?);
+                self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
                 Ok(false)
             }
             Some("switch") => {
@@ -5963,48 +6034,27 @@ impl LiveCli {
                     self.out_println("Usage: /session switch <session-id>");
                     return Ok(false);
                 };
-                let (handle, session) = load_session_reference(target)?;
-                let message_count = session.messages.len();
-                let session_id = session.session_id.clone();
-                let runtime = self.build_replacement_runtime(
-                    session,
-                    handle.id.clone(),
-                    self.config.clone(),
-                )?;
-                self.replace_runtime(runtime)?;
-                self.session = SessionHandle {
-                    id: session_id,
-                    path: handle.path,
-                };
+                let (handle, message_count) = self.lifecycle.resume_session(target)?;
+                self.undone_tool_use_ids.clear();
                 self.out_println(format!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
-                    self.session.id,
-                    self.session.path.display(),
+                    handle.id,
+                    handle.path.display(),
                     message_count,
                 ));
                 Ok(true)
             }
             Some("fork") => {
-                let forked = self.runtime.fork_session(target.map(ToOwned::to_owned));
-                let parent_session_id = self.session.id.clone();
-                let handle = create_managed_session_handle(&forked.session_id)?;
-                let branch_name = forked
-                    .fork
-                    .as_ref()
-                    .and_then(|fork| fork.branch_name.clone());
-                let forked = forked.with_persistence_path(handle.path.clone());
-                let message_count = forked.messages.len();
-                forked.save_to_path(&handle.path)?;
-                let runtime =
-                    self.build_replacement_runtime(forked, handle.id.clone(), self.config.clone())?;
-                self.replace_runtime(runtime)?;
-                self.session = handle;
+                let parent_session_id = self.lifecycle.session_handle().id;
+                let (handle, message_count, branch_name) =
+                    self.lifecycle.fork_session(target.map(ToOwned::to_owned))?;
+                self.undone_tool_use_ids.clear();
                 self.out_println(format!(
                     "Session forked\n  Parent session   {}\n  Active session   {}\n  Branch           {}\n  File             {}\n  Messages         {}",
                     parent_session_id,
-                    self.session.id,
+                    handle.id,
                     branch_name.as_deref().unwrap_or("(unnamed)"),
-                    self.session.path.display(),
+                    handle.path.display(),
                     message_count,
                 ));
                 Ok(true)
@@ -6015,7 +6065,7 @@ impl LiveCli {
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                if handle.id == self.lifecycle.session_handle().id {
                     self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
@@ -6040,7 +6090,7 @@ impl LiveCli {
                     return Ok(false);
                 };
                 let handle = resolve_session_reference(target)?;
-                if handle.id == self.session.id {
+                if handle.id == self.lifecycle.session_handle().id {
                     self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
                         handle.id
@@ -6082,73 +6132,18 @@ impl LiveCli {
     }
 
     fn reload_runtime_features(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        let runtime = self.build_replacement_runtime(session, session_id, self.config.clone())?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()
+        self.lifecycle.reload_features().map_err(Into::into)
     }
 
     fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self
-            .tokio_runtime
-            .block_on(self.runtime.compact(CompactionConfig::default(), None));
-        let removed = result.removed_message_count;
-        let kept = result.compacted_session.messages.len();
-        let skipped = removed == 0;
-        let session_id = self.session.id.clone();
-        let runtime = self.build_replacement_runtime(
-            result.compacted_session,
-            session_id,
-            self.config.clone(),
-        )?;
-        self.replace_runtime(runtime)?;
-        self.persist_session()?;
+        let (removed, kept, skipped, summary_source) = self.lifecycle.run_compaction()?;
         self.out_println(format_compact_report(
             removed,
             kept,
             skipped,
-            &result.summary_source,
+            &summary_source,
         ));
         Ok(())
-    }
-
-    fn run_internal_prompt_text_with_progress(
-        &mut self,
-        prompt: &str,
-        enable_tools: bool,
-        progress: Option<InternalPromptProgressReporter>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let session = self.runtime.session().clone();
-        let session_id = self.session.id.clone();
-        let mut runtime = self.build_replacement_runtime(
-            session,
-            session_id,
-            RuntimeConfig {
-                enable_tools,
-                emit_output: false,
-                progress_reporter: progress,
-                ..self.config.clone()
-            },
-        )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.config.permission_mode);
-        let summary = self.tokio_runtime.block_on(runtime.run_turn(
-            prompt,
-            Some(&mut permission_prompter),
-            None,
-        ))?;
-        let text = final_assistant_text(&summary).trim().to_string();
-        runtime.shutdown_mcp()?;
-        runtime.shutdown_plugins()?;
-        Ok(text)
-    }
-
-    fn run_internal_prompt_text(
-        &mut self,
-        prompt: &str,
-        enable_tools: bool,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.run_internal_prompt_text_with_progress(prompt, enable_tools, None)
     }
 
     fn run_bughunter(&self, scope: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -6173,7 +6168,8 @@ impl LiveCli {
 
     fn run_debug_tool_call(&self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         validate_no_args("/debug-tool-call", args)?;
-        self.out_println(render_last_tool_debug_report(self.runtime.session())?);
+        let session = self.lifecycle.session_snapshot();
+        self.out_println(render_last_tool_debug_report(&session)?);
         Ok(())
     }
 
@@ -6259,148 +6255,6 @@ fn init_json_value(report: &crate::init::InitReport, message: &str) -> serde_jso
 
 fn build_system_prompt() -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     build_system_prompt_for(&env::current_dir()?)
-}
-
-/// ACP variant of [`build_system_prompt_for`]: builds the process-default
-/// prompt for `cwd`/`model` (including any `--system-prompt` /
-/// `--append-system-prompt` CLI flags), then layers the session's
-/// `_meta.sudocode.systemPrompt` / `appendSystemPrompt` on top: the former
-/// swaps the static blocks, the latter appends a trailing dynamic block.
-/// Workspace-derived dynamic blocks (environment, `AGENTS.md`, memory,
-/// plugins) stay, so the caller's prompt still knows where it is running.
-fn build_acp_system_prompt(
-    cwd: &Path,
-    prompt_overrides: &runtime::SystemPromptOverrides,
-) -> Result<SystemPrompt, AcpError> {
-    let mut prompt = build_system_prompt_for(cwd)
-        .map_err(|e| AcpError::internal(format!("failed to build system prompt: {e}")))?;
-    prompt_overrides.apply(&mut prompt);
-    Ok(prompt)
-}
-
-/// Process-wide `--system-prompt` / `--append-system-prompt` flags, set once
-/// from `run()` and applied by every prompt build in this process (REPL,
-/// `--print`, `scode system-prompt`, and the ACP default a session starts
-/// from before its own `_meta` adjustments).
-static CLI_PROMPT_OVERRIDES: std::sync::OnceLock<runtime::SystemPromptOverrides> =
-    std::sync::OnceLock::new();
-
-fn apply_cli_prompt_overrides(prompt: &mut SystemPrompt) {
-    if let Some(overrides) = CLI_PROMPT_OVERRIDES.get() {
-        overrides.apply(prompt);
-    }
-}
-
-fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
-    // Use the local date at session-start time (not the build date baked
-    // into DEFAULT_DATE) so the cacheable system prompt reflects when the
-    // user actually started talking. ConversationRuntime separately tracks
-    // this date and emits a system-reminder if the date rolls over
-    // mid-session, keeping the prompt cache prefix warm.
-    let mut prompt = load_system_prompt(
-        cwd.to_path_buf(),
-        runtime::today_local(),
-        env::consts::OS,
-        "unknown",
-    )?;
-    // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
-    // set, prepend the ported CC-fork coordinator role prompt so it
-    // takes primacy over the default identity. See
-    // runtime::coordinator_mode for the full port.
-    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
-    apply_cli_prompt_overrides(&mut prompt);
-    Ok(prompt)
-}
-
-fn build_runtime_plugin_state() -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    let runtime_config = loader.load()?;
-    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
-        std::collections::BTreeMap::new();
-    build_runtime_plugin_state_with_loader(&cwd, &loader, &runtime_config, &session_mcp)
-}
-
-fn plugin_load_outcome_for_cwd(
-    cwd: &Path,
-) -> Result<PluginLoadOutcome, Box<dyn std::error::Error>> {
-    let loader = ConfigLoader::default_for(cwd);
-    let runtime_config = loader.load()?;
-    let plugin_manager = build_plugin_manager(cwd, &loader, &runtime_config);
-    Ok(plugin_manager.plugin_registry_report()?.load_outcome())
-}
-
-pub(crate) fn build_runtime_plugin_state_with_loader(
-    cwd: &Path,
-    loader: &ConfigLoader,
-    runtime_config: &runtime::RuntimeConfig,
-    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-) -> Result<RuntimePluginState, Box<dyn std::error::Error>> {
-    // Surface the settings `experimental` section to the process-global
-    // experiments registry BEFORE anything consults a flag (the MCP gate
-    // below is one consumer). First call wins; ACP session rebuilds
-    // against the same config are no-ops.
-    runtime::experiments::init_config_flags(runtime_config.experiments().clone());
-    let plugin_manager = build_plugin_manager(cwd, loader, runtime_config);
-    let plugin_registry_report = plugin_manager.plugin_registry_report()?;
-    let plugin_load_outcome = plugin_registry_report.load_outcome();
-    let plugin_registry = plugin_registry_report.into_registry()?;
-    let plugin_hook_config =
-        runtime_hook_config_from_plugin_hooks(plugin_registry.projected_hooks()?);
-    let feature_config = runtime_config
-        .feature_config()
-        .clone()
-        .with_hooks(runtime_config.hooks().merged(&plugin_hook_config));
-    let tool_registry = GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)?;
-    let (mcp_state, runtime_tools) =
-        build_runtime_mcp_state(runtime_config, &plugin_load_outcome, session_mcp)?;
-    let tool_registry = match tool_registry.with_runtime_tools(runtime_tools) {
-        Ok(tool_registry) => tool_registry,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
-        }
-    };
-    Ok(RuntimePluginState {
-        feature_config,
-        tool_registry,
-        plugin_registry,
-        plugin_load_outcome,
-        mcp_state,
-    })
-}
-
-fn build_plugin_manager(
-    cwd: &Path,
-    loader: &ConfigLoader,
-    runtime_config: &runtime::RuntimeConfig,
-) -> PluginManager {
-    let plugin_config = runtime_config
-        .plugins()
-        .to_plugin_manager_config(cwd, loader.config_home());
-    PluginManager::new(plugin_config)
-}
-
-fn runtime_hook_config_from_plugin_hooks(
-    hooks: plugins::ProjectedPluginHooks,
-) -> runtime::RuntimeHookConfig {
-    runtime::RuntimeHookConfig::new_with_sources(
-        hooks
-            .pre_tool_use
-            .into_iter()
-            .map(|entry| (entry.command, entry.plugin_id))
-            .collect(),
-        hooks
-            .post_tool_use
-            .into_iter()
-            .map(|entry| (entry.command, entry.plugin_id))
-            .collect(),
-        hooks
-            .post_tool_use_failure
-            .into_iter()
-            .map(|entry| (entry.command, entry.plugin_id))
-            .collect(),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6623,239 +6477,6 @@ impl InternalPromptProgressRun {
 impl Drop for InternalPromptProgressRun {
     fn drop(&mut self) {
         self.stop_heartbeat();
-    }
-}
-
-fn build_runtime(
-    session: Session,
-    session_id: &str,
-    config: RuntimeConfig,
-) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let cwd = env::current_dir()?;
-    let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
-        std::collections::BTreeMap::new();
-    build_runtime_for_cwd(&cwd, session, session_id, config, &session_mcp)
-}
-
-fn build_runtime_for_cwd(
-    cwd: &Path,
-    session: Session,
-    session_id: &str,
-    config: RuntimeConfig,
-    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let loader = ConfigLoader::default_for(cwd);
-    let file_config = loader.load()?;
-    let runtime_plugin_state =
-        build_runtime_plugin_state_with_loader(cwd, &loader, &file_config, session_mcp)?;
-    build_runtime_with_plugin_state(
-        cwd,
-        session,
-        session_id,
-        config,
-        runtime_plugin_state,
-        session_mcp,
-    )
-}
-
-fn build_runtime_with_plugin_state(
-    cwd: &Path,
-    mut session: Session,
-    session_id: &str,
-    mut config: RuntimeConfig,
-    runtime_plugin_state: RuntimePluginState,
-    session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
-) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    // Persist the model in session metadata so resumed sessions can report it.
-    if session.model.is_none() {
-        session.model = Some(config.model.clone());
-    }
-    let RuntimePluginState {
-        feature_config,
-        tool_registry,
-        plugin_registry,
-        plugin_load_outcome,
-        mcp_state,
-    } = runtime_plugin_state;
-    // Resolve the standalone nexus-A2A session once (fail loud on a partial
-    // config or a dial failure). `None` when A2A is off — the fast path that
-    // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
-    // (Copy) and reused below to advertise, prompt, and wire the send half.
-    let a2a = match cli::nexus_a2a::session() {
-        Ok(a2a) => a2a,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
-        }
-    };
-    // per-session injected MCP tools bypass the global --allowed-tools gate:
-    // they are explicitly requested for this session and their names are only
-    // known at runtime, so add their qualified names to the allow-list when
-    // one is active. The prefix uses `runtime::mcp_tool_prefix`, which
-    // normalizes server names the same way the tool index does (e.g.
-    // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
-    // are matched correctly.
-    if let Some(allowed) = config.allowed_tools.as_mut() {
-        if let Some(mcp_state) = &mcp_state {
-            let tools = mcp_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .manager
-                .tools_with_server();
-            allowed.extend(session_mcp_tool_names(tools, session_mcp));
-        }
-    }
-    // nexus A2A: when configured, keep the peer-reply tool available even under
-    // an explicit --allowedTools restriction (absent a restriction it is
-    // already advertised). Its handler is the CliToolExecutor intercept wired
-    // below; the co-host advertises the same tool the same way.
-    if a2a.is_some() {
-        if let Some(allowed) = config.allowed_tools.as_mut() {
-            allowed.extend(["send_message".to_string()]);
-        }
-    }
-    let policy =
-        match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
-            Ok(policy) => policy,
-            Err(error) => {
-                shutdown_mcp_state_best_effort(&mcp_state);
-                return Err(Box::new(std::io::Error::other(error)));
-            }
-        };
-    let mut system_prompt = config.system_prompt.clone();
-    // Skills are listed so the model can name and load one without the user
-    // having to know it exists. Plugin-provided skill roots are included via
-    // `plugin_load_outcome`, so a plugin can inject skills that the prompt then
-    // advertises. This runs for the REPL, `--print`, and ACP sessions alike:
-    // they all land in this function via `build_runtime_for_cwd`.
-    if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
-        system_prompt.dynamic_sections.push(section);
-    }
-    // nexus A2A: teach the model its A2A identity + how to reach peers, so the
-    // standalone loop knows it can `send_message` to a named peer.
-    if let Some(session) = a2a {
-        system_prompt
-            .dynamic_sections
-            .push(session.peer_system_prompt());
-    }
-    let emit_output = config.emit_output;
-    let client = match AnthropicRuntimeClient::new(session_id, &config, tool_registry.clone()) {
-        Ok(client) => client,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(error);
-        }
-    };
-    let mut runtime = ConversationRuntime::new_with_features(
-        session,
-        client,
-        CliToolExecutor::new(
-            config.allowed_tools,
-            emit_output,
-            tool_registry.clone(),
-            mcp_state.clone(),
-        ),
-        policy,
-        system_prompt,
-        &feature_config,
-    )
-    .with_session_known_date(runtime::today_local());
-    // nexus A2A: give the CLI executor the send half so `send_message` routes
-    // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
-    // uses). Set only when configured; absent it the tool is never advertised.
-    if let Some(session) = a2a {
-        runtime
-            .tool_executor_mut()
-            .set_mailbox_sender(session.sender());
-    }
-    if emit_output {
-        runtime = runtime.with_hook_progress_reporter(Box::new(CliHookProgressReporter));
-    }
-    if let Err(error) = plugin_registry.initialize() {
-        shutdown_mcp_state_best_effort(&mcp_state);
-        return Err(Box::new(error));
-    }
-    Ok(BuiltRuntime::new(
-        runtime,
-        plugin_registry,
-        plugin_load_outcome,
-        mcp_state,
-    ))
-}
-
-fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
-    if let Some(state) = mcp_state {
-        let _ = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .shutdown();
-    }
-}
-
-struct CliHookProgressReporter;
-
-impl runtime::HookProgressReporter for CliHookProgressReporter {
-    fn on_event(&mut self, event: &runtime::HookProgressEvent) {
-        // Format SudoCode plugin attribution once; each outcome line includes
-        // it so the user sees *who* ran the hook in addition to *what* happened.
-        fn attribution(plugin_source: Option<&str>) -> String {
-            match plugin_source {
-                Some(plugin_id) => format!(" (SudoCode plugin {plugin_id})"),
-                None => String::new(),
-            }
-        }
-        match event {
-            runtime::HookProgressEvent::Started {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Completed {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook done {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Denied {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Failed {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-            runtime::HookProgressEvent::Cancelled {
-                event,
-                tool_name,
-                command,
-                plugin_source,
-            } => eprintln!(
-                "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
-                event_name = event.as_str(),
-                attr = attribution(plugin_source.as_deref())
-            ),
-        }
     }
 }
 
@@ -7178,88 +6799,13 @@ fn slash_command_completion_candidates_with_sessions(
     completions.into_iter().collect()
 }
 
-fn resolve_auth_mode(
-    model: &str,
-    explicit: Option<AuthMode>,
-    config: &api::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    if let Some(mode) = explicit {
-        return Ok(mode);
-    }
-    resolve_configured_auth_mode(model, config)
-}
-
-fn resolve_model_switch_auth_mode(
-    model: &str,
-    explicit: Option<AuthMode>,
-    config: &api::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    let Some(entry) = api::resolve_model(config, model) else {
-        if let Some(mode) = explicit {
-            return Ok(mode);
-        }
-        // Proxy passthrough fallback — same logic as resolve_configured_auth_mode.
-        if config.auth_modes.contains_key("proxy") {
-            return AuthMode::parse("proxy");
-        }
-        return Err(format!(
-            "model '{model}' not found in config. Run /model to configure it, \
-             or pass --auth=<subscription|proxy|api-key> explicitly."
-        ));
-    };
-
-    if let Some(mode) = explicit {
-        if entry.providers.contains_key(mode.as_str()) {
-            return Ok(mode);
-        }
-    }
-
-    resolve_configured_auth_mode_for_entry(model, entry)
-}
-
-fn resolve_configured_auth_mode(
-    model: &str,
-    config: &api::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    if let Some(entry) = api::resolve_model(config, model) {
-        return resolve_configured_auth_mode_for_entry(model, entry);
-    }
-    // Model not in sudocode.json — if a proxy provider is configured,
-    // default to proxy auth mode and let proxy passthrough route it.
-    // This avoids requiring every model to be registered in sudocode.json
-    // when sudorouter already knows how to route it.
-    if config.auth_modes.contains_key("proxy") {
-        return AuthMode::parse("proxy");
-    }
-    Err(format!(
-        "model '{model}' not found in config. Run /model to configure it, \
-         or pass --auth=<subscription|proxy|api-key> explicitly."
-    ))
-}
-
-fn resolve_configured_auth_mode_for_entry(
-    model: &str,
-    entry: &api::ModelConfigEntry,
-) -> Result<AuthMode, String> {
-    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
-    for mode_str in PRIORITY {
-        if entry.providers.contains_key(*mode_str) {
-            return AuthMode::parse(mode_str);
-        }
-    }
-    Err(format!(
-        "no auth mode available for model '{model}'. Run /model to configure it, \
-         or pass --auth=<subscription|proxy|api-key> explicitly."
-    ))
-}
-
 #[cfg(test)]
 mod auth_mode_tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn connection(base_url: &str) -> api::ProviderConnectionConfig {
-        api::ProviderConnectionConfig {
+    fn connection(base_url: &str) -> engine_core::ProviderConnectionConfig {
+        engine_core::ProviderConnectionConfig {
             base_url: base_url.to_string(),
             api_key: Some("test-key".to_string()),
             api_key_env: None,
@@ -7275,18 +6821,18 @@ mod auth_mode_tests {
         provider: &str,
         wire_model: &str,
         api_format: &str,
-    ) -> api::ModelConfigEntry {
+    ) -> engine_core::ModelConfigEntry {
         let mut providers = BTreeMap::new();
         providers.insert(
             mode.to_string(),
-            api::ModelProviderMapping {
+            engine_core::ModelProviderMapping {
                 provider: provider.to_string(),
                 model: wire_model.to_string(),
                 api: Some(api_format.to_string()),
             },
         );
 
-        api::ModelConfigEntry {
+        engine_core::ModelConfigEntry {
             alias: alias.to_string(),
             name: alias.to_string(),
             input: vec!["text".to_string()],
@@ -7295,7 +6841,7 @@ mod auth_mode_tests {
         }
     }
 
-    fn mixed_auth_config() -> api::SudoCodeConfig {
+    fn mixed_auth_config() -> engine_core::SudoCodeConfig {
         let mut auth_modes = BTreeMap::new();
         auth_modes.insert(
             "proxy".to_string(),
@@ -7334,7 +6880,7 @@ mod auth_mode_tests {
             ),
         );
 
-        api::SudoCodeConfig {
+        engine_core::SudoCodeConfig {
             auth_modes,
             models,
             ..Default::default()

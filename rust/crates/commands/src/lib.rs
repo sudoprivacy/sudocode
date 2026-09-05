@@ -8,7 +8,39 @@ use plugins::{
     discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,
     PluginLoadFailure, PluginLoadOutcome, PluginManager, PluginSummary,
 };
-use runtime::acp_sdk_server::AcpSlashCommandSpec;
+/// Descriptor for one slash command advertised over ACP — the SSOT for the
+/// `available_commands_update` notification, `/help`, and the unknown-command
+/// hint. Lives in `commands` (the slash-command crate) so both the command
+/// list here and the ACP server (`engine-acp`) that advertises it share one
+/// definition, without a renderer→commands backward dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcpSlashCommandSpec {
+    /// Command name without the leading slash (`compact`, not `/compact`).
+    pub name: &'static str,
+    /// One-line, human-readable description shown by the client.
+    pub description: &'static str,
+    /// Placeholder for the argument text when the command takes any
+    /// (`<model-id>`); `None` for argument-less commands.
+    pub input_hint: Option<&'static str>,
+    /// `true` for commands that rebuild the session runtime (`/model`), which is
+    /// a runtime-construction path and therefore runs under the process-cwd
+    /// lease. Everything else — in particular `/compact`, which waits on a model
+    /// round-trip — runs outside the lease so it never stalls `session/new` /
+    /// `session/load` of sessions in other directories.
+    pub holds_cwd_lease: bool,
+}
+
+impl AcpSlashCommandSpec {
+    /// `/name <hint>` as the user would type it.
+    #[must_use]
+    pub fn usage(&self) -> String {
+        match self.input_hint {
+            Some(hint) => format!("/{} {hint}", self.name),
+            None => format!("/{}", self.name),
+        }
+    }
+}
+
 use runtime::{
     compact_session_sync, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig,
     McpServerConfig, ScopedMcpServerConfig, Session,

@@ -30,6 +30,12 @@ serde_json.workspace = true
 serde = { version = "1", features = ["derive"] }
 # The standalone nexus-A2A session dials the daemon over the VFS client.
 nexus-vfs-client = { path = "../nexus-vfs-client" }
+# `SessionTracer` — the `BuiltRuntime` / `SessionEngine` expose the runtime's
+# session tracer to the renderer for `/status`-style reads.
+telemetry = { path = "../telemetry" }
+# `render_skills_prompt_section` — the runtime build path advertises available
+# skills (incl. plugin-provided roots) in the system prompt.
+commands = { path = "../commands" }
 
 [lints]
 workspace = true

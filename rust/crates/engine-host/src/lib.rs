@@ -59,3 +59,18 @@ pub mod prompt;
 /// build path dials. The renderer starts the receive poller; the tool executor
 /// gets the send half.
 pub mod nexus_a2a;
+
+/// Runtime construction: the `BuiltRuntime` wrapper, the `RuntimeConfig` /
+/// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
+/// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
+pub mod runtime_build;
+
+/// The one live session's `EngineDelegate` (turns) + `SessionLifecycle`
+/// (non-turn model/auth/permission/reset/resume/fork/compaction ops) impl:
+/// `SessionEngine`, its `AcpCliSession` state, and the `ModelSwitchReport` data.
+pub mod session_engine;
+
+// Re-export both modules' public items at the crate root so the CLI (and
+// intra-crate code) can name them as `engine_host::X` / `crate::X`.
+pub use runtime_build::*;
+pub use session_engine::*;

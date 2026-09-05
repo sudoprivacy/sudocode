@@ -1208,7 +1208,7 @@ fn current_tool_registry() -> Result<GlobalToolRegistry, String> {
     let runtime_config = loader.load().map_err(|e| e.to_string())?;
     let session_mcp: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig> =
         std::collections::BTreeMap::new();
-    let state = super::super::build_runtime_plugin_state_with_loader(
+    let state = engine_host::build_runtime_plugin_state_with_loader(
         &cwd,
         &loader,
         &runtime_config,

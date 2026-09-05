@@ -1411,12 +1411,14 @@ dependencies = [
 name = "engine-host"
 version = "0.2.2"
 dependencies = [
+ "commands",
  "engine-core",
  "nexus-vfs-client",
  "plugins",
  "runtime",
  "serde",
  "serde_json",
+ "telemetry",
  "tokio",
  "tools",
 ]

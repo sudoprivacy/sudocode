@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 
+use engine_core::AuthMode;
 use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
@@ -217,4 +218,83 @@ pub fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
         "danger-full-access" => Some("danger-full-access"),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auth-mode resolution
+// ---------------------------------------------------------------------------
+
+pub fn resolve_auth_mode(
+    model: &str,
+    explicit: Option<AuthMode>,
+    config: &engine_core::SudoCodeConfig,
+) -> Result<AuthMode, String> {
+    if let Some(mode) = explicit {
+        return Ok(mode);
+    }
+    resolve_configured_auth_mode(model, config)
+}
+
+pub fn resolve_model_switch_auth_mode(
+    model: &str,
+    explicit: Option<AuthMode>,
+    config: &engine_core::SudoCodeConfig,
+) -> Result<AuthMode, String> {
+    let Some(entry) = engine_core::resolve_model(config, model) else {
+        if let Some(mode) = explicit {
+            return Ok(mode);
+        }
+        // Proxy passthrough fallback — same logic as resolve_configured_auth_mode.
+        if config.auth_modes.contains_key("proxy") {
+            return AuthMode::parse("proxy");
+        }
+        return Err(format!(
+            "model '{model}' not found in config. Run /model to configure it, \
+             or pass --auth=<subscription|proxy|api-key> explicitly."
+        ));
+    };
+
+    if let Some(mode) = explicit {
+        if entry.providers.contains_key(mode.as_str()) {
+            return Ok(mode);
+        }
+    }
+
+    resolve_configured_auth_mode_for_entry(model, entry)
+}
+
+fn resolve_configured_auth_mode(
+    model: &str,
+    config: &engine_core::SudoCodeConfig,
+) -> Result<AuthMode, String> {
+    if let Some(entry) = engine_core::resolve_model(config, model) {
+        return resolve_configured_auth_mode_for_entry(model, entry);
+    }
+    // Model not in sudocode.json — if a proxy provider is configured,
+    // default to proxy auth mode and let proxy passthrough route it.
+    // This avoids requiring every model to be registered in sudocode.json
+    // when sudorouter already knows how to route it.
+    if config.auth_modes.contains_key("proxy") {
+        return AuthMode::parse("proxy");
+    }
+    Err(format!(
+        "model '{model}' not found in config. Run /model to configure it, \
+         or pass --auth=<subscription|proxy|api-key> explicitly."
+    ))
+}
+
+fn resolve_configured_auth_mode_for_entry(
+    model: &str,
+    entry: &engine_core::ModelConfigEntry,
+) -> Result<AuthMode, String> {
+    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
+    for mode_str in PRIORITY {
+        if entry.providers.contains_key(*mode_str) {
+            return AuthMode::parse(mode_str);
+        }
+    }
+    Err(format!(
+        "no auth mode available for model '{model}'. Run /model to configure it, \
+         or pass --auth=<subscription|proxy|api-key> explicitly."
+    ))
 }

@@ -108,6 +108,7 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
+use engine_host::config::{resolve_auth_mode, resolve_model_switch_auth_mode};
 use engine_host::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
 use engine_host::session::{
     create_managed_session_handle, create_managed_session_handle_for, delete_managed_session,
@@ -8065,81 +8066,6 @@ fn slash_command_completion_candidates_with_sessions(
     }
 
     completions.into_iter().collect()
-}
-
-fn resolve_auth_mode(
-    model: &str,
-    explicit: Option<AuthMode>,
-    config: &engine_core::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    if let Some(mode) = explicit {
-        return Ok(mode);
-    }
-    resolve_configured_auth_mode(model, config)
-}
-
-fn resolve_model_switch_auth_mode(
-    model: &str,
-    explicit: Option<AuthMode>,
-    config: &engine_core::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    let Some(entry) = engine_core::resolve_model(config, model) else {
-        if let Some(mode) = explicit {
-            return Ok(mode);
-        }
-        // Proxy passthrough fallback — same logic as resolve_configured_auth_mode.
-        if config.auth_modes.contains_key("proxy") {
-            return AuthMode::parse("proxy");
-        }
-        return Err(format!(
-            "model '{model}' not found in config. Run /model to configure it, \
-             or pass --auth=<subscription|proxy|api-key> explicitly."
-        ));
-    };
-
-    if let Some(mode) = explicit {
-        if entry.providers.contains_key(mode.as_str()) {
-            return Ok(mode);
-        }
-    }
-
-    resolve_configured_auth_mode_for_entry(model, entry)
-}
-
-fn resolve_configured_auth_mode(
-    model: &str,
-    config: &engine_core::SudoCodeConfig,
-) -> Result<AuthMode, String> {
-    if let Some(entry) = engine_core::resolve_model(config, model) {
-        return resolve_configured_auth_mode_for_entry(model, entry);
-    }
-    // Model not in sudocode.json — if a proxy provider is configured,
-    // default to proxy auth mode and let proxy passthrough route it.
-    // This avoids requiring every model to be registered in sudocode.json
-    // when sudorouter already knows how to route it.
-    if config.auth_modes.contains_key("proxy") {
-        return AuthMode::parse("proxy");
-    }
-    Err(format!(
-        "model '{model}' not found in config. Run /model to configure it, \
-         or pass --auth=<subscription|proxy|api-key> explicitly."
-    ))
-}
-
-fn resolve_configured_auth_mode_for_entry(
-    model: &str,
-    entry: &engine_core::ModelConfigEntry,
-) -> Result<AuthMode, String> {
-    const PRIORITY: &[&str] = &["subscription", "proxy", "api-key"];
-    for mode_str in PRIORITY {
-        if entry.providers.contains_key(*mode_str) {
-            return AuthMode::parse(mode_str);
-        }
-    }
-    Err(format!(
-        "no auth mode available for model '{model}'. Run /model to configure it, \
-         or pass --auth=<subscription|proxy|api-key> explicitly."
-    ))
 }
 
 #[cfg(test)]

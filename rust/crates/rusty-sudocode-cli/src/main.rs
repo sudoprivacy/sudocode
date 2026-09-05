@@ -2466,9 +2466,9 @@ fn run_repl_iocraft_dispatch(
     // dispatch (the render-loop thread is left the same way), so it needs no
     // explicit shutdown. The session was already dialed in
     // `build_runtime_for_cwd`, so this just reuses the cached handle.
-    if let Ok(Some(a2a_session)) = cli::nexus_a2a::session() {
+    if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
         let output = repl.output.clone();
-        let _poller = cli::nexus_a2a::spawn_poller(
+        let _poller = engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             runtime::HookAbortSignal::new(),
             move |msg| {
@@ -7484,7 +7484,7 @@ fn build_runtime_with_plugin_state(
     // config or a dial failure). `None` when A2A is off — the fast path that
     // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
     // (Copy) and reused below to advertise, prompt, and wire the send half.
-    let a2a = match cli::nexus_a2a::session() {
+    let a2a = match engine_host::nexus_a2a::session() {
         Ok(a2a) => a2a,
         Err(error) => {
             shutdown_mcp_state_best_effort(&mcp_state);

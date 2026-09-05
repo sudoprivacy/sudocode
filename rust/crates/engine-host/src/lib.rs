@@ -54,3 +54,8 @@ pub mod tool_executor;
 /// System-prompt assembly (process-default + CLI-flag overrides + per-session
 /// `_meta` layering). Which prompt the model sees is an engine input.
 pub mod prompt;
+
+/// Process-singleton standalone nexus-A2A session (send + receive) the engine
+/// build path dials. The renderer starts the receive poller; the tool executor
+/// gets the send half.
+pub mod nexus_a2a;

@@ -8,7 +8,6 @@ pub(crate) mod format;
 pub(crate) mod git;
 pub(crate) mod help;
 pub(crate) mod lifecycle;
-pub(crate) mod nexus_a2a;
 pub(crate) mod pager;
 pub(crate) mod session;
 pub(crate) mod status;

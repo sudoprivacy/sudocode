@@ -12,7 +12,14 @@ pub type RuntimePluginStateBuildOutput = (
 );
 
 pub struct RuntimeMcpState {
-    pub(crate) runtime: tokio::runtime::Runtime,
+    /// The MCP servers' isolated Tokio runtime. `Option` so `Drop` can take it
+    /// and `shutdown_background()` it: an ACP/one-shot session's `SessionEngine`
+    /// (→ `BuiltRuntime` → this state) is dropped by the seam pump from inside
+    /// its own async context (`rt.block_on(drive)`), and a plain
+    /// `tokio::runtime::Runtime` drop there panics ("Cannot drop a runtime in a
+    /// context where blocking is not allowed"). Mirrors `SessionEngine`'s own
+    /// teardown fix.
+    pub(crate) runtime: Option<tokio::runtime::Runtime>,
     pub(crate) manager: McpServerManager,
     pub(crate) pending_servers: Vec<String>,
     pub(crate) degraded_report: Option<runtime::McpDegradedReport>,
@@ -108,7 +115,7 @@ impl RuntimeMcpState {
 
         Ok(Some((
             Self {
-                runtime,
+                runtime: Some(runtime),
                 manager,
                 pending_servers,
                 degraded_report,
@@ -118,7 +125,17 @@ impl RuntimeMcpState {
     }
 
     pub fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.runtime.block_on(self.manager.shutdown())?;
+        // Runs at teardown, which for an ACP/one-shot session happens inside the
+        // seam pump's async context. A bare `self.runtime.block_on` there panics
+        // ("Cannot start a runtime from within a runtime"); `block_on_isolated`
+        // drives the shutdown on a scoped thread that has no entered runtime,
+        // exactly as every other MCP method below already does.
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.shutdown(),
+        )?;
         Ok(())
     }
 
@@ -167,16 +184,26 @@ impl RuntimeMcpState {
     }
 
     pub fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        Self::block_on_isolated(&self.runtime, self.manager.reconnect_server(server_name))
-            .map_err(|e| ToolError::new(e.to_string()))?;
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.reconnect_server(server_name),
+        )
+        .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
             "MCP server reconnected\n  Server           {server_name}"
         ))
     }
 
     pub fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        Self::block_on_isolated(&self.runtime, self.manager.disable_server(server_name))
-            .map_err(|e| ToolError::new(e.to_string()))?;
+        Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.disable_server(server_name),
+        )
+        .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
             "MCP server disabled\n  Server           {server_name}"
         ))
@@ -197,7 +224,9 @@ impl RuntimeMcpState {
         arguments: Option<serde_json::Value>,
     ) -> Result<String, ToolError> {
         let response = Self::block_on_isolated(
-            &self.runtime,
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
             self.manager.call_tool(qualified_tool_name, arguments),
         )
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -217,9 +246,13 @@ impl RuntimeMcpState {
     }
 
     pub fn list_resources_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        let result =
-            Self::block_on_isolated(&self.runtime, self.manager.list_resources(server_name))
-                .map_err(|error| ToolError::new(error.to_string()))?;
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.list_resources(server_name),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "resources": result.resources,
@@ -232,8 +265,12 @@ impl RuntimeMcpState {
         let mut failures = Vec::new();
 
         for server_name in self.server_names() {
-            match Self::block_on_isolated(&self.runtime, self.manager.list_resources(&server_name))
-            {
+            match Self::block_on_isolated(
+                self.runtime
+                    .as_ref()
+                    .expect("mcp state tokio runtime present until drop"),
+                self.manager.list_resources(&server_name),
+            ) {
                 Ok(result) => resources.push(json!({
                     "server": server_name,
                     "resources": result.resources,
@@ -262,9 +299,13 @@ impl RuntimeMcpState {
     }
 
     pub fn read_resource(&mut self, server_name: &str, uri: &str) -> Result<String, ToolError> {
-        let result =
-            Self::block_on_isolated(&self.runtime, self.manager.read_resource(server_name, uri))
-                .map_err(|error| ToolError::new(error.to_string()))?;
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.read_resource(server_name, uri),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "contents": result.contents,
@@ -273,8 +314,13 @@ impl RuntimeMcpState {
     }
 
     pub fn list_prompts_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
-        let result = Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
-            .map_err(|error| ToolError::new(error.to_string()))?;
+        let result = Self::block_on_isolated(
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
+            self.manager.list_prompts(server_name),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
             "server": server_name,
             "prompts": result.prompts,
@@ -287,7 +333,12 @@ impl RuntimeMcpState {
         let mut failures = Vec::new();
 
         for server_name in self.server_names() {
-            match Self::block_on_isolated(&self.runtime, self.manager.list_prompts(&server_name)) {
+            match Self::block_on_isolated(
+                self.runtime
+                    .as_ref()
+                    .expect("mcp state tokio runtime present until drop"),
+                self.manager.list_prompts(&server_name),
+            ) {
                 Ok(result) => prompts.push(json!({
                     "server": server_name,
                     "prompts": result.prompts,
@@ -322,7 +373,9 @@ impl RuntimeMcpState {
         arguments: Option<serde_json::Value>,
     ) -> Result<String, ToolError> {
         let result = Self::block_on_isolated(
-            &self.runtime,
+            self.runtime
+                .as_ref()
+                .expect("mcp state tokio runtime present until drop"),
             self.manager.get_prompt(server_name, name, arguments),
         )
         .map_err(|error| ToolError::new(error.to_string()))?;
@@ -332,6 +385,23 @@ impl RuntimeMcpState {
             "messages": result.messages,
         }))
         .map_err(|error| ToolError::new(error.to_string()))
+    }
+}
+
+impl Drop for RuntimeMcpState {
+    fn drop(&mut self) {
+        // `BuiltRuntime::Drop::shutdown_mcp` already drove `manager.shutdown()`
+        // to completion (via `block_on_isolated`), but the MCP runtime itself is
+        // still dropped here — and for an ACP/one-shot session that drop runs
+        // inside the seam pump's async context (`rt.block_on(drive)`), where a
+        // plain `tokio::runtime::Runtime` drop panics ("Cannot drop a runtime in
+        // a context where blocking is not allowed"). `shutdown_background` tears
+        // it down without blocking, so it is safe in an async context; on the
+        // normal (main-thread) drop no MCP tasks remain in flight, so it is
+        // equivalent. Mirrors `SessionEngine`'s own teardown fix.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 

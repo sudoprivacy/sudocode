@@ -85,7 +85,6 @@ use cli::help::{
     render_diff_report, render_diff_report_for, render_last_tool_debug_report, render_memory_json,
     render_memory_report, render_repl_help, render_teleport_report, validate_no_args,
 };
-use cli::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
 use cli::pager::print_with_pager;
 use cli::session::{
     confirm_session_deletion, create_managed_session_handle, create_managed_session_handle_for,
@@ -114,6 +113,7 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
+use engine_host::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use render::{
@@ -201,10 +201,6 @@ const LEGACY_SESSION_EXTENSION: &str = "json";
 pub(crate) const OFFICIAL_REPO_URL: &str = "https://github.com/sudoprivacy/sudocode";
 pub(crate) const OFFICIAL_REPO_SLUG: &str = "sudoprivacy/sudocode";
 pub(crate) const DEPRECATED_INSTALL_COMMAND: &str = "cargo install sudocode";
-type RuntimePluginStateBuildOutput = (
-    Option<Arc<Mutex<RuntimeMcpState>>>,
-    Vec<RuntimeToolDefinition>,
-);
 
 /// Enable ANSI/VT escape-sequence processing on the Windows console.
 ///
@@ -7584,7 +7580,6 @@ fn build_runtime_with_plugin_state(
             let tools = mcp_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .manager
                 .tools_with_server();
             allowed.extend(session_mcp_tool_names(tools, session_mcp));
         }

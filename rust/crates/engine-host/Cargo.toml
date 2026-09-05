@@ -15,8 +15,17 @@ publish.workspace = true
 # resolution.
 engine-core = { path = "../engine-core" }
 # `ConfigLoader`, `PermissionMode`, `ResolvedPermissionMode`, the workspace-root
-# lookup, and the model-capability seeding the config helpers drive.
+# lookup, the model-capability seeding, and the MCP server manager / config types
+# the engine-side MCP state drives.
 runtime = { path = "../runtime" }
+# The MCP engine state merges plugin-advertised MCP servers (`PluginLoadOutcome`)
+# and exposes the discovered tools as `RuntimeToolDefinition`s.
+plugins = { path = "../plugins" }
+tools = { path = "../tools" }
+# MCP discovery/dispatch drives an isolated Tokio runtime; tool payloads and the
+# degraded-server report serialize through serde_json.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

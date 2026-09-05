@@ -6,12 +6,12 @@ use runtime::{McpServerManager, McpTool, PermissionMode, ToolError};
 use serde_json::json;
 use tools::RuntimeToolDefinition;
 
-pub(crate) type RuntimePluginStateBuildOutput = (
+pub type RuntimePluginStateBuildOutput = (
     Option<Arc<Mutex<RuntimeMcpState>>>,
     Vec<RuntimeToolDefinition>,
 );
 
-pub(crate) struct RuntimeMcpState {
+pub struct RuntimeMcpState {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) manager: McpServerManager,
     pub(crate) pending_servers: Vec<String>,
@@ -19,7 +19,7 @@ pub(crate) struct RuntimeMcpState {
 }
 
 impl RuntimeMcpState {
-    pub(crate) fn new(
+    pub fn new(
         runtime_config: &runtime::RuntimeConfig,
         plugin_load_outcome: &PluginLoadOutcome,
         session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
@@ -117,21 +117,28 @@ impl RuntimeMcpState {
         )))
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.runtime.block_on(self.manager.shutdown())?;
         Ok(())
     }
 
-    pub(crate) fn pending_servers(&self) -> Option<Vec<String>> {
+    pub fn pending_servers(&self) -> Option<Vec<String>> {
         (!self.pending_servers.is_empty()).then(|| self.pending_servers.clone())
     }
 
-    pub(crate) fn degraded_report(&self) -> Option<runtime::McpDegradedReport> {
+    pub fn degraded_report(&self) -> Option<runtime::McpDegradedReport> {
         self.degraded_report.clone()
     }
 
-    pub(crate) fn server_names(&self) -> Vec<String> {
+    pub fn server_names(&self) -> Vec<String> {
         self.manager.server_names()
+    }
+
+    /// The discovered `(tool_name, server_name)` pairs across all live servers.
+    /// The renderer folds these into the `--allowedTools` set so session MCP
+    /// tools stay reachable under an explicit tool restriction.
+    pub fn tools_with_server(&self) -> Vec<(String, String)> {
+        self.manager.tools_with_server()
     }
 
     /// Drives `future` to completion on a dedicated OS thread instead of
@@ -159,7 +166,7 @@ impl RuntimeMcpState {
         })
     }
 
-    pub(crate) fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+    pub fn reconnect_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         Self::block_on_isolated(&self.runtime, self.manager.reconnect_server(server_name))
             .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
@@ -167,7 +174,7 @@ impl RuntimeMcpState {
         ))
     }
 
-    pub(crate) fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+    pub fn disable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         Self::block_on_isolated(&self.runtime, self.manager.disable_server(server_name))
             .map_err(|e| ToolError::new(e.to_string()))?;
         Ok(format!(
@@ -175,7 +182,7 @@ impl RuntimeMcpState {
         ))
     }
 
-    pub(crate) fn enable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
+    pub fn enable_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         self.manager
             .enable_server(server_name)
             .map_err(|e| ToolError::new(e.to_string()))?;
@@ -184,7 +191,7 @@ impl RuntimeMcpState {
         ))
     }
 
-    pub(crate) fn call_tool(
+    pub fn call_tool(
         &mut self,
         qualified_tool_name: &str,
         arguments: Option<serde_json::Value>,
@@ -209,10 +216,7 @@ impl RuntimeMcpState {
         serde_json::to_string_pretty(&result).map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_resources_for_server(
-        &mut self,
-        server_name: &str,
-    ) -> Result<String, ToolError> {
+    pub fn list_resources_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         let result =
             Self::block_on_isolated(&self.runtime, self.manager.list_resources(server_name))
                 .map_err(|error| ToolError::new(error.to_string()))?;
@@ -223,7 +227,7 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_resources_for_all_servers(&mut self) -> Result<String, ToolError> {
+    pub fn list_resources_for_all_servers(&mut self) -> Result<String, ToolError> {
         let mut resources = Vec::new();
         let mut failures = Vec::new();
 
@@ -257,11 +261,7 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn read_resource(
-        &mut self,
-        server_name: &str,
-        uri: &str,
-    ) -> Result<String, ToolError> {
+    pub fn read_resource(&mut self, server_name: &str, uri: &str) -> Result<String, ToolError> {
         let result =
             Self::block_on_isolated(&self.runtime, self.manager.read_resource(server_name, uri))
                 .map_err(|error| ToolError::new(error.to_string()))?;
@@ -272,10 +272,7 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_prompts_for_server(
-        &mut self,
-        server_name: &str,
-    ) -> Result<String, ToolError> {
+    pub fn list_prompts_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
         let result = Self::block_on_isolated(&self.runtime, self.manager.list_prompts(server_name))
             .map_err(|error| ToolError::new(error.to_string()))?;
         serde_json::to_string_pretty(&json!({
@@ -285,7 +282,7 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn list_prompts_for_all_servers(&mut self) -> Result<String, ToolError> {
+    pub fn list_prompts_for_all_servers(&mut self) -> Result<String, ToolError> {
         let mut prompts = Vec::new();
         let mut failures = Vec::new();
 
@@ -318,7 +315,7 @@ impl RuntimeMcpState {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    pub(crate) fn get_prompt(
+    pub fn get_prompt(
         &mut self,
         server_name: &str,
         name: &str,
@@ -374,7 +371,7 @@ pub(crate) fn apply_session_mcp_servers(
 /// servers, for extending an active `--allowedTools` allow-list. Tools are
 /// attributed by their original (pre-normalization) server name, so names that
 /// normalize identically (e.g. `github.com` vs `github_com`) do not collide.
-pub(crate) fn session_mcp_tool_names(
+pub fn session_mcp_tool_names(
     all_tools: impl IntoIterator<Item = (String, String)>,
     session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> BTreeSet<String> {
@@ -385,7 +382,7 @@ pub(crate) fn session_mcp_tool_names(
         .collect()
 }
 
-pub(crate) fn build_runtime_mcp_state(
+pub fn build_runtime_mcp_state(
     runtime_config: &runtime::RuntimeConfig,
     plugin_load_outcome: &PluginLoadOutcome,
     session_mcp: &BTreeMap<String, runtime::ScopedMcpServerConfig>,

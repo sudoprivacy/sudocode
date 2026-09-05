@@ -1412,7 +1412,11 @@ name = "engine-host"
 version = "0.2.2"
 dependencies = [
  "engine-core",
+ "plugins",
  "runtime",
+ "serde_json",
+ "tokio",
+ "tools",
 ]
 
 [[package]]

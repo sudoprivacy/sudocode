@@ -35,3 +35,8 @@
 /// Config / model / permission resolution (the engine-side SSOT the REPL and
 /// `engine-acp` both build a session from).
 pub mod config;
+
+/// Engine-side MCP state: merges plugin/config/session MCP servers, discovers
+/// their tools on an isolated runtime, and dispatches MCP tool calls. The
+/// renderer holds an `Arc<Mutex<RuntimeMcpState>>` and drives it by method.
+pub mod mcp;

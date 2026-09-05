@@ -50,3 +50,7 @@ pub mod session;
 /// Renderer-agnostic — live output crosses the seam as an `EngineEvent`, never a
 /// direct terminal write. The `ConversationRuntime` holds it as its `T`.
 pub mod tool_executor;
+
+/// System-prompt assembly (process-default + CLI-flag overrides + per-session
+/// `_meta` layering). Which prompt the model sees is an engine input.
+pub mod prompt;

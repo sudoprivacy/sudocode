@@ -1402,23 +1402,65 @@ where
                     // Phase 2 (concurrent, &self): overlap the executes of the
                     // permitted tools — only `&self.tool_executor` and the owned
                     // inputs enter the futures, never `&mut self`.
-                    let exec_results: Vec<Option<Result<String, ToolError>>> =
-                        futures::future::join_all(prepared.iter().map(|p| async {
-                            if p.deny_reason.is_some() {
-                                None
-                            } else {
-                                Some(
-                                    self.tool_executor
-                                        .execute_with_context(
-                                            &p.tool_name,
-                                            &p.effective_input,
-                                            &dispatch_context,
-                                        )
-                                        .await,
-                                )
-                            }
-                        }))
-                        .await;
+                    // Race the concurrent batch against the abort signal so a
+                    // hung tool cannot pin the turn open with committed tool_use
+                    // blocks that never receive a tool_result. The push happens
+                    // *after* the select! so the batch future (which borrows
+                    // `&self.tool_executor`) is already dropped and `&mut self`
+                    // is free.
+                    let abort_signal = self.hook_abort_signal.clone();
+                    let batch_exec = futures::future::join_all(prepared.iter().map(|p| async {
+                        if p.deny_reason.is_some() {
+                            None
+                        } else {
+                            Some(
+                                self.tool_executor
+                                    .execute_with_context(
+                                        &p.tool_name,
+                                        &p.effective_input,
+                                        &dispatch_context,
+                                    )
+                                    .await,
+                            )
+                        }
+                    }));
+                    let maybe_results: Option<Vec<Option<Result<String, ToolError>>>> = tokio::select! {
+                        biased;
+                        () = abort_signal.cancelled() => None,
+                        results = batch_exec => Some(results),
+                    };
+                    let Some(exec_results) = maybe_results else {
+                        // Aborted mid-batch: answer every tool_use in this batch
+                        // and any still-pending ones with a synthetic interrupted
+                        // tool_result, then finish the turn.
+                        for p in &prepared {
+                            let result_message = ConversationMessage::tool_result(
+                                p.tool_use_id.clone(),
+                                p.tool_name.clone(),
+                                INTERRUPT_MESSAGE,
+                                true,
+                            );
+                            self.push_tool_result_message(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                result_message,
+                            )?;
+                        }
+                        self.push_interrupted_tool_results(
+                            &mut observer,
+                            iterations,
+                            &mut tool_results,
+                            &pending_tool_uses,
+                            batch_end,
+                        )?;
+                        return Ok(self.cancelled_summary(
+                            assistant_messages,
+                            tool_results,
+                            prompt_cache_events,
+                            iterations,
+                        ));
+                    };
 
                     // Phase 3 (serial, &mut self): post-hook + push, in order.
                     for (offset, p) in prepared.into_iter().enumerate() {
@@ -1599,11 +1641,58 @@ where
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);
-                        let (mut output, mut is_error) = match self
-                            .tool_executor
-                            .execute_with_context(&tool_name, &effective_input, &dispatch_context)
-                            .await
-                        {
+                        // Race tool execution against the abort signal. A naked
+                        // `.await` only observes the abort *after* the tool
+                        // returns; a tool that hangs (e.g. a sub-agent stuck
+                        // retrying a bad endpoint) would never yield, so ESC could
+                        // not interrupt it and the already-committed `tool_use`
+                        // would be left without a matching `tool_result` —
+                        // producing a session the API rejects on resume.
+                        let abort_signal = self.hook_abort_signal.clone();
+                        let exec_outcome = {
+                            let exec = self.tool_executor.execute_with_context(
+                                &tool_name,
+                                &effective_input,
+                                &dispatch_context,
+                            );
+                            tokio::select! {
+                                biased;
+                                () = abort_signal.cancelled() => None,
+                                res = exec => Some(res),
+                            }
+                        };
+                        let Some(exec_result) = exec_outcome else {
+                            // Aborted mid-execution: answer this tool_use (and any
+                            // still-pending ones) with a synthetic interrupted
+                            // tool_result so the persisted transcript keeps the
+                            // "every tool_use has a tool_result" invariant.
+                            let result_message = ConversationMessage::tool_result(
+                                tool_use_id,
+                                tool_name,
+                                INTERRUPT_MESSAGE,
+                                true,
+                            );
+                            self.push_tool_result_message(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                result_message,
+                            )?;
+                            self.push_interrupted_tool_results(
+                                &mut observer,
+                                iterations,
+                                &mut tool_results,
+                                &pending_tool_uses,
+                                tool_index + 1,
+                            )?;
+                            return Ok(self.cancelled_summary(
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
+                                iterations,
+                            ));
+                        };
+                        let (mut output, mut is_error) = match exec_result {
                             Ok(output) => (output, false),
                             Err(error) => (error.to_string(), true),
                         };

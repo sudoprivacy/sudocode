@@ -48,10 +48,6 @@ use engine_core::{
     base_url_for_mode, resolve_startup_auth_source, AuthMode, AuthSource, ProviderKind,
 };
 
-use cli::api_client::{
-    collect_prompt_cache_events, collect_tool_results, collect_tool_uses, final_assistant_text,
-    max_tokens_for_model,
-};
 use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
@@ -4103,7 +4099,7 @@ impl AcpSdkDelegate {
         // Context window comes from the model-capabilities SSOT file (per-model
         // entry, else the file's `default`). No hardcoded fallback here.
         let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
-        let max_output_tokens = max_tokens_for_model(&model) as usize;
+        let max_output_tokens = engine_core::max_tokens_for_model(&model) as usize;
         let overhead_tokens = session
             .runtime
             .api_client()
@@ -4703,10 +4699,10 @@ impl LiveCli {
                 break;
             };
             // Collect the JSON-output data from the event stream (the old paths
-            // read it off TurnSummary; TurnComplete drops the message vecs, so
-            // we re-derive here). `final_text` tracks the LAST assistant message
-            // only — reset it at each ToolCall (a message boundary), matching
-            // `final_assistant_text`'s "last message" semantics.
+            // read it off the finished turn; TurnComplete drops the message
+            // vecs, so we re-derive here). `final_text` tracks the LAST assistant
+            // message only — reset it at each ToolCall (a message boundary), the
+            // last-assistant-message semantics the JSON output has always used.
             match &ev {
                 EngineEvent::TurnComplete(tc) => outcome.complete = Some(tc.clone()),
                 EngineEvent::Error { message } => outcome.error = Some(message.clone()),

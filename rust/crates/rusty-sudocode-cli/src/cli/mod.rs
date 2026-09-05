@@ -1,4 +1,3 @@
-pub(crate) mod api_client;
 pub(crate) mod args;
 pub(crate) mod config_ui;
 pub(crate) mod cron;

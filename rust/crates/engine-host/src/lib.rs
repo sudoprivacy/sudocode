@@ -31,3 +31,7 @@
 //!
 //! The engine code moves in atomically (out of `rusty-sudocode-cli/src/main.rs`);
 //! this module doc is the scaffold that records the crate's contract first.
+
+/// Config / model / permission resolution (the engine-side SSOT the REPL and
+/// `engine-acp` both build a session from).
+pub mod config;

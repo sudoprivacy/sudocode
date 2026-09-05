@@ -18,6 +18,10 @@ commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
 engine-core = { path = "../engine-core" }
 engine-events = { path = "../engine-events" }
+# The engine side below the seam (config/model/permission resolution today; the
+# session builder + delegate as more engine code moves in). The REPL renderer
+# re-imports these so it never owns a second copy of the engine's config SSOT.
+engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"

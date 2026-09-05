@@ -1410,6 +1410,10 @@ dependencies = [
 [[package]]
 name = "engine-host"
 version = "0.2.2"
+dependencies = [
+ "engine-core",
+ "runtime",
+]
 
 [[package]]
 name = "equivalent"
@@ -3956,6 +3960,7 @@ dependencies = [
  "engine-acp",
  "engine-core",
  "engine-events",
+ "engine-host",
  "flate2",
  "futures",
  "futures-util",

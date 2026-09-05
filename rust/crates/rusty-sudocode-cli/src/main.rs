@@ -94,9 +94,9 @@ use cli::session::{
     resolve_session_reference, write_session_clear_backup, SessionHandle, LATEST_SESSION_REFERENCE,
 };
 use cli::status::{
-    format_status_report, normalize_permission_mode, print_sandbox_status_snapshot,
-    print_status_snapshot, print_version, sandbox_json_value, status_context, status_json_value,
-    version_json_value, StatusContext, StatusUsage,
+    format_status_report, print_sandbox_status_snapshot, print_status_snapshot, print_version,
+    sandbox_json_value, status_context, status_json_value, version_json_value, StatusContext,
+    StatusUsage,
 };
 use cli::tool_executor::{
     clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
@@ -135,35 +135,13 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "claude-opus-4-8";
-
-/// #148: Model provenance for `scode status` JSON/text output. Records where
-/// the resolved model string came from so consumers don't have to re-read argv
-/// to audit whether their `--model` flag was honored vs falling back to env
-/// or config or default.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModelSource {
-    /// Explicit `--model` / `--model=` CLI flag.
-    Flag,
-    /// ANTHROPIC_MODEL environment variable (when no flag was passed).
-    Env,
-    /// `model` key in `.scode.json` / `.nexus/sudocode/settings.json` (when neither
-    /// flag nor env set it).
-    Config,
-    /// Compiled-in DEFAULT_MODEL fallback.
-    Default,
-}
-
-impl ModelSource {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            ModelSource::Flag => "flag",
-            ModelSource::Env => "env",
-            ModelSource::Config => "config",
-            ModelSource::Default => "default",
-        }
-    }
-}
+// The config / model / permission web moved below the seam into
+// `engine_host::config`. Re-export the handful the CLI names by their bare
+// (`crate::`) path so the renderer keeps one import surface for them; the
+// resolution logic itself is the engine's input, not the renderer's concern.
+pub(crate) use engine_host::config::{
+    lookup_default_model, normalize_permission_mode, ModelSource, DEFAULT_MODEL,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelProvenance {
@@ -204,31 +182,6 @@ impl ModelProvenance {
             source,
         })
     }
-}
-
-/// Single source of truth for the env-or-config default model lookup. Returns
-/// `(resolved, raw, source)` when env or config wins, `None` to defer to the
-/// compiled-in default.
-pub(crate) fn lookup_default_model() -> Option<(String, String, ModelSource)> {
-    if let Some(env_model) = env::var("ANTHROPIC_MODEL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return Some((
-            resolve_model_alias_with_config(&env_model),
-            env_model,
-            ModelSource::Env,
-        ));
-    }
-    if let Some(config_model) = config_model_for_current_dir() {
-        return Some((
-            resolve_model_alias_with_config(&config_model),
-            config_model,
-            ModelSource::Config,
-        ));
-    }
-    None
 }
 
 // Build-time constants injected by build.rs (fall back to static values when

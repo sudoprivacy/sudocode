@@ -349,15 +349,6 @@ pub(crate) fn sandbox_json_value(status: &runtime::SandboxStatus) -> serde_json:
     })
 }
 
-pub(crate) fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
-    match mode.trim() {
-        "read-only" => Some("read-only"),
-        "workspace-write" => Some("workspace-write"),
-        "danger-full-access" => Some("danger-full-access"),
-        _ => None,
-    }
-}
-
 pub(crate) fn version_json_value() -> serde_json::Value {
     let executable_path = std::env::current_exe()
         .ok()

@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use runtime::{Session, SessionStore};
+use runtime::{CompactionConfig, Session, SessionStore};
 
 /// A resolved session's identity and on-disk path. A leaf value — it holds no
 /// runtime; the core session type carries a `SessionHandle` alongside its
@@ -120,6 +120,52 @@ fn session_clear_backup_path(session_path: &Path) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("session.jsonl");
     session_path.with_file_name(format!("{file_name}.before-clear-{timestamp}.bak"))
+}
+
+/// Canonicalize a user-supplied session `cwd`, verifying it resolves to a real
+/// directory. Returns a plain error string; the ACP renderer wraps it into an
+/// `AcpError` (engine-host stays independent of the ACP serialization).
+pub fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    let canonical =
+        fs::canonicalize(cwd).map_err(|error| format!("params.cwd is not accessible: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("params.cwd must be a directory".to_string());
+    }
+    Ok(canonical)
+}
+
+/// The user-facing message shown when a turn's context still overflows the
+/// model limit after (or without) compaction — distinguishing a too-long
+/// history from a single oversized request so the advice fits the cause.
+pub fn context_overflow_user_message(
+    session: &Session,
+    estimated_tokens: usize,
+    context_limit: usize,
+) -> String {
+    let summary_prefix = usize::from(session.compaction.is_some());
+    let compactable = session.messages.len().saturating_sub(summary_prefix)
+        > CompactionConfig::default().preserve_recent_messages;
+    if compactable {
+        format!(
+            "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
+            当前估算: {estimated_tokens} tokens\n\
+            模型限制: {context_limit} tokens\n\n\
+            建议解决方案：\n\
+            1. 开始新对话\n\
+            2. 使用支持更大上下文的模型\n\
+            3. 减少图片或大文本内容的发送"
+        )
+    } else {
+        format!(
+            "[context_window_exceeded][single_request_too_large] 最近的消息内容过大，压缩历史也无法放入模型上下文。\n\n\
+            当前估算: {estimated_tokens} tokens\n\
+            模型限制: {context_limit} tokens\n\n\
+            建议解决方案：\n\
+            1. 使用较小的图片（压缩或缩小图片尺寸）\n\
+            2. 简化输入内容\n\
+            3. 使用支持更大上下文的模型"
+        )
+    }
 }
 
 #[cfg(test)]

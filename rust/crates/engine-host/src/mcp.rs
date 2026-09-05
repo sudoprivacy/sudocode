@@ -538,6 +538,18 @@ pub(crate) fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Shut the MCP servers down (blocking, best-effort) when tearing a runtime
+/// down. A poisoned lock or a failed shutdown is swallowed: teardown must not
+/// abort the surrounding cleanup path.
+pub fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
+    if let Some(state) = mcp_state {
+        let _ = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

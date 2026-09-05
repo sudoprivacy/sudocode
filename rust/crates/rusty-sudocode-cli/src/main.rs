@@ -109,15 +109,19 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
 use engine_host::config::{resolve_auth_mode, resolve_model_switch_auth_mode};
-use engine_host::mcp::{build_runtime_mcp_state, session_mcp_tool_names, RuntimeMcpState};
+use engine_host::mcp::{
+    build_runtime_mcp_state, session_mcp_tool_names, shutdown_mcp_state_best_effort,
+    RuntimeMcpState,
+};
 use engine_host::prompt::{
     apply_cli_prompt_overrides, build_acp_system_prompt, build_system_prompt_for,
     set_cli_prompt_overrides,
 };
 use engine_host::session::{
-    create_managed_session_handle, create_managed_session_handle_for, delete_managed_session,
-    load_session_reference, new_cli_session, new_cli_session_for, resolve_session_reference,
-    write_session_clear_backup, SessionHandle,
+    canonical_session_cwd, context_overflow_user_message, create_managed_session_handle,
+    create_managed_session_handle_for, delete_managed_session, load_session_reference,
+    new_cli_session, new_cli_session_for, resolve_session_reference, write_session_clear_backup,
+    SessionHandle,
 };
 use engine_host::tool_executor::{
     clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
@@ -3079,7 +3083,7 @@ impl AcpCliAgent {
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<AcpCliSession, AcpError> {
-        let cwd = canonical_session_cwd(cwd)?;
+        let cwd = canonical_session_cwd(cwd).map_err(AcpError::invalid_params)?;
         // Config, plugin/MCP state and the API client's `.env` lookup all
         // resolve against the workspace root (see `runtime::workspace_root`).
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
@@ -3485,7 +3489,7 @@ impl SessionEngine {
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, String> {
-        let cwd = canonical_session_cwd(cwd).map_err(|e| e.to_string())?;
+        let cwd = canonical_session_cwd(cwd)?;
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let resolved_model = if model_flag_raw.is_some() {
             model.clone()
@@ -4107,16 +4111,6 @@ impl SessionLifecycle for SessionEngine {
     }
 }
 
-fn canonical_session_cwd(cwd: &Path) -> Result<PathBuf, AcpError> {
-    let canonical = fs::canonicalize(cwd).map_err(|error| {
-        AcpError::invalid_params(format!("params.cwd is not accessible: {error}"))
-    })?;
-    if !canonical.is_dir() {
-        return Err(AcpError::invalid_params("params.cwd must be a directory"));
-    }
-    Ok(canonical)
-}
-
 fn run_acp_server(
     model: String,
     model_flag_raw: Option<String>,
@@ -4687,7 +4681,7 @@ impl engine_acp::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
-        let cwd = canonical_session_cwd(&cwd)?;
+        let cwd = canonical_session_cwd(&cwd).map_err(AcpError::invalid_params)?;
         // The session store, config and system prompt all resolve against
         // the workspace root; scope this thread to the requested cwd.
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
@@ -4704,7 +4698,7 @@ impl engine_acp::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), engine_acp::AcpError> {
-        let cwd = canonical_session_cwd(&cwd)?;
+        let cwd = canonical_session_cwd(&cwd).map_err(AcpError::invalid_params)?;
         // Read the source before entering the new cwd's scope: a persisted
         // source resolves through *its* directory's session store.
         let parent = self.resolve_fork_source(&source)?;
@@ -5121,36 +5115,6 @@ impl AcpSdkDelegate {
 /// under the limit. `[single_request_too_large]`: nothing but the summary
 /// and the most recent messages remain — the recent messages themselves are
 /// too large (typically a big paste or image), and compacting cannot help.
-fn context_overflow_user_message(
-    session: &Session,
-    estimated_tokens: usize,
-    context_limit: usize,
-) -> String {
-    let summary_prefix = usize::from(session.compaction.is_some());
-    let compactable = session.messages.len().saturating_sub(summary_prefix)
-        > CompactionConfig::default().preserve_recent_messages;
-    if compactable {
-        format!(
-            "[context_window_exceeded][history_context_too_large] 对话内容过长，即使压缩后仍超出模型限制。\n\n\
-            当前估算: {estimated_tokens} tokens\n\
-            模型限制: {context_limit} tokens\n\n\
-            建议解决方案：\n\
-            1. 开始新对话\n\
-            2. 使用支持更大上下文的模型\n\
-            3. 减少图片或大文本内容的发送"
-        )
-    } else {
-        format!(
-            "[context_window_exceeded][single_request_too_large] 最近的消息内容过大，压缩历史也无法放入模型上下文。\n\n\
-            当前估算: {estimated_tokens} tokens\n\
-            模型限制: {context_limit} tokens\n\n\
-            建议解决方案：\n\
-            1. 使用较小的图片（压缩或缩小图片尺寸）\n\
-            2. 简化输入内容\n\
-            3. 使用支持更大上下文的模型"
-        )
-    }
-}
 
 /// Parse an on/off toggle value. Accepts `on|true|1` and `off|false|0`
 /// (case-insensitive). Returns `None` for unrecognized input.
@@ -7626,15 +7590,6 @@ fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     ))
-}
-
-fn shutdown_mcp_state_best_effort(mcp_state: &Option<Arc<Mutex<RuntimeMcpState>>>) {
-    if let Some(state) = mcp_state {
-        let _ = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .shutdown();
-    }
 }
 
 struct CliHookProgressReporter;

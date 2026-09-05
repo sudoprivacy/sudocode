@@ -95,9 +95,6 @@ use cli::status::{
     sandbox_json_value, status_context, status_json_value, version_json_value, StatusContext,
     StatusUsage,
 };
-use cli::tool_executor::{
-    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
-};
 use commands::{
     acp_slash_commands, classify_skills_slash_command, format_acp_unsupported_slash_command,
     handle_agents_slash_command, handle_agents_slash_command_json,
@@ -116,6 +113,9 @@ use engine_host::session::{
     create_managed_session_handle, create_managed_session_handle_for, delete_managed_session,
     load_session_reference, new_cli_session, new_cli_session_for, resolve_session_reference,
     write_session_clear_backup, SessionHandle,
+};
+use engine_host::tool_executor::{
+    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
 };
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};

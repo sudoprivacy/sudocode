@@ -1414,6 +1414,7 @@ dependencies = [
  "engine-core",
  "plugins",
  "runtime",
+ "serde",
  "serde_json",
  "tokio",
  "tools",

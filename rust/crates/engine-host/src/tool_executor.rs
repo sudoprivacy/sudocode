@@ -1,15 +1,16 @@
 use std::cell::RefCell;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
     ContentBlock, PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
-    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor,
+    QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor,
 };
 use serde::Deserialize;
 use tools::GlobalToolRegistry;
 
-use crate::{AllowedToolSet, RuntimeMcpState};
+use crate::config::AllowedToolSet;
+use crate::mcp::RuntimeMcpState;
 
 // ---------------------------------------------------------------------------
 // Global side-channel for the "clear context & execute plan" flow.
@@ -38,12 +39,12 @@ fn set_pending_plan_execution(plan: String) {
 }
 
 /// Take the pending plan (if any), clearing the slot.
-pub(crate) fn take_pending_plan_execution() -> Option<String> {
+pub fn take_pending_plan_execution() -> Option<String> {
     plan_execution_slot().take()
 }
 
 /// Clear the pending plan without returning it.
-pub(crate) fn clear_pending_plan_execution() {
+pub fn clear_pending_plan_execution() {
     *plan_execution_slot() = None;
 }
 
@@ -84,7 +85,7 @@ pub(crate) struct GetMcpPromptRequest {
     pub(crate) arguments: Option<serde_json::Value>,
 }
 
-pub(crate) struct CliToolExecutor {
+pub struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -104,7 +105,7 @@ pub(crate) struct CliToolExecutor {
 }
 
 impl CliToolExecutor {
-    pub(crate) fn new(
+    pub fn new(
         allowed_tools: Option<AllowedToolSet>,
         tool_registry: GlobalToolRegistry,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -123,11 +124,11 @@ impl CliToolExecutor {
     /// DT_STREAM inbox over gRPC (via the shared `handle_send_message`).
     /// Set at startup only when nexus-A2A is configured; absent it,
     /// `send_message` is not advertised to the model.
-    pub(crate) fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
+    pub fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
         self.mailbox_sender = Some(sender);
     }
 
-    pub(crate) fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
+    pub fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
         *self.question_prompter.get_mut() = Some(prompter);
     }
 
@@ -651,7 +652,7 @@ fn mcp_progress_forward(sink: runtime::ProgressSink) -> runtime::McpProgressCall
     })
 }
 
-pub(crate) fn permission_policy(
+pub fn permission_policy(
     mode: PermissionMode,
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,

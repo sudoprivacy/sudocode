@@ -45,3 +45,8 @@ pub mod mcp;
 /// (the transcript store the turn loop reads and writes). The renderer keeps
 /// only the session-list / picker / confirmation UI.
 pub mod session;
+
+/// The CLI tool executor: dispatches a tool call and returns the result.
+/// Renderer-agnostic — live output crosses the seam as an `EngineEvent`, never a
+/// direct terminal write. The `ConversationRuntime` holds it as its `T`.
+pub mod tool_executor;

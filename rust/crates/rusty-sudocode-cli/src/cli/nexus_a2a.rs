@@ -2,7 +2,7 @@
 //!
 //! Holds the one daemon connection an interactive `scode` process makes,
 //! lazily dialed from [`runtime::nexus_mailbox::Config::from_env`]. The send
-//! half feeds [`crate::cli::tool_executor::CliToolExecutor`] via the shared
+//! half feeds [`engine_host::tool_executor::CliToolExecutor`] via the shared
 //! [`MailboxSender`] (the same handler the co-host uses); the receive half is
 //! a background poller that surfaces peer messages into the REPL as they
 //! arrive.

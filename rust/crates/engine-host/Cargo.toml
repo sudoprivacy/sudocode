@@ -26,6 +26,8 @@ tools = { path = "../tools" }
 # degraded-server report serialize through serde_json.
 tokio = { version = "1", features = ["rt-multi-thread"] }
 serde_json.workspace = true
+# The tool executor deserializes each tool's JSON input into a typed request.
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

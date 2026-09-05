@@ -79,7 +79,12 @@ pub struct ModelSwitchReport {
 
 pub struct SessionEngine {
     session: std::sync::Mutex<AcpCliSession>,
-    tokio_runtime: tokio::runtime::Runtime,
+    /// The session's blocking runtime for turn work. `Option` so `Drop` can take
+    /// it and `shutdown_background()` it: the seam pump owns this delegate and
+    /// drops it from inside its own async context (`rt.block_on(drive)`), and a
+    /// plain `Runtime` drop there panics ("cannot drop a runtime in an async
+    /// context"). `shutdown_background` tears down without blocking.
+    tokio_runtime: Option<tokio::runtime::Runtime>,
     allowed_tools: Option<AllowedToolSet>,
     /// Effective permission mode — the engine's SSOT (the renderer no longer
     /// keeps a copy). Resolved once at build from the CLI override / default;
@@ -161,13 +166,23 @@ impl SessionEngine {
         };
         Ok(Self {
             session: std::sync::Mutex::new(session),
-            tokio_runtime: tokio::runtime::Runtime::new()
-                .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
+            tokio_runtime: Some(
+                tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
+            ),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
             auth_mode: std::sync::Mutex::new(auth_mode),
         })
+    }
+
+    /// The session's blocking runtime, present for the delegate's whole life
+    /// (only `Drop` takes it).
+    fn rt(&self) -> &tokio::runtime::Runtime {
+        self.tokio_runtime
+            .as_ref()
+            .expect("session engine tokio runtime present until drop")
     }
 
     fn lock_session(&self) -> std::sync::MutexGuard<'_, AcpCliSession> {
@@ -326,6 +341,21 @@ impl SessionEngine {
     }
 }
 
+impl Drop for SessionEngine {
+    fn drop(&mut self) {
+        // The seam pump (`EngineSession::spawn`) owns this delegate and, on a
+        // one-shot exit, drops the last `Arc` from inside its own async context
+        // (`rt.block_on(drive)`). Dropping a `tokio::runtime::Runtime` there
+        // panics ("Cannot drop a runtime in a context where blocking is not
+        // allowed"). `shutdown_background` tears the runtime down without
+        // blocking, so it is safe in an async context; on the normal (main-
+        // thread) drop no turn tasks remain in flight, so it is equivalent.
+        if let Some(rt) = self.tokio_runtime.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
 impl engine_core::EngineDelegate for SessionEngine {
     fn run_turn(
         &self,
@@ -381,12 +411,12 @@ impl engine_core::EngineDelegate for SessionEngine {
                     attrs
                 });
             }
-            pre_send_compaction = self
-                .tokio_runtime
-                .block_on(session.runtime.compact_in_place(CompactionConfig {
-                    max_estimated_tokens: 0, // force compaction
-                    ..CompactionConfig::default()
-                }));
+            pre_send_compaction =
+                self.rt()
+                    .block_on(session.runtime.compact_in_place(CompactionConfig {
+                        max_estimated_tokens: 0, // force compaction
+                        ..CompactionConfig::default()
+                    }));
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
@@ -402,7 +432,7 @@ impl engine_core::EngineDelegate for SessionEngine {
         }
 
         let turn_summary = self
-            .tokio_runtime
+            .rt()
             .block_on(
                 session
                     .runtime
@@ -711,7 +741,7 @@ impl SessionLifecycle for SessionEngine {
         let cwd = session.cwd.clone();
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let result = self
-            .tokio_runtime
+            .rt()
             .block_on(session.runtime.compact(CompactionConfig::default(), None));
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();

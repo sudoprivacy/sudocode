@@ -301,63 +301,14 @@ pub(crate) fn format_connected_line_with_config(
     format!("Connected: {model} via {provider}{auth_hint}{endpoint_hint}")
 }
 
-pub(crate) fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
-    let config = load_sudocode_config_for_current_dir();
-    let model_lower = model.to_ascii_lowercase();
-
-    // Config aliases with display names + provider info.
-    let mut available_lines = String::new();
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (alias, entry) in &config.models {
-        let marker = if alias == &model_lower { " *" } else { "" };
-        let provider_modes: Vec<&str> = entry.providers.keys().map(String::as_str).collect();
-        write!(
-            available_lines,
-            "\n    {:<16} {} ({}){marker}",
-            alias,
-            entry.name,
-            provider_modes.join(", ")
-        )
-        .expect("write to string");
-        seen.insert(alias.to_ascii_lowercase());
-    }
-
-    // Capabilities SSOT models not already covered by config aliases.
-    for id in runtime::model_capabilities::all_model_ids() {
-        if !seen.contains(&id.to_ascii_lowercase()) {
-            let marker = if id.eq_ignore_ascii_case(model) {
-                " *"
-            } else {
-                ""
-            };
-            write!(available_lines, "\n    {id}{marker}").expect("write to string");
-        }
-    }
-
-    format!(
-        "Model
-  Current model    {model}
-  Available models{available_lines}
-  Session messages {message_count}
-  Session turns    {turns}
-
-Usage
-  Switch models with /model <name>"
-    )
-}
-
-pub(crate) fn format_model_switch_report(
-    previous: &str,
-    next: &str,
-    message_count: usize,
-) -> String {
-    format!(
-        "Model updated
-  Previous         {previous}
-  Current          {next}
-  Preserved msgs   {message_count}"
-    )
-}
+// The model / compact / sandbox report formatters now live in
+// `commands::reports` (shared with the ACP renderer so both render the same
+// reports from one definition). `format_model_report` gained a `config`
+// parameter there so it stays a pure formatter: the caller loads the config.
+pub(crate) use commands::reports::{
+    format_acp_compact_report, format_model_report, format_model_switch_report,
+    format_sandbox_report,
+};
 
 pub(crate) fn format_permissions_report(mode: &str) -> String {
     let modes = [
@@ -521,82 +472,8 @@ pub(crate) fn format_compact_report(
     }
 }
 
-/// `/compact` report under ACP: what happened, how, and the effect on the
-/// transcript. `method` is `None` when nothing was removed; `summary_source`
-/// carries the LLM fallback reason (if any) alongside the method.
-pub(crate) fn format_acp_compact_report(
-    before_tokens: usize,
-    after_tokens: usize,
-    removed: usize,
-    kept: usize,
-    method: Option<(runtime::CompactionMethod, &runtime::CompactionSummarySource)>,
-) -> String {
-    match method {
-        Some((method, summary_source)) => format!(
-            "Compact
-  Result           compacted
-  Method           {}
-  Summary          {summary_source}
-  Messages removed {removed}
-  Messages kept    {kept}
-  Estimated tokens {before_tokens} before, {after_tokens} after",
-            method.as_str()
-        ),
-        None => format!(
-            "Compact
-  Result           skipped
-  Reason           nothing to compact beyond the preserved recent messages
-  Messages kept    {kept}
-  Estimated tokens {after_tokens}"
-        ),
-    }
-}
-
 pub(crate) fn format_auto_compaction_notice(removed: usize) -> String {
     format!("[auto-compacted: removed {removed} messages]")
-}
-
-pub(crate) fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
-    format!(
-        "Sandbox
-  Enabled           {}
-  Active            {}
-  Supported         {}
-  In container      {}
-  Requested ns      {}
-  Active ns         {}
-  Requested net     {}
-  Active net        {}
-  Filesystem mode   {}
-  Filesystem active {}
-  Allowed mounts    {}
-  Markers           {}
-  Fallback reason   {}",
-        status.enabled,
-        status.active,
-        status.supported,
-        status.in_container,
-        status.requested.namespace_restrictions,
-        status.namespace_active,
-        status.requested.network_isolation,
-        status.network_active,
-        status.filesystem_mode.as_str(),
-        status.filesystem_active,
-        if status.allowed_mounts.is_empty() {
-            "<none>".to_string()
-        } else {
-            status.allowed_mounts.join(", ")
-        },
-        if status.container_markers.is_empty() {
-            "<none>".to_string()
-        } else {
-            status.container_markers.join(", ")
-        },
-        status
-            .fallback_reason
-            .clone()
-            .unwrap_or_else(|| "<none>".to_string()),
-    )
 }
 
 pub(crate) fn format_commit_preflight_report(

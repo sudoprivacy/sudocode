@@ -203,6 +203,16 @@ impl ModelProvenance {
             source,
         })
     }
+
+    /// A borrowed, renderer-neutral view for the shared `commands::reports`
+    /// status formatter (whose `provenance` parameter is crate-agnostic).
+    pub(crate) fn view(&self) -> commands::reports::ProvenanceView<'_> {
+        commands::reports::ProvenanceView {
+            resolved: &self.resolved,
+            raw: self.raw.as_deref(),
+            source: self.source.as_str(),
+        }
+    }
 }
 
 // Build-time constants injected by build.rs (fall back to static values when
@@ -219,9 +229,15 @@ const INTERNAL_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const POST_TOOL_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 const LEGACY_SESSION_EXTENSION: &str = "json";
-pub(crate) const OFFICIAL_REPO_URL: &str = "https://github.com/sudoprivacy/sudocode";
-pub(crate) const OFFICIAL_REPO_SLUG: &str = "sudoprivacy/sudocode";
-pub(crate) const DEPRECATED_INSTALL_COMMAND: &str = "cargo install sudocode";
+/// This crate's build metadata, packaged for the shared `commands::reports`
+/// doctor report (which is crate-agnostic and takes it as a parameter).
+pub(crate) fn build_info() -> commands::reports::BuildInfo<'static> {
+    commands::reports::BuildInfo {
+        version: VERSION,
+        git_sha: GIT_SHA,
+        build_target: BUILD_TARGET,
+    }
+}
 
 /// Enable ANSI/VT escape-sequence processing on the Windows console.
 ///
@@ -1416,7 +1432,7 @@ fn run_resume_command(
             })
         }
         SlashCommand::Doctor => {
-            let report = render_doctor_report()?;
+            let report = render_doctor_report(&build_info())?;
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
                 message: Some(report.render()),
@@ -3042,6 +3058,7 @@ impl AcpCliAgent {
                 &current,
                 session.runtime.session().messages.len(),
                 UsageTracker::from_session(session.runtime.session()).turns(),
+                &load_sudocode_config_for_current_dir(),
             ));
         };
 
@@ -3051,6 +3068,7 @@ impl AcpCliAgent {
                 &current,
                 session.runtime.session().messages.len(),
                 UsageTracker::from_session(session.runtime.session()).turns(),
+                &load_sudocode_config_for_current_dir(),
             ));
         }
 
@@ -3670,7 +3688,7 @@ impl engine_acp::acp_sdk_server::SdkAcpDelegate for AcpSdkDelegate {
             }
             SlashCommand::Doctor => {
                 let _scope = runtime::WorkspaceRootScope::enter(self.session_cwd(session_id)?);
-                render_doctor_report()
+                render_doctor_report(&build_info())
                     .map(|report| report.render())
                     .map_err(|e| engine_acp::AcpError::internal(e.to_string()))?
             }
@@ -5301,7 +5319,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Doctor => {
-                self.out_println(render_doctor_report()?.render());
+                self.out_println(render_doctor_report(&build_info())?.render());
                 false
             }
             SlashCommand::History { count } => {
@@ -5495,6 +5513,7 @@ impl LiveCli {
                 &report.resolved,
                 report.message_count,
                 report.turns,
+                &load_sudocode_config_for_current_dir(),
             ));
             Ok(false)
         }

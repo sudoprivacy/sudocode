@@ -892,9 +892,9 @@ fn print_system_prompt(
     Ok(())
 }
 
-/// `--resume` without arguments: list available sessions so the user can
-/// pick one to resume.  Prints id, age, message count, and branch — enough
-/// context to identify the right session.
+/// The `--resume list` session browser: prints available sessions with id,
+/// age, message count, and branch — enough context to pick a specific older
+/// session. (Bare `--resume` resumes the latest session directly.)
 fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     use cli::session::list_managed_sessions;
 
@@ -928,7 +928,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    println!("Available sessions (use `scode --resume <id>`):\n");
+    println!("Available sessions (`scode --resume <id>`, or `scode --resume` for the latest):\n");
     for (i, session) in sessions.iter().enumerate() {
         let age = cli::session::format_session_modified_age(session.modified_epoch_millis);
         let branch = session
@@ -944,7 +944,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         );
     }
     println!();
-    println!("Tip: `scode --resume latest` resumes the most recent session.");
+    println!("Tip: `scode --resume` (no id) resumes the most recent session.");
     Ok(())
 }
 

@@ -79,6 +79,27 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  boundary-gate:
+    name: engine/renderer boundary gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - name: Renderer crates must not name engine-internal streaming types
+        # The engine<->renderer seam is enforced by the dependency graph: a
+        # renderer crate that dropped its runtime/api dep literally cannot name
+        # runtime::RuntimeObserver / runtime::TurnSummary. This gate is the CI
+        # half of that bisection — it fails loudly if either type is reintroduced
+        # into a renderer crate (route it through the EngineEvent seam instead).
+        run: |
+          if rg -n --pcre2 'runtime::(TurnSummary|RuntimeObserver)' \
+               rust/crates/rusty-sudocode-cli rust/crates/engine-acp; then
+            echo "::error::a renderer crate names a forbidden engine-internal type (runtime::RuntimeObserver / runtime::TurnSummary) — cross the EngineEvent seam instead"
+            exit 1
+          fi
+
   test-workspace:
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

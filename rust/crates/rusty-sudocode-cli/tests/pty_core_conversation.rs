@@ -166,7 +166,6 @@ fn multi_tool_roundtrip() {
 
 /// Ctrl+C during a long-running bash tool exits cleanly, not hang.
 #[test]
-#[cfg(unix)]
 fn sigint_cancels_streaming() {
     let env = TestEnv::new("sigint-cancel");
     let prompt = env.prompt(
@@ -202,7 +201,6 @@ fn sigint_cancels_streaming() {
 
 /// ESC key during a long-running bash tool exits cleanly (CC parity).
 #[test]
-#[cfg(unix)]
 fn esc_cancels_streaming() {
     let env = TestEnv::new("esc-cancel");
     let prompt = env.prompt(

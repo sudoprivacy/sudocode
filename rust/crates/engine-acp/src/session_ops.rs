@@ -333,6 +333,14 @@ pub(crate) fn prepare_and_push_images(
     let vision_capable = runtime::model_capabilities::vision_capable(&active_model);
     let sudocode_config = load_sudocode_config_for_cwd(cwd);
     let sudorouter_creds = extract_sudorouter_credentials(&sudocode_config);
+    // Diagnostics on stderr (stdout is the JSON-RPC wire): the image-handling
+    // e2e asserts on these lines to prove the VLM route actually fired.
+    eprintln!("[push_images] entered — {} images", images.len());
+    eprintln!("[push_images] active_model={active_model:?} vision_capable={vision_capable}");
+    eprintln!(
+        "[push_images] sudorouter_creds_present={}",
+        sudorouter_creds.is_some()
+    );
 
     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(images.len());
     for (index, (data, mime_type)) in images.iter().enumerate() {
@@ -377,12 +385,19 @@ fn vlm_describe_block_or_placeholder(
 ) -> ContentBlock {
     let human_idx = index + 1;
     let Some((base_url, api_key)) = sudorouter_creds else {
+        eprintln!(
+            "[push_images] image #{human_idx} — no sudorouter creds, falling back to placeholder"
+        );
         return ContentBlock::Text {
             text: format!(
                 "[Image #{human_idx} could not be sent (sudorouter not configured) — please configure proxy.sudorouter or use a vision-capable model.]"
             ),
         };
     };
+    eprintln!(
+        "[push_images] image #{human_idx} — VLM-route start, {} b64 bytes",
+        image_b64.len()
+    );
 
     let base_url = base_url.clone();
     let api_key = api_key.clone();
@@ -414,14 +429,23 @@ fn vlm_describe_block_or_placeholder(
     };
 
     match result {
-        Ok(description) => ContentBlock::Text {
-            text: format!("[Image #{human_idx}: {description}]"),
-        },
-        Err(e) => ContentBlock::Text {
-            text: format!(
-                "[Image #{human_idx} could not be described automatically ({e}) — please retype your question with the image's key contents in text.]"
-            ),
-        },
+        Ok(description) => {
+            eprintln!(
+                "[push_images] image #{human_idx} — VLM done, {} desc chars",
+                description.len()
+            );
+            ContentBlock::Text {
+                text: format!("[Image #{human_idx}: {description}]"),
+            }
+        }
+        Err(e) => {
+            eprintln!("[push_images] image #{human_idx} — VLM describe failed: {e}");
+            ContentBlock::Text {
+                text: format!(
+                    "[Image #{human_idx} could not be described automatically ({e}) — please retype your question with the image's key contents in text.]"
+                ),
+            }
+        }
     }
 }
 

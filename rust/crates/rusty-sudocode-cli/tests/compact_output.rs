@@ -1,11 +1,8 @@
-// `#![cfg(unix)]` — same diagnosis as the ACP integration gates:
-// scode-subprocess + MockAnthropicService HTTP loop hangs on
-// Windows before producing output (each scenario took ~400s to
-// time out locally). Likely a stdio/pipe-buffer interaction with
-// the mock HTTP server; investigation belongs to a Windows-scode
-// follow-up, not this PR. Same gate applies to every test file in
-// this directory that drives scode + a mock backend.
-#![cfg(unix)]
+// Un-gated for Windows (§5): the historical ~400s hang was NOT a pipe-buffer
+// issue — it was `run_scode`'s `env_clear()` dropping `SystemRoot` (+ the other
+// Windows-essential vars), without which the child's ws2_32 / TLS / temp-file
+// init fails and its HTTP client to the localhost mock server never connects.
+// `run_scode` now preserves those on Windows + uses the real host PATH.
 
 use std::fs;
 use std::path::PathBuf;
@@ -220,13 +217,10 @@ fn piped_stdin_with_compact_flag_produces_clean_output() {
 
     let prompt = format!("{SCENARIO_PREFIX}streaming_text");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scode"))
-        .current_dir(&workspace)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &config_home)
-        .env("HOME", &home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
+    command.current_dir(&workspace);
+    apply_isolated_env(&mut command, &config_home, &home);
+    let mut child = command
         .args([
             "--auth",
             "api-key",
@@ -289,15 +283,50 @@ fn run_scode(
     full_args.extend_from_slice(args);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
+    command.current_dir(cwd).args(&full_args);
+    apply_isolated_env(&mut command, config_home, home);
+    command.output().expect("scode should launch")
+}
+
+/// Apply the isolated test environment to `command`: `env_clear` + the minimal
+/// vars scode needs (config home, HOME, NO_COLOR).
+///
+/// On Windows, `env_clear` also drops `SystemRoot` / `SystemDrive` / `TEMP`,
+/// which ws2_32 (the localhost HTTP client to the mock server), TLS init and
+/// temp-file creation require — without them the child never connects and the
+/// run hangs (the historical ~400s Windows timeout). Re-inject those + use the
+/// real host `PATH` there (the POSIX `/usr/bin:/bin` below is empty on Windows).
+/// Unix keeps the minimal, isolated PATH unchanged.
+fn apply_isolated_env(
+    command: &mut Command,
+    config_home: &std::path::Path,
+    home: &std::path::Path,
+) {
     command
-        .current_dir(cwd)
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", config_home)
         .env("HOME", home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args(&full_args);
-    command.output().expect("scode should launch")
+        .env("NO_COLOR", "1");
+    #[cfg(windows)]
+    {
+        if let Ok(path) = std::env::var("PATH") {
+            command.env("PATH", path);
+        }
+        for key in [
+            "SystemRoot",
+            "SystemDrive",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "windir",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                command.env(key, val);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    command.env("PATH", "/usr/bin:/bin");
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

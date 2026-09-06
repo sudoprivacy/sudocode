@@ -368,8 +368,27 @@ fn turn_label(blocks: &[ContentBlock]) -> String {
 
 /// `RuntimeObserver` → [`EngineEvent`] (fire-and-forget). All seven runtime
 /// callbacks map straight to an event.
-struct ObserverAdapter {
+///
+/// Public so an out-of-process renderer that runs its own turn — the ACP
+/// server, which drives one [`EngineDelegate::run_turn`] per `session/prompt`
+/// — reuses the exact same runtime→event translation the in-process pump uses,
+/// instead of re-implementing a `RuntimeObserver` (which would force a renderer
+/// crate to name `runtime::RuntimeObserver`, defeating the seam). The ACP path
+/// owns the receiving end of `tx` and maps the [`EngineEvent`]s onto its wire.
+pub struct ObserverAdapter {
     tx: std_mpsc::Sender<EngineEvent>,
+}
+
+impl ObserverAdapter {
+    /// Build an adapter that forwards every runtime callback to `tx` as an
+    /// [`EngineEvent`]. `tx` is a plain [`std::sync::mpsc::Sender`] so the
+    /// receiving renderer can block-recv without a Tokio runtime (the ACP path
+    /// bridges it into its async `select!` via a small forwarder thread, the
+    /// same shape the pump uses for its command channel).
+    #[must_use]
+    pub fn new(tx: std_mpsc::Sender<EngineEvent>) -> Self {
+        Self { tx }
+    }
 }
 
 impl RuntimeObserver for ObserverAdapter {

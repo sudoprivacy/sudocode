@@ -788,11 +788,17 @@ fn parse_resume_from_clap(
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
 ) -> Result<CliAction, String> {
-    let (session_path, command_tokens) = if session_str.is_empty() && trailing.is_empty() {
-        // `--resume` without value and no trailing commands — list sessions.
+    let (session_path, command_tokens) = if trailing.is_empty()
+        && matches!(
+            session_str.to_ascii_lowercase().as_str(),
+            "list" | "ls" | "sessions"
+        ) {
+        // `--resume list` / `ls` / `sessions` — the explicit session browser.
         return Ok(CliAction::ListSessions { output_format });
     } else if session_str.is_empty() {
-        // `--resume /status` etc — resume latest with commands
+        // `--resume` with no id now resumes the most recent session directly —
+        // no need to copy a session id (use `--resume list` to browse). Any
+        // trailing `/commands` run against that latest session.
         (PathBuf::from(LATEST_SESSION_REFERENCE), trailing)
     } else if looks_like_slash_command_token(session_str) {
         // `--resume /status` — session_str is actually a command

@@ -15,8 +15,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 
 use crate::acp_sdk_server::{
-    new_session_registry, run_acp_on_transport, SdkAcpConfig, SdkAcpDelegate, SharedDelegate,
-    SharedSessionRegistry,
+    new_session_registry, run_acp_on_transport, SdkAcpConfig, SharedSessionRegistry,
 };
 
 static WEB_UI_HTML: &str = include_str!("acp_web_ui.html");
@@ -24,7 +23,6 @@ static WEB_UI_HTML: &str = include_str!("acp_web_ui.html");
 #[derive(Clone)]
 struct AppState {
     config: SdkAcpConfig,
-    delegate: SharedDelegate,
     registry: SharedSessionRegistry,
 }
 
@@ -35,12 +33,10 @@ struct AppState {
 /// Returns an error if the TCP listener or axum server fails.
 pub async fn run_acp_ws_server(
     config: SdkAcpConfig,
-    delegate: Box<dyn SdkAcpDelegate>,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         config,
-        delegate: Arc::from(delegate),
         registry: new_session_registry(),
     };
     let app = Router::new()
@@ -88,13 +84,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
     let transport = agent_client_protocol::Lines::new(outgoing, incoming);
 
-    if let Err(e) = run_acp_on_transport(
-        &state.config,
-        Arc::clone(&state.delegate),
-        Arc::clone(&state.registry),
-        transport,
-    )
-    .await
+    if let Err(e) =
+        run_acp_on_transport(&state.config, Arc::clone(&state.registry), transport).await
     {
         eprintln!("[acp-ws] transport error: {e}");
     }

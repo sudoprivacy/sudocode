@@ -200,6 +200,25 @@ pub fn config_model_for_current_dir() -> Option<String> {
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }
 
+/// Extract the sudorouter base URL + API key from the proxy auth config, for
+/// the ACP VLM image-describe side-call (a text-only model that is handed an
+/// image routes it through sudorouter). `None` when no complete sudorouter
+/// proxy account is configured. Read by both the REPL (`LiveCli`) and the ACP
+/// renderer, so it lives in the engine-side config SSOT.
+#[must_use]
+pub fn extract_sudorouter_credentials(
+    config: &engine_core::SudoCodeConfig,
+) -> Option<(String, String)> {
+    let proxy = config.auth_modes.get("proxy")?;
+    let sr = proxy.get("sudorouter")?;
+    let base_url = &sr.base_url;
+    let api_key = sr.api_key.as_deref()?;
+    if base_url.is_empty() || api_key.is_empty() {
+        return None;
+    }
+    Some((base_url.clone(), api_key.to_string()))
+}
+
 pub fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;

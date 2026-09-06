@@ -9,5 +9,11 @@
 pub mod acp_sdk_server;
 pub mod acp_stdio_server;
 pub mod acp_ws_server;
+/// ACP-side session lifecycle + turn glue on top of the `engine_core` seam
+/// (build/load/fork a `SessionEngine` per session, drive one `run_turn` per
+/// `session/prompt`, translate `EngineEvent`/`TurnComplete` onto the ACP wire).
+mod session_ops;
+/// VLM image-describe side-call for text-only models handed an image.
+mod vlm_describe;
 
 pub use acp_sdk_server::AcpError;

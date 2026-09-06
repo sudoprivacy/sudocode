@@ -499,12 +499,18 @@ impl SessionEngine {
                     "method".to_string(),
                     Value::String(method.as_str().to_string()),
                 );
-                attrs.insert("removed_messages".to_string(), Value::Number(removed.into()));
+                attrs.insert(
+                    "removed_messages".to_string(),
+                    Value::Number(removed.into()),
+                );
                 attrs.insert(
                     "tokens_before".to_string(),
                     Value::Number(before_tokens.into()),
                 );
-                attrs.insert("tokens_after".to_string(), Value::Number(after_tokens.into()));
+                attrs.insert(
+                    "tokens_after".to_string(),
+                    Value::Number(after_tokens.into()),
+                );
                 attrs
             });
         }
@@ -516,6 +522,35 @@ impl SessionEngine {
             kept,
             method: (removed > 0).then_some((method, summary_source)),
         })
+    }
+
+    /// Set the trace id the next turn's requests carry (ACP `_meta.traceId`).
+    pub fn set_trace_id(&self, trace_id: &str) {
+        self.lock_session()
+            .runtime
+            .set_trace_id(trace_id.to_string());
+    }
+
+    /// Push each block as its own `User` message onto the live session before a
+    /// turn runs — the ACP image path pre-loads native / VLM-described image
+    /// blocks this way (the renderer prepares the blocks; the engine only
+    /// appends them). Ports the message-push half of `AcpSdkDelegate::push_images`.
+    pub fn push_user_blocks(&self, blocks: Vec<runtime::ContentBlock>) -> Result<(), String> {
+        let mut session = self.lock_session();
+        for block in blocks {
+            let msg = runtime::ConversationMessage {
+                role: runtime::MessageRole::User,
+                blocks: vec![block],
+                usage: None,
+                model: None,
+            };
+            session
+                .runtime
+                .session_mut()
+                .push_message(msg)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 

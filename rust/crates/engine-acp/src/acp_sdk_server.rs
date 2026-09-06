@@ -29,13 +29,15 @@ use agent_client_protocol_schema::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
     SessionNotification, SessionUpdate, SetSessionModelRequest, SetSessionModelResponse,
-    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, UnstructuredCommandInput, Usage,
+    StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    UnstructuredCommandInput, Usage,
 };
+use engine_core::{AuthMode, EngineDelegate, EngineEvent, ObserverAdapter};
+use engine_host::config::AllowedToolSet;
+use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
 use runtime::workspace_root::WorkspaceRootScope;
 use runtime::HookAbortSignal;
-use runtime::RuntimeObserver;
 use runtime::SystemPromptOverrides;
 use runtime::UsageCostCurrency;
 use runtime::{
@@ -45,6 +47,9 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
 use std::collections::BTreeMap;
+use std::sync::mpsc as std_mpsc;
+
+use crate::session_ops;
 
 /// Error type returned by ACP agent implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +145,10 @@ impl std::fmt::Display for AcpError {
 
 impl std::error::Error for AcpError {}
 
-/// Configuration for the SDK-based ACP server.
+/// Configuration for the SDK-based ACP server — everything needed to build a
+/// [`SessionEngine`] per ACP session, plus the CLI build metadata `/doctor`
+/// surfaces. Handed in by the composition root (`scode acp`), which owns the
+/// resolved model / allowed-tools / auth / build constants.
 #[derive(Debug, Clone)]
 pub struct SdkAcpConfig {
     pub agent_version: String,
@@ -148,6 +156,14 @@ pub struct SdkAcpConfig {
     pub model_flag_raw: Option<String>,
     pub permission_mode_override: Option<PermissionMode>,
     pub reasoning_effort: Option<String>,
+    /// `--allowed-tools` restriction, threaded into every session's engine.
+    pub allowed_tools: Option<AllowedToolSet>,
+    /// `--auth` override (`None` = auto-resolve from model + config).
+    pub auth_mode: Option<AuthMode>,
+    /// `GIT_SHA` build constant, for the `/doctor` System check.
+    pub git_sha: Option<String>,
+    /// `TARGET` build constant, for the `/doctor` System check.
+    pub build_target: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,231 +227,6 @@ fn acp_mcp_servers_to_scoped(
         }
     }
     out
-}
-
-/// Callback trait that the CLI crate implements to provide session
-/// construction and prompt execution, keeping runtime/provider deps out of
-/// this crate.
-///
-/// Every method takes `&self`: the delegate is shared across all in-flight
-/// ACP requests (see [`SharedDelegate`]) and is responsible for its own
-/// interior locking. The contract the ACP server relies on is
-///
-/// * calls on **different** sessions may run concurrently and must not
-///   block each other — a session that is parked on a permission prompt or
-///   an `AskUserQuestion` must not stall the others;
-/// * calls on the **same** session are already serialized by the server
-///   (see [`SessionRegistry`]), so the delegate only needs per-session
-///   locking for memory safety, not for ordering;
-/// * every session-scoped call is made with the calling thread's
-///   [`runtime::workspace_root`] scope set to that session's working
-///   directory, and the delegate must resolve paths through it (never through
-///   the process cwd) — that is what keeps concurrent turns of sessions in
-///   different directories from seeing each other's files.
-pub trait SdkAcpDelegate: Send + Sync + 'static {
-    /// Create a new session for the given working directory, returning
-    /// `(session_id, cwd, abort_signal)` on success.
-    ///
-    /// `prompt_overrides` carries the client's `_meta.sudocode.systemPrompt`
-    /// (replace the built-in static blocks) and
-    /// `_meta.sudocode.appendSystemPrompt` (append a trailing dynamic block)
-    /// from `session/new`; they apply for the whole lifetime of the session,
-    /// including runtime rebuilds on `session/setModel`.
-    fn new_session(
-        &self,
-        cwd: PathBuf,
-        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
-        prompt_overrides: SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
-
-    /// Create a new session in `cwd` whose transcript starts as a copy of
-    /// another session's (`session/new` with `_meta.sudocode.forkFrom`).
-    ///
-    /// The source is resolved per [`SessionForkSource`]: a session open in
-    /// this process, or one persisted under `source.cwd`'s session store.
-    /// The fork gets a fresh session id, records the source as its parent
-    /// (`fork.parent_session_id`) and is persisted under `cwd`'s own store —
-    /// the source session is left untouched. Everything else (`mcp_servers`,
-    /// `prompt_overrides`, the returned tuple) is as for
-    /// [`Self::new_session`].
-    fn fork_session(
-        &self,
-        source: SessionForkSource,
-        cwd: PathBuf,
-        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
-        prompt_overrides: SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
-
-    /// Run a prompt turn. The implementation should call observer methods
-    /// to stream session updates.
-    fn run_prompt(
-        &self,
-        session_id: &str,
-        prompt: String,
-        observer: &mut SdkSessionObserver,
-        trace_id: Option<&str>,
-    ) -> Result<(StopReason, Option<PromptUsage>), AcpError>;
-
-    /// Run a prompt with permission prompting bridged to the ACP client.
-    fn run_prompt_with_prompter(
-        &self,
-        session_id: &str,
-        prompt: String,
-        observer: &mut SdkSessionObserver,
-        prompter: &mut dyn PermissionPrompter,
-        trace_id: Option<&str>,
-    ) -> Result<(StopReason, Option<PromptUsage>), AcpError>;
-
-    /// Install a question prompter for AskUserQuestion tool execution within a session.
-    fn set_question_prompter(
-        &self,
-        session_id: &str,
-        prompter: Box<dyn QuestionPrompter>,
-    ) -> Result<(), AcpError>;
-
-    /// Handle a slash command. Text output goes through `observer`; the
-    /// returned stop reason is `EndTurn` unless the command honoured a
-    /// `session/cancel` (then `Cancelled`).
-    fn handle_slash_command(
-        &self,
-        session_id: &str,
-        input: &str,
-        observer: &mut SdkSessionObserver,
-    ) -> Result<StopReason, AcpError>;
-
-    /// The slash commands [`Self::handle_slash_command`] accepts. Broadcast
-    /// to the client as `available_commands_update` right after `session/new`
-    /// and `session/load` succeed, so it must describe exactly what the
-    /// delegate implements.
-    fn available_commands(&self) -> &'static [AcpSlashCommandSpec];
-
-    /// List active session IDs with their cwds.
-    fn list_sessions(&self) -> Vec<(String, PathBuf)>;
-
-    /// Close (drop) a session by ID. Returns true if it existed.
-    fn close_session(&self, session_id: &str) -> bool;
-
-    /// Switch the model for a session. Returns a human-readable report.
-    fn set_model(&self, session_id: &str, model_id: &str) -> Result<String, AcpError>;
-
-    /// Return the current model ID and available models.
-    fn get_model_info(&self) -> (String, Vec<String>);
-
-    /// Change the permission mode for a session.
-    fn set_permission_mode(&self, session_id: &str, mode: PermissionMode) -> Result<(), AcpError>;
-
-    /// Push image content blocks into a session before running a prompt.
-    fn push_images(&self, session_id: &str, images: &[(String, String)]) -> Result<(), AcpError>;
-
-    /// Load an existing persisted session by its ID and working directory,
-    /// returning `(session_id, cwd, abort_signal)` on success.
-    ///
-    /// `prompt_overrides` has the same meaning as on [`Self::new_session`];
-    /// it is not persisted with the transcript, so a client that wants it on
-    /// a resumed session passes it again on `session/load`.
-    fn load_session(
-        &self,
-        session_id: &str,
-        cwd: PathBuf,
-        mcp_servers: BTreeMap<String, ScopedMcpServerConfig>,
-        prompt_overrides: SystemPromptOverrides,
-    ) -> Result<(String, PathBuf, HookAbortSignal), AcpError>;
-}
-
-/// Observer that streams session update notifications to the ACP client in
-/// real time via a channel. Implements [`RuntimeObserver`] so existing
-/// `run_turn()` machinery can drive it.
-pub struct SdkSessionObserver {
-    session_id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<SessionNotification>,
-}
-
-impl SdkSessionObserver {
-    /// Create a new observer that sends notifications through `tx`.
-    #[must_use]
-    pub fn new(
-        session_id: impl Into<String>,
-        tx: tokio::sync::mpsc::UnboundedSender<SessionNotification>,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            tx,
-        }
-    }
-
-    fn push(&mut self, update: SessionUpdate) {
-        let _ = self
-            .tx
-            .send(SessionNotification::new(self.session_id.clone(), update));
-    }
-}
-
-impl RuntimeObserver for SdkSessionObserver {
-    fn on_thinking_delta(&mut self, delta: &str) {
-        self.push(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-            ContentBlock::Text(TextContent::new(delta)),
-        )));
-    }
-
-    fn on_text_delta(&mut self, delta: &str) {
-        self.push(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-            ContentBlock::Text(TextContent::new(delta)),
-        )));
-    }
-
-    fn on_tool_use(&mut self, id: &str, name: &str, input: &str) {
-        let id_owned = id.to_owned();
-        let name_owned = name.to_owned();
-        let raw_input = serde_json::from_str(input)
-            .unwrap_or_else(|_| serde_json::Value::String(input.to_owned()));
-        self.push(SessionUpdate::ToolCall(
-            ToolCall::new(id_owned, name_owned)
-                .kind(ToolKind::Other)
-                .status(ToolCallStatus::InProgress)
-                .raw_input(raw_input),
-        ));
-    }
-
-    fn on_tool_result(
-        &mut self,
-        tool_use_id: &str,
-        _tool_name: &str,
-        output: &str,
-        is_error: bool,
-    ) {
-        let id_owned = tool_use_id.to_owned();
-        let raw_output = serde_json::from_str(output)
-            .unwrap_or_else(|_| serde_json::Value::String(output.to_owned()));
-        let status = if is_error {
-            ToolCallStatus::Failed
-        } else {
-            ToolCallStatus::Completed
-        };
-        // `content` is the field ACP clients render; `rawOutput` is an optional
-        // machine-readable payload they are free to ignore. Emit both: the text
-        // block carries the *raw* `output` string (exactly the ToolResult text
-        // the model saw), not the parsed `raw_output` Value — re-serialising a
-        // parsed Value would reformat JSON output and turn plain text into a
-        // quoted JSON string.
-        //
-        // Empty output emits no content field at all rather than an empty text
-        // block: `content` replaces the collection wholesale, so `Some(vec![])`
-        // would tell the client to clear whatever it has, and a `""` text block
-        // renders as a stray blank line. Omitting leaves the client's existing
-        // rendering alone while `rawOutput` still records the empty result.
-        let content = (!output.is_empty()).then(|| {
-            vec![ToolCallContent::from(ContentBlock::Text(TextContent::new(
-                output,
-            )))]
-        });
-        self.push(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-            id_owned,
-            ToolCallUpdateFields::new()
-                .status(status)
-                .content(content)
-                .raw_output(raw_output),
-        )));
-    }
 }
 
 /// Sniff the MIME type of a base64-encoded image from its leading bytes.
@@ -522,21 +313,6 @@ pub struct CumulativeUsage {
     pub total_tokens: u64,
     pub cached_read_tokens: Option<u64>,
     pub cached_write_tokens: Option<u64>,
-}
-
-/// Whether the slash command in `prompt` (`/name …`) is one that must run
-/// under the process-cwd lease, per the delegate's command table. Unknown
-/// commands only ever print a hint, so they do not.
-fn slash_command_holds_cwd_lease(prompt: &str, specs: &[AcpSlashCommandSpec]) -> bool {
-    let name = prompt
-        .trim_start()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next());
-    name.is_some_and(|name| {
-        specs
-            .iter()
-            .any(|spec| spec.name == name && spec.holds_cwd_lease)
-    })
 }
 
 /// Translate a slash-command spec into the ACP `AvailableCommand` advertised in
@@ -737,14 +513,11 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
 mod tests {
     use super::{
         acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage,
-        SdkSessionObserver,
     };
     use agent_client_protocol_schema::{
-        ContentBlock, EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
-        SessionUpdate,
+        EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
     };
     use runtime::config::{ConfigSource, McpServerConfig};
-    use runtime::RuntimeObserver;
     use runtime::UsageCostCurrency;
     use std::path::{Path, PathBuf};
 
@@ -777,26 +550,6 @@ mod tests {
             meta["cumulativeUsage"]["totalTokens"],
             serde_json::json!(14)
         );
-    }
-
-    #[test]
-    fn sdk_session_observer_streams_thinking_as_agent_thought_chunk() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut observer = SdkSessionObserver::new("session-1", tx);
-
-        observer.on_thinking_delta("hidden reasoning");
-
-        let notification = rx.try_recv().expect("thought notification");
-        assert_eq!(&*notification.session_id.0, "session-1");
-        match notification.update {
-            SessionUpdate::AgentThoughtChunk(chunk) => match chunk.content {
-                ContentBlock::Text(text) => {
-                    assert_eq!(text.text, "hidden reasoning");
-                }
-                other => panic!("expected text thought chunk, got {other:?}"),
-            },
-            other => panic!("expected agent thought chunk, got {other:?}"),
-        }
     }
 
     #[test]
@@ -865,15 +618,6 @@ mod tests {
     }
 }
 
-/// Thread-safe handle to a delegate, shared across async handlers.
-///
-/// There is deliberately **no** server-side mutex around the delegate: a
-/// process-wide lock held for the duration of `session/prompt` is exactly
-/// what made one parked session block every other session. Cross-session
-/// concurrency is the delegate's responsibility ([`SdkAcpDelegate`]);
-/// same-session ordering is the server's ([`SessionRegistry`] lanes).
-pub type SharedDelegate = Arc<dyn SdkAcpDelegate>;
-
 /// Shared handle to the [`SessionRegistry`].
 pub type SharedSessionRegistry = Arc<SessionRegistry>;
 
@@ -908,9 +652,16 @@ pub struct SessionRegistry {
 }
 
 struct SessionEntry {
+    /// The single-session engine this ACP session wraps — `Arc` so a turn in
+    /// flight keeps it alive across a concurrent `session/close`.
+    engine: Arc<SessionEngine>,
+    /// A clone of the engine's abort signal, held here so `session/cancel` fires
+    /// without taking any session lock.
     abort: HookAbortSignal,
     lane: Arc<tokio::sync::Mutex<()>>,
     cwd: PathBuf,
+    /// When the session was registered — for the `session/close` duration metric.
+    started_at: std::time::Instant,
 }
 
 /// Async guard for a session lane; drop it to let the next request on the
@@ -924,8 +675,10 @@ impl SessionRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Register (or re-register) a session after `session/new` / `session/load`.
-    pub fn register(&self, session_id: String, abort: HookAbortSignal, cwd: PathBuf) {
+    /// Register (or re-register) a session's engine after `session/new` /
+    /// `session/load`. The abort signal is taken from the engine so
+    /// `session/cancel` needs no session lock.
+    pub fn register(&self, session_id: String, engine: Arc<SessionEngine>, cwd: PathBuf) {
         let mut sessions = self.lock_sessions();
         // A reload of a session that is already live keeps its lane so that
         // requests already queued behind it stay ordered.
@@ -933,12 +686,43 @@ impl SessionRegistry {
             || Arc::new(tokio::sync::Mutex::new(())),
             |e| Arc::clone(&e.lane),
         );
-        sessions.insert(session_id, SessionEntry { abort, lane, cwd });
+        let abort = engine.abort_signal();
+        sessions.insert(
+            session_id,
+            SessionEntry {
+                engine,
+                abort,
+                lane,
+                cwd,
+                started_at: std::time::Instant::now(),
+            },
+        );
     }
 
-    /// Forget a session after `session/close`.
-    pub fn remove(&self, session_id: &str) {
-        self.lock_sessions().remove(session_id);
+    /// The engine for a session; `None` for an unknown sessionId.
+    #[must_use]
+    pub fn engine(&self, session_id: &str) -> Option<Arc<SessionEngine>> {
+        self.lock_sessions()
+            .get(session_id)
+            .map(|e| Arc::clone(&e.engine))
+    }
+
+    /// Remove a session after `session/close`, returning its engine + the time
+    /// it was registered so the caller can record the close telemetry before the
+    /// last `Arc` drops.
+    pub fn take(&self, session_id: &str) -> Option<(Arc<SessionEngine>, std::time::Instant)> {
+        self.lock_sessions()
+            .remove(session_id)
+            .map(|e| (e.engine, e.started_at))
+    }
+
+    /// All live sessions as `(id, cwd)` — the `session/list` response.
+    #[must_use]
+    pub fn list(&self) -> Vec<(String, PathBuf)> {
+        self.lock_sessions()
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.cwd.clone()))
+            .collect()
     }
 
     /// Abort signal for `session/cancel`; `None` for unknown sessions.
@@ -1274,11 +1058,12 @@ fn uuid_v4() -> String {
 ///
 /// This is the shared core used by both the stdio server and the WebSocket
 /// server. The transport must implement `ConnectTo<Agent>` (e.g. `Stdio` or
-/// `Lines`).
+/// `Lines`). Each ACP session wraps one [`SessionEngine`] (the seam) held in the
+/// [`SessionRegistry`]; the delegate indirection is gone — the handlers drive the
+/// engine directly through the seam, one `run_turn` per `session/prompt`.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_acp_on_transport(
     config: &SdkAcpConfig,
-    delegate: SharedDelegate,
     registry: SharedSessionRegistry,
     transport: impl ConnectTo<Agent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1298,19 +1083,11 @@ pub(crate) async fn run_acp_on_transport(
                         .agent_info(Implementation::new("scode", &version))
                         .agent_capabilities(
                             AgentCapabilities::new()
-                                // `session/load` re-opens a persisted session
-                                // (same cwd) in a fresh process; the handler
-                                // below has always existed, the flag had just
-                                // never been advertised, so spec-conformant
-                                // clients never tried it.
                                 .load_session(true)
                                 .prompt_capabilities(PromptCapabilities::new().image(true))
                                 .session_capabilities(
                                     SessionCapabilities::new()
                                         .close(SessionCloseCapabilities::new())
-                                        // `session/list` is handled below; like
-                                        // `loadSession` it had simply never been
-                                        // advertised.
                                         .list(SessionListCapabilities::new()),
                                 ),
                         )
@@ -1324,8 +1101,8 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/new ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
+                let config = config.clone();
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -1344,45 +1121,51 @@ pub(crate) async fn run_acp_on_transport(
                             return Ok(());
                         }
                     };
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
-                    let commands = delegate.available_commands();
+                    let config = config.clone();
+                    let commands = session_ops::available_commands();
                     let cx_notify = cx.clone();
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
+                        let build_registry = Arc::clone(&registry);
                         let result = tokio::task::spawn_blocking(move || {
-                            // Runtime construction: the delegate resolves
-                            // config / model / permission mode against the
-                            // workspace-root scope, but the MCP servers and
-                            // plugins it spawns inherit the process cwd, so
-                            // it also runs under the cwd lease.
-                            let cwd = session_lease_cwd(&req.cwd);
-                            let _cwd = lease
-                                .acquire(&cwd)
-                                .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
-                            let _scope = WorkspaceRootScope::enter(cwd);
-                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
-                            match fork_source {
-                                // `forkFrom`: the new session starts from a
-                                // copy of another session's transcript. The
-                                // source is read, never written, so only the
-                                // new cwd needs the lease.
-                                Some(source) => {
-                                    d.fork_session(source, req.cwd, mcp_servers, prompt_overrides)
-                                }
-                                None => d.new_session(req.cwd, mcp_servers, prompt_overrides),
-                            }
+                            // Runtime construction: the engine resolves config /
+                            // model / permission mode against the workspace-root
+                            // scope, but the MCP servers + plugins it spawns
+                            // inherit the process cwd, so it runs under the lease.
+                            let lease_cwd = session_lease_cwd(&req.cwd);
+                            let _cwd = lease.acquire(&lease_cwd).map_err(|e| {
+                                AcpError::internal(format!("failed to enter cwd: {e}"))
+                            })?;
+                            let _scope = WorkspaceRootScope::enter(lease_cwd);
+                            let mcp_servers =
+                                acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
+                            let (engine, cwd) = match fork_source {
+                                Some(source) => session_ops::open_forked_session(
+                                    &config,
+                                    &source,
+                                    &build_registry,
+                                    req.cwd,
+                                    mcp_servers,
+                                    prompt_overrides,
+                                )?,
+                                None => session_ops::build_new_session(
+                                    &config,
+                                    req.cwd,
+                                    mcp_servers,
+                                    prompt_overrides,
+                                )?,
+                            };
+                            let session_id = engine.session_handle().id;
+                            Ok::<_, AcpError>((engine, session_id, cwd))
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
 
                         match result {
-                            Ok((session_id, cwd, signal)) => {
-                                registry.register(session_id.clone(), signal, cwd);
+                            Ok((engine, session_id, cwd)) => {
+                                registry.register(session_id.clone(), engine, cwd);
                                 responder.respond(NewSessionResponse::new(session_id.clone()))?;
-                                // Advertise the slash commands once the client
-                                // knows the session id (the response goes out
-                                // first on the same queue).
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );
@@ -1401,8 +1184,8 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/prompt (with permission-prompt bridging) ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
+                let config = config.clone();
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
@@ -1413,7 +1196,6 @@ pub(crate) async fn run_acp_on_transport(
                             return Ok(());
                         }
                     };
-                    // Text is required (images alone aren't enough to drive a turn).
                     if prompt_text.is_empty() {
                         responder.respond_with_error(acp_error_to_sdk(
                             &AcpError::invalid_params(
@@ -1422,111 +1204,146 @@ pub(crate) async fn run_acp_on_transport(
                         ))?;
                         return Ok(());
                     }
-
-                    // Extract traceId from _meta if present
                     let trace_id = req.meta.as_ref().and_then(|m| {
                         m.get("traceId").and_then(|v| v.as_str().map(String::from))
                     });
 
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
-                    let commands = delegate.available_commands();
+                    let config = config.clone();
                     let sid = req.session_id.to_string();
                     let cx_inner = cx.clone();
                     let cx_perm = cx.clone();
                     cx.spawn(async move {
-                        // Same-session ordering: wait (asynchronously — no
-                        // thread is tied up) for this session's lane. Other
-                        // sessions have their own lanes and are unaffected.
+                        // Same-session ordering: wait (asynchronously) for this
+                        // session's lane; other sessions are unaffected.
                         let _lane = registry.enter_lane(&sid).await;
+                        let Some(engine) = registry.engine(&sid) else {
+                            responder.respond_with_error(acp_error_to_sdk(
+                                &AcpError::invalid_params(format!("unknown sessionId: {sid}")),
+                            ))?;
+                            return Ok(());
+                        };
                         let session_cwd = registry.cwd(&sid);
                         let cwd_lease = registry.cwd_lease();
                         let is_slash_command = prompt_text.starts_with('/');
-                        let holds_cwd_lease =
-                            is_slash_command && slash_command_holds_cwd_lease(&prompt_text, commands);
+                        let holds_cwd_lease = is_slash_command
+                            && session_ops::slash_command_holds_cwd_lease(&prompt_text);
 
-                        // Set up permission-prompt bridge channels.
+                        // Permission-prompt + question bridge channels (ACP
+                        // round-trips) and the engine event → notification bridge.
                         let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
                             PermissionRequest,
                             tokio::sync::oneshot::Sender<PermissionPromptDecision>,
                         )>();
-                        let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel::<(
-                            String,
-                            QuestionPromptRequest,
-                            tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
-                        )>();
-
-                        // Set up notification streaming channel.
+                        let (question_tx, mut question_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<(
+                                String,
+                                QuestionPromptRequest,
+                                tokio::sync::oneshot::Sender<
+                                    Result<Vec<QuestionPromptAnswer>, String>,
+                                >,
+                            )>();
                         let (notif_tx, mut notif_rx) =
                             tokio::sync::mpsc::unbounded_channel::<SessionNotification>();
 
-                        let sid_for_blocking = sid.clone();
-                        let sid_for_perm = sid.clone();
-                        let images_for_blocking = images.clone();
-                        let prompt_text_for_blocking = prompt_text.clone();
-                        let trace_id_for_blocking = trace_id.clone();
+                        // The seam speaks `EngineEvent` over a std mpsc (the pump's
+                        // shape); a small forwarder thread maps each event onto the
+                        // ACP wire and feeds the async `select!` below — the same
+                        // pattern the in-process pump uses for its command channel.
+                        let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
+                        let sid_forward = sid.clone();
+                        std::thread::Builder::new()
+                            .name("acp-engine-events".into())
+                            .spawn(move || {
+                                while let Ok(event) = evt_rx.recv() {
+                                    if let Some(notification) =
+                                        session_ops::engine_event_to_session_update(
+                                            &sid_forward,
+                                            event,
+                                        )
+                                    {
+                                        if notif_tx.send(notification).is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            })
+                            .expect("spawn acp-engine-events thread");
+
+                        let engine_blocking = Arc::clone(&engine);
+                        let config_blocking = config.clone();
+                        let session_cwd_blocking = session_cwd.clone();
+                        let images_blocking = images.clone();
+                        let prompt_blocking = prompt_text.clone();
+                        let trace_blocking = trace_id.clone();
                         let blocking_handle = tokio::task::spawn_blocking(move || {
-                            // This thread works in the session's directory for
-                            // the whole turn through the workspace-root scope
-                            // (see `runtime::workspace_root`): a thread-scoped
-                            // value, so turns of sessions in other directories
-                            // run at the same time on their own threads. The
-                            // process cwd is not touched. Unknown sessions have
-                            // no cwd and fall through to the delegate's
-                            // `unknown sessionId` error.
-                            let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
-                            // The slash commands that rebuild the session
-                            // runtime (`/model` — `holds_cwd_lease` in the
-                            // command table) are runtime-construction
-                            // paths (see `WorkspaceCwdLease`), so they run
-                            // under the lease: short, never parked on the
-                            // user. The others — notably `/compact`, which
-                            // waits on a model round-trip — run outside it so
-                            // they cannot stall other directories' sessions.
-                            let _cwd_guard = match (holds_cwd_lease, session_cwd) {
-                                (true, Some(cwd)) => Some(cwd_lease.acquire(&cwd).map_err(|e| {
+                            // The turn resolves paths against the session's
+                            // workspace-root scope (thread-scoped), never the
+                            // process cwd, so turns of sessions in other dirs run
+                            // concurrently. `/model` (holds_cwd_lease) rebuilds the
+                            // runtime, so it runs under the process-cwd lease.
+                            let _scope = session_cwd_blocking
+                                .clone()
+                                .map(WorkspaceRootScope::enter);
+                            let _cwd_guard = match (holds_cwd_lease, &session_cwd_blocking) {
+                                (true, Some(cwd)) => Some(cwd_lease.acquire(cwd).map_err(|e| {
                                     AcpError::internal(format!("failed to enter session cwd: {e}"))
                                 })?),
                                 _ => None,
                             };
+                            let turn_cwd = session_cwd_blocking
+                                .clone()
+                                .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-                            let mut observer = SdkSessionObserver::new(&sid_for_blocking, notif_tx);
-                            let mut bridge = AcpPermissionBridge { tx: bridge_tx };
-                            let question_bridge = AcpQuestionBridge { tx: question_tx };
-                            let _ = d.set_question_prompter(
-                                &sid_for_blocking,
-                                Box::new(question_bridge),
-                            );
-
-                            // Push image content blocks into the session before
-                            // running the prompt so the API client includes them.
-                            if !images_for_blocking.is_empty() {
-                                let _ = d.push_images(&sid_for_blocking, &images_for_blocking);
+                            if is_slash_command {
+                                let (text, stop) = session_ops::handle_slash_command(
+                                    &engine_blocking,
+                                    &config_blocking,
+                                    &turn_cwd,
+                                    &prompt_blocking,
+                                )?;
+                                let _ = evt_tx.send(EngineEvent::TextDelta { text });
+                                return Ok::<_, AcpError>((stop, None));
                             }
 
-                            let stop = if is_slash_command {
-                                d.handle_slash_command(
-                                    &sid_for_blocking,
-                                    &prompt_text_for_blocking,
-                                    &mut observer,
-                                )
-                                .map(|stop| (stop, None))
+                            if let Some(tid) = &trace_blocking {
+                                engine_blocking.set_trace_id(tid);
+                            }
+                            if !images_blocking.is_empty() {
+                                session_ops::prepare_and_push_images(
+                                    &engine_blocking,
+                                    &images_blocking,
+                                    &turn_cwd,
+                                )?;
+                            }
+                            engine_blocking.set_question_prompter(Box::new(AcpQuestionBridge {
+                                tx: question_tx,
+                            }));
+                            let mut observer = ObserverAdapter::new(evt_tx);
+                            let mut bridge = AcpPermissionBridge { tx: bridge_tx };
+                            let blocks = vec![runtime::ContentBlock::Text {
+                                text: prompt_blocking,
+                            }];
+                            let complete = engine_blocking
+                                .run_turn(blocks, &mut observer, &mut bridge)
+                                .map_err(AcpError::internal)?;
+                            let auto_compacted = complete.auto_compaction.is_some();
+                            session_ops::record_turn_usage(&engine_blocking, &complete);
+                            let usage = session_ops::build_prompt_usage(
+                                &engine_blocking,
+                                &complete,
+                                auto_compacted,
+                            );
+                            let stop = if complete.cancelled {
+                                StopReason::Cancelled
                             } else {
-                                d.run_prompt_with_prompter(
-                                    &sid_for_blocking,
-                                    prompt_text_for_blocking,
-                                    &mut observer,
-                                    &mut bridge,
-                                    trace_id_for_blocking.as_deref(),
-                                )
+                                StopReason::EndTurn
                             };
-                            // Return the Result instead of unwrapping, so we can handle errors
-                            stop
+                            Ok((stop, usage))
                         });
 
-                        // Concurrently serve permission requests and stream
-                        // notifications from the blocking thread while waiting
-                        // for it to finish.
+                        // Concurrently serve permission/question requests + stream
+                        // notifications while the blocking turn runs.
                         let mut blocking_handle = blocking_handle;
                         let mut notif_rx_open = true;
                         let result: Result<(StopReason, Option<PromptUsage>), AcpError> = loop {
@@ -1536,14 +1353,13 @@ pub(crate) async fn run_acp_on_transport(
                                     if let Some(n) = notif {
                                         let _ = cx_inner.send_notification(n);
                                     } else {
-                                        // Sender dropped — stop polling this channel.
                                         notif_rx_open = false;
                                     }
                                 }
                                 perm = bridge_rx.recv() => {
                                     if let Some((perm_req, response_tx)) = perm {
                                         let acp_req = build_acp_permission_request(
-                                            sid_for_perm.clone(),
+                                            sid.clone(),
                                             &perm_req,
                                         );
                                         let decision = match cx_perm
@@ -1559,9 +1375,6 @@ pub(crate) async fn run_acp_on_transport(
                                         };
                                         let _ = response_tx.send(decision);
                                     } else {
-                                        // Channel closed — blocking task dropped the sender.
-                                        // Await the result directly to avoid a busy loop
-                                        // (biased select would keep picking this branch).
                                         break blocking_handle.await
                                             .unwrap_or(Err(AcpError::internal("blocking task failed")));
                                     }
@@ -1569,7 +1382,7 @@ pub(crate) async fn run_acp_on_transport(
                                 question = question_rx.recv() => {
                                     if let Some((tool_call_id, question_req, response_tx)) = question {
                                         let payload = AcpAskUserQuestionRequestPayload {
-                                            session_id: sid_for_perm.clone(),
+                                            session_id: sid.clone(),
                                             tool_call_id,
                                             title: question_req.title.clone(),
                                             description: question_req.description.clone(),
@@ -1596,7 +1409,6 @@ pub(crate) async fn run_acp_on_transport(
                                                 })
                                                 .collect(),
                                         };
-
                                         let outcome = match serde_json::value::to_raw_value(&payload) {
                                             Ok(raw) => {
                                                 match cx_perm
@@ -1638,13 +1450,11 @@ pub(crate) async fn run_acp_on_transport(
                             }
                         };
 
-                        // Drain any residual notifications that were buffered
-                        // before the blocking task returned.
+                        // Drain residual notifications buffered before the turn returned.
                         while let Ok(n) = notif_rx.try_recv() {
                             let _ = cx_inner.send_notification(n);
                         }
 
-                        // Handle errors by sending an error message notification to the client
                         match result {
                             Ok((stop_reason, prompt_usage)) => {
                                 let mut response = PromptResponse::new(stop_reason);
@@ -1652,16 +1462,17 @@ pub(crate) async fn run_acp_on_transport(
                                     let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
                                     let mut meta = Map::new();
                                     meta.insert("sudocode".to_string(), json!(sudocode_meta));
-                                    response = response.usage(
-                                        Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
-                                            .cached_read_tokens(u.cache_read_tokens)
-                                            .cached_write_tokens(u.cache_write_tokens),
-                                    ).meta(Some(meta));
+                                    response = response
+                                        .usage(
+                                            Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
+                                                .cached_read_tokens(u.cache_read_tokens)
+                                                .cached_write_tokens(u.cache_write_tokens),
+                                        )
+                                        .meta(Some(meta));
                                 }
                                 responder.respond(response)?;
                             }
                             Err(error) => {
-                                // Send user-friendly error message as a notification to the client
                                 let user_message = error.user_friendly_message();
                                 let error_notification = SessionNotification::new(
                                     sid.clone(),
@@ -1670,8 +1481,6 @@ pub(crate) async fn run_acp_on_transport(
                                     )),
                                 );
                                 let _ = cx_inner.send_notification(error_notification);
-
-                                // Respond with an error
                                 responder.respond_with_error(acp_error_to_sdk(&error))?;
                             }
                         }
@@ -1687,9 +1496,6 @@ pub(crate) async fn run_acp_on_transport(
             {
                 let registry = Arc::clone(&registry);
                 async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
-                    // Deliberately lock-free w.r.t. sessions: cancel must reach
-                    // a session whose lane is busy running the very turn being
-                    // cancelled.
                     if let Some(signal) = registry.abort_signal(&notif.session_id.to_string()) {
                         signal.abort();
                     }
@@ -1701,25 +1507,42 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/close ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
                 async move |req: CloseSessionRequest,
                             responder: Responder<CloseSessionResponse>,
                             cx: ConnectionTo<Client>| {
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     cx.spawn(async move {
-                        // Queue behind any in-flight turn on this session (as
-                        // before: close waits for the turn to finish).
+                        // Queue behind any in-flight turn on this session.
                         let _lane = registry.enter_lane(&sid).await;
-                        let sid_clone = sid.clone();
+                        let taken = registry.take(&sid);
                         tokio::task::spawn_blocking(move || {
-                            d.close_session(&sid_clone);
+                            if let Some((engine, started_at)) = taken {
+                                // Session-ended telemetry, then persist + drop.
+                                if let Some(tracer) = engine.session_tracer() {
+                                    let usage = engine.usage_snapshot();
+                                    let cumulative = usage.cumulative_usage();
+                                    let duration_ms = started_at.elapsed().as_millis() as u64;
+                                    tracer.record_usage(
+                                        "session_summary".to_string(),
+                                        cumulative.input_tokens,
+                                        cumulative.output_tokens,
+                                        cumulative.cache_creation_input_tokens,
+                                        cumulative.cache_read_input_tokens,
+                                    );
+                                    tracer.record_session_ended(
+                                        usage.turns(),
+                                        u64::from(cumulative.input_tokens),
+                                        u64::from(cumulative.output_tokens),
+                                        duration_ms,
+                                    );
+                                }
+                                engine.close();
+                            }
                         })
                         .await
                         .ok();
-                        registry.remove(&sid);
                         responder.respond(CloseSessionResponse::new())?;
                         Ok(())
                     })?;
@@ -1731,24 +1554,16 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/list ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
+                let registry = Arc::clone(&registry);
                 async move |_req: ListSessionsRequest,
                             responder: Responder<ListSessionsResponse>,
-                            cx: ConnectionTo<Client>| {
-                    let d = Arc::clone(&delegate);
-                    cx.spawn(async move {
-                        let infos = tokio::task::spawn_blocking(move || {
-                            d.list_sessions()
-                                .into_iter()
-                                .map(|(id, cwd)| SessionInfo::new(id, cwd))
-                                .collect::<Vec<_>>()
-                        })
-                        .await
-                        .unwrap_or_default();
-
-                        responder.respond(ListSessionsResponse::new(infos))?;
-                        Ok(())
-                    })?;
+                            _cx: ConnectionTo<Client>| {
+                    let infos = registry
+                        .list()
+                        .into_iter()
+                        .map(|(id, cwd)| SessionInfo::new(id, cwd))
+                        .collect::<Vec<_>>();
+                    responder.respond(ListSessionsResponse::new(infos))?;
                     Ok(())
                 }
             },
@@ -1757,12 +1572,10 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/setModel (unstable) ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
                 async move |req: SetSessionModelRequest,
                             responder: Responder<SetSessionModelResponse>,
                             cx: ConnectionTo<Client>| {
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     let sid = req.session_id.to_string();
                     let model_id: String = req.model_id.0.to_string();
@@ -1770,9 +1583,15 @@ pub(crate) async fn run_acp_on_transport(
                         let _lane = registry.enter_lane(&sid).await;
                         let session_cwd = registry.cwd(&sid);
                         let lease = registry.cwd_lease();
+                        let Some(engine) = registry.engine(&sid) else {
+                            responder.respond_with_error(acp_error_to_sdk(
+                                &AcpError::invalid_params(format!("unknown sessionId: {sid}")),
+                            ))?;
+                            return Ok(());
+                        };
                         let result = tokio::task::spawn_blocking(move || {
                             // The model switch rebuilds the session runtime
-                            // (runtime construction — see `WorkspaceCwdLease`).
+                            // (runtime construction — under the cwd lease).
                             let _scope = session_cwd.clone().map(WorkspaceRootScope::enter);
                             let _cwd = match session_cwd {
                                 Some(cwd) => Some(lease.acquire(&cwd).map_err(|e| {
@@ -1780,18 +1599,14 @@ pub(crate) async fn run_acp_on_transport(
                                 })?),
                                 None => None,
                             };
-                            d.set_model(&sid, &model_id)
+                            EngineDelegate::set_model(&*engine, &model_id)
+                                .map_err(AcpError::internal)
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
-
                         match result {
-                            Ok(_report) => {
-                                responder.respond(SetSessionModelResponse::new())?;
-                            }
-                            Err(e) => {
-                                responder.respond_with_error(acp_error_to_sdk(&e))?;
-                            }
+                            Ok(_) => responder.respond(SetSessionModelResponse::new())?,
+                            Err(e) => responder.respond_with_error(acp_error_to_sdk(&e))?,
                         }
                         Ok(())
                     })?;
@@ -1803,8 +1618,8 @@ pub(crate) async fn run_acp_on_transport(
         // --- session/load ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
+                let config = config.clone();
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -1816,36 +1631,39 @@ pub(crate) async fn run_acp_on_transport(
                                 return Ok(());
                             }
                         };
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
-                    let commands = delegate.available_commands();
+                    let config = config.clone();
+                    let commands = session_ops::available_commands();
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
                     cx.spawn(async move {
-                        // If the session is already live in this process, a
-                        // reload must not race a turn on it.
                         let _lane = registry.enter_lane(&sid).await;
                         let lease = registry.cwd_lease();
                         let result = tokio::task::spawn_blocking(move || {
-                            // Runtime construction — see `session/new` above.
                             let lease_cwd = session_lease_cwd(&cwd);
-                            let _cwd = lease
-                                .acquire(&lease_cwd)
-                                .map_err(|e| AcpError::internal(format!("failed to enter cwd: {e}")))?;
+                            let _cwd = lease.acquire(&lease_cwd).map_err(|e| {
+                                AcpError::internal(format!("failed to enter cwd: {e}"))
+                            })?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
                             let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
-                            d.load_session(&sid, cwd, mcp_servers, prompt_overrides)
+                            let (engine, cwd) = session_ops::open_loaded_session(
+                                &config,
+                                &sid,
+                                cwd,
+                                mcp_servers,
+                                prompt_overrides,
+                            )?;
+                            let session_id = engine.session_handle().id;
+                            Ok::<_, AcpError>((engine, session_id, cwd))
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
 
                         match result {
-                            Ok((session_id, cwd, signal)) => {
-                                registry.register(session_id.clone(), signal, cwd);
+                            Ok((engine, session_id, cwd)) => {
+                                registry.register(session_id.clone(), engine, cwd);
                                 responder.respond(LoadSessionResponse::new())?;
-                                // Same broadcast as `session/new`: a loaded
-                                // session accepts the same commands.
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );
@@ -1861,18 +1679,25 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- session/setPermissionMode (custom extension, not in SDK schema) ---
+        // --- session/setPermissionMode (custom extension) ---
         .on_receive_request(
             {
-                let delegate = Arc::clone(&delegate);
                 let registry = Arc::clone(&registry);
                 async move |req: SetPermissionModeRequest,
                             responder: Responder<SetPermissionModeResponse>,
                             cx: ConnectionTo<Client>| {
-                    let d = Arc::clone(&delegate);
                     let registry = Arc::clone(&registry);
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&req.session_id).await;
+                        let Some(engine) = registry.engine(&req.session_id) else {
+                            responder.respond_with_error(acp_error_to_sdk(
+                                &AcpError::invalid_params(format!(
+                                    "unknown sessionId: {}",
+                                    req.session_id
+                                )),
+                            ))?;
+                            return Ok(());
+                        };
                         let result = tokio::task::spawn_blocking(move || {
                             let mode = match req.permission_mode.as_str() {
                                 "read-only" => Ok(PermissionMode::ReadOnly),
@@ -1885,19 +1710,16 @@ pub(crate) async fn run_acp_on_transport(
                                 ))),
                             };
                             match mode {
-                                Ok(m) => d.set_permission_mode(&req.session_id, m),
+                                Ok(m) => EngineDelegate::set_permission_mode(&*engine, m)
+                                    .map_err(AcpError::internal),
                                 Err(e) => Err(e),
                             }
                         })
                         .await
                         .unwrap_or_else(|e| Err(AcpError::internal(e.to_string())));
                         match result {
-                            Ok(()) => {
-                                responder.respond(SetPermissionModeResponse {})?;
-                            }
-                            Err(e) => {
-                                responder.respond_with_error(acp_error_to_sdk(&e))?;
-                            }
+                            Ok(()) => responder.respond(SetPermissionModeResponse {})?,
+                            Err(e) => responder.respond_with_error(acp_error_to_sdk(&e))?,
                         }
                         Ok(())
                     })?;
@@ -1907,9 +1729,6 @@ pub(crate) async fn run_acp_on_transport(
             on_receive_request!(),
         )
         // --- catch-all for unhandled methods ---
-        // Only respond with method_not_found for Request/Notification.
-        // Response MUST be passed through (Handled::No) so the SDK's ResponseRouter
-        // can deliver the result to the waiting oneshot channel.
         .on_receive_dispatch(
             async move |dispatch: Dispatch, cx: ConnectionTo<Client>| {
                 match &dispatch {
@@ -1917,13 +1736,10 @@ pub(crate) async fn run_acp_on_transport(
                         dispatch.respond_with_error(Error::method_not_found(), cx)?;
                         Ok(Handled::Yes)
                     }
-                    Dispatch::Response(_, _) => {
-                        // Pass through to SDK's default ResponseRouter
-                        Ok(Handled::No {
-                            message: dispatch,
-                            retry: false,
-                        })
-                    }
+                    Dispatch::Response(_, _) => Ok(Handled::No {
+                        message: dispatch,
+                        retry: false,
+                    }),
                 }
             },
             on_receive_dispatch!(),

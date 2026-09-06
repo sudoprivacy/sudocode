@@ -1377,11 +1377,15 @@ dependencies = [
  "async-trait",
  "axum",
  "commands",
+ "engine-core",
+ "engine-host",
  "futures",
  "nix 0.29.0",
+ "reqwest",
  "runtime",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 

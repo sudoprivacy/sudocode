@@ -379,7 +379,7 @@ impl Session {
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
         let contents = fs.read_to_string(&path.to_string_lossy())?;
-        let session = match JsonValue::parse(&contents) {
+        let mut session = match JsonValue::parse(&contents) {
             Ok(value)
                 if value
                     .as_object()
@@ -389,7 +389,63 @@ impl Session {
             }
             Err(_) | Ok(_) => Self::from_jsonl(&contents)?,
         };
+        // Defensive repair: a session persisted mid-tool-call (e.g. the process
+        // was killed, or crashed, while a tool was still running) can contain a
+        // `tool_use` with no following `tool_result`. The Anthropic API rejects
+        // such a history on resume ("`tool_use` ids were found without
+        // `tool_result` blocks immediately after"). Backfill a synthetic error
+        // result for any orphan so the transcript is always resumable, no matter
+        // how it was persisted. Applied in-memory on every load (idempotent).
+        session.sanitize_orphan_tool_uses();
         Ok(session.with_persistence_path(path.to_path_buf()))
+    }
+
+    /// Backfill a synthetic `tool_result` immediately after any `tool_use` that
+    /// has no matching `tool_result` anywhere in the transcript. Returns the
+    /// number of synthetic results inserted (0 when the history is already
+    /// well-formed). See [`Self::load_from_path_with`] for why this is needed.
+    fn sanitize_orphan_tool_uses(&mut self) -> usize {
+        const ORPHAN_TOOL_RESULT_MESSAGE: &str =
+            "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]";
+
+        // Every tool_use id that is already answered somewhere in the history.
+        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for message in &self.messages {
+            for block in &message.blocks {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    answered.insert(tool_use_id.clone());
+                }
+            }
+        }
+
+        let mut repaired: Vec<ConversationMessage> = Vec::with_capacity(self.messages.len());
+        let mut inserted = 0usize;
+        for message in std::mem::take(&mut self.messages) {
+            let orphans: Vec<(String, String)> = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, name, .. } if !answered.contains(id) => {
+                        Some((id.clone(), name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            repaired.push(message);
+            for (tool_use_id, tool_name) in orphans {
+                // Mark answered so a later duplicate id is not filled twice.
+                answered.insert(tool_use_id.clone());
+                repaired.push(ConversationMessage::tool_result(
+                    tool_use_id,
+                    tool_name,
+                    ORPHAN_TOOL_RESULT_MESSAGE,
+                    true,
+                ));
+                inserted += 1;
+            }
+        }
+        self.messages = repaired;
+        inserted
     }
 
     pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
@@ -1632,6 +1688,78 @@ mod tests {
             Some(43_700)
         );
         assert_eq!(restored.session_id, session.session_id);
+    }
+
+    #[test]
+    fn sanitizes_orphan_tool_use_on_load() {
+        // Assistant emits a tool_use; the tool call is interrupted so the very
+        // next message is plain user text with no tool_result. The Anthropic API
+        // rejects this on resume — load must backfill a synthetic tool_result.
+        let mut session = Session::new();
+        session.push_user_text("go").expect("user append");
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "tool-x".to_string(),
+                    name: "Agent".to_string(),
+                    input: "{}".to_string(),
+                    thought_signature: None,
+                },
+            ]))
+            .expect("assistant append");
+        session.push_user_text("stop").expect("user append");
+
+        let path = temp_session_path("orphan");
+        session.save_to_path(&path).expect("session should save");
+        let restored = Session::load_from_path(&path).expect("session should load");
+        fs::remove_file(&path).expect("temp file should be removable");
+
+        let pos = restored
+            .messages
+            .iter()
+            .position(|m| {
+                m.blocks
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "tool-x"))
+            })
+            .expect("tool_use present");
+        let next = restored
+            .messages
+            .get(pos + 1)
+            .expect("message after tool_use");
+        assert!(
+            next.blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult { tool_use_id, is_error, .. }
+                    if tool_use_id == "tool-x" && *is_error
+            )),
+            "a synthetic error tool_result must immediately follow the orphan tool_use"
+        );
+    }
+
+    #[test]
+    fn sanitize_leaves_well_formed_history_unchanged() {
+        // A complete tool_use → tool_result pair must not gain a duplicate.
+        let mut session = Session::new();
+        session.push_user_text("hi").expect("user append");
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                    input: "{}".to_string(),
+                    thought_signature: None,
+                },
+            ]))
+            .expect("assistant append");
+        session
+            .push_message(ConversationMessage::tool_result("t1", "bash", "ok", false))
+            .expect("tool result append");
+
+        let before = session.messages.len();
+        let inserted = session.sanitize_orphan_tool_uses();
+        assert_eq!(inserted, 0, "well-formed history needs no repair");
+        assert_eq!(session.messages.len(), before);
     }
 
     #[test]

@@ -1127,13 +1127,27 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Update spinner.  When a new turn starts (spinner becomes
             // active), clear the previous turn's result — the spinner
             // takes priority in the StatusSlot and the old result is stale.
+            //
+            // Only mutate state when it actually changes. `render_frame`
+            // returns "" whenever the spinner is inactive (idle), so the old
+            // unconditional `frame.set(idx+1)` + `spinner_text.set("")` churned
+            // identical state on every 80ms idle tick. Per iocraft's render
+            // model an unconditional `State::set` — even to the same value —
+            // resolves `component.wait()` and can starve `term.wait()`, dropping
+            // keyboard events (the failure mode guarded by
+            // `iocraft_repl_keyboard_input_not_frozen`). Leaving idle ticks
+            // untouched keeps key-event distribution alive between renders.
             let idx = frame.get();
-            frame.set(idx.wrapping_add(1));
             let text = spinner_for_future.render_frame(idx);
-            if !text.is_empty() && turn_result.read().is_some() {
-                turn_result.set(None);
+            if !text.is_empty() {
+                frame.set(idx.wrapping_add(1));
+                if turn_result.read().is_some() {
+                    turn_result.set(None);
+                }
             }
-            spinner_text.set(text);
+            if *spinner_text.read() != text {
+                spinner_text.set(text);
+            }
         }
     });
 

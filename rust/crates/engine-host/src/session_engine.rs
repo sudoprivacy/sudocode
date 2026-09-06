@@ -9,7 +9,7 @@
 //! report DATA a model switch returns (each renderer formats it its own way).
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine_core::AuthMode;
 use plugins::PluginLoadOutcome;
@@ -75,6 +75,27 @@ pub struct ModelSwitchReport {
     pub changed: bool,
     /// Config keys ∪ discovery, current model pinned first (for `ModelChanged`).
     pub available: Vec<String>,
+}
+
+/// Report DATA from a cancellable `/compact` ([`SessionEngine::compact_cancellable`],
+/// the ACP path). The renderer formats it (e.g. `format_acp_compact_report`);
+/// no formatting crosses the seam.
+pub struct CompactionOutcome {
+    /// `true` when a `session/cancel` aborted the compaction mid-round-trip (or
+    /// landed after it): the transcript in memory and on disk is untouched.
+    pub cancelled: bool,
+    /// Estimated session tokens before compaction.
+    pub before_tokens: usize,
+    /// Estimated session tokens after (equal to `before_tokens` when skipped).
+    pub after_tokens: usize,
+    /// Messages removed (0 when skipped or cancelled).
+    pub removed: usize,
+    /// Messages kept.
+    pub kept: usize,
+    /// `Some((method, summary_source))` when messages were actually removed;
+    /// `None` when skipped or cancelled — matching the `method` argument shape
+    /// of `commands::reports::format_acp_compact_report`.
+    pub method: Option<(runtime::CompactionMethod, runtime::CompactionSummarySource)>,
 }
 
 pub struct SessionEngine {
@@ -154,6 +175,84 @@ impl SessionEngine {
             .session()
             .save_to_path(&handle.path)
             .map_err(|e| format!("failed to persist session: {e}"))?;
+
+        let session = AcpCliSession {
+            cwd,
+            handle,
+            runtime,
+            abort_signal,
+            started_at: Instant::now(),
+            session_mcp_servers: mcp_servers.clone(),
+            prompt_overrides,
+        };
+        Ok(Self {
+            session: std::sync::Mutex::new(session),
+            tokio_runtime: Some(
+                tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
+            ),
+            allowed_tools,
+            permission_mode: std::sync::Mutex::new(permission_mode),
+            reasoning_effort,
+            auth_mode: std::sync::Mutex::new(auth_mode),
+        })
+    }
+
+    /// Build a single-session engine wrapping an **already-persisted**
+    /// transcript (`session` under `handle`) — the ACP `session/load` and
+    /// `session/new` fork paths, where the transcript already exists on disk and
+    /// must be adopted as-is (not recreated, not re-saved here). Mirrors
+    /// [`Self::build`]'s model / permission / auth resolution; the caller
+    /// supplies the resolved `system_prompt` (the ACP one) exactly as for
+    /// `build`. Ports `AcpSdkDelegate::open_persisted_session`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persisted(
+        cwd: &Path,
+        handle: SessionHandle,
+        session: runtime::Session,
+        mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+        system_prompt: SystemPrompt,
+        model: String,
+        model_flag_raw: Option<String>,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode_override: Option<PermissionMode>,
+        reasoning_effort: Option<String>,
+        auth_mode: Option<AuthMode>,
+    ) -> Result<Self, String> {
+        let cwd = canonical_session_cwd(cwd)?;
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        let resolved_model = if model_flag_raw.is_some() {
+            model.clone()
+        } else {
+            resolve_repl_model(model.clone())
+        };
+        let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+        let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
+        let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
+            .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
+        let abort_signal = runtime::HookAbortSignal::new();
+        // Adopt the persisted transcript verbatim — no `new_cli_session_for`, no
+        // `save_to_path` (it is already on disk at `handle.path`; re-saving here
+        // would rewrite a transcript the turn loop has not touched yet).
+        let runtime = build_engine_runtime(
+            &cwd,
+            session,
+            &handle.id,
+            RuntimeConfig {
+                model: resolved_model,
+                system_prompt,
+                enable_tools: true,
+                allowed_tools: allowed_tools.clone(),
+                permission_mode,
+                auth_mode: resolved_auth,
+                sudocode_config,
+            },
+            mcp_servers,
+            abort_signal.clone(),
+            reasoning_effort.clone(),
+        )
+        .map_err(|e| format!("failed to build runtime: {e}"))?;
 
         let session = AcpCliSession {
             cwd,
@@ -337,6 +436,100 @@ impl SessionEngine {
         let mut session = self.lock_session();
         if let Some(rt) = session.runtime.runtime_mut() {
             rt.permission_policy_mut().set_active_mode(mode);
+        }
+    }
+
+    /// Run an explicit `/compact` that a `session/cancel` can abort mid-flight
+    /// (the ACP path; the REPL's [`SessionLifecycle::run_compaction`] is not
+    /// cancellable, since the REPL has no concurrent cancel channel). Compacts
+    /// through the LLM path with a local-heuristic fallback, installs + persists
+    /// the compacted transcript when anything was removed, and records the same
+    /// telemetry the ACP `/compact` always did. A cancel during the model
+    /// round-trip — or one that lands right after it — leaves the transcript
+    /// untouched and returns `cancelled`. Returns report DATA; the renderer
+    /// formats it. Ports `AcpCliAgent::handle_acp_compact`.
+    pub fn compact_cancellable(&self) -> Result<CompactionOutcome, String> {
+        let mut session = self.lock_session();
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        // Fresh turn: a cancel left over from an earlier turn must not abort this
+        // one (mirrors `run_turn`).
+        session.abort_signal.reset();
+        let abort_signal = session.abort_signal.clone();
+        let before_tokens = estimate_session_tokens(session.runtime.session());
+        let config = CompactionConfig {
+            max_estimated_tokens: 0,
+            ..CompactionConfig::default()
+        };
+        let compaction = self.rt().block_on(async {
+            tokio::select! {
+                result = session.runtime.compact_with_method(config, None) => Some(result),
+                () = wait_for_abort(&abort_signal) => None,
+            }
+        });
+        let Some((result, method)) = compaction.filter(|_| !abort_signal.is_aborted()) else {
+            if let Some(tracer) = session.runtime.session_tracer() {
+                tracer.record("slash_compact_cancelled", Map::new());
+            }
+            return Ok(CompactionOutcome {
+                cancelled: true,
+                before_tokens,
+                after_tokens: before_tokens,
+                removed: 0,
+                kept: session.runtime.session().messages.len(),
+                method: None,
+            });
+        };
+        let removed = result.removed_message_count;
+        let summary_source = result.summary_source;
+        if removed > 0 {
+            *session.runtime.session_mut() = result.compacted_session;
+            let path = session.handle.path.clone();
+            session
+                .runtime
+                .session()
+                .save_to_path(&path)
+                .map_err(|e| format!("failed to persist compacted session: {e}"))?;
+        }
+        let kept = session.runtime.session().messages.len();
+        let after_tokens = estimate_session_tokens(session.runtime.session());
+        if let Some(tracer) = session.runtime.session_tracer() {
+            tracer.record("slash_compact", {
+                let mut attrs = Map::new();
+                attrs.insert(
+                    "method".to_string(),
+                    Value::String(method.as_str().to_string()),
+                );
+                attrs.insert("removed_messages".to_string(), Value::Number(removed.into()));
+                attrs.insert(
+                    "tokens_before".to_string(),
+                    Value::Number(before_tokens.into()),
+                );
+                attrs.insert("tokens_after".to_string(), Value::Number(after_tokens.into()));
+                attrs
+            });
+        }
+        Ok(CompactionOutcome {
+            cancelled: false,
+            before_tokens,
+            after_tokens,
+            removed,
+            kept,
+            method: (removed > 0).then_some((method, summary_source)),
+        })
+    }
+}
+
+/// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
+/// notification, so an `abort()` that races the subscription is still seen
+/// promptly. Ported from the ACP `/compact` path (`main.rs::wait_for_abort`).
+async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
+    loop {
+        if signal.is_aborted() {
+            return;
+        }
+        tokio::select! {
+            () = signal.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
     }
 }

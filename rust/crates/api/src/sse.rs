@@ -44,9 +44,21 @@ impl SseParser {
         }
 
         let trailing = std::mem::take(&mut self.buffer);
-        match self.parse_frame_with_context(&String::from_utf8_lossy(&trailing))? {
-            Some(event) => Ok(vec![event]),
-            None => Ok(Vec::new()),
+        let tail = String::from_utf8_lossy(&trailing);
+        // A non-empty buffer at end-of-stream is a frame that never got its
+        // `\n\n` terminator. Some servers legitimately omit the final blank
+        // line, so a clean parse must still succeed. But when the tail cannot
+        // be parsed it is a truncation, not a malformed model payload: report
+        // it as a retryable IncompleteStream carrying the tail, never as a
+        // JSON "failed to parse ... for model X" error that blames the model.
+        match self.parse_frame_with_context(&tail) {
+            Ok(Some(event)) => Ok(vec![event]),
+            Ok(None) => Ok(Vec::new()),
+            Err(_) => Err(ApiError::incomplete_stream(
+                self.provider.as_deref().unwrap_or("unknown"),
+                self.model.as_deref().unwrap_or("unknown"),
+                &tail,
+            )),
         }
     }
 
@@ -190,6 +202,7 @@ pub(crate) fn detect_non_sse_error(trimmed: &str) -> Option<ApiError> {
 #[cfg(test)]
 mod tests {
     use super::{parse_frame, SseParser};
+    use crate::error::ApiError;
     use crate::types::{ContentBlockDelta, MessageDelta, OutputContentBlock, StreamEvent, Usage};
 
     #[test]
@@ -387,5 +400,49 @@ mod tests {
                 usage: Usage::default(),
             }))
         );
+    }
+
+    #[test]
+    fn finish_on_truncated_frame_reports_incomplete_stream_not_json_error() {
+        // A stream that ends mid-frame (no terminating blank line, partial
+        // JSON) is a transport truncation. finish() must surface it as a
+        // retryable IncompleteStream naming the truncation — never as a JSON
+        // parse error "for model X" that blames the model.
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        let partial = b"event: content_block_delta\ndata: {\"type\":\"content_block_del";
+        assert!(parser.push(partial).expect("partial buffers").is_empty());
+
+        let err = parser.finish().expect_err("truncated tail must error");
+        assert!(
+            matches!(err, ApiError::IncompleteStream { .. }),
+            "expected IncompleteStream, got: {err:?}"
+        );
+        assert!(err.is_retryable(), "a truncated stream must be retryable");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("ended mid-frame") && rendered.contains("claude-opus-5"),
+            "message should name the truncation and model: {rendered}"
+        );
+        assert!(
+            !rendered.contains("failed to parse"),
+            "must not render as a JSON parse failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn finish_parses_a_final_frame_missing_its_trailing_blank_line() {
+        // Some servers omit the final `\n\n`. A complete-but-unterminated last
+        // frame must still parse cleanly (not be misclassified as truncated).
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        let whole = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{}}";
+        assert!(parser
+            .push(whole)
+            .expect("buffers, no terminator yet")
+            .is_empty());
+
+        let events = parser
+            .finish()
+            .expect("unterminated final frame still parses");
+        assert_eq!(events.len(), 1, "the final frame should yield its event");
     }
 }

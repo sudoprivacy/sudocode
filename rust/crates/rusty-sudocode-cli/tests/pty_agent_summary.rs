@@ -79,7 +79,11 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
         &["--permission-mode", "danger-full-access", prompt],
         &[("SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS", "200")],
     );
-    let long = LIVE_TIMEOUT.saturating_mul(4);
+    // Sub-agent tests are two serialised model turns (parent spawns a worker,
+    // worker answers, parent relays), so they need noticeably more room than a
+    // single-turn test — especially when the rest of the suite is running
+    // beside them. Purely a timeout: the assertions are unchanged.
+    let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
     // Success signals — both must appear:

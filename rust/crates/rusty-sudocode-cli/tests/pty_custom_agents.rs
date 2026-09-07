@@ -90,7 +90,11 @@ fn custom_md_agent_is_reachable_via_agent_tool() {
     );
 
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    let long = LIVE_TIMEOUT.saturating_mul(3);
+    // Sub-agent tests are two serialised model turns (parent spawns a worker,
+    // worker answers, parent relays), so they need noticeably more room than a
+    // single-turn test — especially when the rest of the suite is running
+    // beside them. Purely a timeout: the assertions are unchanged.
+    let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
     // Sentinel is the primary success indicator — proves the custom

@@ -105,12 +105,12 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     // the legacy `└ ` or the current `⏺` format — both must end CRLF.
     sess.expect("(?:└ |⏺)[^\n]*\r\n")
         .expect("tool-result line should end with CRLF, not a bare LF");
-    // The status line now lives in the StatusSlot::TurnResult ChromeSlot
-    // (above the upper separator), rendered by iocraft's canvas redraw.
-    // Both ctx and separator appear in the same canvas frame, so match
-    // them together to avoid timing issues across platforms.
-    sess.expect("ctx [^\n]*\r?\n[^\n]*─{20,}")
-        .expect("turn status line in ChromeSlot followed by separator");
+    // The status line is printed to scrollback AND persisted in the
+    // StatusSlot::TurnResult ChromeSlot. The scrollback println is the
+    // reliable sync point for PTY expects.
+    sess.expect("ctx ").expect("turn status line");
+    sess.expect("─{20,}")
+        .expect("separator redrawn after the status line");
 
     let mut box_indents = indents_of_rows_containing(&sess, "╭─ ");
     box_indents.extend(indents_of_rows_containing(&sess, "$ printf"));

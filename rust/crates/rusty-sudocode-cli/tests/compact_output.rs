@@ -1,8 +1,10 @@
-// Un-gated for Windows (§5): the historical ~400s hang was NOT a pipe-buffer
-// issue — it was `run_scode`'s `env_clear()` dropping `SystemRoot` (+ the other
-// Windows-essential vars), without which the child's ws2_32 / TLS / temp-file
-// init fails and its HTTP client to the localhost mock server never connects.
-// `run_scode` now preserves those on Windows + uses the real host PATH.
+// Un-gated for Windows: the historical ~400s hang was NOT a pipe-buffer issue —
+// it was `env_clear()` dropping `SystemRoot`, without which the child's ws2_32 /
+// TLS / temp-file init fails and its HTTP client to the localhost mock server
+// never connects. See `common/isolated_env.rs`.
+
+#[path = "common/isolated_env.rs"]
+mod isolated_env;
 
 use std::fs;
 use std::path::PathBuf;
@@ -289,14 +291,8 @@ fn run_scode(
 }
 
 /// Apply the isolated test environment to `command`: `env_clear` + the minimal
-/// vars scode needs (config home, HOME, NO_COLOR).
-///
-/// On Windows, `env_clear` also drops `SystemRoot` / `SystemDrive` / `TEMP`,
-/// which ws2_32 (the localhost HTTP client to the mock server), TLS init and
-/// temp-file creation require — without them the child never connects and the
-/// run hangs (the historical ~400s Windows timeout). Re-inject those + use the
-/// real host `PATH` there (the POSIX `/usr/bin:/bin` below is empty on Windows).
-/// Unix keeps the minimal, isolated PATH unchanged.
+/// vars scode needs (config home, HOME, NO_COLOR) + the per-platform set a
+/// child still requires afterwards (`isolated_env`).
 fn apply_isolated_env(
     command: &mut Command,
     config_home: &std::path::Path,
@@ -307,26 +303,9 @@ fn apply_isolated_env(
         .env("SUDO_CODE_CONFIG_HOME", config_home)
         .env("HOME", home)
         .env("NO_COLOR", "1");
-    #[cfg(windows)]
-    {
-        if let Ok(path) = std::env::var("PATH") {
-            command.env("PATH", path);
-        }
-        for key in [
-            "SystemRoot",
-            "SystemDrive",
-            "TEMP",
-            "TMP",
-            "USERPROFILE",
-            "windir",
-        ] {
-            if let Ok(val) = std::env::var(key) {
-                command.env(key, val);
-            }
-        }
+    for (key, value) in isolated_env::inherited_env() {
+        command.env(key, value);
     }
-    #[cfg(not(windows))]
-    command.env("PATH", "/usr/bin:/bin");
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

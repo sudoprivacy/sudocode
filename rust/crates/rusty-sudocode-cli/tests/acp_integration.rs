@@ -3,22 +3,19 @@
 //! Each transport runs the same suite of scenarios to verify protocol parity
 //! between the SDK-based stdio server and the axum-based WebSocket server.
 //!
-//! `#![cfg(unix)]` because the ACP stdio server's subprocess handshake
-//! (spawn `scode acp`, wait for the "server ready" line on stderr, then
-//! exchange JSON-RPC over stdio) hangs on Windows: locally on Win10 +
-//! MSVC every scenario panics with `stderr closed before server ready`,
-//! and on CI three tests in this file (`acp_stdio_integration`,
-//! `acp_stdio_exits_on_stdin_close`, `acp_ws_integration`) caused the
-//! windows-latest cargo-test job to wedge for nearly three hours
-//! before being cancelled. Either the stderr-pipe contract is racing
-//! ConPTY/MinGW handles or the ACP server binary itself doesn't
-//! finish init on Windows; either way it's far out of scope for the
-//! "wire PTY testing into the matrix" PR. Tracked as a follow-up.
+//! Runs on Windows too. The old `#![cfg(unix)]` gate blamed "the stderr-pipe
+//! contract racing ConPTY/MinGW handles" for `stderr closed before server
+//! ready` (and a ~3h windows-latest CI wedge); the real cause was
+//! [`isolate_env`]'s `env_clear()` dropping `SystemRoot`, without which the
+//! spawned `scode acp` cannot initialise winsock — so `acp serve` fails to bind
+//! and dies before printing its ready line. See `common/isolated_env.rs`.
 
-#![cfg(unix)]
-
+#[path = "common/isolated_env.rs"]
+mod isolated_env;
 #[path = "common/openai_compat_mock.rs"]
 mod openai_compat_mock;
+#[path = "common/python.rs"]
+mod python;
 
 use std::fs;
 use std::path::PathBuf;
@@ -356,15 +353,24 @@ impl AcpTestClient {
 // Transport constructors
 // ---------------------------------------------------------------------------
 
-fn base_command(workspace: &TestWorkspace) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(&workspace.root)
-        .env_clear()
+/// Give `cmd` a hermetic environment: `env_clear()` so the developer's real
+/// config and API keys can't leak in, then the test's own config home / HOME
+/// plus the per-platform vars a spawned child still needs (`isolated_env`).
+fn isolate_env(cmd: &mut Command, workspace: &TestWorkspace) {
+    cmd.env_clear()
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
         .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
+        .env("NO_COLOR", "1");
+    for (key, value) in isolated_env::inherited_env() {
+        cmd.env(key, value);
+    }
+}
+
+fn base_command(workspace: &TestWorkspace) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(&workspace.root);
+    isolate_env(&mut cmd, workspace);
+    cmd.args([
             "--auth",
             "api-key",
             "--model",
@@ -2398,13 +2404,9 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
     workspace.seed_text_only_test_fixture(WIRE_MODEL);
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(&workspace.root)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
-        .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
+    cmd.current_dir(&workspace.root);
+    isolate_env(&mut cmd, &workspace);
+    cmd.args([
             "--auth",
             "api-key",
             "--model",
@@ -2617,13 +2619,9 @@ while True:
 /// so MCP tool calls are not gated behind an interactive permission prompt.
 fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(&workspace.root)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
-        .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
+    cmd.current_dir(&workspace.root);
+    isolate_env(&mut cmd, workspace);
+    cmd.args([
             "--auth",
             "api-key",
             "--model",
@@ -2659,13 +2657,9 @@ fn spawn_stdio_client_danger_with_allowed(
     allowed: &str,
 ) -> AcpTestClient {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(&workspace.root)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
-        .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
+    cmd.current_dir(&workspace.root);
+    isolate_env(&mut cmd, workspace);
+    cmd.args([
             "--auth",
             "api-key",
             "--model",
@@ -2804,7 +2798,7 @@ async fn acp_session_new_injects_stdio_mcp() {
                 "cwd": workspace.root.to_string_lossy(),
                 "mcpServers": [{
                     "name": "parity",
-                    "command": "python3",
+                    "command": python::resolve_python(),
                     "args": [dummy.to_string_lossy()],
                     "env": [
                         {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},
@@ -2873,7 +2867,7 @@ async fn acp_session_new_mcp_survives_model_switch() {
 
     let mcp_servers = json!([{
         "name": "parity",
-        "command": "python3",
+        "command": python::resolve_python(),
         "args": [dummy.to_string_lossy()],
         "env": [
             {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},
@@ -3252,7 +3246,7 @@ async fn acp_session_new_mcp_isolated_per_session() {
                 "cwd": workspace.root.to_string_lossy(),
                 "mcpServers": [{
                     "name": "parity",
-                    "command": "python3",
+                    "command": python::resolve_python(),
                     "args": [dummy.to_string_lossy()],
                     "env": [
                         {"name": "DUMMY_PROOF", "value": proof_a.to_string_lossy()},
@@ -3355,7 +3349,7 @@ async fn acp_session_new_mcp_available_under_allowed_tools() {
                 "cwd": workspace.root.to_string_lossy(),
                 "mcpServers": [{
                     "name": "parity",
-                    "command": "python3",
+                    "command": python::resolve_python(),
                     "args": [dummy.to_string_lossy()],
                     "env": [
                         {"name": "DUMMY_PROOF", "value": proof.to_string_lossy()},

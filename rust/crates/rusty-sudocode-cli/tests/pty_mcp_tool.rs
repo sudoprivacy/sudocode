@@ -21,15 +21,15 @@
 //! makes the echoed payload fail to round-trip, so the assertion below
 //! fails.
 //!
-//! `#![cfg(unix)]` for the same reason as the sibling PTY/ACP suites:
-//! the mock MCP server is a POSIX subprocess (a `python3` script) and
-//! the harness spawns scode under a POSIX PTY.
+//! Runs on Windows too: the PTY harness is cross-platform (`common::resolve_sh`)
+//! and the mock MCP server reaches a real interpreter through
+//! `common::resolve_python` rather than the bare `python3` name, which on
+//! Windows is a Microsoft Store alias that never runs the script.
 //!
 //! ```bash
 //! cargo test --test pty_mcp_tool                          # mock (CI)
 //! SCODE_TEST_BACKEND=live cargo test --test pty_mcp_tool  # real API
 //! ```
-#![cfg(unix)]
 
 mod common;
 
@@ -123,7 +123,7 @@ fn configure_mcp_server(workspace_root: &Path) {
     let settings = serde_json::json!({
         "mcpServers": {
             "parity": {
-                "command": "python3",
+                "command": common::resolve_python(),
                 "args": [script_path.display().to_string()],
             }
         }

@@ -2555,6 +2555,15 @@ impl BuiltRuntime {
         self
     }
 
+    fn with_session_known_model(mut self, model: impl Into<String>) -> Self {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("runtime should exist before overriding session known model");
+        self.runtime = Some(runtime.with_session_known_model(model));
+        self
+    }
+
     /// Set the trace ID for the next request.
     fn set_trace_id(&mut self, trace_id: impl Into<String>) {
         if let Some(ref mut runtime) = self.runtime {
@@ -3802,7 +3811,17 @@ impl AcpSdkDelegate {
         mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
     ) -> Result<(String, PathBuf, runtime::HookAbortSignal), runtime::AcpError> {
-        let model = self.inner.resolve_model_for_cwd(&cwd)?;
+        // A persisted transcript carries the model it was last run with
+        // (`build_runtime_with_plugin_state` records it). Prefer that over the
+        // directory's default: resuming a session that had been switched to
+        // another model must not silently drop back to the config model, which
+        // would run the rest of the conversation on the wrong model and
+        // mis-size the context window for auto-compaction. An explicit
+        // `--model` flag still wins.
+        let model = match (&self.inner.model_flag_raw, &session.model) {
+            (None, Some(persisted)) => persisted.clone(),
+            _ => self.inner.resolve_model_for_cwd(&cwd)?,
+        };
         let permission_mode = self.inner.resolve_permission_mode_for_cwd(&cwd)?;
         let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides)?;
         let sudocode_config =
@@ -4675,6 +4694,7 @@ impl LiveCli {
         // known date silently advanced to today on every turn — suppressing
         // the date-rollover reminder added in #128 (see issue #135).
         let inherited_known_date = self.runtime.prompt_known_date().map(str::to_string);
+        let inherited_known_model = self.runtime.prompt_known_model().map(str::to_string);
         let session = self.runtime.session().clone();
         let session_id = self.session.id.clone();
         self.shutdown_runtime_resources()?;
@@ -4689,6 +4709,9 @@ impl LiveCli {
         .with_hook_abort_signal(hook_abort_signal.clone());
         if let Some(known) = inherited_known_date {
             runtime = runtime.with_session_known_date(known);
+        }
+        if let Some(known) = inherited_known_model {
+            runtime = runtime.with_session_known_model(known);
         }
         let hook_abort_monitor = if self.esc_monitor_enabled {
             HookAbortMonitor::spawn(hook_abort_signal)
@@ -6759,7 +6782,8 @@ fn build_runtime_with_plugin_state(
         system_prompt,
         &feature_config,
     )
-    .with_session_known_date(runtime::today_local());
+    .with_session_known_date(runtime::today_local())
+    .with_session_known_model(config.model.clone());
     // nexus A2A: give the CLI executor the send half so `send_message` routes
     // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
     // uses). Set only when configured; absent it the tool is never advertised.

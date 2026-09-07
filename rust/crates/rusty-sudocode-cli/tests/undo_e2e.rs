@@ -317,9 +317,14 @@ fn resumed_undo_emits_structured_json_when_requested() {
 }
 
 fn run_scode(current_dir: &Path, args: &[&str]) -> Output {
-    common::isolate_process_config_home();
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
-    command.current_dir(current_dir).args(args);
+    command
+        .current_dir(current_dir)
+        .env(
+            "SUDO_CODE_CONFIG_HOME",
+            common::throwaway_config_home(current_dir),
+        )
+        .args(args);
     command.output().expect("scode should launch")
 }
 

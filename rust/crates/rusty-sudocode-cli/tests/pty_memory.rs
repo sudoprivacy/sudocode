@@ -44,9 +44,12 @@ fn write_entry(dir: &Path, slug: &str, entry_type: &str, description: &str, body
 
 /// Run `scode system-prompt` with the given env vars and return the output.
 fn run_system_prompt(cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output {
-    common::isolate_process_config_home();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.current_dir(cwd);
+    // Config home under this test's own temp root: per-test, not shared. These
+    // tests run in parallel and `scode` writes into its config home, so one
+    // directory across all of them means they trip over each other's files.
+    cmd.current_dir(cwd)
+        .env("SUDO_CODE_CONFIG_HOME", common::throwaway_config_home(cwd));
     for (k, v) in envs {
         cmd.env(k, v);
     }

@@ -64,9 +64,14 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
              just five hundred 7s in a row.\", \
             run_in_background=true). Record the agent_id you get back. \
         (2) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker. \
-        (3) Report back to the user with the value of the `result_full_path` field in the \
-            TaskOutput response — the exact path string as it appears there, tagged with \
-            'FULL_PATH: <path>'. The path will end in `.full.md`.";
+        (3) The worker's output is long, so it comes back summarized with the complete text \
+            saved to a file alongside it. Tell me where that file is, as \
+            'FULL_PATH: <path>', so I can open it.";
+    // Phrased as a request for where the output was saved, not as an
+    // instruction to echo a named response field back verbatim. The latter
+    // reads to a live model like an attempt to extract an internal path, and
+    // sonnet refuses it outright — the test then fails on a refusal rather
+    // than on the summarization behaviour it is here to check.
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access", prompt],

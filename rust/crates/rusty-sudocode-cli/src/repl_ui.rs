@@ -558,6 +558,67 @@ fn submit_dialpad_selection(
     let _ = input_tx.send(InputEvent::QuestionAnswer(answer));
 }
 
+// ---------------------------------------------------------------------------
+// Paste placeholder helpers (CC-style [Pasted text #N +M lines] placeholders)
+// ---------------------------------------------------------------------------
+
+/// Format a placeholder reference for pasted text.
+/// Matches the CC convention so history/session files are compatible.
+fn format_paste_placeholder(id: u32, text: &str) -> String {
+    let newline_count = text.chars().filter(|&c| c == '\n').count();
+    if newline_count == 0 {
+        format!("[Pasted text #{id}]")
+    } else {
+        format!("[Pasted text #{id} +{newline_count} lines]")
+    }
+}
+
+/// Replace all `[Pasted text #N ...]` placeholders in `input` with the real
+/// text from `store`, producing the final string to send to the LLM.
+/// The store is consumed after each submit — it is ephemeral by design.
+fn expand_paste_placeholders(
+    input: &str,
+    store: &std::collections::HashMap<u32, String>,
+) -> String {
+    if store.is_empty() || !input.contains("[Pasted text #") {
+        return input.to_string();
+    }
+    // Walk placeholder matches from right to left so byte offsets stay valid.
+    let re_str = r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]";
+    // Hand-rolled scan: no regex dep wanted here.
+    let mut result = input.to_string();
+    let placeholder_prefix = "[Pasted text #";
+    loop {
+        let Some(start) = result.rfind(placeholder_prefix) else {
+            break;
+        };
+        let tail = &result[start + placeholder_prefix.len()..];
+        let Some(id_end) = tail.find(|c: char| !c.is_ascii_digit()) else {
+            break;
+        };
+        if id_end == 0 {
+            break;
+        }
+        let Ok(id) = tail[..id_end].parse::<u32>() else {
+            break;
+        };
+        let rest = &tail[id_end..];
+        let end_bracket = if rest.starts_with("]") {
+            start + placeholder_prefix.len() + id_end + 1
+        } else if let Some(bracket) = rest.find("]") {
+            start + placeholder_prefix.len() + id_end + bracket + 1
+        } else {
+            break;
+        };
+        if let Some(real_text) = store.get(&id) {
+            result.replace_range(start..end_bracket, real_text);
+        } else {
+            break; // unknown id, stop to avoid infinite loop
+        }
+    }
+    result
+}
+
 fn enter_key_event_for_value(
     question: Option<&QuestionPromptView>,
     selected_index: usize,
@@ -999,6 +1060,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
     let mut dialpad_cursor = hooks.use_state(|| 0usize);
+    // Ephemeral paste store: placeholder_id -> real pasted text.
+    // Allocated when the user pastes, freed on submit/clear.
+    // Never persisted — the real content goes into the submitted message.
+    let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
+    let mut next_paste_id = hooks.use_state(|| 1u32);
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -1209,7 +1275,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             let _ = input_tx_for_events.send(InputEvent::Exit);
                                         }
                                         InputEvent::Submit(text) => {
-                                            let trimmed = text.trim();
+                                            // Expand any [Pasted text #N] placeholders back to
+                                            // the real pasted content before sending to the LLM.
+                                            let store_snap = paste_store.read().clone();
+                                            let expanded = expand_paste_placeholders(&text, &store_snap);
+                                            paste_store.write().clear();
+                                            next_paste_id.set(1);
+                                            let trimmed = expanded.trim();
                                             if !trimmed.is_empty() {
                                                 let mut h = history.write();
                                                 if h.last().map_or(true, |last| last != trimmed) {
@@ -1217,7 +1289,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                 }
                                             }
                                             stdout_for_events.println(format!("{}\u{276f} {val}{}", crate::render::BOLD, crate::render::RESET));
-                                            let _ = input_tx_for_events.send(InputEvent::Submit(text));
+                                            let _ = input_tx_for_events.send(InputEvent::Submit(expanded));
                                         }
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
                                     }
@@ -1558,6 +1630,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             on_change: move |new_val: String| {
                                 input_value.set(new_val);
                             },
+                            on_paste: move |pasted: String| {
+                                // Store the real text and replace with a
+                                // compact placeholder so the input box does
+                                // not overflow with potentially huge content.
+                                let id = next_paste_id.get();
+                                next_paste_id.set(id + 1);
+                                let placeholder = format_paste_placeholder(id, &pasted);
+                                paste_store.write().insert(id, pasted);
+                                // Append the placeholder to whatever is already in the box.
+                                let current = input_value.read().clone();
+                                input_value.set(if current.is_empty() {
+                                    placeholder
+                                } else {
+                                    format!("{current}{placeholder}")
+                                });
+                            },
                         )
                     }
                 }
@@ -1775,5 +1863,41 @@ mod tests {
             !suggestions.contains(&"/cost".to_string()),
             "/cost should not appear in suggestions for /ver, got: {suggestions:?}"
         );
+    }
+
+    #[test]
+    fn paste_placeholder_single_line_has_no_line_count() {
+        let p = format_paste_placeholder(1, "hello world");
+        assert_eq!(p, "[Pasted text #1]");
+    }
+
+    #[test]
+    fn paste_placeholder_multi_line_includes_line_count() {
+        let p = format_paste_placeholder(1, "line one\nline two\nline three");
+        assert_eq!(p, "[Pasted text #1 +2 lines]");
+    }
+
+    #[test]
+    fn expand_paste_placeholders_restores_real_text() {
+        let mut store = std::collections::HashMap::new();
+        store.insert(1u32, "line one\nline two".to_string());
+        let input = "before [Pasted text #1 +1 lines] after";
+        let expanded = expand_paste_placeholders(input, &store);
+        assert_eq!(expanded, "before line one\nline two after");
+    }
+
+    #[test]
+    fn expand_paste_placeholders_noop_when_no_store() {
+        let store = std::collections::HashMap::new();
+        let input = "no placeholders here";
+        assert_eq!(expand_paste_placeholders(input, &store), input);
+    }
+
+    #[test]
+    fn expand_paste_placeholders_single_line_variant() {
+        let mut store = std::collections::HashMap::new();
+        store.insert(3u32, "hello".to_string());
+        let input = "[Pasted text #3]";
+        assert_eq!(expand_paste_placeholders(input, &store), "hello");
     }
 }

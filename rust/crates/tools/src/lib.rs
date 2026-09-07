@@ -1604,7 +1604,7 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
 /// `TaskCreate`, `WebFetch`, `Skill`, `Agent`, `TaskUpdate`, …) whose
 /// `execute_tool` match arms are PascalCase: lower-casing them (the prior
 /// behaviour) turned every one into `unsupported tool`.
-fn canonicalize_tool_name(name: &str) -> String {
+pub fn canonicalize_tool_name(name: &str) -> String {
     let normalized = normalize_tool_name(name);
     for &(alias, canonical) in TOOL_ALIASES {
         if normalized == alias {

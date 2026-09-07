@@ -62,6 +62,17 @@ const DATE_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>Today's date is ";
 /// also counts as a valid date announcement when scanning the session.
 const DATE_ROLLOVER_REMINDER_MARKER: &str = "The local calendar date has changed";
 
+/// Prefix of the user-side model announcement injected on the first turn.
+/// The active model deliberately lives in a content block instead of the
+/// system prompt so the system blocks stay byte-stable across a `/model`
+/// switch (the dynamic system block would otherwise miss its prompt cache
+/// every switch). Also used as the marker when scanning the session for an
+/// existing announcement.
+const MODEL_CONTEXT_REMINDER_PREFIX: &str = "<system-reminder>You are running as ";
+/// Marker present in the model-change reminder text; a change reminder also
+/// counts as a valid model announcement when scanning the session.
+const MODEL_CHANGE_REMINDER_MARKER: &str = "The active model has changed";
+
 /// Fully assembled request payload sent to the upstream model client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -385,6 +396,13 @@ pub struct ConversationRuntime<C, T> {
     /// a `<system-reminder>` content block on the first user turn and
     /// prepends a rollover reminder when the local date changes mid-session.
     prompt_known_date: Option<String>,
+    /// The model this session last announced to the assistant. Mirrors
+    /// `prompt_known_date`: `run_turn_with_blocks` announces the active model
+    /// via a `<system-reminder>` content block on the first user turn and
+    /// prepends a change reminder when the active model differs mid-session
+    /// (e.g. after `/model`). Keeps model identity out of the cached system
+    /// prompt entirely.
+    prompt_known_model: Option<String>,
     /// Override for "today" used in tests. Always `None` outside tests.
     #[cfg(test)]
     today_override: Option<String>,
@@ -456,6 +474,7 @@ where
             permission_policy,
             system_prompt,
             prompt_known_date: None,
+            prompt_known_model: None,
             #[cfg(test)]
             today_override: None,
             max_iterations: usize::MAX,
@@ -494,6 +513,24 @@ where
     #[must_use]
     pub fn prompt_known_date(&self) -> Option<&str> {
         self.prompt_known_date.as_deref()
+    }
+
+    /// Announce the model this session starts on. Mirrors
+    /// [`Self::with_session_known_date`]: the model is carried in a first-turn
+    /// `<system-reminder>` content block, never in the cached system prompt.
+    #[must_use]
+    pub fn with_session_known_model(mut self, model: impl Into<String>) -> Self {
+        self.prompt_known_model = Some(model.into());
+        self
+    }
+
+    /// Model this session last announced to the assistant. Exposed so the CLI
+    /// can carry the state across runtime rebuilds (a `/model` switch rebuilds
+    /// the runtime); without it a rebuild would re-announce or, worse, announce
+    /// a stale model.
+    #[must_use]
+    pub fn prompt_known_model(&self) -> Option<&str> {
+        self.prompt_known_model.as_deref()
     }
 
     #[must_use]
@@ -676,6 +713,79 @@ where
                     ContentBlock::Text { text }
                         if text.contains(DATE_CONTEXT_REMINDER_PREFIX)
                             || text.contains(DATE_ROLLOVER_REMINDER_MARKER)
+                )
+            })
+        })
+    }
+
+    /// Keep the assistant informed of which model it is WITHOUT ever putting
+    /// the model into the (cache-prefix) system prompt, mirroring
+    /// [`Self::inject_date_context`]. Both shapes live in user-side content
+    /// blocks, leaving the system prompt byte-stable across a `/model` switch
+    /// so its prompt-cache prefix stays warm.
+    fn inject_model_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+        let Some(known) = self.prompt_known_model.clone() else {
+            return blocks;
+        };
+        let active = self.active_model();
+        if active.is_empty() {
+            return blocks;
+        }
+        if active != known {
+            let reminder = ContentBlock::Text {
+                text: format!(
+                    "<system-reminder>The active model has changed since this session started. \
+                     You were {known}; you are now running as {active}. \
+                     Any earlier text in this conversation that named a different model is stale. \
+                     When asked which model you are, answer {active}.</system-reminder>"
+                ),
+            };
+            self.prompt_known_model = Some(active);
+            let mut combined = Vec::with_capacity(blocks.len() + 1);
+            combined.push(reminder);
+            combined.extend(blocks);
+            return combined;
+        }
+        if self.session_has_model_context() {
+            return blocks;
+        }
+        let mut combined = blocks;
+        combined.push(ContentBlock::Text {
+            text: format!(
+                "{MODEL_CONTEXT_REMINDER_PREFIX}{active}. \
+                 Your built-in identity text may name a different model or vendor; \
+                 the model named here is the one actually serving this session, so \
+                 when asked which model you are, answer {active}.</system-reminder>"
+            ),
+        });
+        combined
+    }
+
+    /// Model the session should treat as the one currently answering. Reads
+    /// the session's requested model (`session.model`) — the one the next
+    /// request will actually use, kept in sync by `/model` and runtime
+    /// rebuilds — and falls back to the announced model when the session
+    /// carries none. This is compared against `prompt_known_model` (what was
+    /// last announced) so a switch is detected exactly once.
+    fn active_model(&self) -> String {
+        self.session
+            .model
+            .clone()
+            .or_else(|| self.prompt_known_model.clone())
+            .unwrap_or_default()
+    }
+
+    /// `true` when some message already announced the active model to the
+    /// assistant, via either the first-turn announcement or a change reminder.
+    /// Scanning the session self-heals after compaction removes the carrier.
+    fn session_has_model_context(&self) -> bool {
+        self.session.messages.iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains(MODEL_CONTEXT_REMINDER_PREFIX)
+                            || text.contains(MODEL_CHANGE_REMINDER_MARKER)
                 )
             })
         })
@@ -998,6 +1108,7 @@ where
         mut observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<TurnSummary, RuntimeError> {
         let blocks = self.inject_date_context(blocks);
+        let blocks = self.inject_model_context(blocks);
         // Coordinator-mode push: drain any `<task-notification>` XML
         // blocks that background sub-agents deposited into the
         // coordinator's inbox since the previous turn, and prepend
@@ -4774,6 +4885,127 @@ mod tests {
             &second_turn_user_blocks[0],
             ContentBlock::Text { text } if text == "second"
         ));
+    }
+
+    #[tokio::test]
+    async fn first_turn_announces_active_model_after_user_content() {
+        // The system prompt carries no model, so the first turn must announce
+        // it via a user-side system-reminder block appended AFTER the user's
+        // content (mirrors the date announcement).
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_model("claude-opus-5");
+
+        runtime
+            .run_turn("hello", None, None)
+            .await
+            .expect("turn should succeed");
+
+        let requests = captured.lock().expect("captured mutex");
+        let user_blocks = &requests[0].messages[0].blocks;
+        assert_eq!(
+            user_blocks.len(),
+            2,
+            "first turn should carry user text + model announcement"
+        );
+        assert!(matches!(
+            &user_blocks[0],
+            ContentBlock::Text { text } if text == "hello"
+        ));
+        let ContentBlock::Text { text: announcement } = &user_blocks[1] else {
+            panic!("second block should be the model announcement");
+        };
+        assert!(
+            announcement.contains("<system-reminder>")
+                && announcement.contains("You are running as claude-opus-5"),
+            "model announcement malformed: {announcement}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_announcement_is_not_repeated_on_later_turns() {
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_model("claude-opus-5");
+
+        runtime.run_turn("first", None, None).await.expect("turn 1");
+        runtime
+            .run_turn("second", None, None)
+            .await
+            .expect("turn 2");
+
+        let requests = captured.lock().expect("captured mutex");
+        let second_turn_user_blocks = requests[1]
+            .messages
+            .iter()
+            .rfind(|m| m.role == MessageRole::User)
+            .expect("user message")
+            .blocks
+            .clone();
+        assert_eq!(
+            second_turn_user_blocks.len(),
+            1,
+            "model announcement must not repeat while the session carries it"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_change_is_announced_mid_session() {
+        // Switching the requested model mid-session (as `/model` does by
+        // rebuilding the runtime with a new session.model) must inject a
+        // change reminder naming the new model, prepended BEFORE the user
+        // content.
+        let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            CapturingApi {
+                requests: captured.clone(),
+            },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_session_known_model("claude-opus-5");
+
+        runtime.run_turn("first", None, None).await.expect("turn 1");
+        runtime.session_mut().model = Some("claude-sonnet-4-6".to_string());
+        runtime
+            .run_turn("second", None, None)
+            .await
+            .expect("turn 2");
+
+        let requests = captured.lock().expect("captured mutex");
+        let second_turn_user_blocks = requests[1]
+            .messages
+            .iter()
+            .rfind(|m| m.role == MessageRole::User)
+            .expect("user message")
+            .blocks
+            .clone();
+        let ContentBlock::Text { text: reminder } = &second_turn_user_blocks[0] else {
+            panic!("first block of the switched turn should be the change reminder");
+        };
+        assert!(
+            reminder.contains("The active model has changed")
+                && reminder.contains("claude-sonnet-4-6"),
+            "model change reminder malformed: {reminder}"
+        );
     }
 
     #[tokio::test]

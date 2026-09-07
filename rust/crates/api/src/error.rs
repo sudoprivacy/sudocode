@@ -71,6 +71,18 @@ pub enum ApiError {
         last_error: Box<ApiError>,
     },
     InvalidSseFrame(&'static str),
+    /// The response stream ended in the middle of an SSE frame — the trailing
+    /// bytes are a partial `data:` payload that cannot be parsed. This is a
+    /// transport truncation (dropped connection, a proxy cutting the stream),
+    /// not a malformed payload from the model, so it is retryable and must not
+    /// be reported as a JSON parse failure "for model X" (which misleads the
+    /// user into blaming the model). `body_snippet` carries the leading bytes
+    /// of the unparseable tail for diagnosis.
+    IncompleteStream {
+        provider: String,
+        model: String,
+        body_snippet: String,
+    },
     BackoffOverflow {
         attempt: u32,
         base_delay: Duration,
@@ -83,6 +95,27 @@ pub enum ApiError {
     /// Config-driven provider resolution error (e.g. missing model alias,
     /// unavailable auth mode, missing credential in sudocode.json).
     Configuration(String),
+}
+
+/// Internal classification used by [`ApiError::categorize`] to share
+/// exhaustive match arms across predicate methods without repeating every
+/// variant in every method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    /// `Http`, `Api`, or `RetriesExhausted` — callers inspect these directly.
+    Structured,
+    /// `IncompleteStream`, `InvalidSseFrame`, `BackoffOverflow`.
+    Transport,
+    /// `MissingCredentials`, `ExpiredOAuthToken`, `Auth`.
+    Auth,
+    /// `ContextWindowExceeded`.
+    ContextWindow,
+    /// `RequestBodySizeExceeded`.
+    RequestSize,
+    /// `InvalidApiKeyEnv`, `Io`, `Json`.
+    RuntimeIo,
+    /// `Configuration`.
+    Configuration,
 }
 
 impl ApiError {
@@ -135,23 +168,66 @@ impl ApiError {
         }
     }
 
+    /// Build an [`ApiError::IncompleteStream`] from the unparseable trailing
+    /// bytes of a truncated SSE stream.
+    #[must_use]
+    pub fn incomplete_stream(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        body: &str,
+    ) -> Self {
+        Self::IncompleteStream {
+            provider: provider.into(),
+            model: model.into(),
+            body_snippet: truncate_body_snippet(body, 200),
+        }
+    }
+
+    /// Internal classification used to share exhaustive match arms across the
+    /// several boolean/option predicate methods below. Each method still has
+    /// its own `match self` at the top for variants that carry data (e.g.
+    /// `Api` for retryability and failure class, `Http` for retryability) —
+    /// those branches return before `categorize()` is ever called. The helper
+    /// is #[inline] so the compiler can constant-fold it into each call site.
+    #[inline]
+    fn categorize(&self) -> ErrorCategory {
+        match self {
+            // These carry data needed by each predicate method; callers
+            // short-circuit before reaching categorize().
+            Self::Http(_) | Self::Api { .. } | Self::RetriesExhausted { .. } => {
+                ErrorCategory::Structured
+            }
+            // Transport failures: retryable, safe_failure_class = "provider_transport".
+            Self::IncompleteStream { .. }
+            | Self::InvalidSseFrame(_)
+            | Self::BackoffOverflow { .. } => ErrorCategory::Transport,
+            // Credential / auth errors: safe_failure_class = "provider_auth".
+            Self::MissingCredentials { .. } | Self::ExpiredOAuthToken | Self::Auth(_) => {
+                ErrorCategory::Auth
+            }
+            // Context-window hard stop.
+            Self::ContextWindowExceeded { .. } => ErrorCategory::ContextWindow,
+            // Request too large.
+            Self::RequestBodySizeExceeded { .. } => ErrorCategory::RequestSize,
+            // Local I/O or JSON parse failures.
+            Self::InvalidApiKeyEnv(_) | Self::Io(_) | Self::Json { .. } => ErrorCategory::RuntimeIo,
+            // Config-driven resolution errors.
+            Self::Configuration(_) => ErrorCategory::Configuration,
+        }
+    }
+
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
             Self::Api { retryable, .. } => *retryable,
+            // A stream truncated mid-frame is a transport failure: retry the
+            // whole request rather than surfacing the partial tail as fatal.
+            Self::IncompleteStream { .. } => true,
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
-            Self::MissingCredentials { .. }
-            | Self::ContextWindowExceeded { .. }
-            | Self::ExpiredOAuthToken
-            | Self::Auth(_)
-            | Self::InvalidApiKeyEnv(_)
-            | Self::Io(_)
-            | Self::Json { .. }
-            | Self::InvalidSseFrame(_)
-            | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. }
-            | Self::Configuration(_) => false,
+            // All remaining variants — auth, context-window, I/O, config, etc.
+            // — are not retryable.
+            _ => false,
         }
     }
 
@@ -160,18 +236,7 @@ impl ApiError {
         match self {
             Self::Api { request_id, .. } => request_id.as_deref(),
             Self::RetriesExhausted { last_error, .. } => last_error.request_id(),
-            Self::MissingCredentials { .. }
-            | Self::ContextWindowExceeded { .. }
-            | Self::ExpiredOAuthToken
-            | Self::Auth(_)
-            | Self::InvalidApiKeyEnv(_)
-            | Self::Http(_)
-            | Self::Io(_)
-            | Self::Json { .. }
-            | Self::InvalidSseFrame(_)
-            | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. }
-            | Self::Configuration(_) => None,
+            _ => None,
         }
     }
 
@@ -185,18 +250,7 @@ impl ApiError {
                 retry_after.map(|secs| Duration::from_secs(u64::from(secs.get())))
             }
             Self::RetriesExhausted { last_error, .. } => last_error.retry_after(),
-            Self::MissingCredentials { .. }
-            | Self::ContextWindowExceeded { .. }
-            | Self::ExpiredOAuthToken
-            | Self::Auth(_)
-            | Self::InvalidApiKeyEnv(_)
-            | Self::Http(_)
-            | Self::Io(_)
-            | Self::Json { .. }
-            | Self::InvalidSseFrame(_)
-            | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. }
-            | Self::Configuration(_) => None,
+            _ => None,
         }
     }
 
@@ -218,11 +272,18 @@ impl ApiError {
             Self::Api { status, .. } if status.as_u16() == 429 => "provider_rate_limit",
             Self::Api { .. } if self.is_generic_fatal_wrapper() => "provider_internal",
             Self::Api { .. } => "provider_error",
-            Self::Http(_) | Self::InvalidSseFrame(_) | Self::BackoffOverflow { .. } => {
-                "provider_transport"
-            }
-            Self::InvalidApiKeyEnv(_) | Self::Io(_) | Self::Json { .. } => "runtime_io",
-            Self::RequestBodySizeExceeded { .. } => "request_size",
+            // Collapse remaining variants through categorize() so adding a new
+            // ApiError variant only requires updating categorize().
+            _ => match self.categorize() {
+                ErrorCategory::Transport => "provider_transport",
+                ErrorCategory::Auth => "provider_auth",
+                ErrorCategory::ContextWindow => "context_window",
+                ErrorCategory::RequestSize => "request_size",
+                ErrorCategory::RuntimeIo => "runtime_io",
+                ErrorCategory::Configuration => "provider_auth",
+                // Structured (Http/Api/RetriesExhausted) already handled above.
+                ErrorCategory::Structured => "provider_error",
+            },
         }
     }
 
@@ -236,18 +297,7 @@ impl ApiError {
                     || looks_like_generic_fatal_wrapper(body)
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_generic_fatal_wrapper(),
-            Self::MissingCredentials { .. }
-            | Self::ContextWindowExceeded { .. }
-            | Self::ExpiredOAuthToken
-            | Self::Auth(_)
-            | Self::InvalidApiKeyEnv(_)
-            | Self::Http(_)
-            | Self::Io(_)
-            | Self::Json { .. }
-            | Self::InvalidSseFrame(_)
-            | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. }
-            | Self::Configuration(_) => false,
+            _ => false,
         }
     }
 
@@ -268,17 +318,7 @@ impl ApiError {
                         || looks_like_context_window_error(body))
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_context_window_failure(),
-            Self::MissingCredentials { .. }
-            | Self::ExpiredOAuthToken
-            | Self::Auth(_)
-            | Self::InvalidApiKeyEnv(_)
-            | Self::Http(_)
-            | Self::Io(_)
-            | Self::Json { .. }
-            | Self::InvalidSseFrame(_)
-            | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. }
-            | Self::Configuration(_) => false,
+            _ => false,
         }
     }
 }
@@ -345,6 +385,14 @@ impl Display for ApiError {
             } => write!(
                 f,
                 "failed to parse {provider} response for model {model}: {source}; first 200 chars of body: {body_snippet}"
+            ),
+            Self::IncompleteStream {
+                provider,
+                model,
+                body_snippet,
+            } => write!(
+                f,
+                "{provider} stream for model {model} ended mid-frame (truncated response, likely a dropped connection or a proxy cutting the stream); first 200 chars of the incomplete tail: {body_snippet}"
             ),
             Self::Api {
                 status,

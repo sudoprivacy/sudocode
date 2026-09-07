@@ -9,6 +9,10 @@
 //! 3. Budget enforcement: when total rendered memory exceeds the
 //!    16 000-char cap, excess entries are dropped with a notice.
 //!
+//! 4. Opt-out: `autoMemoryEnabled: false` in settings drops the whole
+//!    `# auto memory` block (entries and write instructions) and leaves
+//!    the memory directory untouched.
+//!
 //! All tests set `SUDOCODE_MEMORY_DIR` to a temp directory, avoiding
 //! any interaction with the user's real `~/.scode/memory/`.
 
@@ -350,6 +354,87 @@ fn memory_project_scoped_path() {
     );
 
     fs::remove_dir_all(root).ok();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 4b. Opt-out via `autoMemoryEnabled: false`
+// ──────────────────────────────────────────────────────────────────────
+
+/// `autoMemoryEnabled: false` in the project's `settings.local.json` must
+/// remove the `# auto memory` block entirely: no remembered entries, no
+/// write instructions, and the memory directory is not created. The same
+/// workspace with the key absent keeps the block, proving the toggle (not
+/// the fixture) is what removes it.
+#[test]
+fn memory_disabled_by_setting() {
+    let root = unique_temp_dir("disabled");
+    let memory_dir = unique_temp_dir("disabled-memory");
+    let config_home = unique_temp_dir("disabled-config-home");
+    fs::create_dir_all(&root).expect("create root");
+    fs::create_dir_all(&memory_dir).expect("create memory dir");
+    fs::create_dir_all(&config_home).expect("create config home");
+    write_entry(
+        &memory_dir,
+        "secret_preference",
+        "user",
+        "Preference that must not leak",
+        "The user prefers tabs over spaces.",
+    );
+    let memory_dir_str = memory_dir.to_str().expect("utf8");
+    let config_home_str = config_home.to_str().expect("utf8");
+    // Isolate the config home so the developer's real settings.json
+    // cannot flip the toggle either way.
+    let envs = [
+        ("SUDOCODE_MEMORY_DIR", memory_dir_str),
+        ("SUDO_CODE_CONFIG_HOME", config_home_str),
+    ];
+
+    // Control: key absent → block present, entry rendered.
+    let output = run_system_prompt(&root, &envs);
+    assert!(output.status.success(), "control run should exit 0");
+    let control = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        control.contains("# auto memory") && control.contains("tabs over spaces"),
+        "control run should render the memory block; got:\n{control}"
+    );
+
+    // Opt out at project scope (the scope `/config set autoMemoryEnabled`
+    // writes to).
+    let settings_dir = root.join(".nexus").join("sudocode");
+    fs::create_dir_all(&settings_dir).expect("create settings dir");
+    fs::write(
+        settings_dir.join("settings.local.json"),
+        "{\"autoMemoryEnabled\": false}\n",
+    )
+    .expect("write settings.local.json");
+    fs::remove_dir_all(&memory_dir).expect("drop memory dir for the opt-out run");
+
+    let output = run_system_prompt(&root, &envs);
+    assert!(
+        output.status.success(),
+        "opt-out run should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains("# auto memory"),
+        "auto-memory block should be absent when autoMemoryEnabled=false; got:\n{text}"
+    );
+    assert!(
+        !text.contains("tabs over spaces") && !text.contains("secret_preference"),
+        "memory entries must not leak when autoMemoryEnabled=false"
+    );
+    assert!(
+        !text.contains("MEMORY.md"),
+        "memory write instructions must not be injected when autoMemoryEnabled=false"
+    );
+    assert!(
+        !memory_dir.exists(),
+        "memory directory must not be created when autoMemoryEnabled=false"
+    );
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_dir_all(config_home).ok();
 }
 
 // ──────────────────────────────────────────────────────────────────────

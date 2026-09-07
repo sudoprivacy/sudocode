@@ -4913,9 +4913,7 @@ impl LiveCli {
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
-                    // Show turn result in the ChromeSlot (StatusSlot::TurnResult)
-                    // — persists above the input until the next turn starts.
-                    ui.set_turn_result(&format_turn_status_line_with_branch(
+                    let status_line = format_turn_status_line_with_branch(
                         &self.config.model,
                         turns,
                         &usage,
@@ -4923,7 +4921,11 @@ impl LiveCli {
                         Some(context_window),
                         elapsed,
                         branch.as_deref(),
-                    ));
+                    );
+                    // Persist in ChromeSlot (visible until next turn) AND
+                    // scrollback (survives scroll, visible in session replay).
+                    ui.set_turn_result(&status_line);
+                    output.println(&status_line);
                 }
                 self.persist_session()?;
                 Ok(())

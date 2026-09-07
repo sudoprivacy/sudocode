@@ -71,7 +71,40 @@ pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Locate the compiled `scode` binary for the current test run.
 #[must_use]
 pub fn scode_bin() -> PathBuf {
+    isolate_process_config_home();
     PathBuf::from(env!("CARGO_BIN_EXE_scode"))
+}
+
+/// Point this *test process* at a throwaway config home seeded from the real
+/// one, so nothing the suite spawns can reach `~/.nexus/sudocode`.
+///
+/// [`TestEnv`] already gives each test its own config home, but not every
+/// `scode` in the suite comes from `TestEnv` — several files spawn it directly
+/// for read-only subcommands, and `spawn_scode` has no workspace to hang a
+/// config home on. Those inherit the environment, which is the developer's real
+/// config, and `scode` writes to it: `/config` with no section opens an
+/// interactive editor over `settings.json` and `sudocode.json`. A live run was
+/// silently rewriting both — losing `auth_profile` and repointing every model
+/// at a different proxy account — after which later tests billed the wrong
+/// account and failed against a routing group that account cannot reach. The
+/// failures looked like flakes and moved around between runs.
+///
+/// Setting it here makes that unreachable for *every* spawn, however it is
+/// made. The credential copy is shared by the whole process (unlike `TestEnv`'s
+/// per-test copy) and is only a safety net: tests that want their own writable
+/// config still get one from `TestEnv`.
+pub fn isolate_process_config_home() {
+    static ISOLATED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let home = ISOLATED.get_or_init(|| {
+        let real = default_config_home();
+        let dir = unique_temp_dir("shared-config-home");
+        fs::create_dir_all(&dir).expect("shared config home should be created");
+        if real.join("sudocode.json").exists() {
+            copy_live_credentials(&real, &dir);
+        }
+        dir
+    });
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", home);
 }
 
 /// Spawn `scode <args...>` under a PTY with the default timeout.

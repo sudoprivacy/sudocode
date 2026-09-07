@@ -44,6 +44,7 @@ fn write_entry(dir: &Path, slug: &str, entry_type: &str, description: &str, body
 
 /// Run `scode system-prompt` with the given env vars and return the output.
 fn run_system_prompt(cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output {
+    common::isolate_process_config_home();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.current_dir(cwd);
     for (k, v) in envs {

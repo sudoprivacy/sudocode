@@ -167,14 +167,14 @@ fn cli_at_image_reference_completes_turn() {
     // mode the `single_turn_text` scenario canned reply is "The answer
     // is 4"; in live mode any assistant text works. We key on either
     // pattern so both modes exercise the same assertion path (DRY).
+    // A vision turn — upload plus description — outlasts the default live timeout, so
+    // both the content wait and the exit get their own, larger budget. (The
+    // content pattern is also satisfied by the echo of the prompt, which names
+    // the image and its shapes, so it can return while the turn still runs;
+    // the exit is what actually proves the turn finished.)
+    sess.set_default_timeout(std::time::Duration::from_secs(180));
     sess.expect("(?i)(answer|image|shape|color|red|blue|yellow|circle|rectangle|square)")
         .expect("scode should produce some assistant content on stdout");
-
-    // That match is satisfied by the echo of the prompt itself, which names
-    // the image and its shapes — so it can return while the turn is still
-    // running, and a live vision turn takes longer than the default live
-    // timeout. Give the exit its own, larger budget.
-    sess.set_default_timeout(std::time::Duration::from_secs(180));
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0, "cli image turn should exit 0; got {exit}");
 

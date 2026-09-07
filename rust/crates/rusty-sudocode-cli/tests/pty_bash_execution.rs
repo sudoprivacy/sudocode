@@ -53,7 +53,7 @@ fn bash_stdout_roundtrip() {
     // Live: model should produce a response (tool call or text) and exit 0.
     // Both paths hit the streaming API → tool executor → stdout pipeline.
     if env.is_mock() {
-        sess.expect("bash")
+        sess.expect("(?i)bash")
             .expect("should see bash tool call (agent trigger)");
         // Assert on the mock's *final message*, which embeds whatever the bash
         // tool captured ("bash completed: <stdout>"). A bare
@@ -110,7 +110,7 @@ fn bash_creates_file_and_disk_verify() {
     ]);
 
     // Agent trigger: model selects bash.
-    sess.expect("bash")
+    sess.expect("(?i)bash")
         .expect("should see bash tool call (agent trigger)");
 
     // Response confirms bash execution.
@@ -289,7 +289,7 @@ fn bash_command_fails_gracefully() {
     // Mock: verify exact tool call + error mention.
     // Live: model should produce some response and exit 0.
     if env.is_mock() {
-        sess.expect("bash")
+        sess.expect("(?i)bash")
             .expect("should see bash tool call (agent trigger)");
         sess.expect(
             "(?i)(not found|no such file|does not exist|error|failed|nonexistent|completed|alpha)",

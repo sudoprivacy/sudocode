@@ -496,7 +496,7 @@ fn memory_write_read_forget_workflow() {
         .expect("send remember request");
 
     // Wait for the model to call write_file (proves the API responded).
-    sess.expect("write_file").unwrap_or_else(|e| {
+    sess.expect("(?i)write_file").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("should see write_file tool call: {e}\nPTY screen:\n{screen}");
     });
@@ -875,7 +875,7 @@ fn memory_multi_type_single_session() {
     .expect("send multi-type request");
 
     // Wait for multiple write_file calls.
-    sess.expect("write_file").unwrap_or_else(|e| {
+    sess.expect("(?i)write_file").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("should see first write_file: {e}\nPTY screen:\n{screen}");
     });

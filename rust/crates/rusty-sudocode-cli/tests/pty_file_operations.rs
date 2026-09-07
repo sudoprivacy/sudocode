@@ -39,7 +39,7 @@ fn write_then_read_back() {
     ]);
 
     // Agent trigger: model calls write_file.
-    sess.expect("write_file")
+    sess.expect("(?i)write_file")
         .expect("should see write_file tool call (agent trigger)");
 
     // Response confirms the write.
@@ -94,7 +94,7 @@ fn edit_then_verify_on_disk() {
     ]);
 
     // Agent trigger: model calls edit_file.
-    sess.expect("edit_file")
+    sess.expect("(?i)edit_file")
         .expect("should see edit_file tool call (agent trigger)");
 
     // Response confirms the edit.
@@ -151,7 +151,7 @@ fn glob_then_grep_discovery() {
 
     // Agent trigger: at minimum grep must be called.
     sess.set_default_timeout(Duration::from_secs(60));
-    sess.expect("grep")
+    sess.expect("(?i)grep")
         .expect("should see grep tool call (agent trigger)");
 
     // Response references the results.

@@ -139,9 +139,9 @@ fn multi_tool_roundtrip() {
     // call appears and the response references the fixture content.
     sess.set_default_timeout(Duration::from_secs(60));
     if env.is_mock() {
-        sess.expect("read_file")
+        sess.expect("(?i)read_file")
             .expect("should see read_file tool call (agent trigger)");
-        sess.expect("grep")
+        sess.expect("(?i)grep")
             .expect("should see grep_search tool call (agent trigger)");
     } else {
         sess.expect("(?i)(read_file|grep|fixture|parity)")

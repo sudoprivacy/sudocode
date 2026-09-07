@@ -2752,14 +2752,16 @@ async fn acp_session_cancel_survives_model_switch() {
         }))
         .await;
 
+    // The point is that the cancel lands at all, not that it lands inside two
+    // seconds: under a parallel `cargo test --workspace` this box is running a
+    // crowd of other `scode` children, and the turn needs room to unwind.
+    const CANCEL_WINDOW: Duration = Duration::from_secs(20);
     let (_, prompt_resp) = client
-        .recv_until(Duration::from_secs(2), |message| {
-            is_response_to(message, prompt_id)
-        })
+        .recv_until(CANCEL_WINDOW, |message| is_response_to(message, prompt_id))
         .await
         .unwrap_or_else(|seen| {
             panic!(
-                "prompt did not stop within 2s after cancel following model switch; saw: {seen:?}"
+                "prompt did not stop within {CANCEL_WINDOW:?} after cancel following model switch; saw: {seen:?}"
             )
         });
     assert!(

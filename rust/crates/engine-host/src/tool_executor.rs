@@ -242,18 +242,21 @@ impl ToolExecutor for CliToolExecutor {
         input: &str,
         ctx: &runtime::ToolDispatchContext,
     ) -> Result<String, ToolError> {
-        // Compare canonical names on both sides. `--allowedTools` is parsed
-        // into canonical names, but a model names tools its own way — `Bash`,
-        // `Edit`, `Grep` for `bash`, `edit_file`, `grep_search` — and dispatch
-        // canonicalises before matching. Comparing the raw name here rejected
-        // exactly the calls dispatch would have accepted, so a run with an
-        // allow-list silently did nothing while looking like the model simply
-        // chose not to act.
-        if self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|allowed| !allowed.contains(&tools::canonicalize_tool_name(tool_name)))
-        {
+        // Accept the call under either spelling. A model names tools its own
+        // way — `Bash`, `Edit`, `Grep` for `bash`, `edit_file`, `grep_search` —
+        // and dispatch canonicalises before matching, so comparing only the raw
+        // name rejected exactly the calls dispatch would have accepted: an
+        // allow-listed run refused every tool call while, because the model then
+        // explained itself politely, looking like it had simply chosen not to
+        // act. Comparing only the canonical name is wrong too — the allow-list
+        // parser deliberately keeps the *spec* name for PascalCase-native tools
+        // (`--allowedTools TaskList` stores `TaskList`, not its `pid_status`
+        // dispatch alias), so canonicalising `TaskList` would miss its own
+        // entry. Either spelling matching is what "this tool is allowed" means.
+        if self.allowed_tools.as_ref().is_some_and(|allowed| {
+            !allowed.contains(tool_name)
+                && !allowed.contains(&tools::canonicalize_tool_name(tool_name))
+        }) {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));

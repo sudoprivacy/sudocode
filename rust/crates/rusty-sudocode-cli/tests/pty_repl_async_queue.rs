@@ -36,10 +36,6 @@ use std::time::Duration;
 /// then exits cleanly on `/exit`. Baseline smoke — proves the async dispatch is
 /// reachable + not deadlocked + telemetry-completion runs.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows PTY: iocraft render_loop exit timing causes spurious timeout"
-)]
 fn async_repl_processes_single_turn_and_exits() {
     let env = TestEnv::new("repl-async-queue-smoke");
 
@@ -59,22 +55,19 @@ fn async_repl_processes_single_turn_and_exits() {
 
     // Wait for the LLM to actually respond. The mock's `single_turn_text`
     // scenario emits "The answer is 4"; the `4` proves the turn *ran* through
-    // the runner thread. We deliberately do NOT wait for a second `❯` prompt
-    // afterwards — the input thread's rustyline shares stdout with the runner
-    // thread's LLM stream, so the "next prompt" glyph can end up interleaved
-    // with LLM output in ways pty-expect's forward-only search doesn't
-    // reliably re-locate. The strong signal of "turn actually ran" is the
-    // "4"; the strong signal of "loop is still alive after turn end" is
-    // that `/exit` below causes a clean exit rather than a hang.
+    // the runner thread. The signal that the loop is still alive after the turn
+    // is that `/exit` below produces a clean exit rather than a hang.
     sess.expect("4")
         .expect("async REPL should stream the LLM answer through the runner thread");
 
-    // Wait for the prompt to reappear after the turn ends — the
-    // prompt_ready channel gates readline, so ❯ only shows once all
-    // output (including the status line) is flushed.
-    sess.expect("❯").unwrap_or_else(|e| {
+    // Wait for the per-turn status line, which is printed once the turn is
+    // over. Not `❯`: iocraft repaints the whole frame as the turn runs, so a
+    // forward-only search finds a redrawn prompt from *before* the turn ended
+    // and `/exit` gets typed mid-turn — where it sits in the input line,
+    // unsubmitted, and the session never exits.
+    sess.expect("ctx ").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("should see prompt after turn: {e}\nPTY screen:\n{screen}");
+        panic!("should see the turn status line: {e}\nPTY screen:\n{screen}");
     });
 
     sess.send("/exit\r").expect("send /exit");
@@ -84,8 +77,11 @@ fn async_repl_processes_single_turn_and_exits() {
     // runner-thread join + persist_session + telemetry flush + process
     // teardown even on a congested runner.
     sess.set_default_timeout(Duration::from_secs(30));
-    let exit = sess
-        .expect_eof()
-        .unwrap_or_else(|e| panic!("async REPL should exit cleanly after /exit; got error: {e:?}"));
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!(
+            "async REPL should exit cleanly after /exit; got error: {e:?}\nPTY screen:\n{screen}"
+        )
+    });
     assert_eq!(exit, 0, "async REPL clean-exit expected 0; got {exit}");
 }

@@ -599,6 +599,8 @@ fn is_prompt_too_long(error_msg: &str) -> bool {
         // own prompt-too-long so the head-truncation retry still applies.
         || lower.contains("context_window_blocked")
         || lower.contains("context window")
+        // Anthropic: "input length and `max_tokens` exceed context limit".
+        || lower.contains("context limit")
 }
 
 /// Drop the oldest ~20% of message groups from compaction input to make

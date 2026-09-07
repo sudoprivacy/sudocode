@@ -21,6 +21,11 @@ const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "completion tokens",
     "prompt tokens",
     "request is too large",
+    // Anthropic, when `input + max_tokens` overflows the window: "input
+    // length and `max_tokens` exceed context limit: N + M > W". This fires
+    // long before "prompt is too long" (input alone over the window), so it
+    // is the overflow a long agentic session actually sees.
+    "context limit",
 ];
 
 #[derive(Debug)]

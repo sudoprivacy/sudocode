@@ -1001,11 +1001,8 @@ mod tests {
         let root = temp_dir();
         fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
         fs::write(root.join("AGENTS.md"), "Project rules").expect("write AGENTS.md");
-        fs::write(
-            root.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"permissionMode":"acceptEdits"}"#,
-        )
-        .expect("write settings");
+        let settings_path = root.join(".nexus").join("sudocode").join("settings.json");
+        fs::write(&settings_path, r#"{"permissionMode":"acceptEdits"}"#).expect("write settings");
 
         let _guard = env_lock();
         ensure_valid_cwd();
@@ -1032,9 +1029,12 @@ mod tests {
 
         assert!(prompt.contains("Project rules"));
         // `# Runtime config` is gone: the loaded settings file is not named and
-        // its body was never inlined, so neither may appear.
+        // its body was never inlined, so neither may appear. Keyed on the
+        // file's own path, not on the bare word "settings.json" — the
+        // auto-memory instructions legitimately name that file (telling the
+        // model not to write memories into it), which is not this leak.
         assert!(!prompt.contains("permissionMode"));
-        assert!(!prompt.contains("settings.json"));
+        assert!(!prompt.contains(&settings_path.display().to_string()));
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -1043,11 +1043,8 @@ mod tests {
         let root = temp_dir();
         fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
         fs::write(root.join("AGENTS.md"), "Project rules").expect("write AGENTS.md");
-        fs::write(
-            root.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"permissionMode":"acceptEdits"}"#,
-        )
-        .expect("write settings");
+        let settings_path = root.join(".nexus").join("sudocode").join("settings.json");
+        fs::write(&settings_path, r#"{"permissionMode":"acceptEdits"}"#).expect("write settings");
 
         let project_context =
             ProjectContext::discover(&root, "2026-03-31").expect("context should load");
@@ -1075,7 +1072,10 @@ mod tests {
         // must not leak by either route.
         assert!(!prompt.contains("# Project context"));
         assert!(!prompt.contains("# Runtime config"));
-        assert!(!prompt.contains("settings.json"));
+        // See the note in `load_system_prompt_reads_instruction_files_and_config`:
+        // the check is that this settings file is not named, not that the word
+        // never appears.
+        assert!(!prompt.contains(&settings_path.display().to_string()));
         assert!(!prompt.contains("permissionMode"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

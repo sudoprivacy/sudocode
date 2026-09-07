@@ -77,11 +77,15 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
         .spawn()
         .expect("scode should launch");
 
-    wait_for_message_request(&runtime, &server, 1, Duration::from_secs(10));
+    // Generous: this is a liveness wait, not the assertion. Under a parallel
+    // `cargo test --workspace` the machine is running many other `scode`
+    // children, and 10s was not always enough for this one to start and reach
+    // the mock server.
+    wait_for_message_request(&runtime, &server, 1, Duration::from_secs(60));
     thread::sleep(Duration::from_millis(1500));
     send_interrupt(child.id());
 
-    let status = wait_for_exit(&mut child, Duration::from_secs(10))
+    let status = wait_for_exit(&mut child, Duration::from_secs(60))
         .expect("scode should exit after the interrupt");
     let mut stdout = String::new();
     let mut stderr = String::new();

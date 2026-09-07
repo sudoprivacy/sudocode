@@ -1880,6 +1880,27 @@ impl repl_async::TurnDriver for LiveCliDriver {
     }
 }
 
+/// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
+///
+/// Windows-only cancellation channel — see [`SignalCancelGuard`] for why a
+/// Ctrl-C-only monitor is unreachable from a parent that used
+/// `CREATE_NEW_PROCESS_GROUP`. If the handler can't be registered we fall back
+/// to pending so the `select!` still runs on Ctrl-C alone.
+#[cfg(windows)]
+async fn ctrl_break_cancel_signal() {
+    match tokio::signal::windows::ctrl_break() {
+        Ok(mut stream) => {
+            stream.recv().await;
+        }
+        Err(_) => std::future::pending().await,
+    }
+}
+
+#[cfg(not(windows))]
+async fn ctrl_break_cancel_signal() {
+    std::future::pending().await
+}
+
 /// Installs a process SIGINT / Ctrl-C handler for the duration of a
 /// **non-interactive one-shot turn** (`scode <prompt>`, incl. `--output-format
 /// json`), translating the signal into an `EngineCommand::Cancel` across the
@@ -1896,6 +1917,13 @@ impl repl_async::TurnDriver for LiveCliDriver {
 /// The monitor runs on its own current-thread tokio runtime (the renderer is
 /// otherwise tokio-free). Dropping the guard stops it: the stop channel wakes
 /// the blocking waiter, which wins the `select!` and lets the runtime unwind.
+///
+/// On Windows it also listens for Ctrl-Break, because a parent that spawns
+/// `scode` with `CREATE_NEW_PROCESS_GROUP` — the standard way a job runner
+/// isolates cancellation so it doesn't signal its whole console — *cannot*
+/// deliver Ctrl-C: Windows disables Ctrl-C for a new process group, leaving
+/// `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` as the only way to reach
+/// it. Both mean the same thing here, so both raise `Cancel`.
 struct SignalCancelGuard {
     stop_tx: Option<std::sync::mpsc::Sender<()>>,
     join_handle: Option<std::thread::JoinHandle<()>>,
@@ -1922,6 +1950,9 @@ impl SignalCancelGuard {
                         if result.is_ok() {
                             let _ = commands.send(EngineCommand::Cancel);
                         }
+                    }
+                    () = ctrl_break_cancel_signal() => {
+                        let _ = commands.send(EngineCommand::Cancel);
                     }
                     _ = stop => {}
                 }

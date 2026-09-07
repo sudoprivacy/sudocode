@@ -3586,9 +3586,13 @@ impl LiveCli {
             branch.as_deref(),
         );
         match (ui, output) {
-            // Show turn result in the ChromeSlot (StatusSlot::TurnResult) —
-            // persists above the input until the next turn starts.
-            (Some(ui), _) => ui.set_turn_result(&line),
+            // Persist in ChromeSlot (visible until next turn) AND scrollback
+            // (survives scroll, visible in session replay).
+            (Some(ui), Some(out)) => {
+                ui.set_turn_result(&line);
+                out.println(&line);
+            }
+            (Some(ui), None) => ui.set_turn_result(&line),
             (None, Some(out)) => out.println(&line),
             (None, None) => self.out_println(line),
         }

@@ -373,17 +373,33 @@ pub fn edit_file(
             "old_string and new_string must differ",
         ));
     }
-    if !original_file.contains(old_string) {
+
+    // On Windows files often use CRLF but the LLM sends LF in
+    // old_string. When the direct match fails, expand LF→CRLF in
+    // old_string/new_string to match the file's native endings.
+    let (effective_old, effective_new) = if original_file.contains(old_string) {
+        (old_string.to_owned(), new_string.to_owned())
+    } else if original_file.contains("\r\n") && !old_string.contains("\r\n") {
+        let crlf_old = old_string.replace('\n', "\r\n");
+        if original_file.contains(&crlf_old) {
+            (crlf_old, new_string.replace('\n', "\r\n"))
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "old_string not found in file",
+            ));
+        }
+    } else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "old_string not found in file",
         ));
-    }
+    };
 
     let updated = if replace_all {
-        original_file.replace(old_string, new_string)
+        original_file.replace(&effective_old, &effective_new)
     } else {
-        original_file.replacen(old_string, new_string, 1)
+        original_file.replacen(&effective_old, &effective_new, 1)
     };
 
     fs.write(&abs_str, updated.as_bytes())?;

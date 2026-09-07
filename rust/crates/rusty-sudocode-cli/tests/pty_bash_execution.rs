@@ -55,8 +55,13 @@ fn bash_stdout_roundtrip() {
     if env.is_mock() {
         sess.expect("bash")
             .expect("should see bash tool call (agent trigger)");
-        sess.expect("alpha from bash")
-            .expect("should see echoed string in terminal output");
+        // Assert on the mock's *final message*, which embeds whatever the bash
+        // tool captured ("bash completed: <stdout>"). A bare
+        // `expect("alpha from bash")` matched the echoed prompt — which
+        // contains that same string — so it passed even when the tool captured
+        // nothing at all.
+        sess.expect("bash completed: alpha from bash")
+            .expect("should see the captured bash stdout in the final message");
     } else {
         // Live: wait for any response — tool call or text.
         sess.expect("(?i)(bash|alpha|printf|echo|command|ok|hello|sure)")

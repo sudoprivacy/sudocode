@@ -85,7 +85,11 @@ The two compose: set both and the static blocks are replaced *and* the
 extra block is appended after the replacement, still inside the static
 prefix. Workspace-derived dynamic blocks (environment,
 `AGENTS.md`, memory) are always kept, so an overridden prompt still knows
-which directory it is operating in.
+which directory it is operating in. The one dynamic block with its own
+switch is auto-memory: `"autoMemoryEnabled": false` in the session
+`cwd`'s `.nexus/sudocode/settings.local.json` (or the process-wide
+`~/.nexus/sudocode/settings.json`) drops it for that session — see
+[`usage.md`](./usage.md#memory).
 
 Rules:
 

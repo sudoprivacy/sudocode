@@ -81,6 +81,31 @@ default that ACP sessions can further adjust per session via
 `_meta.sudocode.systemPrompt` / `appendSystemPrompt` — see
 [`acp.md`](./acp.md#per-session-system-prompt-_metasudocode).
 
+## Memory
+
+Every session gets a `# auto memory` block in the system prompt: the
+entries under the workspace's memory directory (`~/.scode/projects/<slug>/memory/`
+by default, `SUDOCODE_MEMORY_DIR` to relocate) plus the instructions that
+tell the model how to write new ones. `/memory` in the REPL opens the
+files.
+
+To turn memory off, set `autoMemoryEnabled` to `false` in settings —
+globally in `~/.nexus/sudocode/settings.json`, or per project in
+`<cwd>/.nexus/sudocode/settings.local.json` (the scope
+`/config set autoMemoryEnabled false` writes to):
+
+```json
+{ "autoMemoryEnabled": false }
+```
+
+With the key off the block is dropped entirely — no remembered entries,
+no write instructions — and the memory directory is left untouched.
+`scode system-prompt` shows the result. The key is read at session start
+(and on `scode acp` per session `cwd`), so a running REPL needs a restart
+to pick up a change. Note that `SUDOCODE_MEMORY_DIR` pointed at an empty
+directory is *not* an off switch: the write instructions still go in and
+the model still writes there.
+
 ## Models
 
 Select a model with `--model`. See [`models.md`](./models.md) for aliases

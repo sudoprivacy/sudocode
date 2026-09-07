@@ -64,14 +64,16 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
              just five hundred 7s in a row.\", \
             run_in_background=true). Record the agent_id you get back. \
         (2) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker. \
-        (3) The worker's output is long, so it comes back summarized with the complete text \
-            saved to a file alongside it. Tell me where that file is, as \
-            'FULL_PATH: <path>', so I can open it.";
-    // Phrased as a request for where the output was saved, not as an
-    // instruction to echo a named response field back verbatim. The latter
-    // reads to a live model like an attempt to extract an internal path, and
-    // sonnet refuses it outright — the test then fails on a refusal rather
-    // than on the summarization behaviour it is here to check.
+        (3) Summarize what the worker produced.";
+    // The prompt deliberately does *not* ask the model to report the sidecar
+    // path. Summarizing an over-threshold worker output and recording where the
+    // full text went is `scode`'s own behaviour, and its `TaskOutput` rendering
+    // prints the `.full.md` path — so the assertion reads what the runtime
+    // emitted rather than depending on the model to relay it. Earlier phrasings
+    // did ask for it, as a numbered "report the value of field X" step, and a
+    // live model intermittently refused the whole thing as a path-exfiltration
+    // attempt; the test then failed on a refusal instead of on the behaviour it
+    // exists to check.
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access", prompt],

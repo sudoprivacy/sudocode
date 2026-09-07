@@ -497,9 +497,13 @@ fn memory_write_read_forget_workflow() {
         .expect("send remember request");
 
     // Wait for the model to call write_file (proves the API responded).
-    sess.expect("(?i)write_file").unwrap_or_else(|e| {
+    // Keyed on the per-turn status line rather than on a tool name: which write
+    // tool a live model reaches for (`write_file` or `Write`) varies from run to
+    // run, and what this step needs is for the turn to be over before the
+    // on-disk assertion below runs.
+    sess.expect("ctx ").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("should see write_file tool call: {e}\nPTY screen:\n{screen}");
+        panic!("should see the turn status line after the write: {e}\nPTY screen:\n{screen}");
     });
 
     // Wait for the turn to complete (REPL prompt returns).
@@ -875,10 +879,12 @@ fn memory_multi_type_single_session() {
     )
     .expect("send multi-type request");
 
-    // Wait for multiple write_file calls.
-    sess.expect("(?i)write_file").unwrap_or_else(|e| {
+    // Wait for the turn to finish — see the note in
+    // `memory_write_read_forget_workflow` on why this is keyed on the status
+    // line rather than on a tool name.
+    sess.expect("ctx ").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("should see first write_file: {e}\nPTY screen:\n{screen}");
+        panic!("should see the turn status line after the writes: {e}\nPTY screen:\n{screen}");
     });
 
     // Wait for turn completion.

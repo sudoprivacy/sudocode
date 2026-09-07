@@ -1,7 +1,9 @@
 use std::env;
 use std::path::Path;
 
-use runtime::{load_oauth_credentials, resolve_sandbox_status, ConfigLoader, ProjectContext};
+use runtime::{
+    load_oauth_credentials, resolve_sandbox_status, ConfigLoader, ProjectContext, RuntimeConfig,
+};
 use serde_json::{json, Map, Value};
 
 use crate::cli::lifecycle::classify_session_lifecycle_for;
@@ -211,16 +213,27 @@ pub(crate) fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error:
             check_workspace_health(&context),
             check_sandbox_health(&context.sandbox_status),
             check_system_health(&cwd, config.as_ref().ok()),
-            check_account_health(&config_loader),
+            check_account_health(
+                &config_loader,
+                config
+                    .as_ref()
+                    .ok()
+                    .and_then(RuntimeConfig::model)
+                    .unwrap_or_default(),
+            ),
         ],
     })
 }
 
-/// Surface which named proxy account this project resolves to, so a user can
-/// confirm a per-project `auth_profile` selection actually takes effect. Mirrors
-/// the selection in `try_proxy_passthrough`: an explicit `auth_profile` picks
-/// that account by name; otherwise the first configured account is used.
-fn check_account_health(config_loader: &ConfigLoader) -> DiagnosticCheck {
+/// Surface which named proxy account this project is actually billed to, so a
+/// user can confirm a per-project `auth_profile` selection takes effect.
+///
+/// Resolves through `api::proxy_account_for_model` — the same selector request
+/// resolution uses — rather than a second copy of the rules. A report that
+/// re-implements the decision can disagree with the code that spends the money,
+/// which is precisely how an unhonored `auth_profile` stayed invisible while
+/// every request billed a different account.
+fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> DiagnosticCheck {
     let config = match config_loader.load_sudocode_config() {
         Ok(config) => config,
         Err(err) => {
@@ -232,40 +245,38 @@ fn check_account_health(config_loader: &ConfigLoader) -> DiagnosticCheck {
             .with_details(vec![err.to_string()]);
         }
     };
-    let Some(accounts) = config
+    if config
         .auth_modes
         .get("proxy")
-        .filter(|accounts| !accounts.is_empty())
-    else {
+        .is_none_or(|accounts| accounts.is_empty())
+    {
         return DiagnosticCheck::new(
             "Account",
             DiagnosticLevel::Ok,
             "no proxy accounts configured",
         );
-    };
+    }
     let selected = config.selected_account.as_deref();
-    let resolved = match selected {
-        Some(name) => accounts.get_key_value(name),
-        None => accounts.iter().next(),
-    };
-    match resolved {
-        Some((name, connection)) => {
+    match api::proxy_account_for_model(&config, resolved_model) {
+        Ok((name, connection)) => {
             DiagnosticCheck::new("Account", DiagnosticLevel::Ok, "resolved proxy account")
                 .with_details(vec![format!(
-                    "account={name} base_url={} auth_profile={}",
+                    "account={name} base_url={} auth_profile={} model={}",
                     connection.base_url,
-                    selected.unwrap_or("<default: first>")
+                    selected.unwrap_or("<default>"),
+                    if resolved_model.is_empty() {
+                        "<none>"
+                    } else {
+                        resolved_model
+                    }
                 )])
         }
-        None => DiagnosticCheck::new(
+        Err(err) => DiagnosticCheck::new(
             "Account",
             DiagnosticLevel::Warn,
-            "auth_profile does not match any configured proxy account",
+            "could not resolve a proxy account",
         )
-        .with_details(vec![format!(
-            "auth_profile={} is not present in auth_modes.proxy",
-            selected.unwrap_or("<none>")
-        )]),
+        .with_details(vec![err.to_string()]),
     }
 }
 

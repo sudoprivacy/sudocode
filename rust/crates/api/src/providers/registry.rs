@@ -268,6 +268,104 @@ fn connection_for<'a>(
     config.auth_modes.get(auth_mode)?.get(provider_name)
 }
 
+/// Single source of truth for **which proxy account a request is billed to**.
+///
+/// Every path that can put a request on a proxy account resolves through this
+/// one function — model-config resolution, proxy passthrough, and the `doctor`
+/// report. Keeping them on separate copies of this decision is what let a
+/// per-project `auth_profile` take effect on one branch while another silently
+/// billed a different account, with `doctor` reporting the one that was *not*
+/// being charged.
+///
+/// Precedence, highest first:
+/// 1. `config.selected_account` — the layered settings' `auth_profile`. An
+///    explicit per-project choice, so naming an account that does not exist is
+///    an error: falling back would spend a different account's balance.
+/// 2. `mapping_provider` — the `provider` named by `models.<alias>.providers.proxy`.
+/// 3. The first configured account (legacy single-account behavior).
+#[inline]
+pub fn select_proxy_account<'a>(
+    config: &'a SudoCodeConfig,
+    mapping_provider: Option<&str>,
+) -> Result<(&'a str, &'a ProviderConnectionConfig), ApiError> {
+    let accounts = config
+        .auth_modes
+        .get("proxy")
+        .filter(|accounts| !accounts.is_empty())
+        .ok_or_else(|| {
+            ApiError::Configuration(
+                "no accounts configured under auth_modes.proxy in sudocode.json".to_string(),
+            )
+        })?;
+    let configured = || {
+        accounts
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    if let Some(name) = config
+        .selected_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return accounts
+            .get_key_value(name)
+            .map(|(name, connection)| (name.as_str(), connection))
+            .ok_or_else(|| {
+                ApiError::Configuration(format!(
+                    "auth_profile '{name}' is not present in auth_modes.proxy (configured: {}). \
+                     Refusing to fall back to another account — an unhonored selection would \
+                     bill the wrong one.",
+                    configured()
+                ))
+            });
+    }
+
+    if let Some(name) = mapping_provider {
+        return accounts
+            .get_key_value(name)
+            .map(|(name, connection)| (name.as_str(), connection))
+            .ok_or_else(|| {
+                ApiError::Configuration(format!(
+                    "provider '{name}' not found under auth_modes.proxy in sudocode.json \
+                     (configured: {})",
+                    configured()
+                ))
+            });
+    }
+
+    accounts
+        .iter()
+        .next()
+        .map(|(name, connection)| (name.as_str(), connection))
+        .ok_or_else(|| {
+            ApiError::Configuration(
+                "no accounts configured under auth_modes.proxy in sudocode.json".to_string(),
+            )
+        })
+}
+
+/// The proxy account a given model alias would actually be billed to.
+///
+/// Thin wrapper over [`select_proxy_account`] that supplies the model entry's
+/// own `provider` when the alias is registered — i.e. exactly the inputs
+/// request resolution uses. Reporting surfaces (`scode doctor`) go through
+/// this so their answer cannot drift from the path a real request takes.
+#[inline]
+pub fn proxy_account_for_model<'a>(
+    config: &'a SudoCodeConfig,
+    model_alias: &str,
+) -> Result<(&'a str, &'a ProviderConnectionConfig), ApiError> {
+    let alias_lower = model_alias.trim().to_ascii_lowercase();
+    let mapping_provider = resolve_model_for_mode(config, &alias_lower, Some("proxy"))
+        .and_then(|entry| entry.providers.get("proxy"))
+        .map(|mapping| mapping.provider.as_str());
+    select_proxy_account(config, mapping_provider)
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -298,7 +396,7 @@ pub fn resolve_provider_from_config(
     // knows how to route any model. This avoids requiring every model
     // to be registered in sudocode.json.
     if model_config.is_none() {
-        if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config) {
+        if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config)? {
             return Ok(resolved);
         }
         return Err(ApiError::Configuration(format!(
@@ -314,7 +412,7 @@ pub fn resolve_provider_from_config(
             // If the explicit auth mode doesn't have this model but
             // it's proxy mode, try passthrough.
             if s == "proxy" {
-                if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config) {
+                if let Some(resolved) = try_proxy_passthrough(model_alias, explicit_auth, config)? {
                     return Ok(resolved);
                 }
             }
@@ -353,28 +451,35 @@ pub fn resolve_provider_from_config(
         ))
     })?;
 
-    // 4. Get connection config.
-    let connection =
-        connection_for(config, &auth_mode_str, &mapping.provider).ok_or_else(|| {
-            ApiError::Configuration(format!(
-                "provider '{}' not found under auth_modes.{} in sudocode.json",
-                mapping.provider, auth_mode_str
-            ))
-        })?;
+    // 4. Get connection config. Proxy mode goes through the shared account
+    //    selector, so an explicit per-project `auth_profile` decides who pays
+    //    here exactly as it does on the passthrough path and in `doctor`.
+    let (provider_name, connection) = if auth_mode_str == "proxy" {
+        select_proxy_account(config, Some(mapping.provider.as_str()))?
+    } else {
+        let connection =
+            connection_for(config, &auth_mode_str, &mapping.provider).ok_or_else(|| {
+                ApiError::Configuration(format!(
+                    "provider '{}' not found under auth_modes.{} in sudocode.json",
+                    mapping.provider, auth_mode_str
+                ))
+            })?;
+        (mapping.provider.as_str(), connection)
+    };
 
     // 5. Determine API format.
     let api_format = resolve_api_format(
         &auth_mode_str,
-        &mapping.provider,
+        provider_name,
         mapping.api.as_deref(),
         &mapping.model,
     )?;
 
     // 6. Resolve credential.
-    let credential = resolve_credential(&auth_mode_str, &mapping.provider, connection)?;
+    let credential = resolve_credential(&auth_mode_str, provider_name, connection)?;
 
     // 7. Determine provider kind from the provider name / api format.
-    let kind = infer_provider_kind(&mapping.provider, api_format);
+    let kind = infer_provider_kind(provider_name, api_format);
 
     let base_url = adjust_base_url_for_format(&connection.base_url, api_format);
 
@@ -399,36 +504,31 @@ fn try_proxy_passthrough(
     model_id: &str,
     explicit_auth: Option<AuthMode>,
     config: &SudoCodeConfig,
-) -> Option<ResolvedProvider> {
+) -> Result<Option<ResolvedProvider>, ApiError> {
     // Only use proxy passthrough if auth mode is proxy or unspecified.
+    // `None` means "this path does not apply", never "resolution failed" —
+    // failures propagate so a misconfigured account can't be mistaken for a
+    // missing model alias.
     if let Some(mode) = explicit_auth {
         if mode != AuthMode::Proxy {
-            return None;
+            return Ok(None);
         }
     }
 
-    // Select the proxy account: the explicitly selected named account
-    // (`selected_account`, sourced from the layered settings' `auth_profile`)
-    // when set, otherwise the first available — the latter keeps existing
-    // single-account behavior byte-for-byte (regression-safe default).
-    let proxy_providers = config.auth_modes.get("proxy")?;
-    let (provider_name, connection) = match config.selected_account.as_deref() {
-        Some(name) => proxy_providers.get_key_value(name)?,
-        None => proxy_providers.iter().next()?,
-    };
+    // Who pays: the shared selector (SSOT with the model-config path and
+    // `doctor`). There is no `models.<alias>` entry here, so no mapping
+    // provider to offer it.
+    let (provider_name, connection) = select_proxy_account(config, None)?;
 
-    // Pick API format from model_capabilities SSOT (preferred endpoint
-    // type from sudorouter), falling back to openai-completions.
-    let api_format = runtime::model_capabilities::preferred_endpoint_type(model_id)
-        .as_deref()
-        .map(endpoint_type_to_api_format)
-        .unwrap_or(ApiFormat::OpenAiCompletions);
-    let credential = resolve_credential("proxy", provider_name, connection).ok()?;
+    // Wire format: the shared resolver (SSOT with the model-config path) —
+    // no explicit `api` here, so it consults the model_capabilities SSOT.
+    let api_format = resolve_api_format("proxy", provider_name, None, model_id)?;
+    let credential = resolve_credential("proxy", provider_name, connection)?;
     let kind = infer_provider_kind(provider_name, api_format);
 
     let base_url = adjust_base_url_for_format(&connection.base_url, api_format);
 
-    Some(ResolvedProvider {
+    Ok(Some(ResolvedProvider {
         kind,
         api_format,
         base_url,
@@ -436,7 +536,7 @@ fn try_proxy_passthrough(
         model_id: model_id.to_string(),
         // Proxy passthrough has no `models.<alias>` entry to read from.
         extra_body: Map::new(),
-    })
+    }))
 }
 
 /// Map sudorouter endpoint type string to `ApiFormat`.
@@ -847,6 +947,119 @@ mod tests {
             connection_for(&config, "proxy", "sudorouter").expect("should find proxy sudorouter");
         assert_eq!(conn.base_url, "https://hk.sudorouter.ai/v1");
         assert_eq!(conn.api_key.as_deref(), Some("sk-test-key"));
+    }
+
+    /// `sample_config()` plus a second, differently-keyed proxy account, so a
+    /// test can tell *which* account a request would be billed to.
+    fn config_with_second_proxy_account() -> SudoCodeConfig {
+        let mut config = sample_config();
+        config
+            .auth_modes
+            .get_mut("proxy")
+            .expect("proxy mode exists")
+            .insert(
+                "fujitoken".to_string(),
+                ProviderConnectionConfig {
+                    base_url: "https://api.sudorouter.ai/v1".to_string(),
+                    api_key: Some("sk-fujitoken-key".to_string()),
+                    api_key_env: None,
+                    token: None,
+                    token_env: None,
+                    auth_file: None,
+                },
+            );
+        config
+    }
+
+    /// A per-project `auth_profile` must decide who pays even when the model is
+    /// registered in `models` — that branch used to ignore it entirely and bill
+    /// the account hard-coded in the model entry.
+    #[test]
+    fn auth_profile_overrides_registered_model_provider() {
+        let mut config = config_with_second_proxy_account();
+        // `models.opus.providers.proxy.provider` is "sudorouter".
+        config.selected_account = Some("fujitoken".to_string());
+
+        let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+            .expect("should resolve");
+        assert_eq!(
+            resolved.credential,
+            Credential::ApiKey("sk-fujitoken-key".to_string()),
+            "registered model must bill the selected account, not the model entry's provider"
+        );
+        assert!(
+            resolved.base_url.starts_with("https://api.sudorouter.ai"),
+            "base_url should come from the selected account, got {}",
+            resolved.base_url
+        );
+    }
+
+    /// An `auth_profile` that names no configured account is a hard error.
+    /// Falling back would quietly spend a different account's balance.
+    #[test]
+    fn unknown_auth_profile_errors_instead_of_billing_another_account() {
+        let mut config = config_with_second_proxy_account();
+        config.selected_account = Some("typo-profile".to_string());
+
+        let err = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+            .expect_err("unknown auth_profile must not silently fall back");
+        let message = err.to_string();
+        assert!(
+            message.contains("typo-profile"),
+            "error should name the bad profile, got: {message}"
+        );
+
+        // Same rule on the passthrough branch (model not in `models`).
+        let err = resolve_provider_from_config("some-unregistered-model", None, &config)
+            .expect_err("passthrough must not silently fall back either");
+        assert!(
+            err.to_string().contains("typo-profile"),
+            "passthrough error should name the bad profile, got: {err}"
+        );
+    }
+
+    /// What `doctor` reports and what a request is billed to come from the same
+    /// selector, so the report cannot disagree with the code that spends money.
+    #[test]
+    fn reported_account_matches_the_one_a_request_bills() {
+        for selected in [None, Some("fujitoken".to_string())] {
+            let mut config = config_with_second_proxy_account();
+            config.selected_account = selected.clone();
+
+            let (reported, connection) =
+                proxy_account_for_model(&config, "opus").expect("should resolve an account");
+            let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+                .expect("should resolve");
+
+            assert_eq!(
+                resolved.credential,
+                Credential::ApiKey(
+                    connection
+                        .api_key
+                        .clone()
+                        .expect("fixture accounts carry inline keys")
+                ),
+                "reported account {reported} must be the one billed (selected={selected:?})"
+            );
+        }
+    }
+
+    /// Without a selection, a registered model still bills the account its own
+    /// entry names — the pre-existing default must not shift.
+    #[test]
+    fn no_auth_profile_keeps_model_entry_provider() {
+        let config = config_with_second_proxy_account();
+        assert!(config.selected_account.is_none());
+
+        let (name, _) = proxy_account_for_model(&config, "opus").expect("should resolve");
+        assert_eq!(name, "sudorouter");
+
+        let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+            .expect("should resolve");
+        assert_eq!(
+            resolved.credential,
+            Credential::ApiKey("sk-test-key".to_string())
+        );
     }
 
     #[test]

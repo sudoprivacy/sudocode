@@ -105,13 +105,14 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     // the legacy `└ ` or the current `⏺` format — both must end CRLF.
     sess.expect("(?:└ |⏺)[^\n]*\r\n")
         .expect("tool-result line should end with CRLF, not a bare LF");
-    // The status line is the last turn output through the FIFO channel.
-    // iocraft prints queued stdout by clearing its canvas, writing the
-    // lines, then redrawing the canvas below — so the separator rules are
-    // only guaranteed back on screen once a rule follows the status line.
-    sess.expect("ctx ").expect("turn status line");
+    // The status line now lives in the StatusSlot::TurnResult ChromeSlot
+    // (above the upper separator), rendered by iocraft's canvas redraw.
+    // After the turn ends, iocraft redraws the canvas with the TurnResult
+    // slot populated — `ctx ` appears in the ChromeSlot, followed by the
+    // separator below it.
+    sess.expect("ctx ").expect("turn status line in ChromeSlot");
     sess.expect("─{20,}")
-        .expect("footer separator redrawn after the status line");
+        .expect("separator redrawn below the status line");
 
     let mut box_indents = indents_of_rows_containing(&sess, "╭─ ");
     box_indents.extend(indents_of_rows_containing(&sess, "$ printf"));

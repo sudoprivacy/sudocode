@@ -617,10 +617,17 @@ fn load_system_prompt_impl(
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
     let config = ConfigLoader::default_for(&cwd).load()?;
+    let auto_memory_enabled = config.auto_memory_enabled();
     let builder_base = SystemPromptBuilder::new()
         .with_os(os_name, os_version)
         .with_project_context(project_context)
         .with_runtime_config(config);
+    // `autoMemoryEnabled: false` drops the whole `# auto memory` block —
+    // both the remembered entries and the instructions telling the model
+    // where to write — and leaves the memory directory untouched.
+    if !auto_memory_enabled {
+        return Ok(builder_base.build());
+    }
     // Preserves the previous per-branch choice exactly: sub-agent spawns ask
     // the agent definition, the main loop always takes the compact edition.
     let variant = match agent_type {

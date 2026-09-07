@@ -182,6 +182,10 @@ pub struct RuntimeFeatureConfig {
     trusted_roots: Vec<String>,
     /// Enable extended thinking for models that support it (default: true).
     thinking: bool,
+    /// Load the auto-memory directory and inject the `# auto memory` block
+    /// (entries + write instructions) into the system prompt (default:
+    /// true). Settings key: `autoMemoryEnabled`.
+    auto_memory: bool,
     /// `experimental` section: feature-flag key -> enabled. Keys are
     /// validated against `crate::experiments::Experiment` at parse time.
     experiments: BTreeMap<String, bool>,
@@ -457,6 +461,7 @@ impl ConfigLoader {
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
             trusted_roots: parse_optional_trusted_roots(&merged_value)?,
             thinking: parse_optional_thinking(&merged_value),
+            auto_memory: parse_optional_auto_memory(&merged_value),
             experiments: parse_optional_experiments(&merged_value)?,
         };
 
@@ -612,6 +617,13 @@ impl RuntimeConfig {
         self.feature_config.thinking
     }
 
+    /// Whether the auto-memory block is injected into the system prompt
+    /// (`autoMemoryEnabled`, default: true).
+    #[must_use]
+    pub fn auto_memory_enabled(&self) -> bool {
+        self.feature_config.auto_memory
+    }
+
     #[must_use]
     pub fn aliases(&self) -> &BTreeMap<String, String> {
         &self.feature_config.aliases
@@ -684,6 +696,11 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn thinking(&self) -> bool {
         self.thinking
+    }
+
+    #[must_use]
+    pub fn auto_memory_enabled(&self) -> bool {
+        self.auto_memory
     }
 
     #[must_use]
@@ -1158,6 +1175,16 @@ fn parse_optional_experiments(root: &JsonValue) -> Result<BTreeMap<String, bool>
 fn parse_optional_thinking(root: &JsonValue) -> bool {
     root.as_object()
         .and_then(|object| object.get("thinking"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(true)
+}
+
+/// Parse `autoMemoryEnabled` from settings. Default is `true` (enabled);
+/// `false` keeps the memory directory untouched and drops the
+/// `# auto memory` block from the system prompt.
+fn parse_optional_auto_memory(root: &JsonValue) -> bool {
+    root.as_object()
+        .and_then(|object| object.get("autoMemoryEnabled"))
         .and_then(JsonValue::as_bool)
         .unwrap_or(true)
 }

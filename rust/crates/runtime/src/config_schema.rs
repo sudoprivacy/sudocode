@@ -258,6 +258,11 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         "Enable extended thinking for supported models (default: true)",
     ),
     FieldSchema::leaf(
+        "autoMemoryEnabled",
+        FieldType::Bool,
+        "Inject the auto-memory block (entries + write instructions) into the system prompt (default: true)",
+    ),
+    FieldSchema::leaf(
         "providerFallbacks",
         FieldType::Object,
         "Provider fallback chain",

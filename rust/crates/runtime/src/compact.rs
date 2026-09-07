@@ -1135,9 +1135,9 @@ mod tests {
         let large = super::autocompact_buffer_tokens("claude-opus-4-8");
         assert_eq!(large, 50_000);
 
-        // Unknown model falls back to SSOT default (200K) → 13K
+        // Unknown model falls back to SSOT default (1M) → 50K (large tier)
         let unknown = super::autocompact_buffer_tokens("unknown-model-xyz");
-        assert_eq!(unknown, 13_000);
+        assert_eq!(unknown, 50_000);
     }
 
     #[test]

@@ -1772,6 +1772,53 @@ pub(crate) fn format_turn_status_line(
     format_turn_status_line_with_branch(model, turn, usage, None, None, elapsed, None)
 }
 
+/// Format the `ctx <used>/<window> (<pct>%)` status segment, or `None` when
+/// the window is unknown/zero.
+///
+/// `context_tokens` is the CURRENT context-window occupancy — the size of the
+/// prompt the provider actually processed on the latest response (uncached
+/// input + cache reads + cache writes), i.e. `TokenUsage::context_tokens()`.
+/// It is NOT the session-cumulative token total: cumulative grows every turn
+/// and never shrinks, so it overshoots the window (and rockets past 100%)
+/// while telling the user nothing about how full the context actually is.
+/// This is the same occupancy metric auto-compaction compares against the
+/// window, so the indicator and the compaction trigger stay in agreement.
+#[inline]
+pub(crate) fn format_context_usage_segment(context_tokens: u32, window: u32) -> Option<String> {
+    if window == 0 {
+        return None;
+    }
+    let pct = (f64::from(context_tokens) / f64::from(window) * 100.0).min(100.0);
+    let used_display = format_token_count(context_tokens);
+    let win_display = format_token_count_round(window);
+    Some(format!("ctx {used_display}/{win_display} ({pct:.0}%)"))
+}
+
+/// Compact token count with one decimal (`1.2k`, `3.4M`).
+#[inline]
+fn format_token_count(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", f64::from(n) / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("{:.1}k", f64::from(n) / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Compact token count with no decimals (`1M`, `200k`) — used for the window
+/// denominator, which is a round capacity figure.
+#[inline]
+fn format_token_count_round(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.0}M", f64::from(n) / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("{:.0}k", f64::from(n) / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Render the dim per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, turn number, cumulative token count,
@@ -1783,7 +1830,10 @@ pub(crate) fn format_turn_status_line_with_branch(
     model: &str,
     turn: u32,
     usage: &TokenUsage,
-    cumulative_usage: Option<&TokenUsage>,
+    // Current context-window occupancy (TokenUsage::context_tokens of the
+    // latest turn), NOT the session-cumulative total. See
+    // format_context_usage_segment.
+    context_tokens: Option<u32>,
     context_window: Option<u32>,
     elapsed: Duration,
     branch: Option<&str>,
@@ -1810,26 +1860,11 @@ pub(crate) fn format_turn_status_line_with_branch(
         segments.push(cost);
     }
     segments.push(format!("{secs:.1}s"));
-    // Context window usage: cumulative tokens / model context window
-    if let (Some(cumulative), Some(window)) = (cumulative_usage, context_window) {
-        if window > 0 {
-            let cum_total = cumulative.total_tokens();
-            let pct = (f64::from(cum_total) / f64::from(window) * 100.0).min(100.0);
-            let cum_display = if cum_total >= 1_000_000 {
-                format!("{:.1}M", f64::from(cum_total) / 1_000_000.0)
-            } else if cum_total >= 1000 {
-                format!("{:.1}k", f64::from(cum_total) / 1000.0)
-            } else {
-                cum_total.to_string()
-            };
-            let win_display = if window >= 1_000_000 {
-                format!("{:.0}M", f64::from(window) / 1_000_000.0)
-            } else if window >= 1000 {
-                format!("{:.0}k", f64::from(window) / 1000.0)
-            } else {
-                window.to_string()
-            };
-            segments.push(format!("ctx {cum_display}/{win_display} ({pct:.0}%)"));
+    // Context-window usage: current occupancy / model window. Uses the same
+    // occupancy metric as auto-compaction (see format_context_usage_segment).
+    if let (Some(used), Some(window)) = (context_tokens, context_window) {
+        if let Some(segment) = format_context_usage_segment(used, window) {
+            segments.push(segment);
         }
     }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
@@ -2258,6 +2293,44 @@ mod tests {
         let plain = strip_ansi(&rendered);
         // Trailing segment should be the duration, not an empty " · ".
         assert!(plain.ends_with("0.8s"), "{plain}");
+    }
+
+    #[test]
+    fn context_usage_segment_reports_occupancy_over_window() {
+        // 150k occupancy in a 1M window => 15%.
+        let seg = format_context_usage_segment(150_000, 1_000_000)
+            .expect("segment present for non-zero window");
+        assert_eq!(seg, "ctx 150.0k/1M (15%)", "{seg}");
+    }
+
+    #[test]
+    fn context_usage_segment_never_exceeds_100_percent() {
+        // Occupancy above the window is clamped to 100% rather than showing a
+        // nonsensical >100% figure (the old cumulative-total bug rendered
+        // things like 7740%).
+        let seg = format_context_usage_segment(2_000_000, 1_000_000).expect("segment present");
+        assert!(seg.ends_with("(100%)"), "{seg}");
+    }
+
+    #[test]
+    fn context_usage_segment_absent_for_zero_window() {
+        assert!(format_context_usage_segment(1234, 0).is_none());
+    }
+
+    #[test]
+    fn turn_status_line_renders_context_segment() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line_with_branch(
+            "claude-sonnet-4-6",
+            2,
+            &usage,
+            Some(150_000),
+            Some(1_000_000),
+            Duration::from_secs_f64(0.5),
+            None,
+        );
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("ctx 150.0k/1M (15%)"), "{plain}");
     }
 
     #[test]

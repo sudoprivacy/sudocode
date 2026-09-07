@@ -404,8 +404,10 @@ fn context_window_resolves_from_ssot_with_default_fallback() {
         file_default
     );
 
-    // known model → its own value; 1M for opus-4-8, distinct from the default
-    let opus = context_window_or_default("claude-opus-4-8");
-    assert_eq!(opus, 1_000_000);
-    assert_ne!(opus, file_default);
+    // known model → its own seeded value, distinct from the default. Use a
+    // model whose window differs from the default (sonnet-4-6 is 200K) so the
+    // assertion is meaningful even when the default itself is 1M.
+    let sonnet = context_window_or_default("claude-sonnet-4-6");
+    assert_eq!(sonnet, 200_000);
+    assert_ne!(sonnet, file_default);
 }

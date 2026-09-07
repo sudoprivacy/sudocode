@@ -4791,14 +4791,15 @@ impl LiveCli {
                     }
                     let elapsed = turn_start.elapsed();
                     let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
+                    // Current context-window occupancy (what the provider just
+                    // processed), the same metric auto-compaction uses — not the
+                    // session-cumulative total, which never shrinks and overshoots
+                    // the window. Window is sized off the session model so the
+                    // percentage and the compaction trigger share one denominator.
+                    let context_tokens = self.runtime.usage().current_turn_usage().context_tokens();
                     let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -4806,7 +4807,7 @@ impl LiveCli {
                         &self.config.model,
                         turns,
                         &usage,
-                        Some(&cumulative),
+                        Some(context_tokens),
                         Some(context_window),
                         elapsed,
                         branch.as_deref(),
@@ -4900,14 +4901,15 @@ impl LiveCli {
                     }
                     let elapsed = turn_start.elapsed();
                     let usage = self.runtime.usage().current_turn_usage();
-                    let cumulative = self.runtime.usage().cumulative_usage();
                     let turns = self.runtime.usage().turns();
-                    let model_for_caps = summary
-                        .response_model
-                        .as_deref()
-                        .unwrap_or(&self.config.model);
+                    // Current context-window occupancy (what the provider just
+                    // processed), the same metric auto-compaction uses — not the
+                    // session-cumulative total, which never shrinks and overshoots
+                    // the window. Window is sized off the session model so the
+                    // percentage and the compaction trigger share one denominator.
+                    let context_tokens = self.runtime.usage().current_turn_usage().context_tokens();
                     let context_window =
-                        runtime::model_capabilities::context_window_or_default(model_for_caps);
+                        runtime::model_capabilities::context_window_or_default(&self.config.model);
                     let branch = env::current_dir()
                         .ok()
                         .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -4917,7 +4919,7 @@ impl LiveCli {
                         &self.config.model,
                         turns,
                         &usage,
-                        Some(&cumulative),
+                        Some(context_tokens),
                         Some(context_window),
                         elapsed,
                         branch.as_deref(),

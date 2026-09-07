@@ -40,7 +40,7 @@ impl MemoryType {
     }
 
     fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
+        match value.trim().to_ascii_lowercase().as_str() {
             "user" => Some(Self::User),
             "feedback" => Some(Self::Feedback),
             "project" => Some(Self::Project),
@@ -134,25 +134,35 @@ impl MemoryEntry {
             }
             let indent = line.len() - line.trim_start().len();
             let content = line.trim_start();
+            // Field names are matched case-insensitively. A model asked to
+            // write these files does not always mirror the case it was shown —
+            // `TYPE: FEEDBACK` is a common variation — and an unparsed memory
+            // file is skipped *silently*, so a stricter reader loses the user's
+            // memories without ever saying so.
+            let key = content.to_ascii_lowercase();
 
             if indent == 0 {
                 in_metadata = false;
-                if let Some(value) = content.strip_prefix("name:") {
+                if let Some(value) = key.strip_prefix("name:") {
+                    let value = &content[content.len() - value.len()..];
                     name = Some(unquote(value.trim()).to_string());
-                } else if let Some(value) = content.strip_prefix("description:") {
+                } else if let Some(value) = key.strip_prefix("description:") {
+                    let value = &content[content.len() - value.len()..];
                     description = Some(unquote(value.trim()).to_string());
-                } else if let Some(value) = content.strip_prefix("type:") {
+                } else if let Some(value) = key.strip_prefix("type:") {
                     // Allow `type: ...` at the top level too, for friendliness.
+                    let value = &content[content.len() - value.len()..];
                     let raw_type = unquote(value.trim());
                     memory_type = Some(
                         MemoryType::parse(raw_type)
                             .ok_or_else(|| MemoryParseError::UnknownType(raw_type.to_string()))?,
                     );
-                } else if content.starts_with("metadata:") {
+                } else if key.starts_with("metadata:") {
                     in_metadata = true;
                 }
             } else if in_metadata {
-                if let Some(value) = content.strip_prefix("type:") {
+                if let Some(value) = key.strip_prefix("type:") {
+                    let value = &content[content.len() - value.len()..];
                     let raw_type = unquote(value.trim());
                     memory_type = Some(
                         MemoryType::parse(raw_type)

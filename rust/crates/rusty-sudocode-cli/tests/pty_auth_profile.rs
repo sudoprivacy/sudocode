@@ -137,6 +137,23 @@ fn write_two_account_config(env: &TestEnv) {
     let serialized = serde_json::to_string_pretty(&config).expect("serialize sudocode.json");
     fs::write(env.config_home().join("sudocode.json"), serialized)
         .expect("write two-account sudocode.json");
+
+    // These tests are about which account the *selector* resolves to, so the
+    // config home must not carry one of its own. In live mode it is seeded from
+    // a copy of the developer's config, which may well have `auth_profile` set —
+    // and then `doctor_defaults_to_first_account_without_auth_profile` would be
+    // asserting the default path while a profile was quietly in force.
+    let settings_path = env.config_home().join("settings.json");
+    if let Ok(contents) = fs::read_to_string(&settings_path) {
+        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(object) = settings.as_object_mut() {
+                object.remove("auth_profile");
+            }
+            let serialized =
+                serde_json::to_string_pretty(&settings).expect("serialize settings.json");
+            fs::write(&settings_path, serialized).expect("rewrite settings.json");
+        }
+    }
 }
 
 /// Persist a project-scoped `auth_profile` selector to the same

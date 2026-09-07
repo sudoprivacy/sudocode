@@ -179,6 +179,19 @@ fn row_of(rows: &[String], needle: &str) -> usize {
 #[test]
 fn markdown_showcase_renders_without_spacing_artifacts() {
     let env = TestEnv::new("md-showcase");
+
+    // Mock-only by nature: every assertion below is about how the renderer
+    // lays out one specific document (`MARKDOWN_SHOWCASE_DOC`) — its labels,
+    // its list items, the blank rows between its blocks. A live model writes
+    // whatever markdown it likes, so there is nothing to compare against.
+    if env.is_live() {
+        eprintln!(
+            "markdown_showcase_renders_without_spacing_artifacts: \
+             skipped in live mode (asserts on the mock showcase document)"
+        );
+        return;
+    }
+
     let mut sess = spawn_iocraft_repl(&env, "read-only");
 
     let prompt = env.prompt("Show me formatted markdown", "markdown_rendering_showcase");

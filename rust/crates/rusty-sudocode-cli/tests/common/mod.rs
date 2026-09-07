@@ -475,6 +475,49 @@ fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &
     }
 }
 
+/// `true` if `screen` shows the model being unreachable *for this account or
+/// right now*, rather than the model genuinely misbehaving.
+///
+/// Live tests that name a specific model are only meaningful when the tester's
+/// account can actually reach it. Proxy accounts are scoped to a subset of
+/// models — a token with Claude access and nothing else answers
+/// "This token has no access to model …" — and any account can hit a transient
+/// rate limit or upstream outage. Neither says anything about the code under
+/// test, so callers skip on this rather than fail, and stay account-agnostic.
+///
+/// Matches with all whitespace removed from both sides, because the screen is
+/// a wrapped 80-column terminal: `no access to model o3-mini` can arrive split
+/// across a line break, and a plain `contains` then misses it.
+#[must_use]
+pub fn model_unavailable_in_screen(screen: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        // Account scope — the model exists, this token just can't use it.
+        "no access to model",
+        "model_not_found",
+        "not supported",
+        "404",
+        // Transient capacity / connectivity.
+        "429",
+        "rate limit",
+        "Rate limit",
+        "overloaded",
+        "saturated",
+        "upstream",
+        "503",
+        "502",
+        "timed out",
+        "timeout",
+        "ETIMEDOUT",
+        "ECONNREFUSED",
+        "connection refused",
+    ];
+    let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    MARKERS.iter().any(|marker| {
+        let marker: String = marker.chars().filter(|c| !c.is_whitespace()).collect();
+        squeezed.contains(&marker)
+    })
+}
+
 mod python;
 mod shell;
 

@@ -898,9 +898,15 @@ fn memory_multi_type_single_session() {
     );
 
     // Verify at least two different types appear across the files.
+    // Case-insensitive: what is under test is that the model recorded two
+    // distinct memory *types*, not how it capitalised the frontmatter — a live
+    // model writes `TYPE: FEEDBACK` as readily as `type: feedback`, and the
+    // loader accepts both.
     let mut types_seen = std::collections::HashSet::new();
     for file_name in &non_index {
-        let content = fs::read_to_string(memory_dir.join(file_name)).unwrap_or_default();
+        let content = fs::read_to_string(memory_dir.join(file_name))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         for t in ["user", "feedback", "reference", "project"] {
             if content.contains(&format!("type: {t}")) {
                 types_seen.insert(t);

@@ -168,9 +168,12 @@ fn git_init_write_commit_verify() {
         &prompt,
     ]);
 
-    // Agent triggers bash (at least once — may be multiple calls).
+    // Agent triggers bash (at least once — may be multiple calls). Matched
+    // case-insensitively: a live model names the tool `Bash`, and the tool
+    // name's capitalisation is a presentation detail, not the behaviour under
+    // test.
     sess.set_default_timeout(Duration::from_secs(60));
-    sess.expect("bash")
+    sess.expect("(?i)bash")
         .expect("should see bash tool call (agent trigger)");
 
     // Response mentions completion.

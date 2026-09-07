@@ -230,23 +230,23 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
-    // Use a model that supports extended thinking.
-    sess.send("/model claude-sonnet-4-6\r")
-        .expect("send /model");
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after /model: {e}\nPTY:\n{screen}");
-    });
+    // No `/model` switch: live mode already runs on `sonnet`, which supports
+    // extended thinking. Asking for the model that is already active prints the
+    // full model *listing* rather than a switch report, and that long block
+    // desynchronised every `expect` that follows.
 
     // Send a prompt that triggers thinking. The response should include
     // a thinking summary with non-zero chars if anthropic format is used.
     sess.send("What is 247 * 183? Think step by step.\r")
         .expect("send prompt");
 
-    // Wait for response to complete.
-    sess.expect("❯").unwrap_or_else(|e| {
+    // Wait for the answer itself, not for `❯` — the prompt marker also prefixes
+    // the echo of the question that was just submitted, so matching it returns
+    // while the turn is still running. `/exit` then lands in the input queue
+    // mid-turn and is never submitted, and the session never ends.
+    sess.expect("45[,. ]?201").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+        panic!("should see the computed answer: {e}\nPTY:\n{screen}");
     });
 
     // Check the full screen for thinking summary. With anthropic format,
@@ -267,8 +267,11 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
     // Note: some models/prompts may not trigger thinking at all,
     // so we don't assert thinking is always present.
 
-    // Clean exit.
+    // Clean exit. Input is queued during a turn (`SUDOCODE_INTERRUPT_QUEUE_MODE`),
+    // so `/exit` only runs once the model has finished — and "think step by
+    // step" invites a long answer. Give that more room than the default.
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(Duration::from_secs(180));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");

@@ -10,8 +10,8 @@ use telemetry::SessionTracer;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
-    compact_session_sync_after_llm_failure, estimate_session_tokens, CompactionConfig,
-    CompactionError, CompactionResult, ReadFileTracker,
+    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
+    CompactionConfig, CompactionError, CompactionResult, ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{HookAbortSignal, HookProgressReporter, HookRunResult, HookRunner};
@@ -1883,6 +1883,14 @@ where
                     result_message,
                 )?;
             }
+
+            // A tool loop grows the context without ever returning to the
+            // caller, so the end-of-turn check alone lets a long turn sail
+            // from "under the threshold" straight into a provider rejection.
+            // Check here, with the tool results just pushed, before the next
+            // request is built.
+            overflow_compaction =
+                merge_auto_compaction(overflow_compaction, self.maybe_auto_compact().await);
         }
 
         let auto_compaction =
@@ -2093,7 +2101,7 @@ where
         // hundred tokens per turn and never reaches the threshold; without
         // caching it grows quadratically, never decreases, and re-compacts
         // after every turn once crossed.
-        if self.usage_tracker.current_turn_usage().context_tokens() < threshold {
+        if self.projected_context_tokens() < threshold {
             return None;
         }
 
@@ -2119,6 +2127,27 @@ where
                 self.consecutive_auto_compact_noops.saturating_add(1);
         }
         event
+    }
+
+    /// Best estimate of the context the next request will carry: the context
+    /// the provider reported for the latest response, plus everything pushed
+    /// since that response (tool results, injected reminders) that no usage
+    /// report has counted yet. At the end of a turn the trailing part is
+    /// empty and this is exactly the latest response's context; between
+    /// iterations of a tool loop it is what lets auto-compaction run before
+    /// the next request instead of after the provider rejects it.
+    fn projected_context_tokens(&self) -> u32 {
+        let reported = self.usage_tracker.current_turn_usage().context_tokens();
+        let unreported: usize = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .take_while(|message| message.role != MessageRole::Assistant)
+            .flat_map(|message| message.blocks.iter())
+            .map(estimate_block_tokens)
+            .sum();
+        reported.saturating_add(u32::try_from(unreported).unwrap_or(u32::MAX))
     }
 
     /// Compact the live session and install the result.
@@ -2376,10 +2405,16 @@ fn merge_auto_compaction(
     }
 }
 
-/// Per-model auto-compact threshold: `context_window - max_output - buffer`.
+/// Per-model auto-compact threshold:
+/// `context_window - request max_tokens - buffer`.
 ///
-/// Matches CC's dynamic threshold calculation instead of a flat 100K default.
-/// Falls back to the env-var or built-in default when the model is unknown.
+/// The provider rejects a request once `input + max_tokens` exceeds the
+/// window, and the API client's preflight mirrors that sum. The output
+/// reservation subtracted here is therefore the `max_tokens` chat requests
+/// are actually sent with ([`crate::model_capabilities::request_max_output_tokens`]),
+/// not the compaction summary's smaller cap: with a 200K window and 64K
+/// `max_tokens` the provider rejects at 136K, so a threshold above that can
+/// never fire in time. Falls back to the env-var override when set.
 #[must_use]
 pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     // Env-var override takes precedence (explicit user intent).
@@ -2392,11 +2427,9 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     }
 
     let context_window = crate::model_capabilities::context_window_or_default(model);
-    let max_output = crate::model_capabilities::max_output_tokens_or_default(model);
-    // Clamp max_output to avoid overflow on small context windows
-    let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
+    let max_output = crate::model_capabilities::request_max_output_tokens(model);
     let buffer = autocompact_buffer_tokens(model);
-    context_window.saturating_sub(effective_max_output + buffer)
+    context_window.saturating_sub(max_output.saturating_add(buffer))
 }
 
 fn build_assistant_message(
@@ -4526,16 +4559,16 @@ mod tests {
         let _g = env_guard();
         // Ensure no env-var override is active.
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
-        // The threshold is context_window - min(max_output, 20K) - buffer.
-        // For claude-sonnet-4-6 (200K context, 64K output):
-        //   buffer = 13K (200K < 400K), threshold = 200K - 20K - 13K = 167K
+        // The threshold is context_window - request max_tokens - buffer.
+        // For claude-sonnet-4-6 (200K context, 64K request max_tokens):
+        //   buffer = 13K (200K < 400K), threshold = 200K - 64K - 13K = 123K
         let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
-        assert_eq!(threshold, 167_000);
+        assert_eq!(threshold, 123_000);
 
-        // Unknown model falls back to SSOT default (1M context, 64K output):
-        //   buffer = 50K (1M >= 800K), threshold = 1M - 20K - 50K = 930K
+        // Unknown model: SSOT default window (1M) and the 64K request heuristic:
+        //   buffer = 50K (1M >= 800K), threshold = 1M - 64K - 50K = 886K
         let unknown = auto_compact_threshold_for_model("some-unknown-model");
-        assert_eq!(unknown, 930_000);
+        assert_eq!(unknown, 886_000);
     }
 
     // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is

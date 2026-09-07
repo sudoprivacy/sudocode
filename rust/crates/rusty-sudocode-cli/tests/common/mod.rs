@@ -490,6 +490,40 @@ fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &
                 .unwrap_or_else(|e| panic!("live {relative} should copy: {e}"));
         }
     }
+    // Which account a live run bills is chosen per run, and only ever written
+    // into this copy. `SCODE_LIVE_AUTH_PROFILE` names an account from
+    // `auth_modes.proxy`; without it the run uses whatever the machine's config
+    // already selects.
+    //
+    // This is deliberately not a change to the developer's global config. That
+    // file is shared by every session on the machine, and editing it to pick an
+    // account both fights whoever else is using it and pushes the choice onto
+    // repositories that did not ask for it — one proxy account does not serve
+    // every model, so a global repoint breaks unrelated work. Since
+    // `auth_profile` now applies to registered models too (sudocode #556), a
+    // per-run selection is enough.
+    if let Ok(profile) = std::env::var("SCODE_LIVE_AUTH_PROFILE") {
+        let profile = profile.trim();
+        if !profile.is_empty() {
+            let settings_path = test_config_home.join("settings.json");
+            let mut settings: serde_json::Value = fs::read_to_string(&settings_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(object) = settings.as_object_mut() {
+                object.insert(
+                    "auth_profile".to_string(),
+                    serde_json::Value::String(profile.to_string()),
+                );
+            }
+            fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&settings).expect("settings.json should serialize"),
+            )
+            .expect("live settings.json should be written");
+        }
+    }
+
     // Cached model capabilities are not credentials, but copying them keeps a
     // live run from re-fetching the catalogue once per test.
     let capabilities = real_config_home

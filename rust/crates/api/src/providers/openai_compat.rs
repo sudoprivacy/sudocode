@@ -636,13 +636,18 @@ impl OpenAiSseParser {
             return Ok(Vec::new());
         }
         let trailing = std::mem::take(&mut self.buffer);
-        match parse_sse_frame(
-            &String::from_utf8_lossy(&trailing),
-            &self.provider,
-            &self.model,
-        )? {
-            Some(event) => Ok(vec![event]),
-            None => Ok(Vec::new()),
+        let tail = String::from_utf8_lossy(&trailing);
+        // A leftover frame at end-of-stream that fails to parse is a
+        // truncation, not a malformed model payload: surface it as a retryable
+        // IncompleteStream instead of a JSON error that blames the model.
+        match parse_sse_frame(&tail, &self.provider, &self.model) {
+            Ok(Some(event)) => Ok(vec![event]),
+            Ok(None) => Ok(Vec::new()),
+            Err(_) => Err(ApiError::incomplete_stream(
+                &self.provider,
+                &self.model,
+                &tail,
+            )),
         }
     }
 }

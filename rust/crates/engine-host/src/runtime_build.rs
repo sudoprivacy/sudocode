@@ -93,6 +93,15 @@ impl BuiltRuntime {
         self
     }
 
+    pub fn with_session_known_model(mut self, model: impl Into<String>) -> Self {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("runtime should exist before overriding session known model");
+        self.runtime = Some(runtime.with_session_known_model(model));
+        self
+    }
+
     /// Set the trace ID for the next request.
     pub fn set_trace_id(&mut self, trace_id: impl Into<String>) {
         if let Some(ref mut runtime) = self.runtime {
@@ -419,7 +428,8 @@ pub(crate) fn build_runtime_with_plugin_state(
         system_prompt,
         &feature_config,
     )
-    .with_session_known_date(runtime::today_local());
+    .with_session_known_date(runtime::today_local())
+    .with_session_known_model(config.model.clone());
     // nexus A2A: give the CLI executor the send half so `send_message` routes
     // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
     // uses). Set only when configured; absent it the tool is never advertised.

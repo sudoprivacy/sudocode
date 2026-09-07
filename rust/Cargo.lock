@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2a"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 dependencies = [
  "contracts",
  "kernel",
@@ -185,7 +185,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64",
  "criterion",
@@ -781,8 +781,9 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
+ "api",
  "plugins",
  "runtime",
  "serde_json",
@@ -790,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "commands",
  "runtime",
@@ -860,7 +861,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1369,7 +1370,7 @@ checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
 name = "engine-acp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -1392,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "engine-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "api",
  "async-trait",
@@ -1407,14 +1408,14 @@ dependencies = [
 
 [[package]]
 name = "engine-events"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "runtime",
 ]
 
 [[package]]
 name = "engine-host"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "commands",
  "engine-core",
@@ -2371,7 +2372,7 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2433,7 +2434,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2554,7 +2555,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "managed-agent"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 dependencies = [
  "a2a",
  "contracts",
@@ -2635,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "api",
  "serde_json",
@@ -2661,11 +2662,11 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=b5b969a060c322835be67ff9b1e6e02f7c97abd1#b5b969a060c322835be67ff9b1e6e02f7c97abd1"
+source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c121db85cf8bfa679d#5806c39d471928caabd098c121db85cf8bfa679d"
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3118,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3819,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -3960,7 +3961,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arboard",
  "async-trait",
@@ -4580,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "chrono",
  "dirs",
@@ -4934,7 +4935,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "api",
  "async-trait",

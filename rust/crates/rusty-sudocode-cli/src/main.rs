@@ -874,9 +874,9 @@ fn print_system_prompt(
     Ok(())
 }
 
-/// `--resume` without arguments: list available sessions so the user can
-/// pick one to resume.  Prints id, age, message count, and branch — enough
-/// context to identify the right session.
+/// The `--resume list` session browser: prints available sessions with id,
+/// age, message count, and branch — enough context to pick a specific older
+/// session. (Bare `--resume` resumes the latest session directly.)
 fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     use cli::session::list_managed_sessions;
 
@@ -910,7 +910,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    println!("Available sessions (use `scode --resume <id>`):\n");
+    println!("Available sessions (`scode --resume <id>`, or `scode --resume` for the latest):\n");
     for (i, session) in sessions.iter().enumerate() {
         let age = cli::session::format_session_modified_age(session.modified_epoch_millis);
         let branch = session
@@ -926,7 +926,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
         );
     }
     println!();
-    println!("Tip: `scode --resume latest` resumes the most recent session.");
+    println!("Tip: `scode --resume` (no id) resumes the most recent session.");
     Ok(())
 }
 
@@ -3533,12 +3533,7 @@ impl LiveCli {
                 if let Some(event) = tc.auto_compaction {
                     self.out_println(format_auto_compaction_notice(event.removed_message_count));
                 }
-                self.print_turn_status_line(
-                    &model,
-                    tc.response_model.as_deref(),
-                    turn_start.elapsed(),
-                    None,
-                );
+                self.print_turn_status_line(&model, turn_start.elapsed(), None, None);
             }
             None => {
                 clear_pending_plan_execution();
@@ -3564,16 +3559,20 @@ impl LiveCli {
     fn print_turn_status_line(
         &self,
         model: &str,
-        response_model: Option<&str>,
         elapsed: Duration,
         output: Option<&repl_ui::OutputSender>,
+        ui: Option<&repl_ui::UiCommandSender>,
     ) {
         let usage_tracker = self.lifecycle.usage_snapshot();
         let usage = usage_tracker.current_turn_usage();
-        let cumulative = usage_tracker.cumulative_usage();
         let turns = usage_tracker.turns();
-        let model_for_caps = response_model.unwrap_or(model);
-        let context_window = runtime::model_capabilities::context_window_or_default(model_for_caps);
+        // Current context-window occupancy (what the provider just processed),
+        // the same metric auto-compaction uses — not the session-cumulative
+        // total, which never shrinks and overshoots the window. Window is sized
+        // off the session model so the percentage and the compaction trigger
+        // share one denominator.
+        let context_tokens = usage.context_tokens();
+        let context_window = runtime::model_capabilities::context_window_or_default(model);
         let branch = env::current_dir()
             .ok()
             .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -3581,14 +3580,17 @@ impl LiveCli {
             model,
             turns,
             &usage,
-            Some(&cumulative),
+            Some(context_tokens),
             Some(context_window),
             elapsed,
             branch.as_deref(),
         );
-        match output {
-            Some(out) => out.println(&line),
-            None => self.out_println(line),
+        match (ui, output) {
+            // Show turn result in the ChromeSlot (StatusSlot::TurnResult) —
+            // persists above the input until the next turn starts.
+            (Some(ui), _) => ui.set_turn_result(&line),
+            (None, Some(out)) => out.println(&line),
+            (None, None) => self.out_println(line),
         }
     }
 
@@ -3641,12 +3643,7 @@ impl LiveCli {
                 }
                 // The status line is part of the transcript: printed once, in
                 // order, above the next prompt.
-                self.print_turn_status_line(
-                    &model,
-                    tc.response_model.as_deref(),
-                    turn_start.elapsed(),
-                    Some(output),
-                );
+                self.print_turn_status_line(&model, turn_start.elapsed(), Some(output), Some(ui));
             }
             // Error already rendered by the EngineEventRenderer (Error event).
             None => {}

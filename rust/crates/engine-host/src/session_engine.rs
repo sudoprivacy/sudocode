@@ -222,10 +222,17 @@ impl SessionEngine {
     ) -> Result<Self, String> {
         let cwd = canonical_session_cwd(cwd)?;
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
-        let resolved_model = if model_flag_raw.is_some() {
-            model.clone()
-        } else {
-            resolve_repl_model(model.clone())
+        // A persisted transcript carries the model it was last run with
+        // (`build_runtime_with_plugin_state` records it). Prefer that over the
+        // directory's default: resuming a session that had been switched to
+        // another model must not silently drop back to the config model, which
+        // would run the rest of the conversation on the wrong model and
+        // mis-size the context window for auto-compaction. An explicit
+        // `--model` flag still wins.
+        let resolved_model = match (&model_flag_raw, &session.model) {
+            (Some(_), _) => model.clone(),
+            (None, Some(persisted)) => persisted.clone(),
+            (None, None) => resolve_repl_model(model.clone()),
         };
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
@@ -308,6 +315,13 @@ impl SessionEngine {
     ) -> Result<(), String> {
         let cwd = session.cwd.clone();
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        // The rebuilt runtime is stamped with today's date. Carry the outgoing
+        // one's date forward instead: a session that started yesterday and is
+        // rebuilt today (a `/model` switch, a fork, a compaction) would
+        // otherwise have its known date silently advanced, suppressing the
+        // date-rollover reminder (#128, issue #135). The *model* is deliberately
+        // not carried — a rebuild is where it legitimately changes.
+        let inherited_known_date = session.runtime.prompt_known_date().map(str::to_string);
         if new_session.model.is_none() {
             new_session.model = session.runtime.session().model.clone();
         }
@@ -336,6 +350,10 @@ impl SessionEngine {
             self.reasoning_effort.clone(),
         )
         .map_err(|e| e.to_string())?;
+        let runtime = match inherited_known_date {
+            Some(known) => runtime.with_session_known_date(known),
+            None => runtime,
+        };
         session.runtime = runtime;
         session.handle = handle;
         Ok(())

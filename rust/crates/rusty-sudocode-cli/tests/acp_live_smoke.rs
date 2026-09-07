@@ -238,13 +238,13 @@ fn base_command_with_mode(
         cmd.env(key, value);
     }
     cmd.args([
-            "--auth",
-            "subscription",
-            "--model",
-            "claude-sonnet",
-            "--permission-mode",
-            permission_mode,
-        ]);
+        "--auth",
+        "subscription",
+        "--model",
+        "claude-sonnet",
+        "--permission-mode",
+        permission_mode,
+    ]);
     cmd
 }
 

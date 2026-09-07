@@ -383,7 +383,10 @@ fn spawn_with_workspace(
     // C:\ paths) and can't find `env` — the resulting `exec: env: not
     // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
     // same way on Linux, macOS, and Git Bash on Windows.
-    let mut cmd = format!("cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env", shell_quote(&workspace_root));
+    let mut cmd = format!(
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env",
+        shell_quote(&workspace_root)
+    );
     cmd.push_str(&format!(
         " SUDO_CODE_CONFIG_HOME={}",
         shell_quote(&effective_config_home)
@@ -461,7 +464,9 @@ fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &
     }
     // Cached model capabilities are not credentials, but copying them keeps a
     // live run from re-fetching the catalogue once per test.
-    let capabilities = real_config_home.join("cache").join("model-capabilities.json");
+    let capabilities = real_config_home
+        .join("cache")
+        .join("model-capabilities.json");
     if capabilities.exists() {
         let cache_dir = test_config_home.join("cache");
         fs::create_dir_all(&cache_dir).expect("live cache dir should be created");

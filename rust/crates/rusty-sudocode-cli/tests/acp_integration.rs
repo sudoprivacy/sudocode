@@ -371,13 +371,13 @@ fn base_command(workspace: &TestWorkspace) -> Command {
     cmd.current_dir(&workspace.root);
     isolate_env(&mut cmd, workspace);
     cmd.args([
-            "--auth",
-            "api-key",
-            "--model",
-            "sonnet",
-            "--permission-mode",
-            "read-only",
-        ]);
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "read-only",
+    ]);
     cmd
 }
 
@@ -2407,17 +2407,17 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
     cmd.current_dir(&workspace.root);
     isolate_env(&mut cmd, &workspace);
     cmd.args([
-            "--auth",
-            "api-key",
-            "--model",
-            TEST_MODEL,
-            "--permission-mode",
-            "read-only",
-            "acp",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        "--auth",
+        "api-key",
+        "--model",
+        TEST_MODEL,
+        "--permission-mode",
+        "read-only",
+        "acp",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn scode acp");
     let stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -2622,17 +2622,17 @@ fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
     cmd.current_dir(&workspace.root);
     isolate_env(&mut cmd, workspace);
     cmd.args([
-            "--auth",
-            "api-key",
-            "--model",
-            "sonnet",
-            "--permission-mode",
-            "danger-full-access",
-            "acp",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "danger-full-access",
+        "acp",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("spawn scode acp stdio (danger)");
     let stdin = child.stdin.take().expect("stdin should be piped");
@@ -2660,19 +2660,19 @@ fn spawn_stdio_client_danger_with_allowed(
     cmd.current_dir(&workspace.root);
     isolate_env(&mut cmd, workspace);
     cmd.args([
-            "--auth",
-            "api-key",
-            "--model",
-            "sonnet",
-            "--permission-mode",
-            "danger-full-access",
-            "--allowedTools",
-            allowed,
-            "acp",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "danger-full-access",
+        "--allowedTools",
+        allowed,
+        "acp",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("spawn scode acp stdio (danger+allowed)");
     let stdin = child.stdin.take().expect("stdin should be piped");

@@ -61,7 +61,10 @@ fn resolve_python_uncached() -> String {
 /// fails, because it exits non-zero (or pops the Store) instead of executing.
 fn runs_python3(command: &str) -> bool {
     Command::new(command)
-        .args(["-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)"])
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

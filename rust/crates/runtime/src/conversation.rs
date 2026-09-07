@@ -4532,9 +4532,10 @@ mod tests {
         let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
         assert_eq!(threshold, 167_000);
 
-        // Unknown model falls back to SSOT default (200K context, 64K output)
+        // Unknown model falls back to SSOT default (1M context, 64K output):
+        //   buffer = 50K (1M >= 800K), threshold = 1M - 20K - 50K = 930K
         let unknown = auto_compact_threshold_for_model("some-unknown-model");
-        assert_eq!(unknown, 167_000);
+        assert_eq!(unknown, 930_000);
     }
 
     // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is

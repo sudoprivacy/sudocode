@@ -447,10 +447,17 @@ pub struct ManagedSessionSummary {
 
 fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
     sessions.sort_by(|left, right| {
-        right
-            .updated_at_ms
-            .cmp(&left.updated_at_ms)
+        // Empty (0-message) shells sink below real sessions so "latest" never
+        // lands on an empty one. Among real sessions, order by most-recently
+        // modified first — the same signal displayed as "age" in the list, so
+        // the `(latest)` marker matches what the user sees and `--resume`
+        // returns the session they last worked in. Rotation snapshots and
+        // backups are excluded from listing (see `is_managed_session_file`), so
+        // file mtime reflects real activity (messages, compaction, resume).
+        (left.message_count == 0)
+            .cmp(&(right.message_count == 0))
             .then_with(|| right.modified_epoch_millis.cmp(&left.modified_epoch_millis))
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
             .then_with(|| right.id.cmp(&left.id))
     });
 }
@@ -558,6 +565,17 @@ pub fn resolve_managed_session_path_for(
 
 #[must_use]
 pub fn is_managed_session_file(path: &Path) -> bool {
+    // Rotation snapshots (`<id>.rot-<ts>.jsonl`) share the .jsonl extension but
+    // are NOT resumable sessions: each carries the same internal session_id as
+    // its parent, so listing them yields duplicate entries for one session.
+    // Exclude any file whose name contains a `.rot-` marker.
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".rot-"))
+    {
+        return false;
+    }
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|extension| {
@@ -688,9 +706,10 @@ fn path_is_within_workspace(path: &Path, workspace_root: &Path, fs: &dyn FsBacke
 #[cfg(test)]
 mod tests {
     use super::{
-        create_managed_session_handle_for, fork_managed_session_for, is_session_reference_alias,
-        list_managed_sessions_for, load_managed_session_for, resolve_session_reference_for,
-        workspace_fingerprint, ManagedSessionSummary, SessionStore, LATEST_SESSION_REFERENCE,
+        create_managed_session_handle_for, fork_managed_session_for, is_managed_session_file,
+        is_session_reference_alias, list_managed_sessions_for, load_managed_session_for,
+        resolve_session_reference_for, workspace_fingerprint, ManagedSessionSummary, SessionStore,
+        LATEST_SESSION_REFERENCE,
     };
     use crate::session::Session;
     use std::fs;
@@ -753,6 +772,45 @@ mod tests {
     }
 
     #[test]
+    fn rotation_snapshots_are_not_listed_as_sessions() {
+        // `<id>.rot-<ts>.jsonl` snapshots share the .jsonl extension and carry
+        // the parent's internal session_id, so they must be filtered out — else
+        // one session shows up N times in `--resume`.
+        assert!(is_managed_session_file(Path::new("session-42-0.jsonl")));
+        assert!(!is_managed_session_file(Path::new(
+            "session-42-0.rot-1788709927232.jsonl"
+        )));
+        assert!(!is_managed_session_file(Path::new(
+            "session-42-0.jsonl.bak-before-fix"
+        )));
+    }
+
+    #[test]
+    fn empty_sessions_never_rank_as_latest() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("root dir should exist");
+        let real = persist_session(&root, "real work");
+        // An empty (0-message) shell created *afterwards* — newer updated_at —
+        // must still sink below the real session so "latest" is never empty.
+        let empty = Session::new().with_workspace_root(root.to_path_buf());
+        let handle = create_managed_session_handle_for(&root, &empty.session_id)
+            .expect("handle should build");
+        let empty = empty.with_persistence_path(handle.path.clone());
+        empty
+            .save_to_path(&handle.path)
+            .expect("empty session should persist");
+
+        let listed = list_managed_sessions_for(&root).expect("list");
+        assert!(listed.len() >= 2, "both sessions should be listed");
+        assert_eq!(
+            listed.first().map(|s| s.id.as_str()),
+            Some(real.session_id.as_str()),
+            "the non-empty session must sort first (latest)"
+        );
+        assert_eq!(listed.last().map(|s| s.message_count), Some(0));
+    }
+
+    #[test]
     fn legacy_flat_session_is_still_listed_and_resolved() {
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir should exist");
@@ -801,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_session_prefers_semantic_updated_at_over_file_mtime() {
+    fn latest_session_tracks_most_recently_modified_file() {
         let mut sessions = vec![
             ManagedSessionSummary {
                 id: "older-file-newer-session".to_string(),
@@ -825,8 +883,10 @@ mod tests {
 
         crate::session_control::sort_managed_sessions(&mut sessions);
 
-        assert_eq!(sessions[0].id, "older-file-newer-session");
-        assert_eq!(sessions[1].id, "newer-file-older-session");
+        // mtime (the displayed age) decides: the more recently *touched* file
+        // is latest, even though its last-message timestamp is older.
+        assert_eq!(sessions[0].id, "newer-file-older-session");
+        assert_eq!(sessions[1].id, "older-file-newer-session");
     }
 
     #[test]

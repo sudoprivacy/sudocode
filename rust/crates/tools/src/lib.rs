@@ -1205,7 +1205,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TaskUpdate",
-            description: "Update a task's status, subject, or other fields.",
+            description: "Update a task's status, subject, or other fields. A task must exist first (created via TaskCreate); use TaskList to see available task IDs.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

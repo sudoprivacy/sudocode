@@ -1450,8 +1450,26 @@ pub(crate) async fn run_acp_on_transport(
                             }
                         };
 
-                        // Drain residual notifications buffered before the turn returned.
-                        while let Ok(n) = notif_rx.try_recv() {
+                        // Flush the rest of the turn's notifications before the
+                        // response, which the protocol requires: a client renders
+                        // `session/update`s as they arrive and finalises on the
+                        // `session/prompt` response, so an update that lands after
+                        // it is an update the client has already stopped listening
+                        // for.
+                        //
+                        // Draining with `try_recv` did not guarantee that. The turn
+                        // hands events to the forwarder thread, which maps them onto
+                        // the wire; when the turn returned with the forwarder still
+                        // mid-map, `try_recv` saw an empty channel and the response
+                        // overtook them. A slash command — one `TextDelta` sent
+                        // immediately before returning — lost that race routinely on
+                        // Windows over WebSocket, and the client saw a bare
+                        // `end_turn` with no text at all.
+                        //
+                        // The forwarder owns the only sender, so the channel closes
+                        // exactly when it has finished; recv until then and the
+                        // ordering is guaranteed rather than raced.
+                        while let Some(n) = notif_rx.recv().await {
                             let _ = cx_inner.send_notification(n);
                         }
 

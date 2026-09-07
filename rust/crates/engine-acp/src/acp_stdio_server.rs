@@ -2,7 +2,12 @@
 //!
 //! Thin wrapper that runs the shared ACP handler chain over stdin/stdout.
 
-use agent_client_protocol_tokio::Stdio;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use agent_client_protocol::ByteStreams;
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp_sdk_server::{new_session_registry, run_acp_on_transport, SdkAcpConfig};
 
@@ -13,53 +18,53 @@ use crate::acp_sdk_server::{new_session_registry, run_acp_on_transport, SdkAcpCo
 /// Returns an error if the transport or handler chain fails.
 pub async fn run_acp_stdio_server(config: SdkAcpConfig) -> Result<(), Box<dyn std::error::Error>> {
     // When launched over stdio by a host (e.g. an editor), the agent must not
-    // outlive that host. Two independent signals drive shutdown:
-    //
-    // * `spawn_stdin_eof_watchdog` exits when stdin's writer end is closed
-    //   (graceful disconnect). The SDK transport keeps its future alive on
-    //   stdin EOF because stdout is still open, so we need our own probe.
-    // * `spawn_parent_exit_watchdog` exits when the original parent process
-    //   dies and we are reparented (host killed abruptly, stdin inherited).
-    spawn_stdin_eof_watchdog();
+    // outlive that host. Two signals drive shutdown: stdin reaching EOF (a
+    // graceful disconnect — see `ExitOnStdinEof`), and, where the platform can
+    // report it, the original parent dying while stdin stays inherited by some
+    // other process (`spawn_parent_exit_watchdog`).
     spawn_parent_exit_watchdog();
 
-    run_acp_on_transport(&config, new_session_registry(), Stdio::new()).await
+    // Hand the transport its own stdin wrapper rather than using
+    // `agent_client_protocol_tokio::Stdio`, which reads stdin directly. The
+    // transport keeps its future alive at stdin EOF because stdout is still
+    // open, so EOF has to be acted on by someone; noticing it *inside* the
+    // reader the transport already owns is the only place that neither races
+    // that reader nor needs a platform-specific probe.
+    run_acp_on_transport(
+        &config,
+        new_session_registry(),
+        ByteStreams::new(
+            tokio::io::stdout().compat_write(),
+            ExitOnStdinEof(tokio::io::stdin()).compat(),
+        ),
+    )
+    .await
 }
 
-/// Watch for stdin's writer end closing and exit when it does.
+/// Process stdin that terminates the process when its writer end closes.
 ///
-/// Uses `poll(2)` on fd 0 without consuming bytes: `POLLHUP` is always
-/// reported in `revents` regardless of the requested events, so a closed
-/// writer wakes the poll even though we never registered for `POLLIN`. This
-/// avoids racing the SDK transport's own stdin reader.
-#[cfg(unix)]
-fn spawn_stdin_eof_watchdog() {
-    use std::os::fd::AsFd;
+/// Previously this was a `poll(2)`-on-fd-0 watchdog beside the transport,
+/// which could only be built on Unix — so on Windows an ACP host that
+/// disconnected left `scode acp` running forever, one orphan per session.
+/// Reading is the one thing every platform agrees on: a pipe whose writer is
+/// gone reports EOF, and a `poll_read` that fills nothing when it had room is
+/// exactly that.
+struct ExitOnStdinEof(tokio::io::Stdin);
 
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-
-    tokio::task::spawn_blocking(|| {
-        let stdin = std::io::stdin();
-        let exit_flags = PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL;
-        loop {
-            let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLPRI)];
-            match poll(&mut fds, PollTimeout::NONE) {
-                Ok(_) => {
-                    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
-                    if revents.intersects(exit_flags) {
-                        std::process::exit(0);
-                    }
-                }
-                Err(nix::errno::Errno::EINTR) => {}
-                Err(_) => return,
-            }
+impl AsyncRead for ExitOnStdinEof {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let had_room = buf.remaining() > 0;
+        let filled_before = buf.filled().len();
+        let poll = Pin::new(&mut self.0).poll_read(cx, buf);
+        if matches!(poll, Poll::Ready(Ok(()))) && had_room && buf.filled().len() == filled_before {
+            std::process::exit(0);
         }
-    });
-}
-
-#[cfg(not(unix))]
-fn spawn_stdin_eof_watchdog() {
-    // Non-unix: rely on the transport returning on stdin EOF.
+        poll
+    }
 }
 
 /// Watch for the parent process going away and exit when it does.
@@ -96,6 +101,8 @@ fn spawn_parent_exit_watchdog() {
 
 #[cfg(not(unix))]
 fn spawn_parent_exit_watchdog() {
-    // No portable parent-death notification is available; on these platforms we
-    // rely on the transport returning when stdin reaches EOF.
+    // No portable parent-death notification is available here. `ExitOnStdinEof`
+    // still covers the disconnect that matters — a host that exits closes its
+    // end of the pipe — so this only leaves the case where the host dies but
+    // something else keeps the write handle open.
 }

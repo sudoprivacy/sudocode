@@ -1146,7 +1146,38 @@ where
     /// When cancellation fires the stream is dropped immediately, which closes
     /// the underlying HTTP connection and stops token consumption.
     #[allow(clippy::too_many_lines)]
+    /// Run a turn, then tear down what was installed *for* that turn.
+    ///
+    /// The hook-progress reporter is the one such thing. It is rebuilt from the
+    /// observer at the start of every turn, so it must not survive the turn
+    /// either — and it used to, because nothing cleared it. That pins the
+    /// renderer's live event channel open after the turn has already returned.
+    /// The REPL never noticed; the ACP server waits for exactly that channel to
+    /// close before answering `session/prompt`, and so waited forever.
+    ///
+    /// Only cleared when this turn installed it: a reporter supplied at build
+    /// time through [`with_hook_progress_reporter`](Self::with_hook_progress_reporter)
+    /// is not per-turn and stays.
     pub async fn run_turn_with_blocks(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        prompter: Option<&mut dyn PermissionPrompter>,
+        observer: Option<&mut dyn RuntimeObserver>,
+    ) -> Result<TurnSummary, RuntimeError> {
+        let installs_hook_reporter = observer
+            .as_deref()
+            .and_then(RuntimeObserver::hook_progress_sink)
+            .is_some();
+        let summary = self
+            .run_turn_with_blocks_inner(blocks, prompter, observer)
+            .await;
+        if installs_hook_reporter {
+            self.hook_progress_reporter = None;
+        }
+        summary
+    }
+
+    async fn run_turn_with_blocks_inner(
         &mut self,
         blocks: Vec<ContentBlock>,
         mut prompter: Option<&mut dyn PermissionPrompter>,

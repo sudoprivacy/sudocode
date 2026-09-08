@@ -44,6 +44,10 @@ fn spawn_iocraft_repl(env: &TestEnv) -> pty_expect::PtySession {
 /// this framing on paste; we synthesize it directly on the PTY.
 const PASTE: &str = "\u{1b}[200~line one\nline two\nline three\u{1b}[201~";
 
+/// Same three-line payload but with CRLF separators — this is what a real
+/// Windows terminal delivers when the clipboard holds Windows line endings.
+const PASTE_CRLF: &str = "\u{1b}[200~line one\r\nline two\r\nline three\u{1b}[201~";
+
 #[test]
 fn bracketed_paste_shows_placeholder_and_does_not_submit() {
     let env = TestEnv::new("bracketed-paste");
@@ -69,6 +73,38 @@ fn bracketed_paste_shows_placeholder_and_does_not_submit() {
     assert!(
         !screen.contains("line two"),
         "raw pasted content leaked / was submitted; screen:\n{screen}"
+    );
+
+    // Clean exit.
+    sess.send_ctrl('c').ok();
+    sess.send_ctrl('c').ok();
+    let _ = sess.expect_eof();
+}
+
+/// Windows clipboards carry CRLF line endings, so a real paste on Windows
+/// delivers `\r\n` between lines (not the bare `\n` the sibling test uses).
+/// This guards that the placeholder still counts lines correctly and does
+/// not auto-submit when the payload is CRLF-separated.
+#[test]
+fn bracketed_paste_crlf_shows_placeholder_and_does_not_submit() {
+    let env = TestEnv::new("bracketed-paste-crlf");
+    let mut sess = spawn_iocraft_repl(&env);
+
+    sess.send(PASTE_CRLF).expect("send CRLF bracketed paste");
+
+    sess.expect("Pasted text #1")
+        .expect("CRLF paste placeholder should appear");
+
+    let screen = sess.render(|s| s.contents());
+    // Three lines => two line breaks => "+2 lines" (line count keys on \n,
+    // which CRLF contains).
+    assert!(
+        screen.contains("[Pasted text #1 +2 lines]"),
+        "expected multi-line placeholder for CRLF paste, screen was:\n{screen}"
+    );
+    assert!(
+        !screen.contains("line two"),
+        "raw CRLF pasted content leaked / was submitted; screen:\n{screen}"
     );
 
     // Clean exit.

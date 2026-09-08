@@ -20,7 +20,6 @@ mod input_chrome;
 mod input_queue;
 mod render;
 mod render_engine;
-mod repl_async;
 mod repl_ui;
 
 use engine_acp::AcpError;
@@ -1588,7 +1587,7 @@ fn run_repl(
     )?;
 
     // Env-gated opt-in to the async REPL that accepts input during a running
-    // turn (see `repl_async` module docs and
+    // turn (see `input_queue` module docs and
     // `notes/plans/conversation-interrupt-queue-sudocode.md`). When set to
     // anything other than `off` / unset, dispatch to the async loop. Default
     // path below stays byte-identical to today's sync behavior.
@@ -1738,155 +1737,6 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Async REPL dispatch — takes ownership of the constructed `LiveCli`, wraps it
-/// in `Arc<Mutex<>>` for the coordinator + runner thread, drives the loop, then
-/// unwraps and finalizes the session on exit. Called by default (queue mode)
-/// or when `SUDOCODE_INTERRUPT_QUEUE_MODE` is explicitly set to a non-off value.
-fn run_repl_async_dispatch(
-    mut cli: LiveCli,
-    mode: input_queue::QueueMode,
-) -> Result<(), Box<dyn std::error::Error>> {
-    cli.is_repl = true;
-    let banner = cli.startup_banner();
-    let completions = cli.repl_completion_candidates().unwrap_or_default();
-
-    // Hold a command-channel clone so ESC/Ctrl-C can cancel the in-flight turn
-    // via the seam (EngineCommand::Cancel) without locking the LiveCli mutex the
-    // runner thread holds while it drives the turn. The engine's pump aborts the
-    // running turn on Cancel — no separate raw-mode HookAbortMonitor needed.
-    let commands = cli.engine_handle.commands.clone();
-
-    // Shared atomic queue mode — the coordinator reads it each turn,
-    // and `/config set auto-interrupt on|off` writes to it.
-    let shared_mode = repl_async::shared_queue_mode(mode);
-    cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
-
-    // ESC abort hook — wired into rustyline's ConditionalEventHandler so ESC
-    // cancels the running turn by sending Cancel across the seam.
-    let esc_abort_hook: input::EscAbortHook = {
-        let commands = commands.clone();
-        Arc::new(move || {
-            let _ = commands.send(EngineCommand::Cancel);
-        })
-    };
-
-    let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
-
-    let cli_shared = std::sync::Arc::new(std::sync::Mutex::new(cli));
-    let driver: std::sync::Arc<LiveCliDriver> = std::sync::Arc::new(LiveCliDriver {
-        cli: std::sync::Arc::clone(&cli_shared),
-        commands,
-    });
-
-    let session_start = Instant::now();
-    repl_async::run_coordinator_loop(
-        driver,
-        shared_mode,
-        banner,
-        completions,
-        Some(esc_abort_hook),
-        &permission_label,
-    )?;
-
-    // All threads spawned by the coordinator loop have already been joined
-    // inside the loop (Exit branch + TurnDone reap). Unwrapping the Arc here
-    // is a debug assertion of that invariant — if it fails, a thread leaked.
-    let cli = std::sync::Arc::try_unwrap(cli_shared)
-        .map_err(|_| "LiveCli still shared after coordinator loop exit — thread leak")?
-        .into_inner()
-        .map_err(|e| format!("LiveCli mutex poisoned: {e}"))?;
-
-    // Session_ended telemetry parity with the sync path (`run_repl`
-    // trailing block just above): record cumulative usage + duration so the
-    // async path's users don't lose observability.
-    let duration_ms = session_start.elapsed().as_millis() as u64;
-    let usage_tracker = cli.lifecycle.usage_snapshot();
-    let usage = usage_tracker.cumulative_usage();
-    let total_turns = usage_tracker.turns();
-    if let Some(tracer) = cli.session_tracer() {
-        tracer.record_usage(
-            "session_summary".to_string(),
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-        );
-        tracer.record_session_ended(
-            total_turns,
-            usage.input_tokens as u64,
-            usage.output_tokens as u64,
-            duration_ms,
-        );
-    }
-
-    Ok(())
-}
-
-/// Adapts `LiveCli::run_turn` (which takes `&mut self`) to the
-/// `repl_async::TurnDriver` trait (which is Sync + call by `&self`). The
-/// mutex guarantees only one turn runs at a time, matching the coordinator's
-/// single-runner-thread invariant. Holds a clone of the persistent abort
-/// signal so `abort_current_turn` can fire without ever touching the mutex.
-struct LiveCliDriver {
-    cli: std::sync::Arc<std::sync::Mutex<LiveCli>>,
-    /// Command-channel clone into the engine session. `abort_current_turn`
-    /// sends `Cancel` through it — no LiveCli lock needed (the runner thread
-    /// holds that lock while the turn streams), replacing the old detached
-    /// `HookAbortSignal`.
-    commands: std::sync::mpsc::Sender<EngineCommand>,
-}
-
-impl repl_async::TurnDriver for LiveCliDriver {
-    fn try_handle_slash_command(&self, input: &str) -> bool {
-        let trimmed = input.trim();
-        match SlashCommand::parse(trimmed) {
-            Ok(Some(command)) => {
-                let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
-                match cli.handle_repl_command(command) {
-                    Ok(true) => {
-                        if let Err(e) = cli.persist_session() {
-                            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(e) => eprintln!("{}{e}{}", ansi_fg(theme().error), RESET),
-                }
-                true
-            }
-            Ok(None) => false,
-            Err(error) => {
-                eprintln!("{}{error}{}", ansi_fg(theme().error), RESET);
-                true
-            }
-        }
-    }
-
-    fn run_turn(&self, prompt: &str) {
-        let mut cli = self.cli.lock().expect("LiveCli mutex poisoned");
-        if let Err(e) = cli.run_turn(prompt) {
-            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-        }
-    }
-
-    fn on_exit(&self) {
-        // Parity with sync REPL — persist the session on /exit / /quit /
-        // Ctrl-D so the next `--resume` sees the last turn's assistant
-        // reply (see the identical `cli.persist_session()?` line at the
-        // sync run_repl's /exit branch).
-        let cli = self.cli.lock().expect("LiveCli mutex poisoned");
-        if let Err(e) = cli.persist_session() {
-            eprintln!("{}{e}{}", ansi_fg(theme().error), RESET);
-        }
-    }
-
-    fn abort_current_turn(&self) {
-        // Cancel crosses the seam on the command channel, not the LiveCli lock —
-        // the runner thread holds that lock while the turn streams and would
-        // deadlock if we tried. The pump aborts the in-flight turn on Cancel.
-        let _ = self.commands.send(EngineCommand::Cancel);
-    }
 }
 
 /// Resolves when the OS delivers Ctrl-Break; on non-Windows it never resolves.
@@ -2497,7 +2347,7 @@ fn run_repl_iocraft_dispatch(
     // across the seam (no separate raw-mode HookAbortMonitor).
     let commands = cli.engine_handle.commands.clone();
 
-    let shared_mode = repl_async::shared_queue_mode(mode);
+    let shared_mode = input_queue::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
     // Spawn the iocraft REPL UI on a dedicated thread.
@@ -2762,7 +2612,7 @@ fn run_repl_iocraft_dispatch(
                     let outcome = coord
                         .lock()
                         .unwrap()
-                        .submit_during_turn(text, repl_async::load_queue_mode(&shared_mode));
+                        .submit_during_turn(text, input_queue::load_queue_mode(&shared_mode));
                     match outcome {
                         input_queue::SubmitOutcome::Queued => {}
                         input_queue::SubmitOutcome::Interrupt => {
@@ -2881,7 +2731,7 @@ struct LiveCli {
     /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     /// `Some` ⇔ async REPL mode is active.
-    shared_queue_mode: Option<repl_async::SharedQueueMode>,
+    shared_queue_mode: Option<input_queue::SharedQueueMode>,
     /// True in REPL mode. Plan mode confirmation dialog only shows in REPL.
     is_repl: bool,
     /// When set, `out_println` routes through this sender instead of bare

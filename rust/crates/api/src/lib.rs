@@ -40,9 +40,9 @@ pub use providers::registry::{
     estimate_request_overhead_tokens, max_tokens_for_model, max_tokens_for_model_from_config,
     max_tokens_for_model_with_override, model_token_limit, model_token_limit_from_config,
     preflight_message_request, proxy_account_for_model, resolve_model,
-    resolve_model_alias_from_config, resolve_provider_from_config, select_proxy_account, ApiFormat,
-    Credential, ModelConfigEntry, ModelProviderMapping, ModelTokenLimit, ProviderConnectionConfig,
-    ResolvedProvider, SudoCodeConfig,
+    resolve_model_alias_from_config, resolve_provider_from_config, select_proxy_account,
+    AccountSource, ApiFormat, Credential, ModelConfigEntry, ModelProviderMapping, ModelTokenLimit,
+    ProviderConnectionConfig, ResolvedProvider, SelectedAccount, SudoCodeConfig,
 };
 pub use providers::{detect_provider_kind, AuthMode, ProviderKind};
 pub use sse::{parse_frame, SseParser};

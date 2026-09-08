@@ -245,6 +245,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: false,
     },
     SlashCommandSpec {
+        name: "account",
+        aliases: &[],
+        summary: "Show or switch which proxy account this project is billed to",
+        argument_hint: Some("[name]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
         name: "clear",
         aliases: &[],
         summary: "Start a fresh local session",
@@ -1220,6 +1227,11 @@ pub enum SlashCommand {
     Auth {
         mode: Option<String>,
     },
+    /// `/account [name]` — show which proxy account pays for this project's
+    /// requests, or point it at a different configured one.
+    Account {
+        account: Option<String>,
+    },
     Clear {
         confirm: bool,
     },
@@ -1512,6 +1524,9 @@ pub fn validate_slash_command_input(
         },
         "auth" => SlashCommand::Auth {
             mode: parse_auth_mode(&args)?,
+        },
+        "account" => SlashCommand::Account {
+            account: optional_single_arg("account", &args, "[name]")?,
         },
         "clear" => SlashCommand::Clear {
             confirm: parse_clear_args(&args)?,
@@ -2180,8 +2195,8 @@ fn slash_command_category(name: &str) -> &'static str {
         | "bookmarks" | "context" | "files" | "focus" | "unfocus" | "retry" | "stop" | "undo" => {
             "Session"
         }
-        "model" | "permissions" | "auth" | "config" | "memory" | "theme" | "vim" | "voice"
-        | "color" | "effort" | "fast" | "brief" | "output-style" | "keybindings"
+        "model" | "permissions" | "auth" | "account" | "config" | "memory" | "theme" | "vim"
+        | "voice" | "color" | "effort" | "fast" | "brief" | "output-style" | "keybindings"
         | "privacy-settings" | "stickers" | "language" | "profile" | "max-tokens"
         | "temperature" | "system-prompt" | "api-key" | "terminal-setup" | "notifications"
         | "telemetry" | "providers" | "env" | "project" | "reasoning" | "budget" | "rate-limit"
@@ -4910,6 +4925,7 @@ pub fn handle_slash_command(
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Auth { .. }
+        | SlashCommand::Account { .. }
         | SlashCommand::Clear { .. }
         | SlashCommand::Cost
         | SlashCommand::Resume { .. }
@@ -5553,7 +5569,8 @@ mod tests {
         assert!(help.contains("aliases: /skill"));
         assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 141);
+        assert!(help.contains("/account [name]"));
+        assert_eq!(slash_command_specs().len(), 142);
         assert!(resume_supported_slash_commands().len() >= 39);
     }
 

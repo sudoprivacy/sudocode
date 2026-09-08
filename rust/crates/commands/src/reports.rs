@@ -493,6 +493,13 @@ pub fn status_context(
     })
 }
 
+/// Render the `/status` report.
+///
+/// `account` is the already-resolved billing line (`engine_host::BillingAccount::describe`).
+/// It arrives pre-rendered because resolving it needs the engine-side config
+/// SSOT, and this crate is a pure formatter that `engine-host` depends on —
+/// reaching back for the answer here would be a dependency cycle and a second
+/// copy of the precedence rules.
 #[must_use]
 pub fn format_status_report(
     model: &str,
@@ -500,6 +507,7 @@ pub fn format_status_report(
     permission_mode: &str,
     context: &StatusContext,
     provenance: Option<&ProvenanceView>,
+    account: &str,
 ) -> String {
     let status_line = if context.config_load_error.is_some() {
         "Status (degraded)"
@@ -524,6 +532,7 @@ pub fn format_status_report(
         format!(
             "{status_line}
   Model            {model}{model_source_line}
+  Account          {account}
   Permission mode  {permission_mode}
   Messages         {}
   Turns            {}
@@ -1060,14 +1069,14 @@ fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> D
             "no proxy accounts configured",
         );
     }
-    let selected = config.selected_account.as_deref();
     match api::proxy_account_for_model(&config, resolved_model) {
-        Ok((name, connection)) => {
+        Ok(selected) => {
             DiagnosticCheck::new("Account", DiagnosticLevel::Ok, "resolved proxy account")
                 .with_details(vec![format!(
-                    "account={name} base_url={} auth_profile={} model={}",
-                    connection.base_url,
-                    selected.unwrap_or("<default>"),
+                    "account={} base_url={} chosen_by={} model={}",
+                    selected.name,
+                    selected.connection.base_url,
+                    selected.source.describe(),
                     if resolved_model.is_empty() {
                         "<none>"
                     } else {

@@ -755,6 +755,96 @@ impl engine_core::EngineDelegate for SessionEngine {
     }
 }
 
+/// Who a session's requests are billed to.
+///
+/// A session spends someone's money, and until this crossed the seam nothing on
+/// screen said whose. The account is resolved per request from layered config,
+/// so it can be one the user never chose — an `auth_profile` inherited from a
+/// parent directory, or simply the first account in the file. That is fine
+/// right up until the bill arrives on the wrong account, which is why the rule
+/// that chose it travels with the name rather than being left to be inferred.
+#[derive(Debug, Clone)]
+pub enum BillingAccount {
+    /// A named account under `auth_modes.proxy`, and the rule that chose it.
+    Proxy {
+        name: String,
+        source: engine_core::AccountSource,
+    },
+    /// The session is not on a proxy account — its auth mode bills no named
+    /// account, so there is nothing to show.
+    NotProxied,
+    /// The selector refused to resolve one. Carries its message: this is the
+    /// case worth showing, because the same refusal is what a request will hit.
+    Unresolved(String),
+}
+
+impl BillingAccount {
+    /// The account name, when one resolved — for the per-turn status line,
+    /// which has room for the answer but not the reasoning.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Proxy { name, .. } => Some(name.as_str()),
+            Self::NotProxied | Self::Unresolved(_) => None,
+        }
+    }
+
+    /// A stable token for the deciding rule, for machine-readable reports.
+    #[must_use]
+    pub fn source_label(&self) -> &'static str {
+        match self {
+            Self::Proxy { source, .. } => source.describe(),
+            Self::NotProxied => "not proxied",
+            Self::Unresolved(_) => "unresolved",
+        }
+    }
+
+    /// One line for `/status`: who pays, and what made it them.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Proxy { name, source } => format!("{name} (chosen by {})", source.describe()),
+            Self::NotProxied => "none (this auth mode bills no named account)".to_string(),
+            Self::Unresolved(err) => format!("unresolved — {err}"),
+        }
+    }
+}
+
+/// Every account configured under `auth_modes.proxy`, in config order.
+#[must_use]
+pub fn configured_proxy_accounts(config: &engine_core::SudoCodeConfig) -> Vec<String> {
+    config
+        .auth_modes
+        .get("proxy")
+        .map(|accounts| accounts.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Who a request for `model` from the current directory would be billed to.
+///
+/// The engine-side entry point for the question, so `/status` in a live REPL,
+/// `scode status` with no engine at all, and the ACP `/status` all get the
+/// answer from the one selector the request path uses. A report that re-derives
+/// the decision can disagree with the code that spends the money — which is
+/// exactly how an unhonored `auth_profile` stayed invisible while every request
+/// billed a different account.
+#[must_use]
+pub fn billing_account_for_model(model: &str, auth_override: Option<AuthMode>) -> BillingAccount {
+    let config = load_sudocode_config_for_current_dir();
+    if resolve_auth_mode(model, auth_override, &config).unwrap_or(AuthMode::ApiKey)
+        != AuthMode::Proxy
+    {
+        return BillingAccount::NotProxied;
+    }
+    match engine_core::proxy_account_for_model(&config, model) {
+        Ok(selected) => BillingAccount::Proxy {
+            name: selected.name.to_string(),
+            source: selected.source,
+        },
+        Err(err) => BillingAccount::Unresolved(err.to_string()),
+    }
+}
+
 /// The non-turn session-lifecycle contract the composition root (`LiveCli`) uses
 /// to manage a live engine session **without being able to drive turns** — turns
 /// go only through `EngineHandle`. Split from [`engine_core::EngineDelegate`]
@@ -800,6 +890,20 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn current_permission_mode(&self) -> PermissionMode;
     /// The resolved auth mode in effect.
     fn current_auth_mode(&self) -> AuthMode;
+    /// Who this session's requests are billed to, and why that account.
+    fn current_billing_account(&self) -> BillingAccount;
+    /// Every account configured under `auth_modes.proxy`, in config order —
+    /// the set `set_billing_account` will accept.
+    fn billing_accounts(&self) -> Vec<String>;
+    /// Point this project at a named proxy account: persist the selection and
+    /// rebuild so the live session bills it from the next turn on. Returns the
+    /// account now in effect.
+    ///
+    /// The rebuild is the point. Persisting alone would leave the session
+    /// spending the old account while every report named the new one — the
+    /// same invisible divergence between what is reported and what is billed
+    /// that [`BillingAccount`] exists to close.
+    fn set_billing_account(&self, name: &str) -> Result<BillingAccount, String>;
 
     // --- semantic session ops (engine owns the rebuild; renderer only formats)-
     /// Switch the model. Returns report DATA (`previous` / `resolved` /
@@ -898,6 +1002,47 @@ impl SessionLifecycle for SessionEngine {
 
     fn current_auth_mode(&self) -> AuthMode {
         self.resolved_auth_mode()
+    }
+
+    fn current_billing_account(&self) -> BillingAccount {
+        billing_account_for_model(&self.session_model(), self.auth_override())
+    }
+
+    fn billing_accounts(&self) -> Vec<String> {
+        configured_proxy_accounts(&load_sudocode_config_for_current_dir())
+    }
+
+    fn set_billing_account(&self, name: &str) -> Result<BillingAccount, String> {
+        let name = name.trim();
+        // Refuse an account that is not configured rather than writing it and
+        // letting the next request fail: the selector treats an unhonored
+        // selection as fatal precisely so it never quietly bills another
+        // account, and a `/account` that accepted a typo would just move that
+        // failure to a place the user has stopped looking.
+        let available = configured_proxy_accounts(&load_sudocode_config_for_current_dir());
+        if !available.iter().any(|candidate| candidate == name) {
+            return Err(if available.is_empty() {
+                "no accounts are configured under auth_modes.proxy in sudocode.json".to_string()
+            } else {
+                format!(
+                    "no account named '{name}' under auth_modes.proxy (configured: {})",
+                    available.join(", ")
+                )
+            });
+        }
+
+        // The one scope-aware config writer `/config set` uses, so the
+        // selection lands in the project's `settings.local.json` exactly as it
+        // would by hand.
+        tools::set_config_setting("auth_profile", name)?;
+
+        {
+            let mut session = self.lock_session();
+            let new_session = session.runtime.session().clone();
+            let handle = session.handle.clone();
+            self.rebuild_locked(&mut session, new_session, handle)?;
+        }
+        Ok(self.current_billing_account())
     }
 
     fn set_model(&self, new_model: &str) -> Result<ModelSwitchReport, String> {

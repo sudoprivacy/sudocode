@@ -1,3 +1,4 @@
+use engine_host::{billing_account_for_model, BillingAccount};
 use runtime::{resolve_sandbox_status, ConfigLoader};
 use serde_json::json;
 
@@ -36,6 +37,9 @@ pub(crate) fn print_status_snapshot(
         },
         None => ModelProvenance::from_default_lookup(),
     };
+    // No engine is running on this path, so the account comes from the same
+    // engine-side selector a request would use, asked directly.
+    let account = billing_account_for_model(&provenance.resolved, None);
     match output_format {
         CliOutputFormat::Text => println!(
             "{}",
@@ -44,7 +48,8 @@ pub(crate) fn print_status_snapshot(
                 usage,
                 permission_mode.as_str(),
                 &context,
-                Some(&provenance.view())
+                Some(&provenance.view()),
+                &account.describe(),
             )
         ),
         CliOutputFormat::Json => println!(
@@ -55,6 +60,7 @@ pub(crate) fn print_status_snapshot(
                 permission_mode.as_str(),
                 &context,
                 Some(&provenance),
+                &account,
             ))?
         ),
     }
@@ -72,6 +78,11 @@ pub(crate) fn status_json_value(
     // that don't have provenance (legacy resume paths) pass None, in which
     // case both new fields are omitted.
     provenance: Option<&ModelProvenance>,
+    // Who the session's requests are billed to. Reported next to the model
+    // because both answer "who served this and on whose account", and because
+    // the text report shows it — a JSON consumer that could not see the account
+    // would be reading a different `/status` than the terminal does.
+    account: &BillingAccount,
 ) -> serde_json::Value {
     // #143: top-level `status` marker so consumers can distinguish
     // a clean run from a degraded run (config parse failed but other fields
@@ -87,6 +98,8 @@ pub(crate) fn status_json_value(
         "model": model,
         "model_source": model_source,
         "model_raw": model_raw,
+        "account": account.name(),
+        "account_source": account.source_label(),
         "permission_mode": permission_mode,
         "usage": {
             "messages": usage.message_count,

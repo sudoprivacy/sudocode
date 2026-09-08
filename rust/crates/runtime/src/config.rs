@@ -346,6 +346,14 @@ pub enum ConfigScope {
     Project,
 }
 
+/// What one pass over `sudocode.json` found still carrying the legacy copies.
+struct LegacyPinSurvey {
+    root: SerdeValue,
+    pinned_accounts: Vec<String>,
+    cleared_providers: Vec<String>,
+    cleared_apis: Vec<String>,
+}
+
 /// How much of the legacy config shape a migration may repair.
 ///
 /// The distinction exists because one half consults the model-capabilities SSOT
@@ -526,54 +534,31 @@ impl ConfigLoader {
             return Ok(ConfigMigration::nothing(path));
         }
 
-        // Lock before reading, not just before writing. Surveying outside the
-        // lock and writing inside it leaves a window where another process
-        // migrates first and this one then rewrites from its stale copy — a lost
-        // update. That window is nearly unhittable when a human types the
-        // command, and routine once this runs unattended at startup on a machine
-        // with several agents.
-        let _guard = ConfigFileLock::acquire(&path)?;
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ConfigMigration::nothing(path))
-            }
-            Err(error) => return Err(ConfigError::Io(error)),
-        };
-        let mut root: SerdeValue = serde_json::from_str(&text)
-            .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
-
-        // Survey first: nothing is written until we know the whole picture.
-        let mut pinned_accounts: Vec<String> = Vec::new();
-        let mut cleared_providers: Vec<String> = Vec::new();
-        let mut cleared_apis: Vec<String> = Vec::new();
-        if let Some(models) = root.get("models").and_then(SerdeValue::as_object) {
-            for (alias, entry) in models {
-                let Some(proxy) = entry.pointer("/providers/proxy") else {
-                    continue;
-                };
-                if let Some(name) = proxy.get("provider").and_then(SerdeValue::as_str) {
-                    if !name.trim().is_empty() {
-                        cleared_providers.push(alias.clone());
-                        if !pinned_accounts.iter().any(|seen| seen == name) {
-                            pinned_accounts.push(name.to_string());
-                        }
-                    }
-                }
-                if scope == MigrationScope::Full && proxy.get("api").is_some() {
-                    let wire = proxy
-                        .get("model")
-                        .and_then(SerdeValue::as_str)
-                        .unwrap_or(alias);
-                    if crate::model_capabilities::preferred_endpoint_type(wire).is_some() {
-                        cleared_apis.push(alias.clone());
-                    }
-                }
-            }
-        }
-        if cleared_providers.is_empty() && cleared_apis.is_empty() {
+        // Survey unlocked first, and bail before taking the lock when there is
+        // nothing to do. This runs before every command, and the overwhelming
+        // majority of runs are that case; taking a lock would mean creating and
+        // deleting a lock file on every startup forever, to repair something
+        // that is repaired once.
+        if Self::survey_legacy_pins(&path, scope)?.is_none() {
             return Ok(ConfigMigration::nothing(path));
         }
+
+        // There is work to do, so pay for the lock now — and re-read under it.
+        // Surveying outside the lock and writing inside it leaves a window where
+        // another process migrates first and this one rewrites from its stale
+        // copy: a lost update. Nearly unhittable when a human types the command,
+        // routine once this runs unattended on a machine with several agents.
+        let _guard = ConfigFileLock::acquire(&path)?;
+        let Some(survey) = Self::survey_legacy_pins(&path, scope)? else {
+            // Another process migrated between the two reads. Nothing left.
+            return Ok(ConfigMigration::nothing(path));
+        };
+        let LegacyPinSurvey {
+            mut root,
+            pinned_accounts,
+            cleared_providers,
+            cleared_apis,
+        } = survey;
 
         // Entries pinned to different accounts encode a routing decision this
         // cannot preserve — dropping them would move some models' traffic.
@@ -702,6 +687,62 @@ impl ConfigLoader {
             .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
             .map_err(ConfigError::Io)?;
         Ok(path)
+    }
+
+    /// Read `sudocode.json` and report the legacy copies it still carries, or
+    /// `None` when it carries none.
+    ///
+    /// Separated out because the migration runs it twice: once unlocked, to
+    /// decide whether taking a lock is warranted at all, and again under the
+    /// lock so the write is based on what the file actually says at that moment.
+    fn survey_legacy_pins(
+        path: &Path,
+        scope: MigrationScope,
+    ) -> Result<Option<LegacyPinSurvey>, ConfigError> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        let root: SerdeValue = serde_json::from_str(&text)
+            .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
+
+        let mut pinned_accounts: Vec<String> = Vec::new();
+        let mut cleared_providers: Vec<String> = Vec::new();
+        let mut cleared_apis: Vec<String> = Vec::new();
+        if let Some(models) = root.get("models").and_then(SerdeValue::as_object) {
+            for (alias, entry) in models {
+                let Some(proxy) = entry.pointer("/providers/proxy") else {
+                    continue;
+                };
+                if let Some(name) = proxy.get("provider").and_then(SerdeValue::as_str) {
+                    if !name.trim().is_empty() {
+                        cleared_providers.push(alias.clone());
+                        if !pinned_accounts.iter().any(|seen| seen == name) {
+                            pinned_accounts.push(name.to_string());
+                        }
+                    }
+                }
+                if scope == MigrationScope::Full && proxy.get("api").is_some() {
+                    let wire = proxy
+                        .get("model")
+                        .and_then(SerdeValue::as_str)
+                        .unwrap_or(alias);
+                    if crate::model_capabilities::preferred_endpoint_type(wire).is_some() {
+                        cleared_apis.push(alias.clone());
+                    }
+                }
+            }
+        }
+        if cleared_providers.is_empty() && cleared_apis.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(LegacyPinSurvey {
+            root,
+            pinned_accounts,
+            cleared_providers,
+            cleared_apis,
+        }))
     }
 
     /// Read `auth_profile` from one specific file, or `None` if it is absent,

@@ -11,6 +11,17 @@ use common::TestEnv;
 use std::fs;
 use std::time::Duration;
 
+/// Budget for the process to exit after `/exit`, separate from the budget a
+/// test gives the behaviour it asserts.
+///
+/// Teardown is its own cost — unwinding the iocraft render loop and persisting
+/// the session — and it is unrelated to how long the assertion under test
+/// should take. Sharing a test's tight interaction budget made these exits
+/// intermittently outrun it on a cold macOS runner. Generous by design: the
+/// hangs these tests guard against are unbounded, so a wide budget still
+/// catches them while runner speed no longer decides the verdict.
+const EXIT_BUDGET: Duration = Duration::from_secs(60);
+
 /// **P0 regression guard**: typing in the iocraft REPL must produce
 /// visible output in the terminal.
 ///
@@ -55,6 +66,7 @@ fn iocraft_repl_keyboard_input_not_frozen() {
 
     // Now press Enter to submit /exit and verify clean process exit.
     sess.send("\r").expect("press Enter");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");
@@ -86,6 +98,7 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     });
 
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("auto_grow exit must not hang: {e}\nPTY:\n{screen}");
@@ -130,6 +143,7 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");

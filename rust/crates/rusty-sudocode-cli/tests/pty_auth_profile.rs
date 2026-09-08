@@ -110,7 +110,11 @@ fn doctor_resolves_selected_account_when_auth_profile_set() {
 fn doctor_reports_ambiguity_when_no_account_is_selected() {
     let env = TestEnv::new("auth-profile-resolve-default");
     write_two_account_config(&env);
-    // No auth_profile persisted — exercise the unselected path.
+    // No auth_profile persisted, and no per-entry pins either — the shape a
+    // migrated config has. With pins present the startup migration would record
+    // an account and resolve the ambiguity before `doctor` ever saw it, which is
+    // the point of that migration; this test is about what remains afterwards.
+    strip_model_account_pins(&env);
 
     let mut sess = env.spawn(&["doctor"]);
     sess.set_default_timeout(Duration::from_secs(30));
@@ -130,6 +134,31 @@ fn doctor_reports_ambiguity_when_no_account_is_selected() {
         panic!("doctor exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
+}
+
+/// Drop `providers.proxy.provider` from every model entry, leaving the config in
+/// the shape `scode config migrate` produces: the account named once, not copied
+/// into each entry.
+fn strip_model_account_pins(env: &TestEnv) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read sudocode.json"))
+            .expect("sudocode.json parses");
+    if let Some(models) = config["models"].as_object_mut() {
+        for entry in models.values_mut() {
+            if let Some(proxy) = entry
+                .pointer_mut("/providers/proxy")
+                .and_then(|p| p.as_object_mut())
+            {
+                proxy.remove("provider");
+            }
+        }
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&config).expect("serialize sudocode.json"),
+    )
+    .expect("write unpinned sudocode.json");
 }
 
 /// Write a global `sudocode.json` with two named proxy accounts (the real sample

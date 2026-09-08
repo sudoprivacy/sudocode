@@ -96,7 +96,7 @@ pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
     ConfigMigration, ConfigScope, ConfigSource, McpConfigCollection, McpManagedProxyServerConfig,
     McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig,
-    McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, ModelConfigEntry,
+    McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, MigrationScope, ModelConfigEntry,
     ModelProviderMapping, OAuthConfig, ProviderConnectionConfig, ProviderFallbackConfig,
     ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
     RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig, SudoCodeConfig,

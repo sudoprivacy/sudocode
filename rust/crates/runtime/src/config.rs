@@ -346,6 +346,24 @@ pub enum ConfigScope {
     Project,
 }
 
+/// How much of the legacy config shape a migration may repair.
+///
+/// The distinction exists because one half consults the model-capabilities SSOT
+/// and the other does not, and that SSOT is a `OnceLock`: whoever touches it
+/// first fixes its contents, so a caller that reads it before the program has
+/// loaded the real file locks in an empty default. Running unattended at startup
+/// is exactly that caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationScope {
+    /// Drop the per-entry account copies only. Decides nothing from the
+    /// capabilities SSOT, so it is safe before the program has loaded it.
+    AccountPinsOnly,
+    /// Also drop `api` overrides the capabilities SSOT can supply. Reads that
+    /// SSOT — and therefore initializes it — so only use it from a command that
+    /// is about to exit, never from a startup hook.
+    Full,
+}
+
 /// What [`ConfigLoader::migrate_model_account_pins`] changed.
 ///
 /// Returned rather than printed so the CLI and `doctor --fix` render the same
@@ -497,10 +515,24 @@ impl ConfigLoader {
     ///
     /// `api` is only dropped for models the capabilities SSOT actually knows: a
     /// copy is safe to delete only when the original exists.
-    pub fn migrate_model_account_pins(&self) -> Result<ConfigMigration, ConfigError> {
+    pub fn migrate_model_account_pins(
+        &self,
+        scope: MigrationScope,
+    ) -> Result<ConfigMigration, ConfigError> {
         use crate::fs_backend::FsBackend as _;
 
         let path = self.config_home.join("sudocode.json");
+        if !path.exists() {
+            return Ok(ConfigMigration::nothing(path));
+        }
+
+        // Lock before reading, not just before writing. Surveying outside the
+        // lock and writing inside it leaves a window where another process
+        // migrates first and this one then rewrites from its stale copy — a lost
+        // update. That window is nearly unhittable when a human types the
+        // command, and routine once this runs unattended at startup on a machine
+        // with several agents.
+        let _guard = ConfigFileLock::acquire(&path)?;
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -528,7 +560,7 @@ impl ConfigLoader {
                         }
                     }
                 }
-                if proxy.get("api").is_some() {
+                if scope == MigrationScope::Full && proxy.get("api").is_some() {
                     let wire = proxy
                         .get("model")
                         .and_then(SerdeValue::as_str)
@@ -553,7 +585,17 @@ impl ConfigLoader {
             )));
         }
 
-        let selected = self.load_sudocode_config()?.selected_account;
+        // Read the selection straight from the two files that own it rather than
+        // through `load_sudocode_config()`. The full pipeline warms the model
+        // capabilities SSOT as a side effect, and this runs before every command
+        // — pulling that warm-up earlier than it would otherwise happen changed
+        // initialization order enough to flip a vision-capability check in the
+        // ACP suite. A repair that runs unattended must not move the ground
+        // under the program it is repairing.
+        let (global_profile, project_profile) = self.auth_profile_paths();
+        let selected = self
+            .read_auth_profile(&project_profile)
+            .or_else(|| self.read_auth_profile(&global_profile));
         let wrote_auth_profile = match (selected, pinned_accounts.first()) {
             (None, Some(account)) => {
                 self.set_auth_profile(account, ConfigScope::Global)?;
@@ -565,7 +607,6 @@ impl ConfigLoader {
         let backup = path.with_extension(format!("json.bak-migrate-{}", current_unix_seconds()));
         std::fs::copy(&path, &backup).map_err(ConfigError::Io)?;
 
-        let _guard = ConfigFileLock::acquire(&path)?;
         if let Some(models) = root.get_mut("models").and_then(SerdeValue::as_object_mut) {
             for (alias, entry) in models.iter_mut() {
                 let Some(proxy) = entry
@@ -661,6 +702,27 @@ impl ConfigLoader {
             .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
             .map_err(ConfigError::Io)?;
         Ok(path)
+    }
+
+    /// Read `auth_profile` from one specific file, or `None` if it is absent,
+    /// blank, or the file cannot be parsed.
+    ///
+    /// Deliberately narrower than a config load: callers that only need the
+    /// selection should not pay for — or trigger the side effects of — the whole
+    /// pipeline.
+    fn read_auth_profile(&self, path: &Path) -> Option<String> {
+        read_optional_json_object_with(&crate::fs_backend::StdFsBackend, path)
+            .ok()
+            .flatten()
+            .and_then(|parsed| {
+                parsed
+                    .object
+                    .get("auth_profile")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|profile| !profile.is_empty())
+                    .map(str::to_string)
+            })
     }
 
     /// The one file per scope that owns `auth_profile`, as `(global, project)`.
@@ -2417,7 +2479,9 @@ mod tests {
             .provider
             .is_empty());
 
-        let report = loader.migrate_model_account_pins().expect("migrate");
+        let report = loader
+            .migrate_model_account_pins(super::MigrationScope::Full)
+            .expect("migrate");
         assert!(report.changed());
         assert_eq!(report.wrote_auth_profile.as_deref(), Some("sudorouter"));
         assert!(report
@@ -2438,7 +2502,9 @@ mod tests {
         );
 
         // Idempotent: nothing left to migrate, so nothing is rewritten.
-        let again = loader.migrate_model_account_pins().expect("second migrate");
+        let again = loader
+            .migrate_model_account_pins(super::MigrationScope::Full)
+            .expect("second migrate");
         assert!(!again.changed());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

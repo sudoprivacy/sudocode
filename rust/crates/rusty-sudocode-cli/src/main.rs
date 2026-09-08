@@ -145,9 +145,9 @@ use runtime::{
     pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
     ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigScope, ConfigSource,
     ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
-    McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode, PermissionPolicy,
-    ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SystemPrompt,
-    TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    McpServerSpec, McpTool, MessageRole, MigrationScope, ModelPricing, PermissionMode,
+    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
+    Session, SystemPrompt, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -260,6 +260,78 @@ fn enable_windows_ansi_support() {
 #[cfg(not(windows))]
 fn enable_windows_ansi_support() {}
 
+/// Environment variable that suppresses the startup config migration.
+const SKIP_CONFIG_MIGRATION_ENV: &str = "SCODE_SKIP_CONFIG_MIGRATION";
+
+/// One-time repair of the legacy config shape, run before any command.
+///
+/// **Temporary shim — added 2026-09, delete once installs have turned over.**
+/// `scode config migrate` stays the explicit entry point; this exists because
+/// the shape it repairs costs every user money silently. A stale `api` override
+/// keeps prompt caching off, and the only evidence is a bill, so expecting each
+/// user to learn about a command they have no reason to run would leave most
+/// configs wrong indefinitely.
+///
+/// Three properties make it safe to run unattended, and all three are load
+/// bearing:
+///
+/// * **Non-fatal.** Any failure leaves the config untouched and the command
+///   proceeds. A migration that can block startup is worse than the shape it
+///   repairs.
+/// * **Quiet unless it acts**, and never on stdout — that carries
+///   `--output-format json`, which a stray line would corrupt.
+/// * **Visible when it acts.** It writes a backup and says what it changed. A
+///   silent fixer would reproduce exactly the invisibility that let the original
+///   problem run for months.
+///
+/// The migration itself holds a lock across its whole read-modify-write, so
+/// several agents starting at once converge instead of clobbering each other.
+fn auto_migrate_legacy_config() {
+    if env::var_os(SKIP_CONFIG_MIGRATION_ENV).is_some() {
+        return;
+    }
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    // AccountPinsOnly, not Full: the `api` half reads the model-capabilities
+    // SSOT, and that is a `OnceLock` — touching it here, before the program
+    // loads the real file, would freeze an empty default and silently change
+    // behaviour that depends on it. Stale `api` overrides are left to the
+    // explicit `scode config migrate` / `doctor --fix`.
+    match ConfigLoader::default_for(&cwd)
+        .migrate_model_account_pins(MigrationScope::AccountPinsOnly)
+    {
+        Ok(report) if report.changed() => {
+            eprintln!("scode: simplified {}", report.path.display());
+            if let Some(account) = &report.wrote_auth_profile {
+                eprintln!("  the account is now named once, as auth_profile = {account}");
+            }
+            if !report.cleared_providers.is_empty() {
+                eprintln!(
+                    "  removed the account copy from {} model entries",
+                    report.cleared_providers.len()
+                );
+            }
+            if !report.cleared_apis.is_empty() {
+                eprintln!(
+                    "  removed {} stale api overrides — prompt caching works again",
+                    report.cleared_apis.len()
+                );
+            }
+            if let Some(backup) = &report.backup {
+                eprintln!("  previous version: {}", backup.display());
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!(
+                "scode: left the config alone ({error}) — run `scode config migrate` for detail, \
+                 or set {SKIP_CONFIG_MIGRATION_ENV}=1 to stop trying"
+            );
+        }
+    }
+}
+
 /// `scode config migrate` — drop the per-model copies of the account and wire
 /// format, leaving each fact stated once.
 ///
@@ -269,7 +341,8 @@ fn enable_windows_ansi_support() {}
 /// session's spending.
 fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let report = ConfigLoader::default_for(&cwd).migrate_model_account_pins()?;
+    let report =
+        ConfigLoader::default_for(&cwd).migrate_model_account_pins(MigrationScope::Full)?;
     match output_format {
         CliOutputFormat::Text => {
             if !report.changed() {
@@ -572,6 +645,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (action, prompt_overrides) = parse_args_with_prompt_overrides(&args)?;
     // Only writer in the process; a second `set` cannot happen.
     set_cli_prompt_overrides(prompt_overrides);
+    auto_migrate_legacy_config();
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
     // If an ensure_authenticated() call is ever added below this point it

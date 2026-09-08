@@ -100,6 +100,32 @@ jobs:
             exit 1
           fi
 
+      - name: Vendored vfs.proto must match what nexus-vfs publishes
+        shell: bash
+        # rust/crates/nexus-vfs-client vendors a copy of the VFS service
+        # definition. nexus-vfs owns it, and the copy has drifted before --
+        # it kept sending WriteRequest.content_id after upstream reserved the
+        # field (their issue #5, where the documented If-Match contract was a
+        # no-op that masked concurrent-writer data loss). Diff against the
+        # definition shipped in the published Node client, which nexus-vfs
+        # generates from that same proto. Public bucket, no credentials.
+        run: |
+          set -euo pipefail
+          url='https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/latest/nexus-ai-fs-vfs-client.tgz'
+          work="$(mktemp -d)"
+          if ! curl -fsSL --retry 3 --max-time 60 "$url" -o "$work/client.tgz"; then
+            echo "::warning::could not reach the published client; skipping the proto drift check"
+            exit 0
+          fi
+          tar xzf "$work/client.tgz" -C "$work"
+          upstream="$work/package/proto/nexus/grpc/vfs/vfs.proto"
+          vendored='rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto'
+          if ! diff -u --strip-trailing-cr "$upstream" "$vendored"; then
+            echo "::error::$vendored has drifted from the definition nexus-vfs publishes; copy the upstream file over it and fix the fallout"
+            exit 1
+          fi
+          echo "vendored vfs.proto matches upstream"
+
   test-workspace:
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

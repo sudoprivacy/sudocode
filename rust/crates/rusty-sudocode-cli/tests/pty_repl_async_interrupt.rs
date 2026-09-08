@@ -1,6 +1,6 @@
 //! PTY test for the auto-interrupt path in async REPL mode.
 //!
-//! Guards the wiring landed in PR #300 (`TurnDriver::abort_current_turn`) +
+//! Guards the abort wiring landed in PR #300 +
 //! LiveCli's `persistent_abort_signal`: when
 //! `SUDOCODE_INTERRUPT_QUEUE_MODE=interrupt` (or `both`), a second submit
 //! DURING a running turn calls the driver's abort hook, the runner's
@@ -11,7 +11,7 @@
 //!
 //! 1. Boot scode REPL under mock backend with
 //!    `SUDOCODE_INTERRUPT_QUEUE_MODE=interrupt` — the async loop takes over
-//!    (`run_repl_async_dispatch`) and installs the persistent abort signal.
+//!    (`run_repl_iocraft_dispatch`) and installs the persistent abort signal.
 //! 2. Fire prompt A that triggers `bash_interrupt_long_running` — mock
 //!    returns a `bash` tool_use with the canned `sleep 30` command. Real
 //!    subprocess starts, prints "interrupt-start", enters the sleep.
@@ -46,7 +46,7 @@ const INTERRUPT_MARKER: &str = "INTERRUPT_TRIGGER_MARKER";
 
 /// Real user journey: send bash-tool prompt → wait for tool to start →
 /// interrupt with a second prompt → verify clean shutdown. Regression
-/// guard for any change that breaks the `TurnDriver::abort_current_turn`
+/// guard for any change that breaks the abort-current-turn
 /// → runtime abort → tool SIGTERM chain.
 #[test]
 fn submit_during_turn_in_interrupt_mode_aborts_running_turn() {
@@ -60,7 +60,7 @@ fn submit_during_turn_in_interrupt_mode_aborts_running_turn() {
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "interrupt")],
     );
 
-    // Step 1: async REPL prompt renders — proves run_repl_async_dispatch
+    // Step 1: async REPL prompt renders — proves run_repl_iocraft_dispatch
     // ran, LineEditor is up, persistent abort signal is installed.
     sess.expect("❯")
         .expect("async REPL should render the initial prompt");

@@ -168,6 +168,29 @@ fn write_auth_profile(env: &TestEnv, profile: &str) {
     .expect("write settings.local.json");
 }
 
+/// Wait for the REPL to be ready for input again, then exit and assert a clean
+/// shutdown.
+///
+/// The `expect("❯")` is the load-bearing half. A slash command's output can
+/// match while the REPL is still finishing the command, and keys sent into that
+/// window are not read as a submitted line — the session then never exits, and
+/// the failure surfaces as a timeout on the exit rather than on the command
+/// that caused it. The exit then gets its own budget, because teardown is a
+/// different cost from the command under test.
+fn exit_cleanly(sess: &mut pty_expect::PtySession) {
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("REPL should return to the prompt: {e}\nPTY screen:\n{screen}");
+    });
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(Duration::from_secs(60));
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
 /// `/account` names who pays and lists what else is configured.
 ///
 /// The account is resolved per request from layered config, so it can be one
@@ -190,8 +213,7 @@ fn account_lists_configured_accounts_and_marks_current() {
         });
     }
 
-    sess.send("/exit\r").expect("send exit");
-    assert_eq!(sess.expect_eof().expect("exit"), 0);
+    exit_cleanly(&mut sess);
 }
 
 /// `/account <name>` switches the project to another configured account and
@@ -214,8 +236,7 @@ fn account_switch_persists_the_selection() {
         panic!("/account <name> should report the switch: {e}\nPTY screen:\n{screen}");
     });
 
-    sess.send("/exit\r").expect("send exit");
-    assert_eq!(sess.expect_eof().expect("exit"), 0);
+    exit_cleanly(&mut sess);
 
     // On disk, in the scope-appropriate file — the same one `/config set
     // auth_profile` writes, not a session-only toggle.
@@ -261,8 +282,7 @@ fn account_refuses_a_name_that_is_not_configured() {
         panic!("the refusal should name what is configured: {e}\nPTY screen:\n{screen}");
     });
 
-    sess.send("/exit\r").expect("send exit");
-    assert_eq!(sess.expect_eof().expect("exit"), 0);
+    exit_cleanly(&mut sess);
 
     // Nothing was written: a refused selection must not land on disk.
     let settings_local = env
@@ -279,7 +299,8 @@ fn account_refuses_a_name_that_is_not_configured() {
 
 /// The per-turn status line names the account the turn was billed to.
 ///
-/// Live-only for the same reason as `status_reports_the_billing_account_and_why`.
+/// Live-only: mock mode runs under `--auth api-key`, which bills no named
+/// account, so there is nothing for the line to name there.
 #[test]
 fn turn_status_line_names_the_billing_account() {
     let env = TestEnv::new("account-status-line");
@@ -304,6 +325,5 @@ fn turn_status_line_names_the_billing_account() {
         panic!("turn status line should name the account: {e}\nPTY screen:\n{screen}");
     });
 
-    sess.send("/exit\r").expect("send exit");
-    assert_eq!(sess.expect_eof().expect("exit"), 0);
+    exit_cleanly(&mut sess);
 }

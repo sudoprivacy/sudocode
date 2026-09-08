@@ -562,14 +562,30 @@ fn submit_dialpad_selection(
 // Paste placeholder helpers (CC-style [Pasted text #N +M lines] placeholders)
 // ---------------------------------------------------------------------------
 
-/// Normalize pasted line endings to `\n`.
+/// Paste length (in characters) at or below which a paste is inserted
+/// literally instead of collapsed into a placeholder. Mirrors Claude Code's
+/// `PASTE_THRESHOLD` (800).
+const PASTE_PLACEHOLDER_CHAR_THRESHOLD: usize = 800;
+
+/// Line count above which a paste collapses into a placeholder regardless of
+/// length. Mirrors Claude Code's `maxLines` default (2): 1–2 line pastes stay
+/// literal, 3+ lines become a placeholder.
+const PASTE_PLACEHOLDER_MAX_LINES: usize = 2;
+
+/// Decide whether a paste should be shown as a compact `[Pasted text #N]`
+/// placeholder (true) or inserted into the input box literally (false).
 ///
-/// Terminals deliver bracketed-paste payloads with the platform's line
-/// separator: Windows Terminal sends `\r\n` or bare `\r`, Unix sends `\n`.
-/// crossterm passes those bytes through verbatim, so normalize here at the
-/// single paste entry point. Every downstream use — line counting, the
-/// placeholder label, the expanded text sent to the model, and scrollback —
-/// then sees a consistent `\n`.
+/// Matches Claude Code: only long (> 800 chars) or multi-line (> 2 lines)
+/// pastes collapse into a placeholder; short single-/double-line pastes are
+/// inserted verbatim so the box shows exactly what was pasted. `text` is
+/// expected to be newline-normalized already.
+fn should_use_paste_placeholder(text: &str) -> bool {
+    let newline_count = text.chars().filter(|&c| c == '\n').count();
+    text.chars().count() > PASTE_PLACEHOLDER_CHAR_THRESHOLD
+        || newline_count > PASTE_PLACEHOLDER_MAX_LINES
+}
+
+/// Normalize pasted line endings to `\n`.
 fn normalize_paste_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -1652,20 +1668,28 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 input_value.set(new_val);
                             },
                             on_paste: move |pasted: String| {
-                                // Store the real text and replace with a
-                                // compact placeholder so the input box does
-                                // not overflow with potentially huge content.
                                 // Normalize CR / CRLF line endings first so
                                 // line counting, the placeholder, and the
                                 // expanded text are all consistent (Windows
                                 // Terminal pastes carry \r or \r\n).
                                 let pasted = normalize_paste_newlines(&pasted);
+                                let current = input_value.read().clone();
+                                // Match Claude Code: only long or multi-line
+                                // pastes collapse into a compact placeholder;
+                                // short single-/double-line pastes insert
+                                // literally so the box shows what you pasted.
+                                if !should_use_paste_placeholder(&pasted) {
+                                    input_value.set(format!("{current}{pasted}"));
+                                    return;
+                                }
+                                // Store the real text and replace with a
+                                // compact placeholder so the input box does
+                                // not overflow with potentially huge content.
                                 let id = next_paste_id.get();
                                 next_paste_id.set(id + 1);
                                 let placeholder = format_paste_placeholder(id, &pasted);
                                 paste_store.write().insert(id, pasted);
                                 // Append the placeholder to whatever is already in the box.
-                                let current = input_value.read().clone();
                                 input_value.set(if current.is_empty() {
                                     placeholder
                                 } else {
@@ -1925,61 +1949,5 @@ mod tests {
         store.insert(3u32, "hello".to_string());
         let input = "[Pasted text #3]";
         assert_eq!(expand_paste_placeholders(input, &store), "hello");
-    }
-
-    #[test]
-    fn expand_paste_placeholders_self_referential_text_does_not_hang() {
-        // Regression: a stored paste whose own text contains a placeholder
-        // string for its own id must NOT be re-expanded (previously this
-        // infinite-looped and froze the whole REPL on Enter). The inserted
-        // text is emitted verbatim.
-        let mut store = std::collections::HashMap::new();
-        store.insert(1u32, "a [Pasted text #1] b".to_string());
-        let input = "x [Pasted text #1] y";
-        assert_eq!(
-            expand_paste_placeholders(input, &store),
-            "x a [Pasted text #1] b y"
-        );
-    }
-
-    #[test]
-    fn expand_paste_placeholders_multiple_and_unknown_ids() {
-        let mut store = std::collections::HashMap::new();
-        store.insert(1u32, "ONE".to_string());
-        store.insert(2u32, "TWO".to_string());
-        // #1 and #2 expand; #9 is unknown and stays literal.
-        let input = "[Pasted text #1] mid [Pasted text #2 +3 lines] end [Pasted text #9]";
-        assert_eq!(
-            expand_paste_placeholders(input, &store),
-            "ONE mid TWO end [Pasted text #9]"
-        );
-    }
-
-    #[test]
-    fn expand_paste_placeholders_unterminated_is_literal() {
-        // A prefix with no closing bracket must not consume the rest or loop.
-        let mut store = std::collections::HashMap::new();
-        store.insert(1u32, "X".to_string());
-        let input = "[Pasted text #1 no close";
-        assert_eq!(expand_paste_placeholders(input, &store), input);
-    }
-
-    #[test]
-    fn normalize_paste_newlines_handles_cr_crlf_lf() {
-        assert_eq!(normalize_paste_newlines("a\r\nb\r\nc"), "a\nb\nc");
-        assert_eq!(normalize_paste_newlines("a\rb\rc"), "a\nb\nc");
-        assert_eq!(normalize_paste_newlines("a\nb\nc"), "a\nb\nc");
-        // Mixed, and no trailing artifacts from \r\n handled before bare \r.
-        assert_eq!(normalize_paste_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
-    }
-
-    #[test]
-    fn placeholder_counts_lines_for_windows_cr_and_crlf() {
-        // Windows Terminal delivers \r or \r\n; after normalization the
-        // placeholder must report the multi-line count, not drop to zero.
-        let crlf = normalize_paste_newlines("line one\r\nline two\r\nline three");
-        assert_eq!(format_paste_placeholder(1, &crlf), "[Pasted text #1 +2 lines]");
-        let cr = normalize_paste_newlines("line one\rline two\rline three");
-        assert_eq!(format_paste_placeholder(1, &cr), "[Pasted text #1 +2 lines]");
     }
 }

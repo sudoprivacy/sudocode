@@ -238,7 +238,7 @@ A file that fails to parse is skipped silently. Bodies render up to 2,000 chars;
 
 After writing a file, add one line to `MEMORY.md`: `- [Title](file.md) — one-line hook`. That file is only an index.
 
-Save immediately when asked to remember (remove when asked to forget); otherwise save anything durable you learn. Update an existing memory instead of duplicating; remove ones that turn out wrong. Don't save what the repo already records (code structure, git history, fixes, AGENTS.md) — if asked to, save what was non-obvious instead. Memories are past observations: verify a file, function, or flag a memory names still exists before relying on it, and trust the current state over the memory."
+Save immediately when asked to remember. When asked to forget, delete that entry's file and its `MEMORY.md` line in the same turn — the request is the confirmation. Otherwise save anything durable you learn. Update an existing memory instead of duplicating; remove ones that turn out wrong. Don't save what the repo already records (code structure, git history, fixes, AGENTS.md) — if asked to, save what was non-obvious instead. Memories are past observations: verify a file, function, or flag a memory names still exists before relying on it, and trust the current state over the memory."
     )
 }
 
@@ -260,7 +260,7 @@ You have a persistent, file-based memory system at `{dir_display}`. This directo
 
 You should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.
 
-If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.
+If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find the relevant entry, delete its file, and remove its `MEMORY.md` line — the request is the confirmation, so do it in that turn rather than asking them to confirm it.
 
 ## Types of memory
 

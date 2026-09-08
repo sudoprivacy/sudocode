@@ -1,0 +1,44 @@
+[package]
+name = "engine-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# engine-acp sits ABOVE the seam on the renderer side: it consumes the engine
+# (via runtime callbacks today; EngineEvent/EngineHandle after the collapse) and
+# translates to/from the ACP wire. Moving it out of `runtime` keeps ACP a
+# renderer, not part of the engine core.
+runtime = { path = "../runtime" }
+# The slash-command SSOT (AcpSlashCommandSpec + the command table) the ACP server
+# advertises. `commands` sits below the renderer, so this is a forward edge.
+commands = { path = "../commands" }
+# Below the seam: the single-session engine each ACP session wraps
+# (SessionEngine = EngineDelegate + SessionLifecycle) and the seam itself
+# (EngineEvent / ObserverAdapter). Acyclic — neither depends on engine-acp.
+engine-host = { path = "../engine-host" }
+engine-core = { path = "../engine-core" }
+agent-client-protocol = { workspace = true }
+agent-client-protocol-schema = { workspace = true }
+agent-client-protocol-tokio = { workspace = true }
+axum = { workspace = true }
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+async-trait = "0.1"
+# The VLM image-describe side-call (text-only model handed an image): an
+# OpenAI-compatible /chat/completions POST + a bounded description cache. Network
+# lives renderer-side, never in the engine crates.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+
+# The ACP stdio server polls stdin + watches the parent PID via termios/poll on
+# Unix (the ppid-death watchdog); the whole block is `#[cfg(unix)]`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["poll", "process"] }
+
+[lints]
+workspace = true

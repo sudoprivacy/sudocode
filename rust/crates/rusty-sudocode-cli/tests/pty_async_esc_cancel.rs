@@ -13,7 +13,6 @@ use std::time::Duration;
 /// Submit a long-running bash prompt under async REPL (queue mode), press ESC
 /// mid-turn, verify the turn is cancelled and the prompt returns.
 #[test]
-#[cfg(unix)]
 fn esc_cancels_turn_in_async_repl() {
     let env = common::TestEnv::new("async-esc-cancel");
     let root = env.workspace_root().to_path_buf();

@@ -11,6 +11,17 @@ use common::TestEnv;
 use std::fs;
 use std::time::Duration;
 
+/// Budget for the process to exit after `/exit`, separate from the budget a
+/// test gives the behaviour it asserts.
+///
+/// Teardown is its own cost — unwinding the iocraft render loop and persisting
+/// the session — and it is unrelated to how long the assertion under test
+/// should take. Sharing a test's tight interaction budget made these exits
+/// intermittently outrun it on a cold macOS runner. Generous by design: the
+/// hangs these tests guard against are unbounded, so a wide budget still
+/// catches them while runner speed no longer decides the verdict.
+const EXIT_BUDGET: Duration = Duration::from_secs(60);
+
 /// **P0 regression guard**: typing in the iocraft REPL must produce
 /// visible output in the terminal.
 ///
@@ -25,7 +36,6 @@ use std::time::Duration;
 /// Journey: boot → type `/exit` character by character → verify `/exit`
 /// appears in terminal → press Enter → clean exit.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_keyboard_input_not_frozen() {
     let env = TestEnv::new("iocraft-input");
     let root = env.workspace_root().to_path_buf();
@@ -56,6 +66,7 @@ fn iocraft_repl_keyboard_input_not_frozen() {
 
     // Now press Enter to submit /exit and verify clean process exit.
     sess.send("\r").expect("press Enter");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");
@@ -70,7 +81,6 @@ fn iocraft_repl_keyboard_input_not_frozen() {
 /// layout style caching is broken, the component stays "dirty"
 /// indefinitely and this test times out.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_auto_grow_exit_no_hang() {
     let env = TestEnv::new("iocraft-exit");
     let root = env.workspace_root().to_path_buf();
@@ -88,6 +98,7 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     });
 
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("auto_grow exit must not hang: {e}\nPTY:\n{screen}");
@@ -100,7 +111,6 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
 /// "Press Ctrl-C again to exit" in the footer area, and a subsequent
 /// keypress should dismiss it. The hint must NOT appear in scrollback.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_ctrlc_hint_in_footer() {
     let env = TestEnv::new("iocraft-ctrlc-hint");
     let root = env.workspace_root().to_path_buf();
@@ -133,6 +143,7 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");
@@ -151,7 +162,6 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
 /// prompt to trigger retries, then verify retry text appears in the
 /// StatusSlot and Ctrl-C cancels cleanly.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_turn_phase_thinking_renders() {
     let env = TestEnv::new("iocraft-turn-phase");
 
@@ -209,7 +219,6 @@ fn iocraft_repl_turn_phase_thinking_renders() {
 ///
 /// Live-only: requires real API with extended thinking model.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_anthropic_format_thinking_visible() {
     let env = TestEnv::new("iocraft-anthropic-thinking");
 
@@ -235,23 +244,23 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
-    // Use a model that supports extended thinking.
-    sess.send("/model claude-sonnet-4-6\r")
-        .expect("send /model");
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after /model: {e}\nPTY:\n{screen}");
-    });
+    // No `/model` switch: live mode already runs on `sonnet`, which supports
+    // extended thinking. Asking for the model that is already active prints the
+    // full model *listing* rather than a switch report, and that long block
+    // desynchronised every `expect` that follows.
 
     // Send a prompt that triggers thinking. The response should include
     // a thinking summary with non-zero chars if anthropic format is used.
     sess.send("What is 247 * 183? Think step by step.\r")
         .expect("send prompt");
 
-    // Wait for response to complete.
-    sess.expect("❯").unwrap_or_else(|e| {
+    // Wait for the answer itself, not for `❯` — the prompt marker also prefixes
+    // the echo of the question that was just submitted, so matching it returns
+    // while the turn is still running. `/exit` then lands in the input queue
+    // mid-turn and is never submitted, and the session never ends.
+    sess.expect("45[,. ]?201").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!("should return to prompt: {e}\nPTY:\n{screen}");
+        panic!("should see the computed answer: {e}\nPTY:\n{screen}");
     });
 
     // Check the full screen for thinking summary. With anthropic format,
@@ -272,8 +281,11 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
     // Note: some models/prompts may not trigger thinking at all,
     // so we don't assert thinking is always present.
 
-    // Clean exit.
+    // Clean exit. Input is queued during a turn (`SUDOCODE_INTERRUPT_QUEUE_MODE`),
+    // so `/exit` only runs once the model has finished — and "think step by
+    // step" invites a long answer. Give that more room than the default.
     sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(Duration::from_secs(180));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");
@@ -286,7 +298,6 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
 ///
 /// Live-only: requires real API.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_openai_format_gpt_works() {
     let env = TestEnv::new("iocraft-openai-gpt");
 
@@ -344,7 +355,6 @@ fn iocraft_repl_openai_format_gpt_works() {
 ///
 /// Live-only: requires real API.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_gemini_format_works() {
     let env = TestEnv::new("iocraft-gemini");
 
@@ -414,7 +424,6 @@ fn iocraft_repl_gemini_format_works() {
 /// This MUST be a live test: mock responses are pre-recorded and bypass
 /// the streaming chunk path that contained the bug.
 #[test]
-#[cfg(unix)]
 fn iocraft_repl_streaming_code_block_not_corrupted() {
     let env = TestEnv::new("iocraft-code-block");
 
@@ -497,7 +506,6 @@ fn iocraft_repl_streaming_code_block_not_corrupted() {
 ///   → verify settings.json updated on disk
 ///   → /exit
 #[test]
-#[cfg(unix)]
 fn config_tree_navigate_back_and_toggle() {
     let env = TestEnv::new("config-tree");
     let root = env.workspace_root().to_path_buf();

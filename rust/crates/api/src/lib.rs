@@ -12,7 +12,7 @@ pub use client::{
     resolve_saved_oauth_token, resolve_startup_auth_source, MessageStream, OAuthTokenSet,
     ProviderClient,
 };
-pub use error::ApiError;
+pub use error::{format_context_window_blocked_error, format_user_visible_api_error, ApiError};
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with,
     build_http_client_with_opts, ProxyConfig, TimeoutConfig,
@@ -40,9 +40,9 @@ pub use providers::registry::{
     estimate_request_overhead_tokens, max_tokens_for_model, max_tokens_for_model_from_config,
     max_tokens_for_model_with_override, model_token_limit, model_token_limit_from_config,
     preflight_message_request, proxy_account_for_model, resolve_model,
-    resolve_model_alias_from_config, resolve_provider_from_config, select_proxy_account, ApiFormat,
-    Credential, ModelConfigEntry, ModelProviderMapping, ModelTokenLimit, ProviderConnectionConfig,
-    ResolvedProvider, SudoCodeConfig,
+    resolve_model_alias_from_config, resolve_provider_from_config, select_proxy_account,
+    AccountSource, ApiFormat, Credential, ModelConfigEntry, ModelProviderMapping, ModelTokenLimit,
+    ProviderConnectionConfig, ResolvedProvider, SelectedAccount, SudoCodeConfig,
 };
 pub use providers::{detect_provider_kind, AuthMode, ProviderKind};
 pub use sse::{parse_frame, SseParser};

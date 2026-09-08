@@ -1,11 +1,10 @@
-// `#![cfg(unix)]` — same diagnosis as the ACP integration gates:
-// scode-subprocess + MockAnthropicService HTTP loop hangs on
-// Windows before producing output (each scenario took ~400s to
-// time out locally). Likely a stdio/pipe-buffer interaction with
-// the mock HTTP server; investigation belongs to a Windows-scode
-// follow-up, not this PR. Same gate applies to every test file in
-// this directory that drives scode + a mock backend.
-#![cfg(unix)]
+// Un-gated for Windows: the historical ~400s hang was NOT a pipe-buffer issue —
+// it was `env_clear()` dropping `SystemRoot`, without which the child's ws2_32 /
+// TLS / temp-file init fails and its HTTP client to the localhost mock server
+// never connects. See `common/isolated_env.rs`.
+
+#[path = "common/isolated_env.rs"]
+mod isolated_env;
 
 use std::fs;
 use std::path::PathBuf;
@@ -220,13 +219,10 @@ fn piped_stdin_with_compact_flag_produces_clean_output() {
 
     let prompt = format!("{SCENARIO_PREFIX}streaming_text");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scode"))
-        .current_dir(&workspace)
-        .env_clear()
-        .env("SUDO_CODE_CONFIG_HOME", &config_home)
-        .env("HOME", &home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
+    command.current_dir(&workspace);
+    apply_isolated_env(&mut command, &config_home, &home);
+    let mut child = command
         .args([
             "--auth",
             "api-key",
@@ -289,15 +285,27 @@ fn run_scode(
     full_args.extend_from_slice(args);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
+    command.current_dir(cwd).args(&full_args);
+    apply_isolated_env(&mut command, config_home, home);
+    command.output().expect("scode should launch")
+}
+
+/// Apply the isolated test environment to `command`: `env_clear` + the minimal
+/// vars scode needs (config home, HOME, NO_COLOR) + the per-platform set a
+/// child still requires afterwards (`isolated_env`).
+fn apply_isolated_env(
+    command: &mut Command,
+    config_home: &std::path::Path,
+    home: &std::path::Path,
+) {
     command
-        .current_dir(cwd)
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", config_home)
         .env("HOME", home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args(&full_args);
-    command.output().expect("scode should launch")
+        .env("NO_COLOR", "1");
+    for (key, value) in isolated_env::inherited_env() {
+        command.env(key, value);
+    }
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

@@ -685,9 +685,20 @@ fn get_working_section() -> String {
         .to_string()
 }
 
+/// The confirmation rule governs actions the assistant *chooses* to take.
+///
+/// Without the "the request is the confirmation" clause it also reads as
+/// covering actions the user just asked for, and the two readings collide with
+/// any instruction to perform one of the listed actions — most visibly the
+/// memory contract's "delete the entry when asked to forget"
+/// (`memory::build_compact_memory_instructions`). A model resolving that
+/// collision conservatively answers "I'll delete X — confirm?" and leaves the
+/// entry on disk, which is a re-ask of a question the user already answered,
+/// not a safety check. The clause states the intent that was always implicit;
+/// unrequested destructive actions still need confirmation.
 fn get_actions_section() -> String {
     "# Risky actions\n\
-     Local, reversible actions (editing files, running tests) need no confirmation. Confirm first for anything hard to reverse or visible to others: deleting files or branches, rm -rf, git reset --hard, force-push, amending published commits, dropping tables, killing processes, changing CI, pushing, creating or commenting on PRs or issues, sending messages, calling external services. One approval does not carry over to other contexts. \
+     Local, reversible actions (editing files, running tests) need no confirmation. Confirm first for anything hard to reverse or visible to others: deleting files or branches, rm -rf, git reset --hard, force-push, amending published commits, dropping tables, killing processes, changing CI, pushing, creating or commenting on PRs or issues, sending messages, calling external services. When the user asks for one of these directly, that request is the confirmation — carry it out in the same turn rather than asking them to confirm what they just told you to do. One approval does not carry over to other contexts. \
      Never bypass safety checks (--no-verify) or delete unfamiliar files, branches, or config to get unblocked — investigate; it may be the user's in-progress work."
         .to_string()
 }
@@ -1001,11 +1012,8 @@ mod tests {
         let root = temp_dir();
         fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
         fs::write(root.join("AGENTS.md"), "Project rules").expect("write AGENTS.md");
-        fs::write(
-            root.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"permissionMode":"acceptEdits"}"#,
-        )
-        .expect("write settings");
+        let settings_path = root.join(".nexus").join("sudocode").join("settings.json");
+        fs::write(&settings_path, r#"{"permissionMode":"acceptEdits"}"#).expect("write settings");
 
         let _guard = env_lock();
         ensure_valid_cwd();
@@ -1032,9 +1040,12 @@ mod tests {
 
         assert!(prompt.contains("Project rules"));
         // `# Runtime config` is gone: the loaded settings file is not named and
-        // its body was never inlined, so neither may appear.
+        // its body was never inlined, so neither may appear. Keyed on the
+        // file's own path, not on the bare word "settings.json" — the
+        // auto-memory instructions legitimately name that file (telling the
+        // model not to write memories into it), which is not this leak.
         assert!(!prompt.contains("permissionMode"));
-        assert!(!prompt.contains("settings.json"));
+        assert!(!prompt.contains(&settings_path.display().to_string()));
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
@@ -1043,11 +1054,8 @@ mod tests {
         let root = temp_dir();
         fs::create_dir_all(root.join(".nexus").join("sudocode")).expect("scode dir");
         fs::write(root.join("AGENTS.md"), "Project rules").expect("write AGENTS.md");
-        fs::write(
-            root.join(".nexus").join("sudocode").join("settings.json"),
-            r#"{"permissionMode":"acceptEdits"}"#,
-        )
-        .expect("write settings");
+        let settings_path = root.join(".nexus").join("sudocode").join("settings.json");
+        fs::write(&settings_path, r#"{"permissionMode":"acceptEdits"}"#).expect("write settings");
 
         let project_context =
             ProjectContext::discover(&root, "2026-03-31").expect("context should load");
@@ -1075,7 +1083,10 @@ mod tests {
         // must not leak by either route.
         assert!(!prompt.contains("# Project context"));
         assert!(!prompt.contains("# Runtime config"));
-        assert!(!prompt.contains("settings.json"));
+        // See the note in `load_system_prompt_reads_instruction_files_and_config`:
+        // the check is that this settings file is not named, not that the word
+        // never appears.
+        assert!(!prompt.contains(&settings_path.display().to_string()));
         assert!(!prompt.contains("permissionMode"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");

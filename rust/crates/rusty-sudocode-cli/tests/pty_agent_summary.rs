@@ -64,15 +64,26 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
              just five hundred 7s in a row.\", \
             run_in_background=true). Record the agent_id you get back. \
         (2) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker. \
-        (3) Report back to the user with the value of the `result_full_path` field in the \
-            TaskOutput response — the exact path string as it appears there, tagged with \
-            'FULL_PATH: <path>'. The path will end in `.full.md`.";
+        (3) Summarize what the worker produced.";
+    // The prompt deliberately does *not* ask the model to report the sidecar
+    // path. Summarizing an over-threshold worker output and recording where the
+    // full text went is `scode`'s own behaviour, and its `TaskOutput` rendering
+    // prints the `.full.md` path — so the assertion reads what the runtime
+    // emitted rather than depending on the model to relay it. Earlier phrasings
+    // did ask for it, as a numbered "report the value of field X" step, and a
+    // live model intermittently refused the whole thing as a path-exfiltration
+    // attempt; the test then failed on a refusal instead of on the behaviour it
+    // exists to check.
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access", prompt],
         &[("SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS", "200")],
     );
-    let long = LIVE_TIMEOUT.saturating_mul(4);
+    // Sub-agent tests are two serialised model turns (parent spawns a worker,
+    // worker answers, parent relays), so they need noticeably more room than a
+    // single-turn test — especially when the rest of the suite is running
+    // beside them. Purely a timeout: the assertions are unchanged.
+    let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
     // Success signals — both must appear:

@@ -7,8 +7,8 @@ use runtime::{ContentBlock, MessageRole, Session};
 use serde_json::json;
 
 use super::format::truncate_for_summary;
-use super::session::load_session_reference;
 use crate::CliOutputFormat;
+use engine_host::session::load_session_reference;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PromptHistoryEntry {

@@ -53,10 +53,15 @@ fn bash_stdout_roundtrip() {
     // Live: model should produce a response (tool call or text) and exit 0.
     // Both paths hit the streaming API → tool executor → stdout pipeline.
     if env.is_mock() {
-        sess.expect("bash")
+        sess.expect("(?i)bash")
             .expect("should see bash tool call (agent trigger)");
-        sess.expect("alpha from bash")
-            .expect("should see echoed string in terminal output");
+        // Assert on the mock's *final message*, which embeds whatever the bash
+        // tool captured ("bash completed: <stdout>"). A bare
+        // `expect("alpha from bash")` matched the echoed prompt — which
+        // contains that same string — so it passed even when the tool captured
+        // nothing at all.
+        sess.expect("bash completed: alpha from bash")
+            .expect("should see the captured bash stdout in the final message");
     } else {
         // Live: wait for any response — tool call or text.
         sess.expect("(?i)(bash|alpha|printf|echo|command|ok|hello|sure)")
@@ -105,7 +110,7 @@ fn bash_creates_file_and_disk_verify() {
     ]);
 
     // Agent trigger: model selects bash.
-    sess.expect("bash")
+    sess.expect("(?i)bash")
         .expect("should see bash tool call (agent trigger)");
 
     // Response confirms bash execution.
@@ -163,9 +168,12 @@ fn git_init_write_commit_verify() {
         &prompt,
     ]);
 
-    // Agent triggers bash (at least once — may be multiple calls).
+    // Agent triggers bash (at least once — may be multiple calls). Matched
+    // case-insensitively: a live model names the tool `Bash`, and the tool
+    // name's capitalisation is a presentation detail, not the behaviour under
+    // test.
     sess.set_default_timeout(Duration::from_secs(60));
-    sess.expect("bash")
+    sess.expect("(?i)bash")
         .expect("should see bash tool call (agent trigger)");
 
     // Response mentions completion.
@@ -281,7 +289,7 @@ fn bash_command_fails_gracefully() {
     // Mock: verify exact tool call + error mention.
     // Live: model should produce some response and exit 0.
     if env.is_mock() {
-        sess.expect("bash")
+        sess.expect("(?i)bash")
             .expect("should see bash tool call (agent trigger)");
         sess.expect(
             "(?i)(not found|no such file|does not exist|error|failed|nonexistent|completed|alpha)",

@@ -2,6 +2,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+use commands::reports::{DEPRECATED_INSTALL_COMMAND, OFFICIAL_REPO_SLUG, OFFICIAL_REPO_URL};
 use commands::{render_slash_command_help_filtered, resume_supported_slash_commands};
 use runtime::{ConfigLoader, ConfigSource, ContentBlock, ProjectContext, Session};
 use serde_json::json;
@@ -9,10 +10,7 @@ use serde_json::json;
 use crate::cli::session::LATEST_SESSION_REFERENCE;
 use crate::render::{ansi_fg, theme, BOLD, RESET};
 use crate::PRIMARY_SESSION_EXTENSION;
-use crate::{
-    truncate_for_prompt, CliOutputFormat, LocalHelpTopic, DEPRECATED_INSTALL_COMMAND,
-    OFFICIAL_REPO_SLUG, OFFICIAL_REPO_URL, STUB_COMMANDS, VERSION,
-};
+use crate::{truncate_for_prompt, CliOutputFormat, LocalHelpTopic, STUB_COMMANDS, VERSION};
 
 pub(crate) fn render_repl_help() -> String {
     [
@@ -210,86 +208,9 @@ pub(crate) fn print_help_topic(
     Ok(())
 }
 
-pub(crate) fn render_config_report(
-    section: Option<&str>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let cwd = runtime::current_workspace_root()?;
-    let loader = ConfigLoader::default_for(&cwd);
-    let discovered = loader.discover();
-    let runtime_config = loader.load()?;
-
-    let mut lines = vec![
-        format!(
-            "Config
-  Working directory {}
-  Loaded files      {}
-  Merged keys       {}",
-            cwd.display(),
-            runtime_config.loaded_entries().len(),
-            runtime_config.merged().len()
-        ),
-        "Discovered files".to_string(),
-    ];
-    for entry in discovered {
-        let source = match entry.source {
-            ConfigSource::User => "user",
-            ConfigSource::Project => "project",
-            ConfigSource::Local => "local",
-        };
-        let status = if runtime_config
-            .loaded_entries()
-            .iter()
-            .any(|loaded_entry| loaded_entry.path == entry.path)
-        {
-            "loaded"
-        } else {
-            "missing"
-        };
-        lines.push(format!(
-            "  {source:<7} {status:<7} {}",
-            entry.path.display()
-        ));
-    }
-
-    if let Some(section) = section {
-        lines.push(format!("Merged section: {section}"));
-        let value = match section {
-            "env" => runtime_config.get("env"),
-            "hooks" => runtime_config.get("hooks"),
-            "model" => runtime_config.get("model"),
-            "plugins" => runtime_config
-                .get("plugins")
-                .or_else(|| runtime_config.get("enabledPlugins")),
-            other => {
-                lines.push(format!(
-                    "  Unsupported config section '{other}'. Use env, hooks, model, or plugins."
-                ));
-                return Ok(lines.join(
-                    "
-",
-                ));
-            }
-        };
-        lines.push(format!(
-            "  {}",
-            match value {
-                Some(value) => value.render(),
-                None => "<unset>".to_string(),
-            }
-        ));
-        return Ok(lines.join(
-            "
-",
-        ));
-    }
-
-    lines.push("Merged JSON".to_string());
-    lines.push(format!("  {}", runtime_config.as_json().render()));
-    Ok(lines.join(
-        "
-",
-    ))
-}
+// `render_config_report` now lives in `commands::reports` (shared with the ACP
+// renderer). Re-exported so the crate's existing import path keeps resolving.
+pub(crate) use commands::reports::render_config_report;
 
 pub(crate) fn render_config_json(
     section: Option<&str>,

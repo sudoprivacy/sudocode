@@ -1,16 +1,17 @@
-// `#![cfg(unix)]` because this harness spawns mock services and
-// helper scripts that rely on POSIX shebangs + `chmod +x` via
-// `std::os::unix::fs::PermissionsExt::set_mode`. Windows doesn't
-// honour shebangs, doesn't have file mode bits, and `set_mode`
-// is not exposed by Windows std. Cross-platform mock-parity
-// coverage is a follow-up — same shape as the gates landed in
-// `runtime`'s mcp_tool_bridge + mcp_stdio test modules.
-#![cfg(unix)]
+// Runs on Windows too. The old `#![cfg(unix)]` blamed POSIX shebangs and
+// `chmod +x`; both are gone — the plugin fixture now names its interpreter
+// explicitly (see `prepare_plugin_fixture`). The other half of the gate was
+// `env_clear()` dropping `SystemRoot`, which stops the spawned `scode` from
+// reaching the mock server at all on Windows (see `common/isolated_env.rs`).
+
+#[path = "common/isolated_env.rs"]
+mod isolated_env;
+#[path = "common/shell.rs"]
+mod shell;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -303,6 +304,9 @@ impl HarnessWorkspace {
 struct ScenarioRun {
     response: Value,
     stdout: String,
+    /// Kept so a failing assertion can show what `scode` reported on stderr —
+    /// without it every parity failure needs a second run to learn anything.
+    stderr: String,
 }
 
 #[derive(Debug, Clone)]
@@ -336,17 +340,19 @@ fn run_case(case: ScenarioCase, workspace: &HarnessWorkspace, base_url: &str) ->
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
         .env("HOME", &workspace.home)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
-            "--auth",
-            "api-key",
-            "--model",
-            "sonnet",
-            "--permission-mode",
-            case.permission_mode,
-            "--output-format=json",
-        ]);
+        .env("NO_COLOR", "1");
+    for (key, value) in isolated_env::inherited_env() {
+        command.env(key, value);
+    }
+    command.args([
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        case.permission_mode,
+        "--output-format=json",
+    ]);
 
     if let Some(allowed_tools) = case.allowed_tools {
         command.args(["--allowedTools", allowed_tools]);
@@ -384,6 +390,7 @@ fn run_case(case: ScenarioCase, workspace: &HarnessWorkspace, base_url: &str) ->
     ScenarioRun {
         response: parse_json_output(&stdout),
         stdout,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
 }
 
@@ -436,6 +443,44 @@ fn prepare_multi_tool_fixture(workspace: &HarnessWorkspace) {
     .expect("multi tool fixture should write");
 }
 
+/// Make `script` runnable as a plugin tool command on this platform, and return
+/// the path the manifest should name — always inside `tool_dir`, so it stays
+/// within the plugin root.
+///
+/// Unix marks the script executable and names it directly. Windows can't run a
+/// shebang script, so it writes a `.cmd` shim next to it that forwards stdin to
+/// `sh`; `%~dp0` keeps the shim independent of the process working directory.
+#[cfg(unix)]
+fn platform_plugin_command(_tool_dir: &Path, script: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(script)
+        .expect("plugin script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(script, permissions).expect("plugin script should be executable");
+    script.to_path_buf()
+}
+
+#[cfg(windows)]
+fn platform_plugin_command(tool_dir: &Path, script: &Path) -> PathBuf {
+    let shim = tool_dir.join("echo-json.cmd");
+    let script_name = script
+        .file_name()
+        .expect("plugin script should have a file name")
+        .to_string_lossy()
+        .into_owned();
+    fs::write(
+        &shim,
+        format!(
+            "@echo off\r\n\"{}\" \"%~dp0{script_name}\"\r\n",
+            shell::resolve_sh()
+        ),
+    )
+    .expect("plugin shim should write");
+    shim
+}
+
 fn prepare_plugin_fixture(workspace: &HarnessWorkspace) {
     let plugin_root = workspace
         .root
@@ -452,35 +497,43 @@ fn prepare_plugin_fixture(workspace: &HarnessWorkspace) {
         "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$SUDOCODE_PLUGIN_ID\" \"$SUDOCODE_TOOL_NAME\" \"$INPUT\"\n",
     )
     .expect("plugin script should write");
-    let mut permissions = fs::metadata(&script_path)
-        .expect("plugin script metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script_path, permissions).expect("plugin script should be executable");
+
+    // The tool command has to live *inside* the plugin root — `scode` rejects a
+    // manifest that points outside it, which is a containment rule worth
+    // keeping, so the interpreter cannot simply be named as the command.
+    //
+    // Unix runs the script directly, which needs the exec bit. Windows honours
+    // neither mode bits nor shebangs, so the plugin ships a `.cmd` beside the
+    // script — still within the root — that hands it to the same `sh` the PTY
+    // harness resolves. Either way the tool is a file in the plugin, and what
+    // the scenario exercises is unchanged: manifest → spawn → stdin JSON →
+    // stdout JSON.
+    let command_path = platform_plugin_command(&tool_dir, &script_path);
 
     fs::write(
         manifest_dir.join("plugin.json"),
-        r#"{
-  "name": "parity-plugin",
-  "version": "1.0.0",
-  "description": "mock parity plugin",
-  "tools": [
-    {
-      "name": "plugin_echo",
-      "description": "Echo JSON input",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "message": { "type": "string" }
-        },
-        "required": ["message"],
-        "additionalProperties": false
-      },
-      "command": "./tools/echo-json.sh",
-      "requiredPermission": "workspace-write"
-    }
-  ]
-}"#,
+        json!({
+            "name": "parity-plugin",
+            "version": "1.0.0",
+            "description": "mock parity plugin",
+            "tools": [
+                {
+                    "name": "plugin_echo",
+                    "description": "Echo JSON input",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string" }
+                        },
+                        "required": ["message"],
+                        "additionalProperties": false
+                    },
+                    "command": command_path.display().to_string(),
+                    "requiredPermission": "workspace-write"
+                }
+            ]
+        })
+        .to_string(),
     )
     .expect("plugin manifest should write");
 
@@ -526,8 +579,33 @@ fn assert_read_file_roundtrip(workspace: &HarnessWorkspace, run: &ScenarioRun) {
     let output = run.response["tool_results"][0]["output"]
         .as_str()
         .expect("tool output");
-    assert!(output.contains(&workspace.root.join("fixture.txt").display().to_string()));
+    // Compare the reported path as a path, not as a substring of the tool's
+    // JSON. `output` is itself a JSON document, so on Windows every separator
+    // inside it is backslash-escaped and a plain `contains` of the fixture path
+    // can never match. Both sides are canonicalised and stripped of the Windows
+    // extended-length prefix (`\\?\`, which `fs::canonicalize` adds and scode
+    // passes through) so the assertion is about which file was read, not how
+    // the platform spells it.
+    let parsed: Value = serde_json::from_str(output).expect("read_file output should be JSON");
+    let reported = parsed["file"]["filePath"]
+        .as_str()
+        .expect("read_file output should carry file.filePath");
+    let expected = fs::canonicalize(workspace.root.join("fixture.txt"))
+        .expect("fixture should canonicalize")
+        .display()
+        .to_string();
+    assert_eq!(
+        strip_extended_length_prefix(reported),
+        strip_extended_length_prefix(&expected),
+        "read_file should report the fixture it read; full output:\n{output}"
+    );
     assert!(output.contains("alpha parity line"));
+}
+
+/// Drop Windows' extended-length path prefix so a canonicalised path compares
+/// equal to the same path written the ordinary way. No-op on Unix.
+fn strip_extended_length_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
 }
 
 fn assert_grep_chunk_assembly(_: &HarnessWorkspace, run: &ScenarioRun) {
@@ -558,10 +636,14 @@ fn assert_write_file_allowed(workspace: &HarnessWorkspace, run: &ScenarioRun) {
         run.response["tool_uses"][0]["name"],
         Value::String("write_file".to_string())
     );
-    assert!(run.response["message"]
-        .as_str()
-        .expect("message text")
-        .contains("generated/output.txt"));
+    // The mock echoes back the path `write_file` reported, which is the
+    // platform-native absolute path — `generated\output.txt` on Windows.
+    // Normalise separators so the assertion is about the file, not the spelling.
+    let message = run.response["message"].as_str().expect("message text");
+    assert!(
+        message.replace('\\', "/").contains("generated/output.txt"),
+        "write_file message should name the file it wrote, got: {message}"
+    );
     let generated = workspace.root.join("generated").join("output.txt");
     let contents = fs::read_to_string(&generated).expect("generated file should exist");
     assert_eq!(contents, "created by mock service\n");
@@ -637,7 +719,10 @@ fn assert_bash_stdout_roundtrip(_: &HarnessWorkspace, run: &ScenarioRun) {
     let parsed: Value = serde_json::from_str(tool_output).expect("bash output json");
     assert_eq!(
         parsed["stdout"],
-        Value::String("alpha from bash".to_string())
+        Value::String("alpha from bash".to_string()),
+        "bash tool input was {}\nscode stderr:\n{}",
+        run.response["tool_uses"][0]["input"],
+        run.stderr,
     );
     assert_eq!(
         run.response["tool_results"][0]["is_error"],

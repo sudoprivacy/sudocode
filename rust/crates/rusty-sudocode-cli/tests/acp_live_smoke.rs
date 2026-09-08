@@ -4,15 +4,13 @@
 //! When the token is absent or empty the tests silently pass (return early).
 //! On CI they run only on main merges where the GitHub secret is available.
 //!
-//! `#![cfg(unix)]` for the same reason as `acp_integration.rs`: the ACP
-//! stdio server's subprocess handshake doesn't complete on Windows.
-//! Live API smoke runs only on `main` pushes through the
-//! `live-api-smoke` job, which is `runs-on: ubuntu-latest` and gated on
-//! the OAuth secret, so this gate has no effect on the actual smoke
-//! coverage — it just keeps the file from breaking the matrix
-//! `test-workspace (windows-latest)` job's compilation step.
+//! Runs on Windows too, for the same reason as `acp_integration.rs`: the ACP
+//! stdio handshake was never Windows-incompatible — `env_clear()` was dropping
+//! `SystemRoot` and killing the child's winsock init. See
+//! `common/isolated_env.rs`.
 
-#![cfg(unix)]
+#[path = "common/isolated_env.rs"]
+mod isolated_env;
 
 use std::fs;
 use std::path::PathBuf;
@@ -235,16 +233,18 @@ fn base_command_with_mode(
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
         .env("HOME", &workspace.home)
         .env("CLAUDE_CODE_OAUTH_TOKEN", token)
-        .env("NO_COLOR", "1")
-        .env("PATH", "/usr/bin:/bin")
-        .args([
-            "--auth",
-            "subscription",
-            "--model",
-            "claude-sonnet",
-            "--permission-mode",
-            permission_mode,
-        ]);
+        .env("NO_COLOR", "1");
+    for (key, value) in isolated_env::inherited_env() {
+        cmd.env(key, value);
+    }
+    cmd.args([
+        "--auth",
+        "subscription",
+        "--model",
+        "claude-sonnet",
+        "--permission-mode",
+        permission_mode,
+    ]);
     cmd
 }
 

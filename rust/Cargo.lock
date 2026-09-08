@@ -185,7 +185,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64",
  "criterion",
@@ -781,8 +781,9 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
+ "api",
  "plugins",
  "runtime",
  "serde_json",
@@ -790,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "commands",
  "runtime",
@@ -1357,6 +1358,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
+name = "engine-acp"
+version = "0.2.4"
+dependencies = [
+ "agent-client-protocol",
+ "agent-client-protocol-schema",
+ "agent-client-protocol-tokio",
+ "async-trait",
+ "axum",
+ "commands",
+ "engine-core",
+ "engine-host",
+ "futures",
+ "nix 0.29.0",
+ "reqwest",
+ "runtime",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "engine-core"
+version = "0.2.4"
+dependencies = [
+ "api",
+ "async-trait",
+ "engine-events",
+ "futures",
+ "runtime",
+ "serde_json",
+ "telemetry",
+ "tokio",
+ "tools",
+]
+
+[[package]]
+name = "engine-events"
+version = "0.2.4"
+dependencies = [
+ "runtime",
+]
+
+[[package]]
+name = "engine-host"
+version = "0.2.4"
+dependencies = [
+ "commands",
+ "engine-core",
+ "nexus-vfs-client",
+ "plugins",
+ "runtime",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tokio",
+ "tools",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1369,7 +1431,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1424,7 +1486,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2189,7 +2251,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2557,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "api",
  "serde_json",
@@ -2587,7 +2649,7 @@ source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c1
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3040,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3434,7 +3496,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3741,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -3810,7 +3872,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3823,7 +3885,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3882,9 +3944,8 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
- "api",
  "arboard",
  "async-trait",
  "base64",
@@ -3893,6 +3954,10 @@ dependencies = [
  "compat-harness",
  "crossterm 0.28.1",
  "dialoguer",
+ "engine-acp",
+ "engine-core",
+ "engine-events",
+ "engine-host",
  "flate2",
  "futures",
  "futures-util",
@@ -4499,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "dirs",
@@ -4518,7 +4583,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4853,7 +4918,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "api",
  "async-trait",

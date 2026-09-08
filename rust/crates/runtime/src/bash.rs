@@ -337,6 +337,58 @@ async fn execute_bash_async(
     })
 }
 
+/// One line read off a child's stdout or stderr by [`pump_lines`].
+enum StreamChunk {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// Read `reader` line by line to EOF, forwarding each line as a [`StreamChunk`].
+///
+/// Lives in its own future so the `read_line` calls are never dropped mid-read
+/// — see the comment at the call site in [`execute_bash_streaming`].
+async fn pump_lines<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    wrap: fn(String) -> StreamChunk,
+    tx: &tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if tx.send(wrap(std::mem::take(&mut line))).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Fold one [`StreamChunk`] into the collected output and progress counters.
+fn accumulate_chunk(
+    chunk: StreamChunk,
+    stdout_buf: &mut String,
+    stderr_buf: &mut String,
+    progress_chunk: &mut String,
+    total_lines: &mut usize,
+    total_bytes: &mut usize,
+) {
+    match chunk {
+        StreamChunk::Stdout(text) => {
+            *total_bytes += text.len();
+            *total_lines += 1;
+            stdout_buf.push_str(&text);
+            progress_chunk.push_str(&text);
+        }
+        StreamChunk::Stderr(text) => {
+            *total_bytes += text.len();
+            stderr_buf.push_str(&text);
+        }
+    }
+}
+
 /// Streaming variant of [`execute_bash_async`].
 ///
 /// Pipes stdout and stderr from the child process and reads them
@@ -385,13 +437,44 @@ async fn execute_bash_streaming(
     };
     tokio::pin!(abort_wait);
 
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-    let mut stdout_line = String::new();
-    let mut stderr_line = String::new();
+    // The two readers run inside ONE pinned future that the `select!` below
+    // borrows rather than owns, and they hand finished lines over a channel.
+    //
+    // They must not be `select!` branches themselves. `AsyncBufReadExt::read_line`
+    // is not cancellation-safe, and a `select!` drops every branch future it
+    // created as soon as any branch completes — so each time stderr resolved,
+    // the in-flight stdout read was destroyed. On Unix that is survivable: the
+    // reactor only reads on readiness, so unread bytes stay in the pipe. On
+    // Windows `tokio::process` reads through the blocking pool, so bytes the
+    // cancelled read had already pulled out of the pipe were simply lost — a
+    // command like `printf 'hi'` returned exit 0 and *empty* stdout, silently,
+    // every time. Borrowing a pinned future keeps the reads alive across
+    // iterations; `UnboundedReceiver::recv` is cancellation-safe, so it is the
+    // only thing the loop is allowed to race against the abort and timeout.
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
+    let readers = async {
+        let tx = &chunk_tx;
+        tokio::join!(
+            pump_lines(&mut stdout_reader, StreamChunk::Stdout, tx),
+            pump_lines(&mut stderr_reader, StreamChunk::Stderr, tx),
+        );
+    };
+    tokio::pin!(readers);
+    let mut readers_done = false;
 
     loop {
-        if stdout_done && stderr_done {
+        if readers_done {
+            // Both streams hit EOF; take whatever is still queued and stop.
+            while let Ok(chunk) = chunk_rx.try_recv() {
+                accumulate_chunk(
+                    chunk,
+                    &mut stdout_buf,
+                    &mut stderr_buf,
+                    &mut progress_chunk,
+                    &mut total_lines,
+                    &mut total_bytes,
+                );
+            }
             break;
         }
 
@@ -415,40 +498,29 @@ async fn execute_bash_streaming(
                     sandbox_status,
                 ));
             }
-            result = stdout_reader.read_line(&mut stdout_line), if !stdout_done => {
-                match result {
-                    Ok(0) => stdout_done = true,
-                    Ok(n) => {
-                        total_bytes += n;
-                        total_lines += 1;
-                        stdout_buf.push_str(&stdout_line);
-                        progress_chunk.push_str(&stdout_line);
-                        stdout_line.clear();
-
-                        if let Some(ref cb) = on_progress {
-                            if last_progress.elapsed() >= PROGRESS_INTERVAL {
-                                cb(BashProgress {
-                                    output: &progress_chunk,
-                                    total_lines,
-                                    total_bytes,
-                                });
-                                progress_chunk.clear();
-                                last_progress = tokio::time::Instant::now();
-                            }
-                        }
-                    }
-                    Err(_) => stdout_done = true,
-                }
+            () = &mut readers => {
+                readers_done = true;
             }
-            result = stderr_reader.read_line(&mut stderr_line), if !stderr_done => {
-                match result {
-                    Ok(0) => stderr_done = true,
-                    Ok(n) => {
-                        total_bytes += n;
-                        stderr_buf.push_str(&stderr_line);
-                        stderr_line.clear();
+            Some(chunk) = chunk_rx.recv() => {
+                accumulate_chunk(
+                    chunk,
+                    &mut stdout_buf,
+                    &mut stderr_buf,
+                    &mut progress_chunk,
+                    &mut total_lines,
+                    &mut total_bytes,
+                );
+
+                if let Some(ref cb) = on_progress {
+                    if !progress_chunk.is_empty() && last_progress.elapsed() >= PROGRESS_INTERVAL {
+                        cb(BashProgress {
+                            output: &progress_chunk,
+                            total_lines,
+                            total_bytes,
+                        });
+                        progress_chunk.clear();
+                        last_progress = tokio::time::Instant::now();
                     }
-                    Err(_) => stderr_done = true,
                 }
             }
         }

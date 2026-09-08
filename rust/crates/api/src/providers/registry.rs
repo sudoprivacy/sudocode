@@ -347,6 +347,23 @@ pub fn select_proxy_account<'a>(
             .join(", ")
     };
 
+    // `auth_profile` set outside the one file that owns it for its scope: refuse
+    // rather than guess. Two files answering "who pays" is how a session spends
+    // from an account nobody chose. Loading still succeeds, so `doctor` can name
+    // the offending file and offer to move the key.
+    if !config.auth_profile_conflicts.is_empty() {
+        return Err(ApiError::Configuration(format!(
+            "auth_profile is set in {} but is only read from the one file that owns it \
+             per scope. Remove it there (or run `scode doctor --fix` to move it), then retry.",
+            config
+                .auth_profile_conflicts
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
     if let Some(name) = config
         .selected_account
         .as_deref()
@@ -385,6 +402,22 @@ pub fn select_proxy_account<'a>(
                     configured()
                 ))
             });
+    }
+
+    // Nothing selected. With several accounts configured there is no defensible
+    // default: the previous behavior took whichever name sorted first, so adding
+    // an account could silently re-point every request at a different bill. Ask
+    // instead — and ask here, at the point of spending, so `doctor` and `config`
+    // still run and can fix it.
+    if accounts.len() > 1 {
+        return Err(ApiError::Configuration(format!(
+            "{} proxy accounts are configured but none is selected: {}. \
+             Run `scode config account <name>` to choose one for this project, \
+             or `scode config account <name> --global` for the machine default. \
+             `scode doctor` shows the current state.",
+            accounts.len(),
+            configured()
+        )));
     }
 
     accounts
@@ -509,8 +542,17 @@ pub fn resolve_provider_from_config(
     //    selector, so an explicit per-project `auth_profile` decides who pays
     //    here exactly as it does on the passthrough path and in `doctor`.
     let (provider_name, connection) = if auth_mode_str == "proxy" {
-        let selected = select_proxy_account(config, Some(mapping.provider.as_str()))?;
+        // An empty `provider` means the entry does not pin an account — the
+        // selected one decides. That is the migrated shape; a pinned name is
+        // still honored as an explicit escape hatch.
+        let pinned = Some(mapping.provider.as_str()).filter(|name| !name.is_empty());
+        let selected = select_proxy_account(config, pinned)?;
         (selected.name, selected.connection)
+    } else if mapping.provider.is_empty() {
+        return Err(ApiError::Configuration(format!(
+            "model '{model_alias}' has no provider for auth mode '{auth_mode_str}'; \
+             only proxy mode can inherit the selected account"
+        )));
     } else {
         let connection =
             connection_for(config, &auth_mode_str, &mapping.provider).ok_or_else(|| {
@@ -973,6 +1015,7 @@ mod tests {
             models,
             web_search: Default::default(),
             selected_account: None,
+            auth_profile_conflicts: Vec::new(),
         }
     }
 
@@ -1099,6 +1142,106 @@ mod tests {
                 "reported account {reported} must be the one billed (selected={selected:?})"
             );
         }
+    }
+
+    /// A model entry that pins no account inherits the selected one. This is the
+    /// shape `scode config migrate` leaves behind: the account named once, in
+    /// `auth_profile`, instead of copied into every model entry.
+    #[test]
+    fn model_without_a_pinned_provider_uses_the_selected_account() {
+        let mut config = config_with_second_proxy_account();
+        config
+            .models
+            .get_mut("opus")
+            .expect("opus entry")
+            .providers
+            .get_mut("proxy")
+            .expect("proxy mapping")
+            .provider = String::new();
+        config.selected_account = Some("fujitoken".to_string());
+
+        let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+            .expect("an unpinned entry should resolve through the selection");
+        assert_eq!(
+            resolved.credential,
+            Credential::ApiKey("sk-fujitoken-key".to_string())
+        );
+    }
+
+    /// Unpinned and unselected is the one combination with no answer — it must
+    /// ask rather than pick, exactly as a pinned-but-unselected config does.
+    #[test]
+    fn unpinned_provider_without_a_selection_asks_instead_of_guessing() {
+        let mut config = config_with_second_proxy_account();
+        config
+            .models
+            .get_mut("opus")
+            .expect("opus entry")
+            .providers
+            .get_mut("proxy")
+            .expect("proxy mapping")
+            .provider = String::new();
+        assert!(config.selected_account.is_none());
+
+        let err = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
+            .expect_err("no pin and no selection must not silently pick an account");
+        assert!(
+            err.to_string().contains("scode config account"),
+            "error should print the fix command, got: {err}"
+        );
+    }
+
+    /// Several accounts and nothing selected has no defensible answer: the old
+    /// behavior took whichever name sorted first, so adding an account could
+    /// silently re-point every request at a different bill.
+    #[test]
+    fn no_selection_with_multiple_accounts_is_an_error() {
+        let config = config_with_second_proxy_account();
+        assert!(config.selected_account.is_none());
+        assert!(config.auth_modes["proxy"].len() > 1);
+
+        let err = select_proxy_account(&config, None)
+            .expect_err("ambiguous account must not resolve silently");
+        let message = err.to_string();
+        for account in ["fujitoken", "sudorouter"] {
+            assert!(
+                message.contains(account),
+                "error should list the candidates, got: {message}"
+            );
+        }
+        assert!(
+            message.contains("scode config account"),
+            "error should print the exact fix command, got: {message}"
+        );
+    }
+
+    /// A single configured account is unambiguous — keep resolving it, so the
+    /// common single-account setup needs no migration.
+    #[test]
+    fn single_account_without_selection_still_resolves() {
+        let config = sample_config();
+        assert_eq!(config.auth_modes["proxy"].len(), 1);
+
+        let selected = select_proxy_account(&config, None).expect("single account is unambiguous");
+        assert_eq!(selected.name, "sudorouter");
+    }
+
+    /// `auth_profile` outside the file that owns it for its scope: refuse rather
+    /// than guess which one won. Config still *loads* (so `doctor` runs); only
+    /// the path that would spend money fails.
+    #[test]
+    fn auth_profile_outside_its_owning_file_is_refused() {
+        let mut config = config_with_second_proxy_account();
+        config.selected_account = Some("fujitoken".to_string());
+        config.auth_profile_conflicts = vec![PathBuf::from("/repo/.scode.json")];
+
+        let err = select_proxy_account(&config, None)
+            .expect_err("a second file setting auth_profile must not be silently merged");
+        let message = err.to_string();
+        assert!(
+            message.contains(".scode.json"),
+            "error should name the offending file, got: {message}"
+        );
     }
 
     /// Without a selection, a registered model still bills the account its own

@@ -363,6 +363,7 @@ mod tests {
             models,
             web_search: Default::default(),
             selected_account: None,
+            auth_profile_conflicts: Vec::new(),
         }
     }
 

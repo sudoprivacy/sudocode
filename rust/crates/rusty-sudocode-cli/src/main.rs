@@ -143,11 +143,11 @@ use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
     pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
-    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool,
-    MessageRole, ModelPricing, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
-    ResolvedPermissionMode, RuntimeError, Session, SystemPrompt, TokenUsage, ToolError,
-    ToolExecutor, UsageTracker,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigScope, ConfigSource,
+    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
+    McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode, PermissionPolicy,
+    ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError, Session, SystemPrompt,
+    TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -259,6 +259,166 @@ fn enable_windows_ansi_support() {
 
 #[cfg(not(windows))]
 fn enable_windows_ansi_support() {}
+
+/// `scode config migrate` — drop the per-model copies of the account and wire
+/// format, leaving each fact stated once.
+///
+/// Prints exactly what changed and where the backup went. A fixer that edits
+/// config silently would reproduce the problem it is fixing: config drift is
+/// invisible, which is why it went unnoticed long enough to misroute a whole
+/// session's spending.
+fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let report = ConfigLoader::default_for(&cwd).migrate_model_account_pins()?;
+    match output_format {
+        CliOutputFormat::Text => {
+            if !report.changed() {
+                println!(
+                    "nothing to migrate — {} already states each fact once",
+                    report.path.display()
+                );
+                return Ok(());
+            }
+            println!("migrated {}", report.path.display());
+            if let Some(account) = &report.wrote_auth_profile {
+                println!("  auth_profile = {account}  (recorded before dropping the pins, so routing never lapses)");
+            }
+            if !report.cleared_providers.is_empty() {
+                println!(
+                    "  dropped pinned provider from {} model(s): {}",
+                    report.cleared_providers.len(),
+                    report.cleared_providers.join(", ")
+                );
+            }
+            if !report.cleared_apis.is_empty() {
+                println!(
+                    "  dropped redundant api override from {} model(s): {}",
+                    report.cleared_apis.len(),
+                    report.cleared_apis.join(", ")
+                );
+                println!("  (wire format now comes from the model capabilities SSOT — this is what re-enables prompt caching)");
+            }
+            if let Some(backup) = &report.backup {
+                println!("  backup      {}", backup.display());
+            }
+        }
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "kind": "config-migrate",
+                "changed": report.changed(),
+                "path": report.path.display().to_string(),
+                "auth_profile": report.wrote_auth_profile,
+                "cleared_providers": report.cleared_providers,
+                "cleared_apis": report.cleared_apis,
+                "backup": report.backup.map(|path| path.display().to_string()),
+            }))?
+        ),
+    }
+    Ok(())
+}
+
+/// `scode config account [<name>] [--global]` — show, or set, the account that
+/// requests are billed to.
+///
+/// Writing goes through `ConfigLoader::set_auth_profile`, the same entry point
+/// the interactive picker uses, so "record which account pays" has one
+/// implementation rather than one per surface — the drift this whole area is
+/// being repaired for.
+///
+/// An unknown name is rejected here rather than written: a typo that reaches the
+/// config file turns into a refusal at the next request, far from the command
+/// that caused it.
+fn run_config_account(
+    account: Option<&str>,
+    global: bool,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let config = loader.load_sudocode_config()?;
+    let known: Vec<&str> = config
+        .auth_modes
+        .get("proxy")
+        .map(|accounts| accounts.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let candidates = || {
+        if known.is_empty() {
+            "<none configured under auth_modes.proxy>".to_string()
+        } else {
+            known.join(", ")
+        }
+    };
+
+    let Some(account) = account else {
+        let (global_path, project_path) = loader.auth_profile_paths();
+        match output_format {
+            CliOutputFormat::Text => {
+                println!(
+                    "account   {}",
+                    config
+                        .selected_account
+                        .as_deref()
+                        .unwrap_or("<none selected>")
+                );
+                println!("available {}", candidates());
+                println!(
+                    "set here  scode config account <name>            → {}",
+                    project_path.display()
+                );
+                println!(
+                    "machine   scode config account <name> --global   → {}",
+                    global_path.display()
+                );
+                for conflict in &config.auth_profile_conflicts {
+                    println!(
+                        "warning   auth_profile in {} is ignored — remove it",
+                        conflict.display()
+                    );
+                }
+            }
+            CliOutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind": "config-account",
+                    "account": config.selected_account,
+                    "available": known,
+                    "project_path": project_path.display().to_string(),
+                    "global_path": global_path.display().to_string(),
+                    "ignored": config
+                        .auth_profile_conflicts
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>(),
+                }))?
+            ),
+        }
+        return Ok(());
+    };
+
+    if !known.contains(&account) {
+        return Err(format!("unknown account '{account}'. Available: {}", candidates()).into());
+    }
+    let scope = if global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    let written = loader.set_auth_profile(account, scope)?;
+    match output_format {
+        CliOutputFormat::Text => println!("account = {account}  ({})", written.display()),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "kind": "config-account",
+                "account": account,
+                "scope": if global { "global" } else { "project" },
+                "path": written.display().to_string(),
+            }))?
+        ),
+    }
+    Ok(())
+}
 
 fn main() {
     // Must run before any output so early raw ANSI escapes render correctly on
@@ -548,7 +708,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // drop; the renderer keeps none, so there is nothing to shut down
             // here.
         }
-        CliAction::Doctor { output_format } => run_doctor(output_format)?,
+        CliAction::Doctor { fix, output_format } => {
+            // Repair before reporting, so the report a user reads is the state
+            // they are actually left in rather than the one just replaced.
+            if fix {
+                run_config_migrate(output_format)?;
+            }
+            run_doctor(output_format)?;
+        }
         CliAction::Acp {
             model,
             model_flag_raw,
@@ -575,7 +742,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // corresponding _json helpers already exposed for resume sessions.
         CliAction::Config {
             section,
+            value,
+            global,
             output_format,
+        } if section.as_deref() == Some("account") => {
+            run_config_account(value.as_deref(), global, output_format)?;
+        }
+        CliAction::Config {
+            section,
+            output_format,
+            ..
+        } if section.as_deref() == Some("migrate") => {
+            run_config_migrate(output_format)?;
+        }
+        CliAction::Config {
+            section,
+            output_format,
+            ..
         } => match output_format {
             CliOutputFormat::Text => {
                 println!("{}", render_config_report(section.as_deref())?);

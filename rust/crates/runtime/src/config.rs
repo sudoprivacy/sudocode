@@ -153,6 +153,14 @@ pub struct SudoCodeConfig {
     /// caller from merged settings; the account itself stays defined once under
     /// `auth_modes` (single source of truth — this is a reference, not a copy).
     pub selected_account: Option<String>,
+    /// Layer files that set `auth_profile` outside the one file that owns it for
+    /// their scope (see [`ConfigLoader::auth_profile_paths`]).
+    ///
+    /// Carried as *data*, not raised as a load error: a config that cannot load
+    /// also takes `doctor`, `config` and `--help` down with it — precisely the
+    /// commands someone needs to fix this. Diagnostics report these and offer to
+    /// move the key; the spending path refuses (see `select_proxy_account`).
+    pub auth_profile_conflicts: Vec<PathBuf>,
 }
 
 impl SudoCodeConfig {
@@ -326,6 +334,120 @@ impl Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Which scope a config write targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    /// `<config_home>/settings.json` — the machine-wide default.
+    Global,
+    /// `<cwd>/.nexus/sudocode/settings.local.json` — this project only.
+    ///
+    /// The right default for interactive writes: a project-scoped choice cannot
+    /// surprise the other repos — or the other agents — on the same machine.
+    Project,
+}
+
+/// What [`ConfigLoader::migrate_model_account_pins`] changed.
+///
+/// Returned rather than printed so the CLI and `doctor --fix` render the same
+/// facts from one code path — and so a fixer that edits config is never itself
+/// invisible, which is the failure mode this whole area exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigMigration {
+    /// The `sudocode.json` inspected.
+    pub path: PathBuf,
+    /// Backup written before any edit; `None` when nothing needed changing.
+    pub backup: Option<PathBuf>,
+    /// Account written to the global `auth_profile` to preserve routing.
+    pub wrote_auth_profile: Option<String>,
+    /// Model aliases whose pinned `provider` was removed.
+    pub cleared_providers: Vec<String>,
+    /// Model aliases whose redundant `api` override was removed.
+    pub cleared_apis: Vec<String>,
+}
+
+impl ConfigMigration {
+    fn nothing(path: PathBuf) -> Self {
+        Self {
+            path,
+            backup: None,
+            wrote_auth_profile: None,
+            cleared_providers: Vec::new(),
+            cleared_apis: Vec::new(),
+        }
+    }
+
+    /// Whether anything was actually rewritten.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.backup.is_some()
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// Advisory cross-process lock around a config file, released on drop.
+///
+/// An atomic replace alone prevents a *torn* file, not a *lost update*: two
+/// processes can each read, each modify their own copy, and the later write wins
+/// silently. That is precisely the shape of the incident this module guards
+/// against, so the read-modify-write pair is held under one lock.
+struct ConfigFileLock {
+    path: PathBuf,
+}
+
+impl ConfigFileLock {
+    /// How long a lock file may exist before it is treated as a leftover from a
+    /// killed process. A config write takes microseconds; anything older is dead.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn acquire(target: &Path) -> Result<Self, ConfigError> {
+        let file_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("settings.json");
+        let path = target.with_file_name(format!("{file_name}.lock"));
+        for _ in 0..100 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::is_stale(&path) {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(ConfigError::Io(error)),
+            }
+        }
+        Err(ConfigError::Parse(format!(
+            "timed out waiting for the config lock at {}; delete it if no scode process is running",
+            path.display()
+        )))
+    }
+
+    fn is_stale(path: &Path) -> bool {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified.elapsed().unwrap_or_default() > Self::STALE_AFTER)
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for ConfigFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 impl From<std::io::Error> for ConfigError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
@@ -358,6 +480,206 @@ impl ConfigLoader {
     #[must_use]
     pub fn config_home(&self) -> &Path {
         &self.config_home
+    }
+
+    /// Remove the account and wire-format copies from `sudocode.json`'s model
+    /// entries, leaving each fact stated once.
+    ///
+    /// `models.<alias>.providers.proxy.provider` duplicates the selected account
+    /// into every entry, and `.api` duplicates a wire format the capabilities SSOT
+    /// already knows. Both drift: the account copies sent a session's whole bill to
+    /// the wrong place, and a stale `api` silently disabled prompt caching.
+    ///
+    /// Order matters and is not an implementation detail: the selection is written
+    /// **before** the pins are dropped. Reverse it and a config with several
+    /// accounts is momentarily pinned to none — every request refuses until the
+    /// second write lands.
+    ///
+    /// `api` is only dropped for models the capabilities SSOT actually knows: a
+    /// copy is safe to delete only when the original exists.
+    pub fn migrate_model_account_pins(&self) -> Result<ConfigMigration, ConfigError> {
+        use crate::fs_backend::FsBackend as _;
+
+        let path = self.config_home.join("sudocode.json");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ConfigMigration::nothing(path))
+            }
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        let mut root: SerdeValue = serde_json::from_str(&text)
+            .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
+
+        // Survey first: nothing is written until we know the whole picture.
+        let mut pinned_accounts: Vec<String> = Vec::new();
+        let mut cleared_providers: Vec<String> = Vec::new();
+        let mut cleared_apis: Vec<String> = Vec::new();
+        if let Some(models) = root.get("models").and_then(SerdeValue::as_object) {
+            for (alias, entry) in models {
+                let Some(proxy) = entry.pointer("/providers/proxy") else {
+                    continue;
+                };
+                if let Some(name) = proxy.get("provider").and_then(SerdeValue::as_str) {
+                    if !name.trim().is_empty() {
+                        cleared_providers.push(alias.clone());
+                        if !pinned_accounts.iter().any(|seen| seen == name) {
+                            pinned_accounts.push(name.to_string());
+                        }
+                    }
+                }
+                if proxy.get("api").is_some() {
+                    let wire = proxy
+                        .get("model")
+                        .and_then(SerdeValue::as_str)
+                        .unwrap_or(alias);
+                    if crate::model_capabilities::preferred_endpoint_type(wire).is_some() {
+                        cleared_apis.push(alias.clone());
+                    }
+                }
+            }
+        }
+        if cleared_providers.is_empty() && cleared_apis.is_empty() {
+            return Ok(ConfigMigration::nothing(path));
+        }
+
+        // Entries pinned to different accounts encode a routing decision this
+        // cannot preserve — dropping them would move some models' traffic.
+        if pinned_accounts.len() > 1 {
+            return Err(ConfigError::Parse(format!(
+                "model entries pin different accounts ({}); migrating would move some \
+                 models to another account. Reconcile them by hand first.",
+                pinned_accounts.join(", ")
+            )));
+        }
+
+        let selected = self.load_sudocode_config()?.selected_account;
+        let wrote_auth_profile = match (selected, pinned_accounts.first()) {
+            (None, Some(account)) => {
+                self.set_auth_profile(account, ConfigScope::Global)?;
+                Some(account.clone())
+            }
+            _ => None,
+        };
+
+        let backup = path.with_extension(format!("json.bak-migrate-{}", current_unix_seconds()));
+        std::fs::copy(&path, &backup).map_err(ConfigError::Io)?;
+
+        let _guard = ConfigFileLock::acquire(&path)?;
+        if let Some(models) = root.get_mut("models").and_then(SerdeValue::as_object_mut) {
+            for (alias, entry) in models.iter_mut() {
+                let Some(proxy) = entry
+                    .pointer_mut("/providers/proxy")
+                    .and_then(SerdeValue::as_object_mut)
+                else {
+                    continue;
+                };
+                if cleared_providers.iter().any(|cleared| cleared == alias) {
+                    proxy.remove("provider");
+                }
+                if cleared_apis.iter().any(|cleared| cleared == alias) {
+                    proxy.remove("api");
+                }
+            }
+        }
+        let serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&root)
+                .map_err(|error| ConfigError::Parse(error.to_string()))?
+        );
+        crate::fs_backend::StdFsBackend
+            .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
+
+        Ok(ConfigMigration {
+            path,
+            backup: Some(backup),
+            wrote_auth_profile,
+            cleared_providers,
+            cleared_apis,
+        })
+    }
+
+    /// Point `auth_profile` at `account` in the one file that owns it for `scope`,
+    /// returning the file written.
+    ///
+    /// Read-modify-write under a lock file, then an atomic replace, and **only
+    /// that one key is rewritten** — every other setting survives byte for byte.
+    /// Several agents share one machine, and the incident this guards against was
+    /// two of them rewriting the same global config minutes apart, each clobbering
+    /// the other's edit along with 19 unrelated entries.
+    pub fn set_auth_profile(
+        &self,
+        account: &str,
+        scope: ConfigScope,
+    ) -> Result<PathBuf, ConfigError> {
+        let account = account.trim();
+        if account.is_empty() {
+            return Err(ConfigError::Parse(
+                "account name must not be empty".to_string(),
+            ));
+        }
+        let (global, project) = self.auth_profile_paths();
+        let path = match scope {
+            ConfigScope::Global => global,
+            ConfigScope::Project => project,
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
+        }
+
+        use crate::fs_backend::FsBackend as _;
+
+        let _guard = ConfigFileLock::acquire(&path)?;
+        // Round-trip the file as generic JSON so every key we do not own is
+        // written back exactly as it was read.
+        let mut object = match std::fs::read_to_string(&path) {
+            Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+            Ok(text) => serde_json::from_str::<SerdeValue>(&text)
+                .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| {
+                    ConfigError::Parse(format!(
+                        "{}: top-level settings value must be a JSON object",
+                        path.display()
+                    ))
+                })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        object.insert(
+            "auth_profile".to_string(),
+            SerdeValue::String(account.to_string()),
+        );
+        let serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&SerdeValue::Object(object))
+                .map_err(|error| ConfigError::Parse(error.to_string()))?
+        );
+        crate::fs_backend::StdFsBackend
+            .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
+        Ok(path)
+    }
+
+    /// The one file per scope that owns `auth_profile`, as `(global, project)`.
+    ///
+    /// Global is `<config_home>/settings.json`; project is
+    /// `<cwd>/.nexus/sudocode/settings.local.json` — not committed, because which
+    /// account pays is a per-developer deployment fact, not a property of the
+    /// source. Every other file in [`Self::discover`] is a conflict if it sets the
+    /// key; confining it is what makes "who pays" answerable by reading exactly
+    /// one place per scope.
+    #[must_use]
+    pub fn auth_profile_paths(&self) -> (PathBuf, PathBuf) {
+        (
+            self.config_home.join("settings.json"),
+            self.cwd
+                .join(".nexus")
+                .join("sudocode")
+                .join("settings.local.json"),
+        )
     }
 
     #[must_use]
@@ -520,22 +842,40 @@ impl ConfigLoader {
         }
         let mut config =
             parse_sudocode_from_object(&merged, &global_path.display().to_string(), &extra_bodies)?;
-        // Wire the per-project account selection from the layered settings'
-        // `auth_profile`. Single source of truth: the account (base_url + key)
-        // stays defined once under `auth_modes`; here we only read *which* named
-        // account is selected. Best-effort — settings errors leave it unset, so
-        // resolution falls back to the unchanged default.
-        if let Ok(runtime) = self.load() {
-            if let Some(profile) = runtime
-                .merged
-                .get("auth_profile")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|profile| !profile.is_empty())
-            {
-                config.selected_account = Some(profile.to_string());
-            }
-        }
+        // Wire the account selection from `auth_profile`. Single source of truth:
+        // the account (base_url + key) stays defined once under `auth_modes`;
+        // here we only read *which* named account is selected.
+        //
+        // `auth_profile` is read from exactly ONE file per scope, so a repo — or
+        // one of several agents sharing this machine — can never end up with two
+        // answers to "who pays" and no way to see which one won. Setting it in any
+        // other layer file is recorded as a conflict instead of being quietly
+        // merged.
+        let (global_profile_path, project_profile_path) = self.auth_profile_paths();
+        let read_profile = |path: &Path| -> Option<String> {
+            read_optional_json_object_with(backend, path)
+                .ok()
+                .flatten()
+                .and_then(|parsed| {
+                    parsed
+                        .object
+                        .get("auth_profile")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|profile| !profile.is_empty())
+                        .map(str::to_string)
+                })
+        };
+        // Project overrides global — the narrower scope wins, as everywhere else.
+        config.selected_account =
+            read_profile(&project_profile_path).or_else(|| read_profile(&global_profile_path));
+        config.auth_profile_conflicts = self
+            .discover()
+            .into_iter()
+            .map(|entry| entry.path)
+            .filter(|path| path != &global_profile_path && path != &project_profile_path)
+            .filter(|path| read_profile(path).is_some())
+            .collect();
         Ok(config)
     }
 }
@@ -1397,7 +1737,10 @@ fn parse_sudocode_from_object(
         auth_modes,
         models,
         web_search,
+        // Both are wired by the caller from the layered settings; parsing
+        // `sudocode.json` alone cannot see them.
         selected_account: None,
+        auth_profile_conflicts: Vec::new(),
     })
 }
 
@@ -1524,7 +1867,14 @@ fn parse_sudocode_models_section(
             for (mode_name, mapping_value) in providers_obj {
                 let m_ctx = format!("{ctx}.providers.{mode_name}");
                 let m_entry = expect_object(mapping_value, &m_ctx)?;
-                let provider = expect_string(m_entry, "provider", &m_ctx)?.to_string();
+                // `provider` is optional for proxy mode: empty means "whichever
+                // account is selected" (see `select_proxy_account`). Requiring it
+                // is what put one copy of the account name in every model entry —
+                // 19 of them in a stock config — so changing accounts meant 19
+                // edits and every tool did it differently.
+                let provider = optional_string(m_entry, "provider", &m_ctx)?
+                    .unwrap_or_default()
+                    .to_string();
                 let model = expect_string(m_entry, "model", &m_ctx)?.to_string();
                 let api = optional_string(m_entry, "api", &m_ctx)?.map(str::to_string);
                 mappings.insert(
@@ -1995,6 +2345,167 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(root).expect("cleanup temp dir");
         }
+    }
+
+    /// `auth_profile` answers "who pays". It is read from exactly one file per
+    /// scope — project wins over global — and set anywhere else it is reported as
+    /// a conflict rather than merged, so two files can never quietly disagree.
+    #[test]
+    fn auth_profile_is_read_from_one_file_per_scope() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(home.join("sudocode.json"), super::SAMPLE_SUDOCODE_JSON)
+            .expect("write sudocode.json");
+
+        // Global owner only → global wins.
+        fs::write(
+            home.join("settings.json"),
+            r#"{"auth_profile":"global-acct"}"#,
+        )
+        .expect("write global settings");
+        let config = ConfigLoader::new(&cwd, &home)
+            .load_sudocode_config()
+            .expect("config should load");
+        assert_eq!(config.selected_account.as_deref(), Some("global-acct"));
+        assert!(config.auth_profile_conflicts.is_empty());
+
+        // Project owner present → narrower scope wins.
+        let local = cwd
+            .join(".nexus")
+            .join("sudocode")
+            .join("settings.local.json");
+        fs::write(&local, r#"{"auth_profile":"project-acct"}"#).expect("write project settings");
+        let config = ConfigLoader::new(&cwd, &home)
+            .load_sudocode_config()
+            .expect("config should load");
+        assert_eq!(config.selected_account.as_deref(), Some("project-acct"));
+        assert!(config.auth_profile_conflicts.is_empty());
+
+        // A non-owning layer file sets it → recorded as a conflict, and loading
+        // still succeeds so `doctor` can run and say which line to delete.
+        let stray = cwd.join(".scode.json");
+        fs::write(&stray, r#"{"auth_profile":"stray-acct"}"#).expect("write stray settings");
+        let config = ConfigLoader::new(&cwd, &home)
+            .load_sudocode_config()
+            .expect("a conflict must not break loading");
+        assert_eq!(config.selected_account.as_deref(), Some("project-acct"));
+        assert_eq!(config.auth_profile_conflicts, vec![stray]);
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    /// Migration removes the per-entry copies and leaves the account named once.
+    /// The selection is recorded first: reversed, a multi-account config would be
+    /// pinned to nothing between the two writes and every request would refuse.
+    #[test]
+    fn migrate_records_the_account_before_stripping_the_pins() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(home.join("sudocode.json"), super::SAMPLE_SUDOCODE_JSON)
+            .expect("write sudocode.json");
+
+        let loader = ConfigLoader::new(&cwd, &home);
+        let before = loader.load_sudocode_config().expect("load");
+        assert!(before.selected_account.is_none());
+        assert!(!before.models["claude-opus"].providers["proxy"]
+            .provider
+            .is_empty());
+
+        let report = loader.migrate_model_account_pins().expect("migrate");
+        assert!(report.changed());
+        assert_eq!(report.wrote_auth_profile.as_deref(), Some("sudorouter"));
+        assert!(report
+            .cleared_providers
+            .contains(&"claude-opus".to_string()));
+        assert!(
+            report.backup.as_ref().is_some_and(|path| path.exists()),
+            "a fixer that edits config must leave the previous version behind"
+        );
+
+        let after = loader.load_sudocode_config().expect("load after");
+        assert_eq!(after.selected_account.as_deref(), Some("sudorouter"));
+        assert!(
+            after.models["claude-opus"].providers["proxy"]
+                .provider
+                .is_empty(),
+            "the pin should be gone, with the account now named once in auth_profile"
+        );
+
+        // Idempotent: nothing left to migrate, so nothing is rewritten.
+        let again = loader.migrate_model_account_pins().expect("second migrate");
+        assert!(!again.changed());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    /// The write side puts the one key into the file that owns it for the scope,
+    /// leaves every other setting byte-identical, and is picked up by the read
+    /// side — so "who pays" cannot be set somewhere the resolver won't look.
+    #[test]
+    fn set_auth_profile_writes_one_key_into_the_owning_file() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(home.join("sudocode.json"), super::SAMPLE_SUDOCODE_JSON)
+            .expect("write sudocode.json");
+        // Pre-existing settings that must survive the write untouched.
+        fs::write(
+            home.join("settings.json"),
+            r#"{"model":"opus","env":{"A":"1"}}"#,
+        )
+        .expect("write global settings");
+
+        let loader = ConfigLoader::new(&cwd, &home);
+        let written = loader
+            .set_auth_profile("team-b", super::ConfigScope::Global)
+            .expect("write global auth_profile");
+        assert_eq!(written, home.join("settings.json"));
+
+        let text = fs::read_to_string(&written).expect("read back");
+        let value: super::SerdeValue = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(
+            value["auth_profile"],
+            super::SerdeValue::String("team-b".into())
+        );
+        assert_eq!(value["model"], super::SerdeValue::String("opus".into()));
+        assert_eq!(value["env"]["A"], super::SerdeValue::String("1".into()));
+        assert_eq!(
+            loader
+                .load_sudocode_config()
+                .expect("load")
+                .selected_account
+                .as_deref(),
+            Some("team-b")
+        );
+
+        // Project scope writes the project file and wins over the global one.
+        let project_written = loader
+            .set_auth_profile("local-acct", super::ConfigScope::Project)
+            .expect("write project auth_profile");
+        assert_eq!(
+            project_written,
+            cwd.join(".nexus")
+                .join("sudocode")
+                .join("settings.local.json")
+        );
+        assert_eq!(
+            loader
+                .load_sudocode_config()
+                .expect("load")
+                .selected_account
+                .as_deref(),
+            Some("local-acct")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]

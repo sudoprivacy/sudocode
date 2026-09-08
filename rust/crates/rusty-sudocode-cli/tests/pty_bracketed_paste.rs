@@ -10,18 +10,17 @@
 //! This is a regression guard for the bug where each pasted newline arrived
 //! as a KeyCode::Enter and triggered a submit per line.
 //!
-//! **Unix only.** crossterm's Windows event source reads the console via
-//! `ReadConsoleInputW` (Console API) and has no VT byte-stream parser, so it
-//! never produces `Event::Paste` — bracketed paste on Windows needs a
-//! separate VT-input backend (tracked separately). On Unix, crossterm's tty
-//! source parses `ESC[200~…ESC[201~` into `Event::Paste` natively.
+//! **Cross-platform.** On Unix, crossterm's tty source parses
+//! `ESC[200~…ESC[201~` into `Event::Paste` natively. On Windows, the
+//! sudoprivacy crossterm fork (upstream PR crossterm-rs/crossterm#1030)
+//! enables `ENABLE_VIRTUAL_TERMINAL_INPUT` for the lifetime of
+//! `EnableBracketedPaste` and feeds the console's VT byte stream through the
+//! shared ANSI parser, producing the same `Event::Paste` as Unix.
 //!
 //! ```bash
 //! cargo test --test pty_bracketed_paste                          # mock (CI)
 //! SCODE_TEST_BACKEND=live cargo test --test pty_bracketed_paste  # real API
 //! ```
-
-#![cfg(unix)]
 
 mod common;
 
@@ -76,4 +75,31 @@ fn bracketed_paste_shows_placeholder_and_does_not_submit() {
     sess.send_ctrl('c').ok();
     sess.send_ctrl('c').ok();
     let _ = sess.expect_eof();
+}
+
+/// Regression guard: with bracketed paste enabled (and therefore, on the
+/// Windows crossterm fork, VT console input active for the whole REPL
+/// session), ordinary keyboard typing must still reach the TextInput and
+/// render. PR crossterm-rs/crossterm#1030 routes character-bearing key
+/// records through the shared ANSI parser while VT input is on; this proves
+/// that path delivers plain typed characters, not just paste sequences.
+#[test]
+fn typing_still_works_while_bracketed_paste_enabled() {
+    let env = TestEnv::new("bracketed-paste-typing");
+    let mut sess = spawn_iocraft_repl(&env);
+
+    // Type a command WITHOUT Enter; the characters must render in the box.
+    sess.send("/exit").expect("type /exit");
+    sess.expect("/exit").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("typed text must render while VT input is active: {e}\nPTY:\n{screen}");
+    });
+
+    // Enter submits /exit and the process exits cleanly.
+    sess.send("\r").expect("press Enter");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
 }

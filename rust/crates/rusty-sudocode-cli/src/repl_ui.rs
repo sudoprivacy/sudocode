@@ -562,6 +562,18 @@ fn submit_dialpad_selection(
 // Paste placeholder helpers (CC-style [Pasted text #N +M lines] placeholders)
 // ---------------------------------------------------------------------------
 
+/// Normalize pasted line endings to `\n`.
+///
+/// Terminals deliver bracketed-paste payloads with the platform's line
+/// separator: Windows Terminal sends `\r\n` or bare `\r`, Unix sends `\n`.
+/// crossterm passes those bytes through verbatim, so normalize here at the
+/// single paste entry point. Every downstream use — line counting, the
+/// placeholder label, the expanded text sent to the model, and scrollback —
+/// then sees a consistent `\n`.
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Format a placeholder reference for pasted text.
 /// Matches the CC convention so history/session files are compatible.
 fn format_paste_placeholder(id: u32, text: &str) -> String {
@@ -1643,6 +1655,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 // Store the real text and replace with a
                                 // compact placeholder so the input box does
                                 // not overflow with potentially huge content.
+                                // Normalize CR / CRLF line endings first so
+                                // line counting, the placeholder, and the
+                                // expanded text are all consistent (Windows
+                                // Terminal pastes carry \r or \r\n).
+                                let pasted = normalize_paste_newlines(&pasted);
                                 let id = next_paste_id.get();
                                 next_paste_id.set(id + 1);
                                 let placeholder = format_paste_placeholder(id, &pasted);
@@ -1945,5 +1962,24 @@ mod tests {
         store.insert(1u32, "X".to_string());
         let input = "[Pasted text #1 no close";
         assert_eq!(expand_paste_placeholders(input, &store), input);
+    }
+
+    #[test]
+    fn normalize_paste_newlines_handles_cr_crlf_lf() {
+        assert_eq!(normalize_paste_newlines("a\r\nb\r\nc"), "a\nb\nc");
+        assert_eq!(normalize_paste_newlines("a\rb\rc"), "a\nb\nc");
+        assert_eq!(normalize_paste_newlines("a\nb\nc"), "a\nb\nc");
+        // Mixed, and no trailing artifacts from \r\n handled before bare \r.
+        assert_eq!(normalize_paste_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn placeholder_counts_lines_for_windows_cr_and_crlf() {
+        // Windows Terminal delivers \r or \r\n; after normalization the
+        // placeholder must report the multi-line count, not drop to zero.
+        let crlf = normalize_paste_newlines("line one\r\nline two\r\nline three");
+        assert_eq!(format_paste_placeholder(1, &crlf), "[Pasted text #1 +2 lines]");
+        let cr = normalize_paste_newlines("line one\rline two\rline three");
+        assert_eq!(format_paste_placeholder(1, &cr), "[Pasted text #1 +2 lines]");
     }
 }

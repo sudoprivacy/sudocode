@@ -561,19 +561,20 @@ fn memory_write_read_forget_workflow() {
         panic!("prompt after forget: {e}\nPTY screen:\n{screen}");
     });
 
-    // ── Step 4: the forget outcome is NOT asserted, deliberately ─────
+    // ── Step 4: the fact is gone from disk ───────────────────────────
     //
-    // It should be, and this step used to say so in a comment with no code
-    // behind it. Asserting it — that no remaining entry still records the fact,
-    // via `memory_entry_text` below — was tried and fails about two runs in
-    // three: the model acknowledges the request and leaves the entry on disk.
-    // The compact memory instructions do say "remove when asked to forget", so
-    // that is a gap in how reliably the instruction lands, not in this test.
-    //
-    // Asserting it here would make this suite fail for a reason it cannot fix.
-    // Left un-asserted, with the helper kept, so whoever fixes the memory
-    // behaviour can turn this back on as the regression guard for it.
-    let _ = memory_entry_text(&projects_dir);
+    // Asserted on the entries themselves, not on what the model said: "done,
+    // that memory is gone" is exactly the answer that used to accompany the
+    // entry still sitting on disk. The index (`MEMORY.md`) is excluded by the
+    // helper, so this is about the memory the next session would actually be
+    // reminded of.
+    let remaining = memory_entry_text(&projects_dir);
+    assert!(
+        !remaining.to_lowercase().contains("rust"),
+        "forget must remove the entry, not just acknowledge the request; \
+         still on disk:\n{remaining}\nPTY screen:\n{}",
+        sess.render(|s| s.contents())
+    );
 
     // Clean exit.
     sess.send("/exit\r").expect("send /exit");
@@ -616,9 +617,8 @@ fn memory_dedup_does_not_create_duplicate() {
 
     // Pre-seed a memory entry about the user's role.
     let workspace_home = root.join("home");
-    let projects_dir = workspace_home.join(".scode").join("projects");
-    // We need to figure out the slug — just create a well-known memory dir.
-    // Use SUDOCODE_MEMORY_DIR to control the path deterministically.
+    // SUDOCODE_MEMORY_DIR pins the memory path, so this test never has to
+    // derive the per-workspace slug under `.scode/projects/`.
     let memory_dir = workspace_home.join("test-memory");
     fs::create_dir_all(&memory_dir).expect("create memory dir");
 

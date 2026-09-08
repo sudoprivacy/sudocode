@@ -576,6 +576,11 @@ fn format_paste_placeholder(id: u32, text: &str) -> String {
 /// Replace all `[Pasted text #N ...]` placeholders in `input` with the real
 /// text from `store`, producing the final string to send to the LLM.
 /// The store is consumed after each submit — it is ephemeral by design.
+///
+/// Scans left to right and copies each placeholder's replacement into a fresh
+/// output buffer. Inserted text is never re-scanned, so a stored paste whose
+/// own text happens to contain a `[Pasted text #N]` string can never cause an
+/// infinite loop (it is emitted verbatim, not re-expanded).
 fn expand_paste_placeholders(
     input: &str,
     store: &std::collections::HashMap<u32, String>,
@@ -583,39 +588,43 @@ fn expand_paste_placeholders(
     if store.is_empty() || !input.contains("[Pasted text #") {
         return input.to_string();
     }
-    // Walk placeholder matches from right to left so byte offsets stay valid.
-    let re_str = r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]";
-    // Hand-rolled scan: no regex dep wanted here.
-    let mut result = input.to_string();
     let placeholder_prefix = "[Pasted text #";
-    loop {
-        let Some(start) = result.rfind(placeholder_prefix) else {
-            break;
-        };
-        let tail = &result[start + placeholder_prefix.len()..];
-        let Some(id_end) = tail.find(|c: char| !c.is_ascii_digit()) else {
-            break;
-        };
-        if id_end == 0 {
-            break;
-        }
-        let Ok(id) = tail[..id_end].parse::<u32>() else {
-            break;
-        };
-        let rest = &tail[id_end..];
-        let end_bracket = if rest.starts_with("]") {
-            start + placeholder_prefix.len() + id_end + 1
-        } else if let Some(bracket) = rest.find("]") {
-            start + placeholder_prefix.len() + id_end + bracket + 1
-        } else {
-            break;
-        };
-        if let Some(real_text) = store.get(&id) {
-            result.replace_range(start..end_bracket, real_text);
-        } else {
-            break; // unknown id, stop to avoid infinite loop
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(rel_start) = rest.find(placeholder_prefix) {
+        // Copy everything before the candidate placeholder unchanged.
+        result.push_str(&rest[..rel_start]);
+        let after_prefix = &rest[rel_start + placeholder_prefix.len()..];
+
+        // Parse the numeric id, then the optional " +N lines" and closing "]".
+        let id_end = after_prefix.find(|c: char| !c.is_ascii_digit());
+        let matched = id_end.and_then(|id_end| {
+            if id_end == 0 {
+                return None;
+            }
+            let id = after_prefix[..id_end].parse::<u32>().ok()?;
+            let tail = &after_prefix[id_end..];
+            let close = tail.find(']')?;
+            let real_text = store.get(&id)?;
+            // Byte length consumed from `after_prefix` including the ']'.
+            Some((id_end + close + 1, real_text))
+        });
+
+        match matched {
+            Some((consumed_after_prefix, real_text)) => {
+                // Emit the real text verbatim; do NOT rescan it.
+                result.push_str(real_text);
+                rest = &after_prefix[consumed_after_prefix..];
+            }
+            None => {
+                // Not a valid/known placeholder: emit the literal prefix and
+                // continue scanning after it so we make forward progress.
+                result.push_str(placeholder_prefix);
+                rest = after_prefix;
+            }
         }
     }
+    result.push_str(rest);
     result
 }
 
@@ -1899,5 +1908,42 @@ mod tests {
         store.insert(3u32, "hello".to_string());
         let input = "[Pasted text #3]";
         assert_eq!(expand_paste_placeholders(input, &store), "hello");
+    }
+
+    #[test]
+    fn expand_paste_placeholders_self_referential_text_does_not_hang() {
+        // Regression: a stored paste whose own text contains a placeholder
+        // string for its own id must NOT be re-expanded (previously this
+        // infinite-looped and froze the whole REPL on Enter). The inserted
+        // text is emitted verbatim.
+        let mut store = std::collections::HashMap::new();
+        store.insert(1u32, "a [Pasted text #1] b".to_string());
+        let input = "x [Pasted text #1] y";
+        assert_eq!(
+            expand_paste_placeholders(input, &store),
+            "x a [Pasted text #1] b y"
+        );
+    }
+
+    #[test]
+    fn expand_paste_placeholders_multiple_and_unknown_ids() {
+        let mut store = std::collections::HashMap::new();
+        store.insert(1u32, "ONE".to_string());
+        store.insert(2u32, "TWO".to_string());
+        // #1 and #2 expand; #9 is unknown and stays literal.
+        let input = "[Pasted text #1] mid [Pasted text #2 +3 lines] end [Pasted text #9]";
+        assert_eq!(
+            expand_paste_placeholders(input, &store),
+            "ONE mid TWO end [Pasted text #9]"
+        );
+    }
+
+    #[test]
+    fn expand_paste_placeholders_unterminated_is_literal() {
+        // A prefix with no closing bracket must not consume the rest or loop.
+        let mut store = std::collections::HashMap::new();
+        store.insert(1u32, "X".to_string());
+        let input = "[Pasted text #1 no close";
+        assert_eq!(expand_paste_placeholders(input, &store), input);
     }
 }

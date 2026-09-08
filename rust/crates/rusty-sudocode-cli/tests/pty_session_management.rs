@@ -14,7 +14,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{spawn_scode, spawn_scode_in_dir, HarnessWorkspace, DEFAULT_TIMEOUT};
+use common::{spawn_scode_in_dir_with_env, HarnessWorkspace, DEFAULT_TIMEOUT};
 
 /// Write a minimal session JSONL with the given user/assistant messages.
 /// `workspace_root` is embedded in the session meta so scode accepts the
@@ -164,7 +164,6 @@ fn session_auto_save_creates_jsonl() {
 /// 2. Spawn scode --resume <path> /export notes.txt
 /// 3. Verify notes.txt contains the original user message.
 #[test]
-#[cfg(unix)] // spawn_scode_in_dir uses sh -c
 fn resume_and_export_preserves_context() {
     let workspace = HarnessWorkspace::new("resume-export");
     let session_path = write_fixture_session(
@@ -179,10 +178,14 @@ fn resume_and_export_preserves_context() {
     let session_str = session_path.to_str().expect("utf8");
     let export_str = export_path.to_str().expect("utf8");
 
-    let mut sess = spawn_scode_in_dir(
+    let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
         &["--resume", session_str, "/export", export_str],
         DEFAULT_TIMEOUT,
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
     )
     .expect("spawn scode --resume");
 
@@ -214,7 +217,6 @@ fn resume_and_export_preserves_context() {
 /// 4. Spawn scode --resume <path> /undo
 /// 5. Verify file on disk is restored to original content.
 #[test]
-#[cfg(unix)]
 fn undo_restores_file_on_disk() {
     let workspace = HarnessWorkspace::new("undo-restore");
     let file_path = workspace.root.join("fixture.txt");
@@ -230,10 +232,14 @@ fn undo_restores_file_on_disk() {
     let session_path = write_undo_fixture_session(&workspace.root, &abs_path);
     let session_str = session_path.to_str().expect("utf8");
 
-    let mut sess = spawn_scode_in_dir(
+    let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
         &["--resume", session_str, "/undo"],
         DEFAULT_TIMEOUT,
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
     )
     .expect("spawn scode --resume /undo");
 
@@ -267,7 +273,6 @@ fn undo_restores_file_on_disk() {
 /// 2. Spawn scode --resume <path> /compact --output-format json
 /// 3. Verify JSON output contains removed_messages > 0.
 #[test]
-#[cfg(unix)]
 fn compact_reduces_messages() {
     let workspace = HarnessWorkspace::new("compact");
     let mut messages: Vec<(&str, &str, &str)> = Vec::new();
@@ -286,10 +291,14 @@ fn compact_reduces_messages() {
     let session_path = write_fixture_session(&workspace.root, &messages);
     let session_str = session_path.to_str().expect("utf8");
 
-    let mut sess = spawn_scode_in_dir(
+    let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
         &["--resume", session_str, "/compact"],
         DEFAULT_TIMEOUT,
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
     )
     .expect("spawn scode --resume /compact");
 
@@ -326,7 +335,6 @@ fn compact_reduces_messages() {
 /// Human resumes a session and runs /session list. Verifies the
 /// output shows at least one session entry.
 #[test]
-#[cfg(unix)]
 fn session_list_shows_entries() {
     let workspace = HarnessWorkspace::new("session-list");
     let session_path = write_fixture_session(
@@ -335,10 +343,14 @@ fn session_list_shows_entries() {
     );
     let session_str = session_path.to_str().expect("utf8");
 
-    let mut sess = spawn_scode_in_dir(
+    let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
         &["--resume", session_str, "/session", "list"],
         DEFAULT_TIMEOUT,
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
     )
     .expect("spawn scode /session list");
 
@@ -387,10 +399,14 @@ fn resume_latest_restores_most_recent() {
     let export_path = workspace.root.join("latest-export.txt");
     let export_str = export_path.to_str().expect("utf8");
 
-    let mut sess = spawn_scode_in_dir(
+    let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
         &["--resume", "latest", "/export", export_str],
         DEFAULT_TIMEOUT,
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
     )
     .expect("spawn scode --resume latest");
 

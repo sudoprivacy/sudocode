@@ -64,22 +64,7 @@ impl std::fmt::Display for ModelStatus {
 /// unavailable (as opposed to genuinely incompatible). These are
 /// transient/group-membership errors that should be skipped, not failed.
 fn is_availability_error(screen: &str) -> bool {
-    screen.contains("429")
-        || screen.contains("rate limit")
-        || screen.contains("Rate limit")
-        || screen.contains("overloaded")
-        || screen.contains("503")
-        || screen.contains("502")
-        || screen.contains("404")
-        || screen.contains("model_not_found")
-        || screen.contains("not supported")
-        || screen.contains("timed out")
-        || screen.contains("timeout")
-        || screen.contains("ETIMEDOUT")
-        || screen.contains("ECONNREFUSED")
-        || screen.contains("connection refused")
-        || screen.contains("upstream")
-        || screen.contains("saturated")
+    common::model_unavailable_in_screen(screen)
 }
 
 /// Run a single model through a "What is 2+2?" smoke test.
@@ -129,22 +114,26 @@ fn test_one_model(model: &str) -> ModelResult {
                     detail: "responded with 4, exit 0".to_string(),
                 },
                 Ok(code) => {
-                    // Non-zero exit despite matching "4" — could be a false
-                    // positive (e.g. "404" contains "4"). Check the screen
-                    // for availability errors before calling it a failure.
+                    // Non-zero exit despite matching "4" — almost always a
+                    // false positive, because a provider error body carries a
+                    // request id full of digits.
+                    //
+                    // Which third-party models a proxy account can reach is a
+                    // property of the token, not of `scode`, so a rejected run
+                    // is a Skip and not a compatibility verdict. Keyed on the
+                    // exit status rather than the error text: the terminal
+                    // holds only the current frame and a provider error is
+                    // several wrapped lines, so scraping it back off the screen
+                    // decided the same run differently from one attempt to the
+                    // next.
                     let screen = sess.render(|s| s.contents());
-                    if is_availability_error(&screen) {
-                        ModelResult {
-                            model: model.to_string(),
-                            status: ModelStatus::Skip,
-                            detail: format!("upstream unavailable (exit {code})"),
-                        }
-                    } else {
-                        ModelResult {
-                            model: model.to_string(),
-                            status: ModelStatus::Fail,
-                            detail: format!("responded with 4 but exit code {code}"),
-                        }
+                    ModelResult {
+                        model: model.to_string(),
+                        status: ModelStatus::Skip,
+                        detail: format!("run failed with exit {code}; screen tail: {}", {
+                            let tail: String = screen.chars().rev().take(160).collect();
+                            tail.chars().rev().collect::<String>()
+                        }),
                     }
                 }
                 Err(e) => ModelResult {

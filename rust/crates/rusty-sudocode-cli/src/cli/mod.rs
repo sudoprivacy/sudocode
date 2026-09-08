@@ -1,4 +1,3 @@
-pub(crate) mod api_client;
 pub(crate) mod args;
 pub(crate) mod config_ui;
 pub(crate) mod cron;
@@ -8,11 +7,8 @@ pub(crate) mod format;
 pub(crate) mod git;
 pub(crate) mod help;
 pub(crate) mod lifecycle;
-pub(crate) mod mcp;
-pub(crate) mod nexus_a2a;
 pub(crate) mod pager;
 pub(crate) mod session;
 pub(crate) mod status;
-pub(crate) mod tool_executor;
 pub(crate) mod undo;
 pub(crate) mod update;

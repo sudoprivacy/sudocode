@@ -105,7 +105,11 @@ fn explore_and_plan_agents_have_isolated_memory() {
         &["--permission-mode", "danger-full-access", &prompt],
         extra_env,
     );
-    let long = LIVE_TIMEOUT.saturating_mul(3);
+    // Sub-agent tests are two serialised model turns (parent spawns a worker,
+    // worker answers, parent relays), so they need noticeably more room than a
+    // single-turn test — especially when the rest of the suite is running
+    // beside them. Purely a timeout: the assertions are unchanged.
+    let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
     // Both sentinels should eventually surface (the parent reports both

@@ -16,7 +16,6 @@ use std::time::Duration;
 /// may call bash or stream text — either way, ESC should cancel and return
 /// to the `❯` prompt.
 #[test]
-#[cfg(unix)]
 fn esc_cancels_turn_in_repl() {
     let env = common::TestEnv::new("esc-repl");
     let root = env.workspace_root().to_path_buf();

@@ -41,6 +41,22 @@ use pty_expect::{PtySession, Result};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Prefix for every `sh -c` line the harness builds, so `scode` receives its
+/// argv verbatim.
+///
+/// The harness drives `scode` through `sh`, which on Windows is Git Bash. Its
+/// MSYS runtime rewrites arguments that *look* like POSIX paths into Windows
+/// ones before handing them to a native binary, so a slash command argument —
+/// `/session`, `/export`, `/undo`, `/compact` — arrives as
+/// `C:/Program Files/Git/session`. `scode` then rejects it ("--resume trailing
+/// arguments must be slash commands") and the test times out waiting for output
+/// that was never going to come. The conversion is done by the *spawning* shell
+/// based on its own environment, so it has to be exported here rather than
+/// passed through the `/usr/bin/env` prefix that follows.
+///
+/// Inert on Linux and macOS, where the variables mean nothing.
+const MSYS_ARGV_PASSTHROUGH: &str = "export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*';";
+
 /// Default PTY-test timeout for `expect` operations.
 /// Windows CI runners are significantly slower to spawn PTY processes
 /// (cold cache, antivirus scanning, etc.), so use a generous timeout.
@@ -56,6 +72,34 @@ pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 #[must_use]
 pub fn scode_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scode"))
+}
+
+/// A throwaway config home under `parent`, seeded from the real one, for a
+/// spawned `scode` that has no [`TestEnv`] to get one from.
+///
+/// Not every `scode` in the suite comes from `TestEnv`: a few files build their
+/// own `Command` for read-only subcommands. Those inherit the environment,
+/// which points at the developer's real `~/.nexus/sudocode` — and `scode`
+/// writes there: `/config` with no section opens an interactive editor over
+/// `settings.json` and `sudocode.json`. A live run was rewriting both
+/// mid-suite, losing `auth_profile` and repointing every model at a different
+/// proxy account, after which later tests billed an account the developer had
+/// not selected and failed against a routing group it cannot reach — as
+/// timeouts, with no mention of auth, moving between runs like flakes.
+///
+/// Per call, under the caller's own temp root, deliberately: these tests run in
+/// parallel and `scode` writes into its config home, so a single shared
+/// directory has them tripping over each other's files ("The directory is not
+/// empty", os error 145). Rooting it in the test's own workspace also means it
+/// is cleaned up with the rest of that test.
+pub fn throwaway_config_home(parent: &std::path::Path) -> PathBuf {
+    let real = default_config_home();
+    let dir = parent.join("scode-config-home");
+    fs::create_dir_all(&dir).expect("throwaway config home should be created");
+    if real.join("sudocode.json").exists() {
+        copy_live_credentials(&real, &dir);
+    }
+    dir
 }
 
 /// Spawn `scode <args...>` under a PTY with the default timeout.
@@ -84,11 +128,10 @@ enum Backend {
         server: MockAnthropicService,
         workspace: HarnessWorkspace,
     },
-    /// Real API via the user's `~/.nexus/sudocode/sudocode.json`.
-    Live {
-        workspace: HarnessWorkspace,
-        config_home: PathBuf,
-    },
+    /// Real API, via a *copy* of the user's credentials — see
+    /// [`copy_live_credentials`]. Same shape as `Mock`: the config the child
+    /// reads always lives inside the test's own workspace.
+    Live { workspace: HarnessWorkspace },
 }
 
 /// **The single entry point for all PTY tests that talk to a model.**
@@ -148,18 +191,16 @@ impl TestEnv {
         // Serialise live tests — rate-limit protection.
         let guard = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
-        let config_home = default_config_home();
+        let real_config_home = default_config_home();
         assert!(
-            config_home.join("sudocode.json").exists(),
+            real_config_home.join("sudocode.json").exists(),
             "SCODE_TEST_BACKEND=live but {}/sudocode.json not found",
-            config_home.display()
+            real_config_home.display()
         );
         let workspace = HarnessWorkspace::new(label);
+        copy_live_credentials(&real_config_home, &workspace.config_home);
         Self {
-            backend: Backend::Live {
-                workspace,
-                config_home,
-            },
+            backend: Backend::Live { workspace },
             _live_guard: Some(guard),
         }
     }
@@ -214,13 +255,15 @@ impl TestEnv {
                 DEFAULT_TIMEOUT,
                 env_vars,
             ),
-            Backend::Live {
+            // `--model sonnet`, not `--model auto`: `auto` resolves through the
+            // copied settings.json to whatever model the developer happens to
+            // have selected, so the same assertions would be graded against a
+            // different model on every machine. Mock mode pins `sonnet`; live
+            // pins it too, and the two stay comparable.
+            Backend::Live { workspace } => spawn_with_workspace(
                 workspace,
-                config_home,
-            } => spawn_with_workspace(
-                workspace,
-                Some(config_home),
-                &["--auth", "proxy", "--model", "auto"],
+                None,
+                &["--auth", "proxy", "--model", "sonnet"],
                 extra_args,
                 LIVE_TIMEOUT,
                 env_vars,
@@ -233,15 +276,14 @@ impl TestEnv {
     #[must_use]
     pub fn workspace_root(&self) -> &std::path::Path {
         match &self.backend {
-            Backend::Mock { workspace, .. } | Backend::Live { workspace, .. } => &workspace.root,
+            Backend::Mock { workspace, .. } | Backend::Live { workspace } => &workspace.root,
         }
     }
 
     /// Config home directory for the test environment (where settings.json / sudocode.json live).
     pub fn config_home(&self) -> &std::path::Path {
         match &self.backend {
-            Backend::Mock { workspace, .. } => &workspace.config_home,
-            Backend::Live { config_home, .. } => config_home,
+            Backend::Mock { workspace, .. } | Backend::Live { workspace } => &workspace.config_home,
         }
     }
 
@@ -369,7 +411,10 @@ fn spawn_with_workspace(
     // C:\ paths) and can't find `env` — the resulting `exec: env: not
     // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
     // same way on Linux, macOS, and Git Bash on Windows.
-    let mut cmd = format!("cd {} && exec /usr/bin/env", shell_quote(&workspace_root));
+    let mut cmd = format!(
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env",
+        shell_quote(&workspace_root)
+    );
     cmd.push_str(&format!(
         " SUDO_CODE_CONFIG_HOME={}",
         shell_quote(&effective_config_home)
@@ -420,52 +465,129 @@ fn spawn_with_workspace(
     sess
 }
 
-/// Resolve the `sh` binary to the full path portable_pty needs.
+/// Copy the credential files a live run needs out of the developer's real
+/// config home and into the test's own, so the spawned `scode` reads a throwaway
+/// copy.
 ///
-/// On Unix this is trivially `"sh"` — the CreateProcess-equivalent
-/// (posix_spawn) does PATH resolution. On Windows, portable_pty's
-/// `CommandBuilder::new("sh")` hands the raw name to CreateProcessW,
-/// which does NOT look up PATH; the child spawn then fails with
-/// `os error 2` ("system cannot find the specified file"). Resolve
-/// against Git for Windows' bundled `sh.exe` first, then fall back to
-/// PATH scanning so contributors with a different sh installation
-/// (WSL, MSYS2, chocolatey) are still covered.
+/// Live mode used to point `SUDO_CODE_CONFIG_HOME` straight at
+/// `~/.nexus/sudocode`, which meant every test that writes config — `/config
+/// set`, `scode config`, auth-profile edits, cron registration — wrote to the
+/// developer's real one. That is destructive rather than merely untidy: a run
+/// of the full suite overwrote a real `sudocode.json` with the placeholder
+/// `SAMPLE_SUDOCODE_JSON`, and every later live test then failed 401 against a
+/// `<YOUR_..._API_KEY>` credential. Copying makes a live run as disposable as a
+/// mock one while still using real credentials.
 ///
-/// Public so test files with their own bespoke spawn helpers (e.g.
-/// `pty_mcp_manage`) resolve `sh` through this one SSOT rather than
-/// handing a bare `"sh"` to `CreateProcessW` (which fails `os error 2`
-/// on Windows).
-pub fn resolve_sh() -> String {
-    #[cfg(unix)]
-    {
-        String::from("sh")
+/// Only the three files that carry credentials or the model/account selection
+/// are copied. Deliberately not the rest of the directory: `scode.exe` and its
+/// backups are tens of megabytes each, and `crons.json` / `plugins/` are
+/// exactly the developer state a hermetic run should start without.
+fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &std::path::Path) {
+    for relative in ["sudocode.json", "settings.json"] {
+        let source = real_config_home.join(relative);
+        if source.exists() {
+            fs::copy(&source, test_config_home.join(relative))
+                .unwrap_or_else(|e| panic!("live {relative} should copy: {e}"));
+        }
     }
-    #[cfg(windows)]
-    {
-        let candidates = [
-            "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
-            "C:\\Program Files\\Git\\bin\\sh.exe",
-            "C:\\Program Files (x86)\\Git\\usr\\bin\\sh.exe",
-        ];
-        for candidate in candidates {
-            if std::path::Path::new(candidate).exists() {
-                return candidate.to_string();
+    // Which account a live run bills is chosen per run, and only ever written
+    // into this copy. `SCODE_LIVE_AUTH_PROFILE` names an account from
+    // `auth_modes.proxy`; without it the run uses whatever the machine's config
+    // already selects.
+    //
+    // This is deliberately not a change to the developer's global config. That
+    // file is shared by every session on the machine, and editing it to pick an
+    // account both fights whoever else is using it and pushes the choice onto
+    // repositories that did not ask for it — one proxy account does not serve
+    // every model, so a global repoint breaks unrelated work. Since
+    // `auth_profile` now applies to registered models too (sudocode #556), a
+    // per-run selection is enough.
+    if let Ok(profile) = std::env::var("SCODE_LIVE_AUTH_PROFILE") {
+        let profile = profile.trim();
+        if !profile.is_empty() {
+            let settings_path = test_config_home.join("settings.json");
+            let mut settings: serde_json::Value = fs::read_to_string(&settings_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(object) = settings.as_object_mut() {
+                object.insert(
+                    "auth_profile".to_string(),
+                    serde_json::Value::String(profile.to_string()),
+                );
             }
+            fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&settings).expect("settings.json should serialize"),
+            )
+            .expect("live settings.json should be written");
         }
-        if let Some(path_env) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path_env) {
-                let candidate = dir.join("sh.exe");
-                if candidate.exists() {
-                    return candidate.to_string_lossy().into_owned();
-                }
-            }
-        }
-        // Last resort — will produce a clear "os error 2" spawn
-        // failure rather than a silent hang, and matches historical
-        // Linux CI behaviour.
-        String::from("sh")
+    }
+
+    // Cached model capabilities are not credentials, but copying them keeps a
+    // live run from re-fetching the catalogue once per test.
+    let capabilities = real_config_home
+        .join("cache")
+        .join("model-capabilities.json");
+    if capabilities.exists() {
+        let cache_dir = test_config_home.join("cache");
+        fs::create_dir_all(&cache_dir).expect("live cache dir should be created");
+        fs::copy(&capabilities, cache_dir.join("model-capabilities.json"))
+            .expect("live model-capabilities.json should copy");
     }
 }
+
+/// `true` if `screen` shows the model being unreachable *for this account or
+/// right now*, rather than the model genuinely misbehaving.
+///
+/// Live tests that name a specific model are only meaningful when the tester's
+/// account can actually reach it. Proxy accounts are scoped to a subset of
+/// models — a token with Claude access and nothing else answers
+/// "This token has no access to model …" — and any account can hit a transient
+/// rate limit or upstream outage. Neither says anything about the code under
+/// test, so callers skip on this rather than fail, and stay account-agnostic.
+///
+/// Matches with all whitespace removed from both sides, because the screen is
+/// a wrapped 80-column terminal: `no access to model o3-mini` can arrive split
+/// across a line break, and a plain `contains` then misses it.
+#[must_use]
+pub fn model_unavailable_in_screen(screen: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        // Account scope — the model exists, this token just can't use it.
+        "no access to model",
+        "model_not_found",
+        "not supported",
+        "404",
+        // Transient capacity / connectivity.
+        "429",
+        "rate limit",
+        "Rate limit",
+        "overloaded",
+        "saturated",
+        "upstream",
+        "503",
+        "502",
+        "timed out",
+        "timeout",
+        "ETIMEDOUT",
+        "ECONNREFUSED",
+        "connection refused",
+    ];
+    let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    MARKERS.iter().any(|marker| {
+        let marker: String = marker.chars().filter(|c| !c.is_whitespace()).collect();
+        squeezed.contains(&marker)
+    })
+}
+
+mod python;
+mod shell;
+
+// `common` is compiled into every PTY test binary, so a helper only one suite
+// needs is "unused" in all the others.
+#[allow(unused_imports)]
+pub use python::resolve_python;
+pub use shell::resolve_sh;
 
 /// Shell-quote a string so it's safe to embed in `sh -c "..."`.
 /// Wraps in single quotes and escapes any embedded single quotes.
@@ -476,6 +598,28 @@ pub fn spawn_scode_in_dir(
     dir: &std::path::Path,
     args: &[&str],
     timeout: Duration,
+) -> Result<PtySession> {
+    spawn_scode_in_dir_with_env(dir, args, timeout, &[])
+}
+
+/// [`spawn_scode_in_dir`] plus explicit environment variables.
+///
+/// The plain variant lets `scode` inherit the caller's environment, which is
+/// what the proxy-passthrough / model-compat suites want — they deliberately
+/// exercise the developer's real sudorouter account. Suites that only drive
+/// slash commands over a fixture session want the opposite: pass the
+/// workspace's own `SUDO_CODE_CONFIG_HOME` / `HOME` here so the run is
+/// hermetic and can't pick up whatever account happens to be configured on the
+/// machine (which is what made `pty_session_management` behave differently on a
+/// developer's Windows box than on a bare CI runner).
+///
+/// Vars are set through `/usr/bin/env` rather than the PTY spawn call so the
+/// single `sh -c` command line stays the one place the child is constructed.
+pub fn spawn_scode_in_dir_with_env(
+    dir: &std::path::Path,
+    args: &[&str],
+    timeout: Duration,
+    env: &[(&str, &std::path::Path)],
 ) -> Result<PtySession> {
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy().to_string();
@@ -496,10 +640,17 @@ pub fn spawn_scode_in_dir(
     // reliably and resolves the scode path identically on Linux, macOS, and
     // Git Bash (see the note in `spawn_with_workspace`).
     let mut cmd = format!(
-        "cd {} && exec /usr/bin/env {}",
-        shell_quote(&dir_str),
-        shell_quote(&bin_str)
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env",
+        shell_quote(&dir_str)
     );
+    for (key, value) in env {
+        cmd.push_str(&format!(
+            " {}={}",
+            key,
+            shell_quote(&value.display().to_string())
+        ));
+    }
+    cmd.push_str(&format!(" {}", shell_quote(&bin_str)));
     for arg in args {
         cmd.push_str(&format!(" {}", shell_quote(arg)));
     }

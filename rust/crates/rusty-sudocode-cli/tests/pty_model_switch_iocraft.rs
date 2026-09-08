@@ -30,13 +30,24 @@ fn model_switch_changes_active_model() {
         panic!("initial prompt: {e}\nPTY:\n{screen}");
     });
 
-    // Switch to a specific model via /model <name>
-    sess.send("/model claude-sonnet-4-6\r")
+    // Switch to a specific model via /model <name>.
+    //
+    // Deliberately *not* the model live mode starts on (`sonnet`): `/model`
+    // only reports "Model updated" when the model actually changes, and naming
+    // the one already active prints the model listing instead. Skips when the
+    // tester's account can't reach this one — see
+    // `common::model_unavailable_in_screen`.
+    const TARGET_MODEL: &str = "claude-sonnet-4-5-20250929";
+    sess.send(&format!("/model {TARGET_MODEL}\r"))
         .expect("send /model");
-    sess.expect("Model updated").unwrap_or_else(|e| {
+    if let Err(e) = sess.expect("Model updated") {
         let screen = sess.render(|s| s.contents());
-        panic!("model switch report: {e}\nPTY:\n{screen}");
-    });
+        assert!(
+            common::model_unavailable_in_screen(&screen),
+            "model switch report: {e}\nPTY:\n{screen}"
+        );
+        return;
+    }
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -268,6 +268,48 @@ fn connection_for<'a>(
     config.auth_modes.get(auth_mode)?.get(provider_name)
 }
 
+/// Which rule in [`select_proxy_account`]'s precedence chose the account.
+///
+/// Reported alongside the account because "who pays" is only actionable next
+/// to "and why". An account reached by `AuthProfile` is a choice someone made
+/// and can change; one reached by `FirstConfigured` is a default nobody chose,
+/// and it is the case where a surprising name on the bill has no visible
+/// cause. Telling them apart is what makes an unexpected account fixable
+/// instead of merely alarming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSource {
+    /// The layered settings' `auth_profile` — an explicit per-project choice.
+    AuthProfile,
+    /// The `provider` named by `models.<alias>.providers.proxy`.
+    ModelMapping,
+    /// The first account configured under `auth_modes.proxy`, because nothing
+    /// selected one.
+    FirstConfigured,
+}
+
+impl AccountSource {
+    /// A phrase for reports, naming the setting a user would edit.
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::AuthProfile => "auth_profile",
+            Self::ModelMapping => "model mapping",
+            Self::FirstConfigured => "first configured",
+        }
+    }
+}
+
+/// The proxy account a request is billed to, plus the rule that chose it.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedAccount<'a> {
+    /// The account's name under `auth_modes.proxy`.
+    pub name: &'a str,
+    /// Its connection config (base URL, credentials).
+    pub connection: &'a ProviderConnectionConfig,
+    /// Which precedence rule selected it.
+    pub source: AccountSource,
+}
+
 /// Single source of truth for **which proxy account a request is billed to**.
 ///
 /// Every path that can put a request on a proxy account resolves through this
@@ -287,7 +329,7 @@ fn connection_for<'a>(
 pub fn select_proxy_account<'a>(
     config: &'a SudoCodeConfig,
     mapping_provider: Option<&str>,
-) -> Result<(&'a str, &'a ProviderConnectionConfig), ApiError> {
+) -> Result<SelectedAccount<'a>, ApiError> {
     let accounts = config
         .auth_modes
         .get("proxy")
@@ -313,7 +355,11 @@ pub fn select_proxy_account<'a>(
     {
         return accounts
             .get_key_value(name)
-            .map(|(name, connection)| (name.as_str(), connection))
+            .map(|(name, connection)| SelectedAccount {
+                name: name.as_str(),
+                connection,
+                source: AccountSource::AuthProfile,
+            })
             .ok_or_else(|| {
                 ApiError::Configuration(format!(
                     "auth_profile '{name}' is not present in auth_modes.proxy (configured: {}). \
@@ -327,7 +373,11 @@ pub fn select_proxy_account<'a>(
     if let Some(name) = mapping_provider {
         return accounts
             .get_key_value(name)
-            .map(|(name, connection)| (name.as_str(), connection))
+            .map(|(name, connection)| SelectedAccount {
+                name: name.as_str(),
+                connection,
+                source: AccountSource::ModelMapping,
+            })
             .ok_or_else(|| {
                 ApiError::Configuration(format!(
                     "provider '{name}' not found under auth_modes.proxy in sudocode.json \
@@ -340,7 +390,11 @@ pub fn select_proxy_account<'a>(
     accounts
         .iter()
         .next()
-        .map(|(name, connection)| (name.as_str(), connection))
+        .map(|(name, connection)| SelectedAccount {
+            name: name.as_str(),
+            connection,
+            source: AccountSource::FirstConfigured,
+        })
         .ok_or_else(|| {
             ApiError::Configuration(
                 "no accounts configured under auth_modes.proxy in sudocode.json".to_string(),
@@ -358,7 +412,7 @@ pub fn select_proxy_account<'a>(
 pub fn proxy_account_for_model<'a>(
     config: &'a SudoCodeConfig,
     model_alias: &str,
-) -> Result<(&'a str, &'a ProviderConnectionConfig), ApiError> {
+) -> Result<SelectedAccount<'a>, ApiError> {
     let alias_lower = model_alias.trim().to_ascii_lowercase();
     let mapping_provider = resolve_model_for_mode(config, &alias_lower, Some("proxy"))
         .and_then(|entry| entry.providers.get("proxy"))
@@ -455,7 +509,8 @@ pub fn resolve_provider_from_config(
     //    selector, so an explicit per-project `auth_profile` decides who pays
     //    here exactly as it does on the passthrough path and in `doctor`.
     let (provider_name, connection) = if auth_mode_str == "proxy" {
-        select_proxy_account(config, Some(mapping.provider.as_str()))?
+        let selected = select_proxy_account(config, Some(mapping.provider.as_str()))?;
+        (selected.name, selected.connection)
     } else {
         let connection =
             connection_for(config, &auth_mode_str, &mapping.provider).ok_or_else(|| {
@@ -518,7 +573,8 @@ fn try_proxy_passthrough(
     // Who pays: the shared selector (SSOT with the model-config path and
     // `doctor`). There is no `models.<alias>` entry here, so no mapping
     // provider to offer it.
-    let (provider_name, connection) = select_proxy_account(config, None)?;
+    let selected = select_proxy_account(config, None)?;
+    let (provider_name, connection) = (selected.name, selected.connection);
 
     // Wire format: the shared resolver (SSOT with the model-config path) —
     // no explicit `api` here, so it consults the model_capabilities SSOT.
@@ -1026,8 +1082,9 @@ mod tests {
             let mut config = config_with_second_proxy_account();
             config.selected_account = selected.clone();
 
-            let (reported, connection) =
+            let selected =
                 proxy_account_for_model(&config, "opus").expect("should resolve an account");
+            let (reported, connection) = (selected.name, selected.connection);
             let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
                 .expect("should resolve");
 
@@ -1051,8 +1108,9 @@ mod tests {
         let config = config_with_second_proxy_account();
         assert!(config.selected_account.is_none());
 
-        let (name, _) = proxy_account_for_model(&config, "opus").expect("should resolve");
-        assert_eq!(name, "sudorouter");
+        let selected = proxy_account_for_model(&config, "opus").expect("should resolve");
+        assert_eq!(selected.name, "sudorouter");
+        assert_eq!(selected.source, AccountSource::ModelMapping);
 
         let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
             .expect("should resolve");

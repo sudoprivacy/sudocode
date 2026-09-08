@@ -61,15 +61,16 @@ use cli::export::{
     PromptHistoryEntry,
 };
 use cli::format::{
-    describe_tool_progress, first_visible_line, format_acp_compact_report, format_auth_report,
+    describe_tool_progress, first_visible_line, format_account_report,
+    format_account_switch_report, format_acp_compact_report, format_auth_report,
     format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
     format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
     format_cost_report, format_internal_prompt_progress_line, format_issue_report,
     format_model_report, format_model_switch_report, format_permission_prompt_box,
     format_permissions_report, format_permissions_switch_report, format_pr_report,
     format_resume_report, format_sandbox_report, format_tool_call_start, format_tool_result,
-    format_turn_status_line_with_branch, format_ultraplan_report, render_messages,
-    render_resume_usage, render_version_report, truncate_for_summary,
+    format_turn_status_line, format_ultraplan_report, render_messages, render_resume_usage,
+    render_version_report, truncate_for_summary, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -1204,10 +1205,15 @@ fn run_resume_command(
             let tracker = UsageTracker::from_session(session);
             let usage = tracker.cumulative_usage();
             let context = status_context(Some(session_path))?;
+            let model = session.model.as_deref().unwrap_or("restored-session");
+            // Resolved for the model the session was restored with: a resumed
+            // session bills whoever the current config says, which need not be
+            // whoever paid for the turns already in the transcript.
+            let account = engine_host::billing_account_for_model(model, None);
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
                 message: Some(format_status_report(
-                    session.model.as_deref().unwrap_or("restored-session"),
+                    model,
                     StatusUsage {
                         message_count: session.messages.len(),
                         turns: tracker.turns(),
@@ -1218,6 +1224,7 @@ fn run_resume_command(
                     default_permission_mode().as_str(),
                     &context,
                     None, // #148: resumed sessions don't have flag provenance
+                    &account.describe(),
                 )),
                 json: Some(status_json_value(
                     session.model.as_deref(),
@@ -1231,6 +1238,7 @@ fn run_resume_command(
                     default_permission_mode().as_str(),
                     &context,
                     None, // #148: resumed sessions don't have flag provenance
+                    &account,
                 )),
             })
         }
@@ -1502,6 +1510,7 @@ fn run_resume_command(
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Auth { .. }
+        | SlashCommand::Account { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
         | SlashCommand::Login
@@ -3576,15 +3585,20 @@ impl LiveCli {
         let branch = env::current_dir()
             .ok()
             .and_then(|cwd| resolve_git_branch_for(&cwd));
-        let line = format_turn_status_line_with_branch(
+        // Read once per turn, from the engine's own selector rather than a
+        // second copy of the precedence rules. A turn takes seconds; the config
+        // read behind this does not register next to it.
+        let account = self.lifecycle.current_billing_account();
+        let line = format_turn_status_line(&TurnStatus {
             model,
-            turns,
-            &usage,
-            Some(context_tokens),
-            Some(context_window),
+            turn: turns,
+            usage: &usage,
+            context_tokens: Some(context_tokens),
+            context_window: Some(context_window),
             elapsed,
-            branch.as_deref(),
-        );
+            branch: branch.as_deref(),
+            account: account.name(),
+        });
         match (ui, output) {
             // Persist in ChromeSlot (visible until next turn) AND scrollback
             // (survives scroll, visible in session replay).
@@ -3845,6 +3859,7 @@ impl LiveCli {
             SlashCommand::Model { model } => self.set_model(model)?,
             SlashCommand::Permissions { mode } => self.set_permissions(mode)?,
             SlashCommand::Auth { mode } => self.set_auth(mode)?,
+            SlashCommand::Account { account } => self.set_billing_account(account)?,
             SlashCommand::Clear { confirm } => self.clear_session(confirm)?,
             SlashCommand::Cost => {
                 self.print_cost();
@@ -4048,6 +4063,7 @@ impl LiveCli {
             self.lifecycle.current_permission_mode().as_str(),
             &status_context(Some(&handle.path)).expect("status context should load"),
             None, // #148: REPL /status doesn't carry flag provenance
+            &self.lifecycle.current_billing_account().describe(),
         );
         self.out_suspend(|| print_with_pager(&report));
     }
@@ -4189,6 +4205,41 @@ impl LiveCli {
         self.lifecycle
             .set_permission_mode(permission_mode_from_label(normalized))?;
         self.out_println(format_permissions_switch_report(&previous, normalized));
+        Ok(true)
+    }
+
+    /// `/account [name]` — report who pays, or switch to another configured
+    /// account. Returns whether the session was rebuilt.
+    fn set_billing_account(
+        &mut self,
+        account: Option<String>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let current = self.lifecycle.current_billing_account();
+
+        let Some(account) = account else {
+            self.out_println(format_account_report(
+                &current.describe(),
+                current.name(),
+                &self.lifecycle.billing_accounts(),
+            ));
+            return Ok(false);
+        };
+
+        if current.name() == Some(account.trim()) {
+            self.out_println(format_account_report(
+                &current.describe(),
+                current.name(),
+                &self.lifecycle.billing_accounts(),
+            ));
+            return Ok(false);
+        }
+
+        let previous = current.describe();
+        let switched = self.lifecycle.set_billing_account(&account)?;
+        self.out_println(format_account_switch_report(
+            &previous,
+            &switched.describe(),
+        ));
         Ok(true)
     }
 

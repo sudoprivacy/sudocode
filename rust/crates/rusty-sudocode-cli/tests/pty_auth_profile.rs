@@ -167,3 +167,143 @@ fn write_auth_profile(env: &TestEnv, profile: &str) {
     )
     .expect("write settings.local.json");
 }
+
+/// `/account` names who pays and lists what else is configured.
+///
+/// The account is resolved per request from layered config, so it can be one
+/// nobody in this project chose. This is the command that makes it visible
+/// without reading three files.
+#[test]
+fn account_lists_configured_accounts_and_marks_current() {
+    let env = TestEnv::new("account-list");
+    write_two_account_config(&env);
+
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    sess.set_default_timeout(Duration::from_secs(20));
+    sess.expect("❯").expect("async REPL prompt");
+
+    sess.send("/account\r").expect("send /account");
+    for expected in ["Accounts", "sudorouter", "team-b"] {
+        sess.expect(expected).unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("/account should list {expected}: {e}\nPTY screen:\n{screen}");
+        });
+    }
+
+    sess.send("/exit\r").expect("send exit");
+    assert_eq!(sess.expect_eof().expect("exit"), 0);
+}
+
+/// `/account <name>` switches the project to another configured account and
+/// persists the selection through the same writer `/config set` uses, so the
+/// choice survives the session and a later `/account` reports it as chosen by
+/// `auth_profile` rather than by a default.
+#[test]
+fn account_switch_persists_the_selection() {
+    let env = TestEnv::new("account-switch");
+    write_two_account_config(&env);
+
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    sess.set_default_timeout(Duration::from_secs(20));
+    sess.expect("❯").expect("async REPL prompt");
+
+    sess.send("/account team-b\r")
+        .expect("send /account team-b");
+    sess.expect("Account updated").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("/account <name> should report the switch: {e}\nPTY screen:\n{screen}");
+    });
+
+    sess.send("/exit\r").expect("send exit");
+    assert_eq!(sess.expect_eof().expect("exit"), 0);
+
+    // On disk, in the scope-appropriate file — the same one `/config set
+    // auth_profile` writes, not a session-only toggle.
+    let settings_local = env
+        .workspace_root()
+        .join(".nexus")
+        .join("sudocode")
+        .join("settings.local.json");
+    let content = fs::read_to_string(&settings_local).unwrap_or_else(|e| {
+        panic!(
+            "settings.local.json should exist at {}: {e}",
+            settings_local.display()
+        )
+    });
+    assert!(
+        content.contains("auth_profile") && content.contains("team-b"),
+        "/account must persist the selection; settings.local.json:\n{content}"
+    );
+}
+
+/// An account that is not configured is refused, naming the ones that are.
+///
+/// Writing it instead would move the failure to the next request, where the
+/// selector refuses rather than billing someone else — correct, but by then
+/// the user has stopped looking at the command that caused it.
+#[test]
+fn account_refuses_a_name_that_is_not_configured() {
+    let env = TestEnv::new("account-unknown");
+    write_two_account_config(&env);
+
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    sess.set_default_timeout(Duration::from_secs(20));
+    sess.expect("❯").expect("async REPL prompt");
+
+    sess.send("/account no-such-account\r")
+        .expect("send /account no-such-account");
+    sess.expect("no account named").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("/account should refuse an unconfigured name: {e}\nPTY screen:\n{screen}");
+    });
+    sess.expect("team-b").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("the refusal should name what is configured: {e}\nPTY screen:\n{screen}");
+    });
+
+    sess.send("/exit\r").expect("send exit");
+    assert_eq!(sess.expect_eof().expect("exit"), 0);
+
+    // Nothing was written: a refused selection must not land on disk.
+    let settings_local = env
+        .workspace_root()
+        .join(".nexus")
+        .join("sudocode")
+        .join("settings.local.json");
+    let content = fs::read_to_string(&settings_local).unwrap_or_default();
+    assert!(
+        !content.contains("no-such-account"),
+        "a refused account must not be persisted; settings.local.json:\n{content}"
+    );
+}
+
+/// The per-turn status line names the account the turn was billed to.
+///
+/// Live-only for the same reason as `status_reports_the_billing_account_and_why`.
+#[test]
+fn turn_status_line_names_the_billing_account() {
+    let env = TestEnv::new("account-status-line");
+    if env.is_mock() {
+        eprintln!(
+            "skipping turn_status_line_names_the_billing_account: mock mode \
+             runs under --auth api-key (run with SCODE_TEST_BACKEND=live)"
+        );
+        return;
+    }
+
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    sess.set_default_timeout(Duration::from_secs(120));
+    sess.expect("❯").expect("async REPL prompt");
+
+    sess.send("Reply with the single word: ok\r")
+        .expect("send prompt");
+    // `acct ` is emitted only by the status-line renderer, so unlike the model
+    // name it cannot be matched against the echo of the prompt.
+    sess.expect("acct ").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("turn status line should name the account: {e}\nPTY screen:\n{screen}");
+    });
+
+    sess.send("/exit\r").expect("send exit");
+    assert_eq!(sess.expect_eof().expect("exit"), 0);
+}

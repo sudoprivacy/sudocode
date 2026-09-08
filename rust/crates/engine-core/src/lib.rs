@@ -97,10 +97,13 @@ pub use api::{
     // Error surface (raw type + the human-facing formatter the CLI renders).
     format_user_visible_api_error,
     max_tokens_for_model,
+    // Which proxy account a request is billed to, and the rule that chose it.
+    proxy_account_for_model,
     read_base_url,
     resolve_model,
     resolve_provider_from_config,
     resolve_startup_auth_source,
+    AccountSource,
     ApiError,
     // Auth / provider enums + sources.
     AuthMode,

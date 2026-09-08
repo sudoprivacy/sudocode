@@ -563,6 +563,7 @@ pub(crate) fn handle_slash_command(
             let snapshot = engine.session_snapshot();
             let tracker = UsageTracker::from_session(&snapshot);
             let handle = engine.session_handle();
+            let account = engine.current_billing_account();
             format_status_report(
                 &engine.current_model(),
                 StatusUsage {
@@ -576,6 +577,7 @@ pub(crate) fn handle_slash_command(
                 &status_context(Some(&handle.path))
                     .map_err(|e| crate::AcpError::internal(e.to_string()))?,
                 None,
+                &account.describe(),
             )
         }
         SlashCommand::Cost => {

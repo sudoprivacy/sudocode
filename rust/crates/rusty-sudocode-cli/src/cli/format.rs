@@ -414,6 +414,61 @@ pub(crate) fn format_auth_switch_report(previous: &str, next: &str) -> String {
     )
 }
 
+/// Render `/account`: who pays, what chose them, and what else is on offer.
+///
+/// `current` is the rendered [`engine_host::BillingAccount`] line, so the
+/// deciding rule travels with the name — an account nobody selected reads very
+/// differently from one this project asked for, and that difference is the
+/// whole reason to look.
+pub(crate) fn format_account_report(
+    current: &str,
+    current_name: Option<&str>,
+    available: &[String],
+) -> String {
+    let accounts = if available.is_empty() {
+        "  (none configured under auth_modes.proxy in sudocode.json)".to_string()
+    } else {
+        available
+            .iter()
+            .map(|name| {
+                let marker = if Some(name.as_str()) == current_name {
+                    "● current"
+                } else {
+                    "○ available"
+                };
+                format!("  {name:<18} {marker}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "Account
+  Billed to        {current}
+  Defined in       auth_modes.proxy in sudocode.json
+  Selection scope  this project (.nexus/sudocode/settings.local.json)
+
+Accounts
+{accounts}
+
+Usage
+  Inspect current account with /account
+  Switch accounts with /account <name>"
+    )
+}
+
+pub(crate) fn format_account_switch_report(previous: &str, next: &str) -> String {
+    format!(
+        "Account updated
+  Result           account switched
+  Previous account {previous}
+  Billed to        {next}
+  Applies to       subsequent API calls
+  Persisted to     this project's settings.local.json
+  Usage            /account to inspect current account"
+    )
+}
+
 pub(crate) fn format_cost_report(usage: TokenUsage) -> String {
     format!(
         "Cost
@@ -1546,15 +1601,6 @@ pub(crate) fn truncate_for_summary(value: &str, limit: usize) -> String {
     }
 }
 
-pub(crate) fn format_turn_status_line(
-    model: &str,
-    turn: u32,
-    usage: &TokenUsage,
-    elapsed: Duration,
-) -> String {
-    format_turn_status_line_with_branch(model, turn, usage, None, None, elapsed, None)
-}
-
 /// Format the `ctx <used>/<window> (<pct>%)` status segment, or `None` when
 /// the window is unknown/zero.
 ///
@@ -1602,25 +1648,53 @@ fn format_token_count_round(n: u32) -> String {
     }
 }
 
+/// What one finished turn cost, for [`format_turn_status_line`].
+///
+/// Grouped rather than passed positionally: the line summarises a single turn,
+/// and a call site with three `Option`s in a row is one transposition away from
+/// reporting the window as the occupancy with nothing to catch it.
+pub(crate) struct TurnStatus<'a> {
+    /// The model that answered.
+    pub model: &'a str,
+    /// 1-based turn number within the session.
+    pub turn: u32,
+    /// The turn's usage — token counts and the cost estimate.
+    pub usage: &'a TokenUsage,
+    /// Current context-window occupancy (`TokenUsage::context_tokens` of the
+    /// latest turn), NOT the session-cumulative total. See
+    /// [`format_context_usage_segment`].
+    pub context_tokens: Option<u32>,
+    /// The model's context window, the denominator for the occupancy segment.
+    pub context_window: Option<u32>,
+    /// Wall-clock time the turn took.
+    pub elapsed: Duration,
+    /// Current git branch, when the workspace is a repository.
+    pub branch: Option<&'a str>,
+    /// The proxy account the turn was billed to, when one resolved. Shown
+    /// because a session spends someone's money and the name is otherwise
+    /// invisible until the bill arrives; `/status` carries which rule chose it.
+    pub account: Option<&'a str>,
+}
+
 /// Render the dim per-turn status line shown after each interactive turn.
 ///
-/// Contains, in order: model name, turn number, cumulative token count,
-/// estimated cost (when pricing for the model is known), elapsed wall-clock
-/// time for the turn, and the current git branch (when one is available).
-/// All fields are dimmed; turn and tokens are kept compact (`turn 3`,
-/// `3.2k tokens`) so the line stays single-row even at narrow widths.
-pub(crate) fn format_turn_status_line_with_branch(
-    model: &str,
-    turn: u32,
-    usage: &TokenUsage,
-    // Current context-window occupancy (TokenUsage::context_tokens of the
-    // latest turn), NOT the session-cumulative total. See
-    // format_context_usage_segment.
-    context_tokens: Option<u32>,
-    context_window: Option<u32>,
-    elapsed: Duration,
-    branch: Option<&str>,
-) -> String {
+/// Contains, in order: model name, billing account, turn number, cumulative
+/// token count, estimated cost (when pricing for the model is known), elapsed
+/// wall-clock time for the turn, context-window occupancy, and the current git
+/// branch (when one is available). All fields are dimmed; turn and tokens are
+/// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
+/// narrow widths.
+pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
+    let &TurnStatus {
+        model,
+        turn,
+        usage,
+        context_tokens,
+        context_window,
+        elapsed,
+        branch,
+        account,
+    } = status;
     let total = usage.total_tokens();
     let tokens_display = if total >= 1000 {
         format!("{:.1}k", f64::from(total) / 1000.0)
@@ -1637,6 +1711,11 @@ pub(crate) fn format_turn_status_line_with_branch(
 
     let mut segments: Vec<String> = Vec::with_capacity(8);
     segments.push(format!("[{model}]"));
+    // Next to the model: together they answer "who served this turn, and on
+    // whose account".
+    if let Some(account) = account.filter(|a| !a.is_empty()) {
+        segments.push(format!("acct {account}"));
+    }
     segments.push(format!("turn {turn}"));
     segments.push(format!("{tokens_display} tokens"));
     if let Some(cost) = cost_display {
@@ -2012,15 +2091,16 @@ mod tests {
             cache_read_input_tokens: 0,
             ..TokenUsage::default()
         };
-        let rendered = format_turn_status_line_with_branch(
-            "claude-opus-4-6",
-            3,
-            &usage,
-            None,
-            None,
-            Duration::from_secs_f64(1.2),
-            None,
-        );
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-6",
+            turn: 3,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_secs_f64(1.2),
+            branch: None,
+            account: None,
+        });
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
         assert!(plain.contains("turn 3"), "{plain}");
@@ -2032,15 +2112,16 @@ mod tests {
     #[test]
     fn turn_status_line_omits_cost_when_zero() {
         let usage = TokenUsage::default();
-        let rendered = format_turn_status_line_with_branch(
-            "claude-opus-4-6",
-            1,
-            &usage,
-            None,
-            None,
-            Duration::from_secs_f64(0.3),
-            None,
-        );
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-6",
+            turn: 1,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_secs_f64(0.3),
+            branch: None,
+            account: None,
+        });
         let plain = strip_ansi(&rendered);
         assert!(!plain.contains("$"), "{plain}");
     }
@@ -2048,15 +2129,16 @@ mod tests {
     #[test]
     fn turn_status_line_appends_branch_when_present() {
         let usage = TokenUsage::default();
-        let rendered = format_turn_status_line_with_branch(
-            "claude-opus-4-6",
-            1,
-            &usage,
-            None,
-            None,
-            Duration::from_millis(800),
-            Some("feat/tui-backlog-179"),
-        );
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-6",
+            turn: 1,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_millis(800),
+            branch: Some("feat/tui-backlog-179"),
+            account: None,
+        });
         let plain = strip_ansi(&rendered);
         assert!(plain.ends_with("feat/tui-backlog-179"), "{plain}");
     }
@@ -2064,15 +2146,16 @@ mod tests {
     #[test]
     fn turn_status_line_omits_branch_when_empty() {
         let usage = TokenUsage::default();
-        let rendered = format_turn_status_line_with_branch(
-            "claude-opus-4-6",
-            1,
-            &usage,
-            None,
-            None,
-            Duration::from_millis(800),
-            Some(""),
-        );
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-6",
+            turn: 1,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_millis(800),
+            branch: Some(""),
+            account: None,
+        });
         let plain = strip_ansi(&rendered);
         // Trailing segment should be the duration, not an empty " · ".
         assert!(plain.ends_with("0.8s"), "{plain}");
@@ -2103,17 +2186,35 @@ mod tests {
     #[test]
     fn turn_status_line_renders_context_segment() {
         let usage = TokenUsage::default();
-        let rendered = format_turn_status_line_with_branch(
-            "claude-sonnet-4-6",
-            2,
-            &usage,
-            Some(150_000),
-            Some(1_000_000),
-            Duration::from_secs_f64(0.5),
-            None,
-        );
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-sonnet-4-6",
+            turn: 2,
+            usage: &usage,
+            context_tokens: Some(150_000),
+            context_window: Some(1_000_000),
+            elapsed: Duration::from_secs_f64(0.5),
+            branch: None,
+            account: None,
+        });
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("ctx 150.0k/1M (15%)"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_names_the_billing_account() {
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-sonnet-4-6",
+            turn: 1,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_millis(500),
+            branch: None,
+            account: Some("fujitoken"),
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("acct fujitoken"), "{plain}");
     }
 
     #[test]

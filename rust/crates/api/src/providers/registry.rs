@@ -435,6 +435,45 @@ pub fn select_proxy_account<'a>(
         })
 }
 
+/// Rewrite an upstream "no channel serves this model" rejection so it names the
+/// account, which is the thing a user can actually change.
+///
+/// The gateway answers in terms of its own routing groups — "no available
+/// channel for model X under group Y", or "this token has no access to model X"
+/// — and a group is not something anyone configured. An account is. Naming it,
+/// and the command that switches it, turns an opaque rejection into the one edit
+/// that fixes it.
+///
+/// Returns `None` for every other failure, so unrelated errors pass through
+/// untouched rather than being dressed up as a routing problem.
+#[must_use]
+pub fn explain_model_not_served(
+    account: Option<&str>,
+    model: &str,
+    upstream_message: &str,
+) -> Option<String> {
+    /// Phrases the gateway uses for "this model is not routable for you".
+    /// Matched case-insensitively; the Chinese forms have no case to fold.
+    const MARKERS: &[&str] = &[
+        "可用渠道不存在",
+        "没有可用渠道",
+        "no available channel",
+        "no channels available",
+        "has no access to model",
+    ];
+    let haystack = upstream_message.to_lowercase();
+    if !MARKERS.iter().any(|marker| haystack.contains(marker)) {
+        return None;
+    }
+    let account = account.unwrap_or("<none selected>");
+    Some(format!(
+        "account '{account}' has no channel for model '{model}'.\n\
+         Switch accounts with `scode config account <name>`, or pick a model that \
+         account serves. `scode doctor` shows which account is in effect and why.\n\
+         upstream said: {upstream_message}"
+    ))
+}
+
 /// The proxy account a given model alias would actually be billed to.
 ///
 /// Thin wrapper over [`select_proxy_account`] that supplies the model entry's
@@ -1140,6 +1179,50 @@ mod tests {
                         .expect("fixture accounts carry inline keys")
                 ),
                 "reported account {reported} must be the one billed (selected={selected:?})"
+            );
+        }
+    }
+
+    /// The gateway rejects an unroutable model in terms of its own groups, which
+    /// the user never configured. The rewrite names the account and the command
+    /// that changes it, and keeps the upstream text for diagnosis.
+    #[test]
+    fn model_not_served_is_explained_in_terms_of_the_account() {
+        for upstream in [
+            "分组 auto 下模型 claude-opus-4-6 的可用渠道不存在",
+            "No available channel for model claude-opus-4-6 under group auto",
+            "This token has no access to model NEW API",
+        ] {
+            let explained =
+                explain_model_not_served(Some("fujitoken"), "claude-opus-4-6", upstream)
+                    .unwrap_or_else(|| panic!("should recognize: {upstream}"));
+            assert!(
+                explained.contains("fujitoken"),
+                "names the account: {explained}"
+            );
+            assert!(
+                explained.contains("scode config account"),
+                "prints the fix command: {explained}"
+            );
+            assert!(
+                explained.contains(upstream),
+                "keeps the upstream text for diagnosis: {explained}"
+            );
+        }
+    }
+
+    /// Unrelated failures pass through untouched — a rate limit or a 500 dressed
+    /// up as a routing problem would send the reader after the wrong fix.
+    #[test]
+    fn unrelated_errors_are_not_rewritten_as_routing_problems() {
+        for upstream in [
+            "rate limit exceeded, please retry after 30s",
+            "预扣费额度失败, 用户额度不足",
+            "upstream connect error",
+        ] {
+            assert!(
+                explain_model_not_served(Some("fujitoken"), "claude-opus-4-6", upstream).is_none(),
+                "should not rewrite: {upstream}"
             );
         }
     }

@@ -48,6 +48,10 @@ pub struct EngineApiClient {
     tool_registry: GlobalToolRegistry,
     reasoning_effort: Option<String>,
     thinking_enabled: bool,
+    /// The account this client bills to, for error messages. The gateway rejects
+    /// an unroutable model in terms of its own routing groups, which the user
+    /// never configured; naming the account turns that into an actionable edit.
+    account: Option<String>,
 }
 
 impl EngineApiClient {
@@ -70,6 +74,13 @@ impl EngineApiClient {
         let sink = Arc::new(SudoclawLogSink::new()?);
         client = client.with_session_tracer(SessionTracer::new(session_id, sink));
 
+        // Same selector `doctor` reports through, so an error names the account
+        // the report shows. Best-effort: a client that cannot name its account
+        // still works, it just explains less.
+        let account = api::proxy_account_for_model(sudocode_config, model)
+            .ok()
+            .map(|selected| selected.name.to_string());
+
         Ok(Self {
             client,
             session_id: session_id.to_string(),
@@ -79,7 +90,22 @@ impl EngineApiClient {
             tool_registry,
             reasoning_effort: None,
             thinking_enabled: true,
+            account,
         })
+    }
+
+    /// Render a provider failure for a human, adding the account when the
+    /// gateway's complaint is really "this account cannot route that model".
+    ///
+    /// One method rather than four call sites deciding for themselves — the
+    /// duplication this whole area is being repaired for.
+    fn user_visible(&self, error: &api::ApiError) -> String {
+        user_visible_error(
+            &self.session_id,
+            self.account.as_deref(),
+            &self.model,
+            error,
+        )
     }
 
     pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
@@ -129,23 +155,21 @@ impl EngineApiClient {
             .client
             .stream_message(message_request, None)
             .await
-            .map_err(|error| {
-                RuntimeError::new(api::format_user_visible_api_error(&self.session_id, &error))
-            })?;
+            .map_err(|error| RuntimeError::new(self.user_visible(&error)))?;
 
         let prefetched_next = if apply_stall_timeout {
             match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, provider_stream.next_event()).await
             {
-                Ok(inner) => match inner.map_err(|error| {
-                    RuntimeError::new(api::format_user_visible_api_error(&self.session_id, &error))
-                })? {
-                    Some(event) => Some(Some(event)),
-                    None => {
-                        return Err(RuntimeError::new(
-                            "post-tool stall: model stream ended before first event",
-                        ));
+                Ok(inner) => {
+                    match inner.map_err(|error| RuntimeError::new(self.user_visible(&error)))? {
+                        Some(event) => Some(Some(event)),
+                        None => {
+                            return Err(RuntimeError::new(
+                                "post-tool stall: model stream ended before first event",
+                            ));
+                        }
                     }
-                },
+                }
                 Err(_elapsed) => {
                     return Err(RuntimeError::new(
                         "post-tool stall: model did not respond within timeout",
@@ -166,6 +190,8 @@ impl EngineApiClient {
             done: false,
             client: self.client.clone(),
             session_id: self.session_id.clone(),
+            account: self.account.clone(),
+            model: self.model.clone(),
             fallback_request: Some(build_non_streaming_fallback_request(
                 message_request,
                 is_post_tool,
@@ -187,8 +213,10 @@ impl EngineApiClient {
                         prefetched_next
                     } else {
                         state.provider_stream.next_event().await.map_err(|error| {
-                            RuntimeError::new(api::format_user_visible_api_error(
+                            RuntimeError::new(user_visible_error(
                                 &state.session_id,
+                                state.account.as_deref(),
+                                &state.model,
                                 &error,
                             ))
                         })?
@@ -213,8 +241,10 @@ impl EngineApiClient {
                                     .send_message(&fallback_request, None)
                                     .await
                                     .map_err(|error| {
-                                        RuntimeError::new(api::format_user_visible_api_error(
+                                        RuntimeError::new(user_visible_error(
                                             &state.session_id,
+                                            state.account.as_deref(),
+                                            &state.model,
                                             &error,
                                         ))
                                     })?;
@@ -335,6 +365,23 @@ impl ApiClient for EngineApiClient {
 }
 
 /// Incremental stream state for the `try_unfold` above. Holds no render state.
+/// Render a provider failure for a human, adding the account when the gateway's
+/// complaint is really "this account cannot route that model".
+///
+/// One implementation shared by every error path in this file: the gateway
+/// phrases the rejection in terms of its own routing groups, which nobody
+/// configured, and four call sites each deciding how to say that is the
+/// duplication this area is being repaired for.
+fn user_visible_error(
+    session_id: &str,
+    account: Option<&str>,
+    model: &str,
+    error: &api::ApiError,
+) -> String {
+    let rendered = api::format_user_visible_api_error(session_id, error);
+    api::explain_model_not_served(account, model, &rendered).unwrap_or(rendered)
+}
+
 struct StreamState {
     provider_stream: MessageStream,
     pending_tool: Option<(String, String, String, Option<String>)>,
@@ -349,6 +396,10 @@ struct StreamState {
     done: bool,
     client: ProviderClient,
     session_id: String,
+    /// Carried so failures raised inside the stream explain themselves the same
+    /// way as failures raised before it — one wording, not two.
+    account: Option<String>,
+    model: String,
     fallback_request: Option<MessageRequest>,
 }
 

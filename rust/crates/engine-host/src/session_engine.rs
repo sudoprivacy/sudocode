@@ -641,15 +641,19 @@ impl engine_core::EngineDelegate for SessionEngine {
         // persisted transcript; the runtime also compacts-and-resends once
         // reactively inside run_turn if the provider still rejects.
         let model = session.runtime.session().model.clone().unwrap_or_default();
-        let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
-        let max_output_tokens = engine_core::max_tokens_for_model(&model) as usize;
-        let overhead_tokens = session
-            .runtime
-            .api_client()
-            .fixed_request_overhead_tokens(session.runtime.system_prompt());
-        let buffer_tokens = runtime::autocompact_buffer_tokens(&model) as usize;
-        let history_budget =
-            context_limit.saturating_sub(max_output_tokens + overhead_tokens + buffer_tokens);
+        let budget = runtime::ContextBudget {
+            context_limit: runtime::model_capabilities::context_window_or_default(&model) as usize,
+            max_output_tokens: engine_core::max_tokens_for_model(&model) as usize,
+            overhead_tokens: session
+                .runtime
+                .api_client()
+                .fixed_request_overhead_tokens(session.runtime.system_prompt()),
+            buffer_tokens: runtime::autocompact_buffer_tokens(&model) as usize,
+        };
+        let context_limit = budget.context_limit;
+        let max_output_tokens = budget.max_output_tokens;
+        let overhead_tokens = budget.overhead_tokens;
+        let history_budget = budget.history_budget();
         let prompt_tokens: usize = blocks.iter().map(estimate_block_tokens).sum();
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let mut pre_send_compaction = None;
@@ -676,18 +680,17 @@ impl engine_core::EngineDelegate for SessionEngine {
                     attrs
                 });
             }
-            pre_send_compaction =
-                self.rt()
-                    .block_on(session.runtime.compact_in_place(CompactionConfig {
-                        max_estimated_tokens: 0, // force compaction
-                        ..CompactionConfig::default()
-                    }));
+            pre_send_compaction = self.rt().block_on(session.runtime.compact_in_place(
+                CompactionConfig {
+                    max_estimated_tokens: 0, // force compaction
+                    ..CompactionConfig::default()
+                },
+                runtime::CompactionTrigger::Preflight,
+            ));
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
-            if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
-                > context_limit
-            {
+            if !budget.fits(new_estimated_tokens + prompt_tokens) {
                 return Err(context_overflow_user_message(
                     session.runtime.session(),
                     new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,

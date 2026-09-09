@@ -89,8 +89,8 @@ pub use compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
     format_compact_summary, get_compact_continuation_message, should_compact, CompactionConfig,
-    CompactionError, CompactionResult, CompactionSummarySource, AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACT_MAX_OUTPUT_TOKENS,
+    CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
+    AUTOCOMPACT_BUFFER_TOKENS, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
@@ -111,7 +111,8 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compact_threshold_for_model, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
-    AutoCompactionEvent, CompactionMethod, ConversationRuntime, HookProgressSink, ProgressSink,
+    AutoCompactionEvent, CompactionMethod, CompactionTrigger, ConversationRuntime,
+    HookProgressSink, ProgressSink,
     PromptCacheEvent, RetryEvent, RetrySink, RuntimeError, RuntimeObserver, StaticToolExecutor,
     ToolDispatchContext, ToolError, ToolExecutor, ToolProgressEvent, TurnSummary,
     FORK_BOILERPLATE_TAG,

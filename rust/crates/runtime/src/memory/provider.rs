@@ -102,6 +102,39 @@ pub trait MemoryProvider: Send + Sync {
     }
 }
 
+/// Whether memory participates in a unit of work at all.
+///
+/// This is a per-*session* switch, not a process or user setting: one
+/// `scode` process serves many ACP sessions and each carries its own mode,
+/// so session A can remember while session B does not. `Disabled` only
+/// stands memory down — nothing on disk is read, written or removed, so
+/// re-enabling restores the same entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryMode {
+    /// The default: the on-disk [`FileMemoryProvider`].
+    #[default]
+    Enabled,
+    /// [`DisabledMemoryProvider`]: no prompt block, no directory touched.
+    Disabled,
+}
+
+impl MemoryMode {
+    /// The provider this mode selects. The one place the mapping lives, so a
+    /// call site chooses a mode and never a provider.
+    #[must_use]
+    pub fn provider(self) -> Box<dyn MemoryProvider> {
+        match self {
+            Self::Enabled => Box::new(FileMemoryProvider::new()),
+            Self::Disabled => Box::new(DisabledMemoryProvider::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 /// The on-disk provider: `MEMORY.md` plus one file per entry, rendered whole.
 ///
 /// This is the behaviour every session has today, moved behind the trait
@@ -136,6 +169,46 @@ impl MemoryProvider for FileMemoryProvider {
             ..Default::default()
         });
         Some(index.render_for_prompt_with(dir, ctx.variant))
+    }
+}
+
+/// The provider a session with memory switched off runs on: it contributes
+/// nothing and touches nothing.
+///
+/// It exists so "this session does not use memory" is expressed once, at the
+/// seam every backend already goes through, instead of as an `if` at each
+/// call site that reads or writes memory.
+///
+/// On the `None` it returns from [`MemoryProvider::system_prompt_block`]: the
+/// trait reserves `None` for "contribute nothing" and forbids using it to
+/// signal an error, and "contribute nothing" is exactly — and only — what is
+/// meant here, so the contract is honoured rather than stretched. The
+/// neighbouring [`MemoryProvider::is_available`] would be the dishonest
+/// choice: it reports that a backend *cannot* run (an unreachable service, a
+/// missing binary), which is a different claim from a caller having asked for
+/// silence.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisabledMemoryProvider;
+
+impl DisabledMemoryProvider {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl MemoryProvider for DisabledMemoryProvider {
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn name(&self) -> &str {
+        "disabled"
+    }
+
+    /// Contributes no block — and, unlike [`FileMemoryProvider`], does not
+    /// call `ensure_memory_dir_exists`, so a disabled session leaves no trace
+    /// on disk even when the directory does not exist yet.
+    fn system_prompt_block(&self, _ctx: &MemoryContext) -> Option<String> {
+        None
     }
 }
 

@@ -662,6 +662,8 @@ fn is_prompt_too_long(error_msg: &str) -> bool {
         // request before it leaves the process; treat it like the provider's
         // own prompt-too-long so the head-truncation retry still applies.
         || lower.contains("context_window_blocked")
+        // Anthropic: "input length and `max_tokens` exceed context limit".
+        || lower.contains("context limit")
         || lower.contains("context window")
 }
 

@@ -47,6 +47,11 @@ pub struct RuntimeConfig {
     pub permission_mode: PermissionMode,
     pub auth_mode: AuthMode,
     pub sudocode_config: engine_core::SudoCodeConfig,
+    /// Whether this session uses memory at all. Set from
+    /// `_meta.sudocode.memory` on an ACP session; `MemoryMode::Enabled`
+    /// (the default) everywhere else. It reaches the permission policy here;
+    /// the prompt side is applied by the caller's `system_prompt`.
+    pub memory: runtime::memory::MemoryMode,
 }
 
 pub struct BuiltRuntime {
@@ -377,14 +382,19 @@ pub(crate) fn build_runtime_with_plugin_state(
             allowed.extend(["send_message".to_string()]);
         }
     }
-    let policy =
-        match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
-            Ok(policy) => policy,
-            Err(error) => {
-                shutdown_mcp_state_best_effort(&mcp_state);
-                return Err(Box::new(std::io::Error::other(error)));
-            }
-        };
+    let policy = match permission_policy(
+        config.permission_mode,
+        &feature_config,
+        &tool_registry,
+        cwd,
+        config.memory,
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     let mut system_prompt = config.system_prompt.clone();
     // Skills are listed so the model can name and load one without the user
     // having to know it exists. Plugin-provided skill roots are included via

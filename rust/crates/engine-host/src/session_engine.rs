@@ -74,6 +74,12 @@ pub struct AcpCliSession {
     /// / `appendSystemPrompt` on session/new or session/load). Kept on the
     /// session so a runtime rebuild (model switch) re-applies them.
     pub prompt_overrides: runtime::SystemPromptOverrides,
+    /// Whether THIS session uses memory (`_meta.sudocode.memory` on
+    /// session/new or session/load). One process serves many sessions, so
+    /// the mode lives here rather than anywhere process-wide; kept on the
+    /// session for the same reason as `prompt_overrides` — a runtime rebuild
+    /// (model switch, compaction, fork) must re-apply it.
+    pub memory: runtime::memory::MemoryMode,
 }
 
 /// The CLI's implementation of the seam's [`engine_core::EngineDelegate`] — one
@@ -157,6 +163,7 @@ impl SessionEngine {
         cwd: &Path,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
+        memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
         model: String,
         model_flag_raw: Option<String>,
@@ -193,6 +200,7 @@ impl SessionEngine {
                 permission_mode,
                 auth_mode: resolved_auth,
                 sudocode_config,
+                memory,
             },
             mcp_servers,
             abort_signal.clone(),
@@ -212,6 +220,7 @@ impl SessionEngine {
             started_at: Instant::now(),
             session_mcp_servers: mcp_servers.clone(),
             prompt_overrides,
+            memory,
         };
         Ok(Self {
             session: std::sync::Mutex::new(session),
@@ -240,6 +249,7 @@ impl SessionEngine {
         session: runtime::Session,
         mcp_servers: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
         prompt_overrides: runtime::SystemPromptOverrides,
+        memory: runtime::memory::MemoryMode,
         system_prompt: SystemPrompt,
         model: String,
         model_flag_raw: Option<String>,
@@ -273,6 +283,7 @@ impl SessionEngine {
                 permission_mode,
                 auth_mode: resolved_auth,
                 sudocode_config,
+                memory,
             },
             mcp_servers,
             abort_signal.clone(),
@@ -288,6 +299,7 @@ impl SessionEngine {
             started_at: Instant::now(),
             session_mcp_servers: mcp_servers.clone(),
             prompt_overrides,
+            memory,
         };
         Ok(Self {
             session: std::sync::Mutex::new(session),
@@ -350,7 +362,8 @@ impl SessionEngine {
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
         let auth_mode = resolve_model_switch_auth_mode(&model, auth_override, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
-        let system_prompt = build_acp_system_prompt(&cwd, &session.prompt_overrides)?;
+        let system_prompt =
+            build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
             &cwd,
             new_session,
@@ -363,6 +376,7 @@ impl SessionEngine {
                 permission_mode,
                 auth_mode,
                 sudocode_config,
+                memory: session.memory,
             },
             &session.session_mcp_servers,
             session.abort_signal.clone(),

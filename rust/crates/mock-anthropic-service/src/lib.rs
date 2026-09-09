@@ -180,6 +180,7 @@ enum Scenario {
     /// the transport's retry loop, and therefore the retry indicator, without
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
+    ExecuteExtraToolRoundtrip,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -224,6 +225,7 @@ impl Scenario {
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
+            "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
             _ => None,
         }
     }
@@ -264,6 +266,7 @@ impl Scenario {
             Self::RetryThenSucceed => "retry_then_succeed",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
+            Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
         }
     }
 }
@@ -868,6 +871,16 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             // switches to streaming, this SSE path serves as a fallback.
             final_text_sse(CANNED_COMPACTION_SUMMARY)
         }
+        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "execute_extra_tool roundtrip complete: {tool_output}"
+            )),
+            None => tool_use_sse(
+                "toolu_execute_extra",
+                "ExecuteExtraTool",
+                &[r#"{"tool_name":"CronList","params":{}}"#],
+            ),
+        },
     }
 }
 
@@ -1281,6 +1294,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::LlmCompactionRoundtrip => {
             text_message_response("msg_llm_compaction", CANNED_COMPACTION_SUMMARY)
         }
+        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_execute_extra_final",
+                &format!("execute_extra_tool roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_execute_extra",
+                "toolu_execute_extra",
+                "ExecuteExtraTool",
+                json!({"tool_name": "CronList", "params": {}}),
+            ),
+        },
     }
 }
 
@@ -1322,6 +1347,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
+        Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
     }
 }
 

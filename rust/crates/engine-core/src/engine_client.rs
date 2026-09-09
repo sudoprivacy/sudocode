@@ -136,9 +136,10 @@ impl EngineApiClient {
     #[must_use]
     pub fn fixed_request_overhead_tokens(&self, system_prompt: &runtime::SystemPrompt) -> usize {
         let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
-        let tools = self
-            .enable_tools
-            .then(|| self.tool_registry.definitions(self.allowed_tools.as_ref()));
+        let tools = self.enable_tools.then(|| {
+            self.tool_registry
+                .core_definitions(self.allowed_tools.as_ref())
+        });
         api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
     }
 
@@ -386,9 +387,10 @@ impl ApiClient for EngineApiClient {
             max_tokens: api::max_tokens_for_model(&self.model),
             messages: tools::convert_messages(&request.messages),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: self
-                .enable_tools
-                .then(|| self.tool_registry.definitions(self.allowed_tools.as_ref())),
+            tools: self.enable_tools.then(|| {
+                self.tool_registry
+                    .core_definitions(self.allowed_tools.as_ref())
+            }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
             stream: true,
             reasoning_effort: self.reasoning_effort.clone(),

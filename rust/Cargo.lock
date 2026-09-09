@@ -185,7 +185,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "base64",
  "criterion",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "api",
  "plugins",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "commands",
  "runtime",
@@ -1359,7 +1359,7 @@ checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
 name = "engine-acp"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "engine-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "api",
  "async-trait",
@@ -1397,14 +1397,14 @@ dependencies = [
 
 [[package]]
 name = "engine-events"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "runtime",
 ]
 
 [[package]]
 name = "engine-host"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "commands",
  "engine-core",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "api",
  "serde_json",
@@ -2649,7 +2649,7 @@ source = "git+https://github.com/nexi-lab/nexus-vfs?rev=5806c39d471928caabd098c1
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3102,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3803,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -3944,7 +3944,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "arboard",
  "async-trait",
@@ -4564,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "chrono",
  "dirs",
@@ -4918,7 +4918,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "api",
  "async-trait",

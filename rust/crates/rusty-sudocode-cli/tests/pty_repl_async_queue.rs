@@ -1,14 +1,14 @@
 //! PTY smoke test: async REPL is reachable and processes a single turn
 //! end-to-end when `SUDOCODE_INTERRUPT_QUEUE_MODE=queue` is set.
 //!
-//! Guards the wiring landed in PR #297 (`src/repl_async.rs`) against a
+//! Guards the wiring landed in PR #297 against a
 //! regression that would make the async dispatch panic on startup, deadlock
 //! between the input-thread and runner thread, or fail to route a single
 //! input through the coordinator's `submit_when_idle` path.
 //!
 //! ## Scope of this test
 //!
-//! - Env var flip → dispatch reaches `run_repl_async_dispatch` (not the sync
+//! - Env var flip → dispatch reaches `run_repl_iocraft_dispatch` (not the sync
 //!   loop). Verified indirectly: the REPL prompt still renders + a single
 //!   turn completes, i.e., the async path is at least as functional as sync
 //!   for the idle-then-turn baseline.
@@ -45,7 +45,7 @@ fn async_repl_processes_single_turn_and_exits() {
     );
 
     // Startup: the async dispatcher prints the same startup banner as the sync
-    // path (via `run_coordinator_loop`) + the input thread's rustyline renders
+    // path (via `run_repl_iocraft_dispatch`) + the iocraft render loop renders
     // the `❯` prompt. If either dropped, we'd see a hang / EOF here.
     sess.expect("❯").expect("async REPL should render prompt");
 

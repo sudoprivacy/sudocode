@@ -29,7 +29,7 @@
 //!
 //! ## Why the "6a" branch (exit intercept) actually proves batched flush
 //!
-//! The coordinator's `run_coordinator_loop` intercepts `/exit` in the
+//! The REPL intercepts `/exit` in the
 //! `Input(Submit)` branch and breaks BEFORE `TurnEvent::Done` fires the
 //! drain. That means B/C/D land in the coord queue but never flush.
 //! To prove batched flush we need to see the drain path exercised.

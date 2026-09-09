@@ -54,6 +54,14 @@ impl SseParser {
         match self.parse_frame_with_context(&tail) {
             Ok(Some(event)) => Ok(vec![event]),
             Ok(None) => Ok(Vec::new()),
+            // The tail did not parse. If it is the *start* of a terminal frame
+            // (a `message_stop` — the last event Anthropic emits), the stream
+            // reached its logical end and only the closing `}\n\n` bytes were
+            // dropped by a proxy cutting the connection. That is a complete
+            // message, not a truncated one: swallow it rather than forcing a
+            // wasteful whole-turn retry (or a retry loop against a proxy that
+            // keeps truncating the same terminal frame).
+            Err(_) if tail_began_terminal_frame(&tail) => Ok(Vec::new()),
             Err(_) => Err(ApiError::incomplete_stream(
                 self.provider.as_deref().unwrap_or("unknown"),
                 self.model.as_deref().unwrap_or("unknown"),
@@ -93,6 +101,35 @@ impl SseParser {
 
 pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
     parse_frame_with_provider(frame, "unknown", "unknown")
+}
+
+/// Whether an unparseable trailing frame is the *beginning* of a terminal
+/// event — the last frame Anthropic emits (`message_stop`). Used by
+/// [`SseParser::finish`] to distinguish a proxy dropping the closing bytes of
+/// the final frame (the message is complete) from a mid-content truncation
+/// (retryable). Matches on the SSE `event:` line and, as a fallback, the
+/// leading `"type":"message_stop"` of the partial `data:` JSON, so it works
+/// whether the cut landed before or after the event line.
+fn tail_began_terminal_frame(tail: &str) -> bool {
+    for line in tail.trim().lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix("event:") {
+            if name.trim() == "message_stop" {
+                return true;
+            }
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim_start();
+            // The JSON may be cut anywhere after the type; a prefix match is
+            // enough to recognize the terminal event.
+            if data.starts_with("{\"type\":\"message_stop\"")
+                || data.starts_with("{ \"type\": \"message_stop\"")
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn parse_frame_with_provider(
@@ -444,5 +481,54 @@ mod tests {
             .finish()
             .expect("unterminated final frame still parses");
         assert_eq!(events.len(), 1, "the final frame should yield its event");
+    }
+
+    #[test]
+    fn finish_swallows_a_truncated_message_stop_frame() {
+        // Real incident: a proxy cut the connection right after the terminal
+        // `message_stop` event, leaving `event: message_stop\ndata: {"type":"m`
+        // in the buffer. The message is logically complete — only the closing
+        // bytes were dropped — so finish() must NOT surface a retryable
+        // IncompleteStream (which forces a wasteful whole-turn retry, or loops
+        // against a proxy that keeps truncating the same terminal frame).
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        let partial = b"event: message_stop\ndata: {\"type\":\"m";
+        assert!(parser.push(partial).expect("partial buffers").is_empty());
+
+        let events = parser
+            .finish()
+            .expect("a truncated terminal frame is a complete message, not an error");
+        assert!(
+            events.is_empty(),
+            "no event is emitted from the dropped closing bytes"
+        );
+    }
+
+    #[test]
+    fn finish_swallows_truncated_message_stop_even_before_the_event_line() {
+        // Same completion signal, but the cut landed inside the data JSON with
+        // no preceding event line survived — the `"type":"message_stop"` prefix
+        // alone must still be recognized as the terminal frame.
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        let partial = b"data: {\"type\":\"message_stop\"";
+        assert!(parser.push(partial).expect("partial buffers").is_empty());
+
+        let events = parser.finish().expect("terminal frame is complete");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn finish_still_errors_on_a_truncated_content_frame() {
+        // A mid-content truncation (not a terminal frame) is a real transport
+        // failure and must remain a retryable IncompleteStream.
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        let partial = b"event: content_block_delta\ndata: {\"type\":\"content_block_del";
+        assert!(parser.push(partial).expect("partial buffers").is_empty());
+
+        let err = parser
+            .finish()
+            .expect_err("a truncated content frame must still error");
+        assert!(matches!(err, ApiError::IncompleteStream { .. }));
+        assert!(err.is_retryable());
     }
 }

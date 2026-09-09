@@ -159,6 +159,25 @@ pub struct NextTurn {
     pub consumed: usize,
 }
 
+/// The active [`QueueMode`], shared with whatever reads it mid-session.
+///
+/// `/config set auto-interrupt on|off` writes here and the REPL reads it at
+/// each turn boundary, so the mode is a live setting rather than a value fixed
+/// at startup.
+pub type SharedQueueMode = std::sync::Arc<std::sync::atomic::AtomicU8>;
+
+/// Create a shared queue mode from the initial value.
+#[must_use]
+pub fn shared_queue_mode(mode: QueueMode) -> SharedQueueMode {
+    std::sync::Arc::new(std::sync::atomic::AtomicU8::new(mode.to_u8()))
+}
+
+/// Read the current queue mode from the shared cell.
+#[must_use]
+pub fn load_queue_mode(shared: &SharedQueueMode) -> QueueMode {
+    QueueMode::from_u8(shared.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// SSOT for "what does the REPL do with each new line the user types". Mirrors
 /// sudowork's `turnInputCoordinator` (`src/process/task/turnInputCoordinator.ts`)
 /// but the state model is simpler because sudocode has ONE conversation per REPL

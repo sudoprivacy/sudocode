@@ -376,6 +376,7 @@ impl AnthropicClient {
             parser: SseParser::new().with_context("Anthropic", request.model.clone()),
             pending: VecDeque::new(),
             done: false,
+            logically_complete: false,
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
             latest_usage: None,
@@ -855,6 +856,12 @@ pub struct MessageStream {
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
+    /// Set once we observe a logical end-of-message (a `message_delta` with a
+    /// `stop_reason`, or a `message_stop`). After this the response is
+    /// semantically complete, so a truncated trailing frame (e.g. a proxy
+    /// cutting the connection right after `message_stop`) is harmless noise
+    /// and must not be surfaced as an `IncompleteStream` error.
+    logically_complete: bool,
     request: MessageRequest,
     prompt_cache: Option<PromptCache>,
     latest_usage: Option<Usage>,
@@ -877,7 +884,17 @@ impl MessageStream {
             }
 
             if self.done {
-                let remaining = self.parser.finish()?;
+                // The turn already ended (stop_reason or message_stop). If a
+                // trailing frame was truncated by a proxy dropping the
+                // connection after the logical end, that leftover is noise:
+                // ignore the parse error rather than turning a completed
+                // message into a spurious IncompleteStream. Only surface the
+                // error when the stream stopped WITHOUT a logical end.
+                let remaining = match self.parser.finish() {
+                    Ok(remaining) => remaining,
+                    Err(_) if self.logically_complete => Vec::new(),
+                    Err(error) => return Err(error),
+                };
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
@@ -906,10 +923,12 @@ impl MessageStream {
                 // connection alive after the logical stream has ended.
                 if delta.stop_reason.is_some() {
                     self.done = true;
+                    self.logically_complete = true;
                 }
             }
             StreamEvent::MessageStop(_) => {
                 self.done = true;
+                self.logically_complete = true;
                 if !self.usage_recorded {
                     if let Some(usage) = self.latest_usage.as_ref() {
                         if let Some(prompt_cache) = &self.prompt_cache {

@@ -165,6 +165,10 @@ enum Scenario {
     /// compaction request, since compaction requests are classified by the
     /// markers of the messages being summarised.
     DelayedText,
+    /// First request answers 429, the next succeeds — the only way to exercise
+    /// the transport's retry loop, and therefore the retry indicator, without
+    /// waiting on a real provider to rate-limit us.
+    RetryThenSucceed,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -206,6 +210,7 @@ impl Scenario {
             "llm_compaction_roundtrip" => Some(Self::LlmCompactionRoundtrip),
             "delayed_text" => Some(Self::DelayedText),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
+            "retry_then_succeed" => Some(Self::RetryThenSucceed),
             _ => None,
         }
     }
@@ -243,6 +248,7 @@ impl Scenario {
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
             Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
+            Self::RetryThenSucceed => "retry_then_succeed",
         }
     }
 }
@@ -261,6 +267,7 @@ async fn handle_connection(
     let scenario = detect_scenario(&request)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parity scenario"))?;
 
+    let path_for_count = path.clone();
     requests.lock().await.push(CapturedRequest {
         method,
         path,
@@ -273,7 +280,19 @@ async fn handle_connection(
     if scenario == Scenario::DelayedText {
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
     }
-    let response = build_http_response(&request, scenario);
+    // How many times this scenario has already been served AT THIS PATH, so a
+    // scenario can answer differently on a retry. Per-path because a turn is
+    // not one request: the Anthropic provider also asks `/v1/messages/count_tokens`
+    // to refine its preflight, best-effort, and swallows the failure. Counting
+    // scenario-wide would let that call absorb the answer meant for the turn.
+    let attempt = requests
+        .lock()
+        .await
+        .iter()
+        .filter(|captured| captured.scenario == scenario.name() && captured.path == path_for_count)
+        .count()
+        .saturating_sub(1);
+    let response = build_http_response(&request, scenario, attempt);
     socket.write_all(response.as_bytes()).await?;
     Ok(())
 }
@@ -456,7 +475,15 @@ fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> Strin
 }
 
 #[allow(clippy::too_many_lines)]
-fn build_http_response(request: &MessageRequest, scenario: Scenario) -> String {
+fn build_http_response(request: &MessageRequest, scenario: Scenario, attempt: usize) -> String {
+    if scenario == Scenario::RetryThenSucceed && attempt == 0 {
+        return http_response(
+            "429 Too Many Requests",
+            "application/json",
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            &[("request-id", request_id_for(scenario))],
+        );
+    }
     let response = if request.stream {
         let body = build_stream_body(request, scenario);
         return http_response(
@@ -480,7 +507,9 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
-        Scenario::StreamingText | Scenario::DelayedText => streaming_text_sse(),
+        Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
+            streaming_text_sse()
+        }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
@@ -794,10 +823,12 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
-        Scenario::StreamingText | Scenario::DelayedText => text_message_response(
-            "msg_streaming_text",
-            "Mock streaming says hello from the parity harness.",
-        ),
+        Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
+            text_message_response(
+                "msg_streaming_text",
+                "Mock streaming says hello from the parity harness.",
+            )
+        }
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_read_file_final",
@@ -1214,6 +1245,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         }
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
         Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
+        Scenario::RetryThenSucceed => "req_retry_then_succeed",
     }
 }
 

@@ -277,8 +277,36 @@ impl EngineApiClient {
     }
 }
 
+/// Carries a [`runtime::RetrySink`] across the one boundary where the
+/// transport's own callback shape and the seam's meet.
+///
+/// `api` cannot name a runtime sink and the renderer cannot name an `api`
+/// notifier — the compiler gate exists precisely to keep it that way — so the
+/// translation happens here, in the crate that legitimately sees both.
+struct RetrySinkNotifier(runtime::RetrySink);
+
+impl api::RetryNotifier for RetrySinkNotifier {
+    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
+        self.0.emit(runtime::RetryEvent::Waiting {
+            attempt,
+            max_retries,
+            reason: reason.to_string(),
+        });
+    }
+
+    fn on_retry_end(&self) {
+        self.0.emit(runtime::RetryEvent::Resumed);
+    }
+}
+
 #[async_trait]
 impl ApiClient for EngineApiClient {
+    fn set_retry_sink(&mut self, sink: Option<runtime::RetrySink>) {
+        self.client.set_retry_notifier(sink.map(|sink| {
+            std::sync::Arc::new(RetrySinkNotifier(sink)) as std::sync::Arc<dyn api::RetryNotifier>
+        }));
+    }
+
     async fn send_compaction(
         &mut self,
         model: &str,

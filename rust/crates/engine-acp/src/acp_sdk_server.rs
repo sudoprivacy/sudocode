@@ -428,6 +428,10 @@ fn initialize_meta() -> Map<String, serde_json::Value> {
     // `fork_source_from_meta`): a client that forks a conversation into a
     // new directory gates on this instead of probing.
     sudocode_ns.insert("sessionFork".to_string(), json!(true));
+    // `session/new` / `session/load` accept `_meta.sudocode.memory`
+    // ("enabled" | "disabled"), the per-session memory switch (see
+    // `memory_mode_from_meta`).
+    sudocode_ns.insert("sessionMemory".to_string(), json!(true));
     let mut meta = Map::new();
     meta.insert("sudocode".to_string(), json!(sudocode_ns));
     meta
@@ -455,6 +459,58 @@ fn system_prompt_overrides_from_meta(
         system_prompt: non_empty_string_meta(ns, SYSTEM_PROMPT_META_KEY)?,
         append_system_prompt: non_empty_string_meta(ns, APPEND_SYSTEM_PROMPT_META_KEY)?,
     })
+}
+
+/// `_meta.sudocode` key: whether this session uses memory.
+pub const MEMORY_META_KEY: &str = "memory";
+/// Accepted values of [`MEMORY_META_KEY`], in the order they are reported
+/// back in an `invalid_params` message.
+const MEMORY_META_VALUES: [(&str, runtime::memory::MemoryMode); 2] = [
+    ("enabled", runtime::memory::MemoryMode::Enabled),
+    ("disabled", runtime::memory::MemoryMode::Disabled),
+];
+
+/// Read `_meta.sudocode.memory` from a `session/new` / `session/load`
+/// request.
+///
+/// Absent → [`runtime::memory::MemoryMode::Enabled`], which is exactly
+/// today's behaviour: a client that never sends the key sees no change at
+/// all. `"disabled"` stands memory down for **this session only** — the
+/// process serves other sessions with their own modes, and nothing under the
+/// memory directory is read, written or removed, so a later session that
+/// omits the key finds the same entries.
+///
+/// A string outside the accepted set, or a non-string value, is
+/// `invalid_params` rather than a silent default — same rule as the
+/// system-prompt keys, and the one that matters most here, since silently
+/// ignoring a mistyped `"disable"` would leave memory on while the caller
+/// believed it off.
+fn memory_mode_from_meta(
+    meta: Option<&agent_client_protocol_schema::Meta>,
+) -> Result<runtime::memory::MemoryMode, AcpError> {
+    let ns = meta.and_then(|m| m.get("sudocode"));
+    let Some(value) = ns.and_then(|ns| ns.get(MEMORY_META_KEY)) else {
+        return Ok(runtime::memory::MemoryMode::Enabled);
+    };
+    let accepted = MEMORY_META_VALUES
+        .iter()
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let Some(text) = value.as_str() else {
+        return Err(AcpError::invalid_params(format!(
+            "_meta.sudocode.{MEMORY_META_KEY} must be a string ({accepted})"
+        )));
+    };
+    MEMORY_META_VALUES
+        .iter()
+        .find(|(name, _)| *name == text.trim())
+        .map(|(_, mode)| *mode)
+        .ok_or_else(|| {
+            AcpError::invalid_params(format!(
+                "_meta.sudocode.{MEMORY_META_KEY} must be {accepted} (got {text:?})"
+            ))
+        })
 }
 
 /// `_meta.sudocode` key on `session/new`: start the new session from a copy
@@ -1173,6 +1229,13 @@ pub(crate) async fn run_acp_on_transport(
                                 return Ok(());
                             }
                         };
+                    let memory = match memory_mode_from_meta(req.meta.as_ref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            responder.respond_with_error(acp_error_to_sdk(&e))?;
+                            return Ok(());
+                        }
+                    };
                     let fork_source = match fork_source_from_meta(req.meta.as_ref()) {
                         Ok(v) => v,
                         Err(e) => {
@@ -1207,12 +1270,14 @@ pub(crate) async fn run_acp_on_transport(
                                     req.cwd,
                                     mcp_servers,
                                     prompt_overrides,
+                                    memory,
                                 )?,
                                 None => session_ops::build_new_session(
                                     &config,
                                     req.cwd,
                                     mcp_servers,
                                     prompt_overrides,
+                                    memory,
                                 )?,
                             };
                             let session_id = engine.session_handle().id;
@@ -1709,6 +1774,13 @@ pub(crate) async fn run_acp_on_transport(
                                 return Ok(());
                             }
                         };
+                    let memory = match memory_mode_from_meta(req.meta.as_ref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            responder.respond_with_error(acp_error_to_sdk(&e))?;
+                            return Ok(());
+                        }
+                    };
                     let registry = Arc::clone(&registry);
                     let config = config.clone();
                     let commands = session_ops::available_commands();
@@ -1731,6 +1803,7 @@ pub(crate) async fn run_acp_on_transport(
                                 cwd,
                                 mcp_servers,
                                 prompt_overrides,
+                                memory,
                             )?;
                             let session_id = engine.session_handle().id;
                             Ok::<_, AcpError>((engine, session_id, cwd))

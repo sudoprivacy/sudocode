@@ -321,6 +321,13 @@ fn auto_migrate_legacy_config() {
             if let Some(backup) = &report.backup {
                 eprintln!("  previous version: {}", backup.display());
             }
+            // The new shape is a one-way door for anything older: a build from
+            // before this change requires `provider` and refuses to start
+            // without it. Machines that run several scode builds — a release
+            // install alongside worktree builds, say — will see the older ones
+            // stop booting. Say so here rather than leaving it to be discovered
+            // as an unattributable startup error.
+            eprintln!("  scode builds older than this one cannot read the new shape; restore the backup above if you need one to run");
         }
         Ok(_) => {}
         Err(error) => {

@@ -140,8 +140,8 @@ impl HttpTransport {
         }
     }
 
-    pub fn set_retry_notifier(&mut self, notifier: std::sync::Arc<dyn RetryNotifier>) {
-        self.retry_notifier = Some(notifier);
+    pub fn set_retry_notifier(&mut self, notifier: Option<std::sync::Arc<dyn RetryNotifier>>) {
+        self.retry_notifier = notifier;
     }
 
     #[must_use]
@@ -352,16 +352,15 @@ impl HttpTransport {
                     }
                     other => format!("{other}"),
                 };
+                // Reported only through the notifier. A transport writing to
+                // the terminal itself is the boundary leak the engine/renderer
+                // split exists to remove: it lands wherever the cursor happens
+                // to be, no renderer can style or suppress it, and — the reason
+                // this comment exists — it silently stood in for the real
+                // indicator once the notifier stopped being installed, which is
+                // what let that regression go unnoticed.
                 if let Some(ref notifier) = self.retry_notifier {
                     notifier.on_retry(attempts, retry_policy.max_retries, &reason);
-                } else {
-                    eprintln!(
-                        "  \u{27f3} retry {}/{} in {:.0}s \u{2014} {}",
-                        attempts,
-                        retry_policy.max_retries,
-                        delay.as_secs_f64(),
-                        reason,
-                    );
                 }
             }
             tokio::time::sleep(delay).await;

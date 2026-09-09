@@ -467,6 +467,20 @@ impl RuntimeObserver for ObserverAdapter {
                 .send(EngineEvent::HookProgress(event));
         }))
     }
+
+    fn retry_sink(&self) -> Option<runtime::RetrySink> {
+        // Same shape and same reason as `hook_progress_sink`: the emitter is
+        // the HTTP transport on its own task, so the channel is wrapped to be
+        // `Send + Sync`. Reporting retries through the seam is what stops the
+        // transport writing to the terminal behind the renderer's back.
+        let tx = Arc::new(Mutex::new(self.tx.clone()));
+        Some(runtime::RetrySink::new(move |event| {
+            let _ = tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(EngineEvent::Retry(event));
+        }))
+    }
 }
 
 /// `PermissionPrompter::decide` → emit [`EngineEvent::PermissionRequest`], park

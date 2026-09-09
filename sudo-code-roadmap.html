@@ -545,7 +545,8 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>LSP <code>findReferences</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
     <tr><td>LSP <code>hover</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
     <tr><td>LSP <code>documentSymbol</code></td><td data-priority="nice">nice</td><td data-status="gap-l2">Gap (L2)</td><td>—</td><td></td></tr>
-    <tr><td><code>ToolSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>Search for tools by keyword</td></tr>
+    <tr><td><code>ToolSearch</code></td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>tools::tool_search_supports_keyword_and_select_queries</code></td><td>Keyword + <code>select:</code> exact-match queries, alias resolution. ToolSearch covers the full tool registry (core + deferred + MCP + plugin).</td></tr>
+    <tr><td>Deferred tools CC parity (<code>ExecuteExtraTool</code> + <code>&lt;available-deferred-tools&gt;</code>)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>tools::{core_tools_are_subset_of_mvp_tool_specs, core_definitions_excludes_deferred_tools, deferred_tool_listing_returns_non_core_tools, deferred_tools_prompt_section_has_xml_tags, execute_extra_tool_dispatches_to_deferred_tool, execute_extra_tool_rejects_core_tool, execute_extra_tool_resolves_aliases}</code></td><td>CC-style two-step deferred tools: <code>CORE_TOOLS</code> (16 tools) visible in API <code>tools</code> array; remaining ~22 tools listed by name + one-line description in <code>&lt;available-deferred-tools&gt;</code> system prompt section. <code>ExecuteExtraTool</code> dispatches to any deferred tool by name with permission enforcement; rejects direct calls to core tools. Alias resolution (TaskList → pid_status) works through <code>ExecuteExtraTool</code>.</td></tr>
   </tbody>
 </table>
 
@@ -740,7 +741,7 @@ coverage starts fresh and is tracked here as the single source.</p>
     <tr><td>File Operations</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>5</strong></td></tr>
     <tr><td>Execution</td><td>4</td><td>0</td><td>0</td><td>4</td><td><strong>1</strong></td></tr>
     <tr><td>Search &amp; Web</td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td></tr>
-    <tr><td>Code Intelligence</td><td>5</td><td>0</td><td>4</td><td>1</td><td>0</td></tr>
+    <tr><td>Code Intelligence</td><td>7</td><td>0</td><td>4</td><td>3</td><td><strong>2</strong></td></tr>
     <tr><td>Planning &amp; Structured</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>3</strong></td></tr>
     <tr><td>Background &amp; Parallel</td><td>11</td><td>0</td><td>0</td><td>11</td><td><strong>7</strong></td></tr>
     <tr><td>Git Workflow</td><td>5</td><td>0</td><td>0</td><td>5</td><td><strong>1</strong></td></tr><!-- 3 must-have (bash git ops) + 2 nice (skill shortcuts) -->

@@ -95,7 +95,8 @@ fn multiline_paste_crlf_counts_lines() {
     let env = TestEnv::new("bracketed-paste-crlf");
     let mut sess = spawn_iocraft_repl(&env);
 
-    sess.send(&bracketed(FOUR_LINES_CRLF)).expect("send CRLF paste");
+    sess.send(&bracketed(FOUR_LINES_CRLF))
+        .expect("send CRLF paste");
 
     sess.expect("Pasted text #1")
         .expect("CRLF paste placeholder should appear");
@@ -146,7 +147,8 @@ fn short_single_line_paste_inserts_literally() {
     let env = TestEnv::new("bracketed-paste-short");
     let mut sess = spawn_iocraft_repl(&env);
 
-    sess.send(&bracketed("hello world")).expect("send short paste");
+    sess.send(&bracketed("hello world"))
+        .expect("send short paste");
 
     sess.expect("hello world").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -178,7 +180,8 @@ fn paste_containing_placeholder_string_then_enter_does_not_hang() {
     // Multi-line (so it collapses to a placeholder) AND contains the literal
     // "[Pasted text #1]" string, which is what triggered the expansion loop.
     let payload = "alpha\nbeta\n[Pasted text #1]\ngamma";
-    sess.send(&bracketed(payload)).expect("send self-referential paste");
+    sess.send(&bracketed(payload))
+        .expect("send self-referential paste");
     sess.expect("Pasted text #1")
         .expect("placeholder should appear");
 

@@ -326,6 +326,65 @@ fn available_command_from_spec(spec: &AcpSlashCommandSpec) -> AvailableCommand {
     )
 }
 
+/// Deliver nexus-A2A peer messages to ACP clients, once per process.
+///
+/// The receive half of standalone A2A was only ever wired into the interactive
+/// REPL, which printed `📨 A2A from <peer>` to the terminal. An ACP client —
+/// including an agent driving `scode acp` programmatically — saw nothing, so
+/// the send half worked and the reply never arrived anywhere it could be read.
+///
+/// Delivered as a `user_message_chunk` because that is what it is: from this
+/// session's point of view the peer is the party talking *to* the agent. Using
+/// a standard variant means every existing client renders it with no change;
+/// `_meta.sudocode.a2a.from` carries the sender for clients that want to tell
+/// peer mail apart from a human's typing.
+///
+/// Broadcast to every registered session, because the inbox belongs to the
+/// PROCESS: `NEXUS_A2A_AGENT` names one agent, and every session this server
+/// hosts is that agent. There is no per-session mailbox to route to.
+///
+/// Started on the first `session/new` rather than at boot — before a session
+/// exists there is nobody to notify — and only once, since the poller parks on
+/// a blocking tail read of a single inbox.
+fn ensure_a2a_receiver(registry: &SharedSessionRegistry, cx: &ConnectionTo<Client>) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Ok(Some(a2a)) = engine_host::nexus_a2a::session() else {
+        return;
+    };
+
+    // The poller is a blocking thread with a sync callback; the ACP connection
+    // is async. One channel bridges them, the same shape the turn path uses.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let _poller = engine_host::nexus_a2a::spawn_poller(a2a, HookAbortSignal::new(), move |msg| {
+        let _ = tx.send((msg.from.clone(), msg.body.clone()));
+    });
+
+    let registry = Arc::clone(registry);
+    let cx = cx.clone();
+    tokio::spawn(async move {
+        while let Some((from, body)) = rx.recv().await {
+            let mut meta = Map::new();
+            meta.insert(
+                "sudocode".to_string(),
+                serde_json::json!({ "a2a": { "from": from } }),
+            );
+            for (session_id, _cwd) in registry.list() {
+                let notification = SessionNotification::new(
+                    session_id,
+                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                        TextContent::new(&format!("[message from {from}] {body}")),
+                    ))),
+                )
+                .meta(meta.clone());
+                let _ = cx.send_notification(notification);
+            }
+        }
+    });
+}
+
 /// The `session/update` notification advertising `specs` to the client
 /// (`sessionUpdate: "available_commands_update"`, `availableCommands: [...]`).
 fn available_commands_notification(
@@ -1169,6 +1228,7 @@ pub(crate) async fn run_acp_on_transport(
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );
+                                ensure_a2a_receiver(&registry, &cx_notify);
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;

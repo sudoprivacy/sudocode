@@ -17,23 +17,19 @@
 //! ```
 //!
 //! Each test gets an ISOLATED config home (temp dir) so it never touches
-//! the user's real crons and tests can't cross-talk. Serial by design
-//! (`--test-threads=1`) because the spawn helper sets process env.
+//! the user's real crons and tests can't cross-talk.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod common;
+
 use pty_expect::PtySession;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 const TIMEOUT: Duration = Duration::from_secs(45);
-
-/// The spawn helper sets process-global env (SUDO_CODE_CONFIG_HOME, cwd),
-/// so tests must not overlap. Each `CronEnv` holds this lock for its whole
-/// lifetime, serialising tests even under a parallel `cargo test`.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn is_live() -> bool {
     std::env::var("SCODE_TEST_BACKEND").as_deref() == Ok("live")
@@ -53,23 +49,24 @@ fn unique_dir(label: &str) -> PathBuf {
 
 /// Real `~/.nexus/sudocode` on this machine (for live auth seeding).
 fn real_config_home() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
+    std::env::var_os("SUDO_CODE_CONFIG_HOME")
         .map(PathBuf::from)
-        .expect("no HOME/USERPROFILE");
-    home.join(".nexus").join("sudocode")
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
+        })
+        .expect("no SUDO_CODE_CONFIG_HOME, HOME, or USERPROFILE")
 }
 
 struct CronEnv {
     config_home: PathBuf,
     home: PathBuf,
     workspace: PathBuf,
-    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl CronEnv {
     fn new(label: &str) -> Self {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = unique_dir(label);
         let config_home = root.join("config-home");
         let home = root.join("home");
@@ -96,20 +93,39 @@ impl CronEnv {
             config_home,
             home,
             workspace,
-            _guard: guard,
         }
     }
 
-    /// Spawn `scode [--auth --model] cron <args...>` under a PTY with this
-    /// env's isolated config home. Env is set on the process (tests run
-    /// serially), and the binary is spawned directly — no `sh` needed.
-    fn cron(&self, args: &[&str]) -> PtySession {
+    fn spawn(&self, args: &[String], disable_cron_tools: Option<bool>) -> PtySession {
         let scode = env!("CARGO_BIN_EXE_scode");
-        std::env::set_var("SUDO_CODE_CONFIG_HOME", &self.config_home);
-        std::env::set_var("HOME", &self.home);
-        std::env::set_var("NO_COLOR", "1");
-        let _ = std::env::set_current_dir(&self.workspace);
+        let workspace = shell_quote(&self.workspace.display().to_string());
+        let config_home = shell_quote(&self.config_home.display().to_string());
+        let home = shell_quote(&self.home.display().to_string());
+        let scode = shell_quote(scode);
+        let mut command = format!("cd {workspace} && exec /usr/bin/env");
+        if matches!(disable_cron_tools, Some(false)) {
+            command.push_str(" -u SUDOCODE_DISABLE_CRON_TOOLS");
+        }
+        command.push_str(&format!(
+            " SUDO_CODE_CONFIG_HOME={config_home} HOME={home} NO_COLOR=1 TERM=xterm"
+        ));
+        if matches!(disable_cron_tools, Some(true)) {
+            command.push_str(" SUDOCODE_DISABLE_CRON_TOOLS=1");
+        }
+        command.push_str(&format!(" {scode}"));
+        for arg in args {
+            command.push_str(&format!(" {}", shell_quote(arg)));
+        }
 
+        let sh = common::resolve_sh();
+        let mut sess = PtySession::spawn(&sh, &["-c", &command]).expect("spawn scode");
+        sess.set_default_timeout(TIMEOUT);
+        sess
+    }
+
+    /// Spawn `scode [--auth --model] cron <args...>` under a PTY with this
+    /// env's isolated config home.
+    fn cron(&self, args: &[&str]) -> PtySession {
         let mut full: Vec<String> = Vec::new();
         // model/auth flags only matter when a cron fires; harmless for CRUD.
         if is_live() {
@@ -117,11 +133,7 @@ impl CronEnv {
         }
         full.push("cron".to_string());
         full.extend(args.iter().map(|s| (*s).to_string()));
-        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
-
-        let mut sess = PtySession::spawn(scode, &refs).expect("spawn scode cron");
-        sess.set_default_timeout(TIMEOUT);
-        sess
+        self.spawn(&full, None)
     }
 
     fn crons_json(&self) -> String {
@@ -132,16 +144,6 @@ impl CronEnv {
     /// optionally with the host-owns-scheduling gate set — to prove the agent
     /// can (or cannot) reach the cron tools.
     fn prompt_run(&self, text: &str, disable_cron_tools: bool) -> PtySession {
-        let scode = env!("CARGO_BIN_EXE_scode");
-        std::env::set_var("SUDO_CODE_CONFIG_HOME", &self.config_home);
-        std::env::set_var("HOME", &self.home);
-        std::env::set_var("NO_COLOR", "1");
-        if disable_cron_tools {
-            std::env::set_var("SUDOCODE_DISABLE_CRON_TOOLS", "1");
-        } else {
-            std::env::remove_var("SUDOCODE_DISABLE_CRON_TOOLS");
-        }
-        let _ = std::env::set_current_dir(&self.workspace);
         let args = [
             "--auth",
             "proxy",
@@ -151,25 +153,28 @@ impl CronEnv {
             "danger-full-access",
             text,
         ];
-        let mut sess = PtySession::spawn(scode, &args).expect("spawn scode prompt");
-        sess.set_default_timeout(TIMEOUT);
-        sess
+        self.spawn(
+            &args.into_iter().map(String::from).collect::<Vec<_>>(),
+            Some(disable_cron_tools),
+        )
     }
 
     /// Spawn the interactive REPL (`scode` with no subcommand) under a PTY
     /// with this env's isolated config home — for driving the `/cron`
     /// slash command.
     fn repl(&self) -> PtySession {
-        let scode = env!("CARGO_BIN_EXE_scode");
-        std::env::set_var("SUDO_CODE_CONFIG_HOME", &self.config_home);
-        std::env::set_var("HOME", &self.home);
-        std::env::set_var("NO_COLOR", "1");
-        let _ = std::env::set_current_dir(&self.workspace);
-        let args = ["--auth", "proxy", "--model", "auto"];
-        let mut sess = PtySession::spawn(scode, &args).expect("spawn scode repl");
-        sess.set_default_timeout(TIMEOUT);
-        sess
+        self.spawn(
+            &["--auth", "proxy", "--model", "auto"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            None,
+        )
     }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Pull the single cron's id straight from the persisted store.

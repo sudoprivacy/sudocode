@@ -346,6 +346,17 @@ pub enum ConfigScope {
     Project,
 }
 
+/// Whether a wire model id names an Anthropic model.
+///
+/// Used to spot `api` overrides that route one over the OpenAI-compatible path,
+/// where prompt caching does not exist. Deliberately a string test: the caller
+/// runs before the program has loaded the capabilities SSOT, and reading that
+/// early would freeze it empty.
+fn is_anthropic_model(wire_model_id: &str) -> bool {
+    let id = wire_model_id.rsplit('/').next().unwrap_or(wire_model_id);
+    id.starts_with("claude-")
+}
+
 /// What one pass over `sudocode.json` found still carrying the legacy copies.
 struct LegacyPinSurvey {
     root: SerdeValue,
@@ -356,23 +367,39 @@ struct LegacyPinSurvey {
 
 /// How much of the legacy config shape a migration may repair.
 ///
-/// The distinction exists because one half consults the model-capabilities SSOT
-/// and the other does not, and that SSOT is a `OnceLock`: whoever touches it
-/// first fixes its contents, so a caller that reads it before the program has
-/// loaded the real file locks in an empty default. Running unattended at startup
-/// is exactly that caller.
+/// The two halves have opposite constraints, which is why they are separable at
+/// all:
+///
+/// * Dropping `providers.proxy.provider` needs no lookup, but produces a file
+///   that builds predating the optional-`provider` parser refuse to load. It is
+///   the irreversible half.
+/// * Dropping `providers.proxy.api` is invisible to those builds — `api` has
+///   always been optional — but deciding *which* overrides are safe to drop in
+///   general means reading the model-capabilities SSOT, and that is a `OnceLock`:
+///   whoever touches it first fixes its contents, so reading it before the
+///   program loads the real file freezes an empty default.
+///
+/// The unattended path therefore takes the half that is safe for other builds
+/// and answerable without a lookup; anything irreversible waits for a person to
+/// ask for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationScope {
-    /// Drop the per-entry account copies only. Decides nothing from the
-    /// capabilities SSOT, so it is safe before the program has loaded it.
-    AccountPinsOnly,
-    /// Also drop `api` overrides the capabilities SSOT can supply. Reads that
-    /// SSOT — and therefore initializes it — so only use it from a command that
-    /// is about to exit, never from a startup hook.
+    /// Remove only the `api` overrides that pin an Anthropic model to the
+    /// OpenAI-compatible path. That path cannot carry prompt caching, so such an
+    /// override silently makes every turn pay full price for its context — the
+    /// one piece of this shape with a running cost rather than a tidiness cost.
+    ///
+    /// Decided from the model id alone, so no capabilities lookup and no
+    /// `OnceLock` to freeze; `provider` is left in place, so the result still
+    /// loads in every build that could load the file before. Safe unattended.
+    CacheDisablingApiOverrides,
+    /// Everything: also drop the `provider` copies, and any `api` the
+    /// capabilities SSOT can supply. Reads that SSOT (initializing it) and
+    /// produces a file older builds cannot load — for explicit commands only.
     Full,
 }
 
-/// What [`ConfigLoader::migrate_model_account_pins`] changed.
+/// What [`ConfigLoader::migrate_legacy_config_shape`] changed.
 ///
 /// Returned rather than printed so the CLI and `doctor --fix` render the same
 /// facts from one code path — and so a fixer that edits config is never itself
@@ -523,7 +550,7 @@ impl ConfigLoader {
     ///
     /// `api` is only dropped for models the capabilities SSOT actually knows: a
     /// copy is safe to delete only when the original exists.
-    pub fn migrate_model_account_pins(
+    pub fn migrate_legacy_config_shape(
         &self,
         scope: MigrationScope,
     ) -> Result<ConfigMigration, ConfigError> {
@@ -715,22 +742,39 @@ impl ConfigLoader {
                 let Some(proxy) = entry.pointer("/providers/proxy") else {
                     continue;
                 };
-                if let Some(name) = proxy.get("provider").and_then(SerdeValue::as_str) {
-                    if !name.trim().is_empty() {
-                        cleared_providers.push(alias.clone());
-                        if !pinned_accounts.iter().any(|seen| seen == name) {
-                            pinned_accounts.push(name.to_string());
+                let wire = proxy
+                    .get("model")
+                    .and_then(SerdeValue::as_str)
+                    .unwrap_or(alias);
+                let api = proxy.get("api").and_then(SerdeValue::as_str);
+
+                if scope == MigrationScope::Full {
+                    if let Some(name) = proxy.get("provider").and_then(SerdeValue::as_str) {
+                        if !name.trim().is_empty() {
+                            cleared_providers.push(alias.clone());
+                            if !pinned_accounts.iter().any(|seen| seen == name) {
+                                pinned_accounts.push(name.to_string());
+                            }
                         }
                     }
                 }
-                if scope == MigrationScope::Full && proxy.get("api").is_some() {
-                    let wire = proxy
-                        .get("model")
-                        .and_then(SerdeValue::as_str)
-                        .unwrap_or(alias);
-                    if crate::model_capabilities::preferred_endpoint_type(wire).is_some() {
-                        cleared_apis.push(alias.clone());
+
+                let drop_api = match scope {
+                    // Answerable from the model id: an Anthropic model sent over
+                    // the OpenAI-compatible path cannot use prompt caching, so
+                    // the override is not a preference, it is a running cost.
+                    MigrationScope::CacheDisablingApiOverrides => {
+                        api == Some("openai-completions") && is_anthropic_model(wire)
                     }
+                    // Anything the SSOT can supply is redundant, and a copy is
+                    // safe to delete only when the original exists.
+                    MigrationScope::Full => {
+                        api.is_some()
+                            && crate::model_capabilities::preferred_endpoint_type(wire).is_some()
+                    }
+                };
+                if drop_api {
+                    cleared_apis.push(alias.clone());
                 }
             }
         }
@@ -2500,6 +2544,80 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
+    /// The unattended scope removes only the `api` overrides that route an
+    /// Anthropic model over the OpenAI-compatible path — where prompt caching
+    /// does not exist — and leaves everything else exactly as it found it.
+    ///
+    /// `provider` surviving is the property that matters beyond tidiness: it is
+    /// what keeps the file loadable by builds that predate the optional-`provider`
+    /// parser, which is why this scope is the one safe to run without being asked.
+    #[test]
+    fn unattended_scope_only_removes_cache_disabling_api_overrides() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(
+            home.join("sudocode.json"),
+            r#"{
+              "auth_modes": {"proxy": {"acct": {"baseUrl": "https://example.test/v1", "apiKey": "k"}}},
+              "models": {
+                "opus":   {"providers": {"proxy": {"provider": "acct", "model": "claude-opus-4-8", "api": "openai-completions"}}},
+                "gpt":    {"providers": {"proxy": {"provider": "acct", "model": "gpt-5.4", "api": "openai-completions"}}},
+                "native": {"providers": {"proxy": {"provider": "acct", "model": "claude-sonnet-4-6", "api": "anthropic-messages"}}}
+              }
+            }"#,
+        )
+        .expect("write sudocode.json");
+
+        let loader = ConfigLoader::new(&cwd, &home);
+        let report = loader
+            .migrate_legacy_config_shape(super::MigrationScope::CacheDisablingApiOverrides)
+            .expect("migrate");
+        assert!(report.changed());
+        assert_eq!(report.cleared_apis, vec!["opus".to_string()]);
+        assert!(
+            report.cleared_providers.is_empty(),
+            "the unattended scope must not touch `provider` — that is the irreversible half"
+        );
+        assert!(
+            report.wrote_auth_profile.is_none(),
+            "nothing was unpinned, so no selection needed recording"
+        );
+
+        let after: super::SerdeValue =
+            serde_json::from_str(&fs::read_to_string(home.join("sudocode.json")).expect("read"))
+                .expect("valid json");
+        for alias in ["opus", "gpt", "native"] {
+            assert_eq!(
+                after["models"][alias]["providers"]["proxy"]["provider"],
+                super::SerdeValue::String("acct".into()),
+                "{alias} must keep its provider so older builds can still load the file"
+            );
+        }
+        assert!(
+            after["models"]["opus"]["providers"]["proxy"]
+                .get("api")
+                .is_none(),
+            "the cache-disabling override should be gone"
+        );
+        assert!(
+            after["models"]["gpt"]["providers"]["proxy"]
+                .get("api")
+                .is_some(),
+            "a non-Anthropic model loses nothing by using the OpenAI path"
+        );
+        assert!(
+            after["models"]["native"]["providers"]["proxy"]
+                .get("api")
+                .is_some(),
+            "an override that already names the native path is not a cost"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
     /// Migration removes the per-entry copies and leaves the account named once.
     /// The selection is recorded first: reversed, a multi-account config would be
     /// pinned to nothing between the two writes and every request would refuse.
@@ -2521,7 +2639,7 @@ mod tests {
             .is_empty());
 
         let report = loader
-            .migrate_model_account_pins(super::MigrationScope::Full)
+            .migrate_legacy_config_shape(super::MigrationScope::Full)
             .expect("migrate");
         assert!(report.changed());
         assert_eq!(report.wrote_auth_profile.as_deref(), Some("sudorouter"));
@@ -2544,7 +2662,7 @@ mod tests {
 
         // Idempotent: nothing left to migrate, so nothing is rewritten.
         let again = loader
-            .migrate_model_account_pins(super::MigrationScope::Full)
+            .migrate_legacy_config_shape(super::MigrationScope::Full)
             .expect("second migrate");
         assert!(!again.changed());
 

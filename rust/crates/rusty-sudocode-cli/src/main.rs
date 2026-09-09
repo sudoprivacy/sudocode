@@ -293,41 +293,26 @@ fn auto_migrate_legacy_config() {
     let Ok(cwd) = env::current_dir() else {
         return;
     };
-    // AccountPinsOnly, not Full: the `api` half reads the model-capabilities
-    // SSOT, and that is a `OnceLock` — touching it here, before the program
-    // loads the real file, would freeze an empty default and silently change
-    // behaviour that depends on it. Stale `api` overrides are left to the
-    // explicit `scode config migrate` / `doctor --fix`.
+    // The narrow scope, not `Full`. Two reasons pointing the same way: dropping
+    // `provider` produces a file older builds refuse to load, which is not
+    // something to do to someone unasked; and deciding about `api` in general
+    // reads the capabilities SSOT, a `OnceLock` that freezes empty if touched
+    // before the program loads the real file. What is left is safe for other
+    // builds, answerable from the model id — and is the half with a running cost.
     match ConfigLoader::default_for(&cwd)
-        .migrate_model_account_pins(MigrationScope::AccountPinsOnly)
+        .migrate_legacy_config_shape(MigrationScope::CacheDisablingApiOverrides)
     {
         Ok(report) if report.changed() => {
-            eprintln!("scode: simplified {}", report.path.display());
-            if let Some(account) = &report.wrote_auth_profile {
-                eprintln!("  the account is now named once, as auth_profile = {account}");
-            }
-            if !report.cleared_providers.is_empty() {
-                eprintln!(
-                    "  removed the account copy from {} model entries",
-                    report.cleared_providers.len()
-                );
-            }
-            if !report.cleared_apis.is_empty() {
-                eprintln!(
-                    "  removed {} stale api overrides — prompt caching works again",
-                    report.cleared_apis.len()
-                );
-            }
+            eprintln!(
+                "scode: removed {} api override(s) from {} that were disabling prompt caching",
+                report.cleared_apis.len(),
+                report.path.display()
+            );
+            eprintln!("  affected: {}", report.cleared_apis.join(", "));
             if let Some(backup) = &report.backup {
                 eprintln!("  previous version: {}", backup.display());
             }
-            // The new shape is a one-way door for anything older: a build from
-            // before this change requires `provider` and refuses to start
-            // without it. Machines that run several scode builds — a release
-            // install alongside worktree builds, say — will see the older ones
-            // stop booting. Say so here rather than leaving it to be discovered
-            // as an unattributable startup error.
-            eprintln!("  scode builds older than this one cannot read the new shape; restore the backup above if you need one to run");
+            eprintln!("  run `scode config migrate` to also collapse the per-model account copies");
         }
         Ok(_) => {}
         Err(error) => {
@@ -349,7 +334,7 @@ fn auto_migrate_legacy_config() {
 fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let report =
-        ConfigLoader::default_for(&cwd).migrate_model_account_pins(MigrationScope::Full)?;
+        ConfigLoader::default_for(&cwd).migrate_legacy_config_shape(MigrationScope::Full)?;
     match output_format {
         CliOutputFormat::Text => {
             if !report.changed() {
@@ -380,6 +365,18 @@ fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std:
             }
             if let Some(backup) = &report.backup {
                 println!("  backup      {}", backup.display());
+            }
+            if !report.cleared_providers.is_empty() {
+                // Dropping `provider` is the irreversible half: builds predating
+                // the optional-`provider` parser refuse to load a file without
+                // it. That is why it happens here, where someone asked for it,
+                // and never on the startup path — and why it is said out loud
+                // rather than left to surface as an unattributable boot error on
+                // whichever other scode build shares this config.
+                println!(
+                    "  note        scode builds older than this one cannot read the result; \
+                     restore the backup above if you need one to run"
+                );
             }
         }
         CliOutputFormat::Json => println!(

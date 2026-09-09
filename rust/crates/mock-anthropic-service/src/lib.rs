@@ -160,6 +160,17 @@ enum Scenario {
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
     AskUserQuestionRoundtrip,
+    /// Streaming request without a compaction summary in its history is
+    /// rejected with Anthropic's real `input length and max_tokens exceed
+    /// context limit` 400; once the history carries a summary the request is
+    /// answered. Exercises the runtime's compact-and-retry on the overflow
+    /// error a long session actually gets.
+    ContextLimitThenText,
+    /// First request answers with a `read_file` tool use whose reported
+    /// context is far above the auto-compact threshold; the follow-up
+    /// request (carrying the tool result) is answered with text that says
+    /// whether a compaction summary was in its history.
+    ToolLoopContextGrowth,
     /// `streaming_text`, answered after [`DELAYED_TEXT_LATENCY`]. Gives a
     /// test a window to cancel a request in flight — including an LLM
     /// compaction request, since compaction requests are classified by the
@@ -209,6 +220,8 @@ impl Scenario {
             }
             "llm_compaction_roundtrip" => Some(Self::LlmCompactionRoundtrip),
             "delayed_text" => Some(Self::DelayedText),
+            "context_limit_then_text" => Some(Self::ContextLimitThenText),
+            "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             _ => None,
@@ -249,6 +262,8 @@ impl Scenario {
             Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
             Self::RetryThenSucceed => "retry_then_succeed",
+            Self::ContextLimitThenText => "context_limit_then_text",
+            Self::ToolLoopContextGrowth => "tool_loop_context_growth",
         }
     }
 }
@@ -474,6 +489,24 @@ fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> Strin
         .join("\n")
 }
 
+/// Text every compaction continuation message starts with (see
+/// `runtime::compact::COMPACT_CONTINUATION_PREAMBLE`).
+const COMPACTION_SUMMARY_MARKER: &str = "continued from a previous conversation";
+
+/// Anthropic's verbatim rejection when `input + max_tokens` overflows the
+/// window — the overflow a long agentic session sees first, well before
+/// "prompt is too long".
+const CONTEXT_LIMIT_ERROR_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 150000 + 64000 > 200000, decrease input length or `max_tokens` and try again"},"request_id":"req_context_limit_then_text"}"#;
+
+fn history_carries_compaction_summary(request: &MessageRequest) -> bool {
+    request.messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            InputContentBlock::Text { text } => text.contains(COMPACTION_SUMMARY_MARKER),
+            _ => false,
+        })
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_http_response(request: &MessageRequest, scenario: Scenario, attempt: usize) -> String {
     if scenario == Scenario::RetryThenSucceed && attempt == 0 {
@@ -481,6 +514,14 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario, attempt: us
             "429 Too Many Requests",
             "application/json",
             r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            &[("request-id", request_id_for(scenario))],
+        );
+    }
+    if scenario == Scenario::ContextLimitThenText && !history_carries_compaction_summary(request) {
+        return http_response(
+            "400 Bad Request",
+            "application/json",
+            CONTEXT_LIMIT_ERROR_BODY,
             &[("request-id", request_id_for(scenario))],
         );
     }
@@ -662,6 +703,19 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::AutoCompactTriggered => {
             final_text_sse_with_usage("auto compact parity complete.", 50_000, 200)
         }
+        Scenario::ContextLimitThenText => final_text_sse("context limit recovery complete."),
+        Scenario::ToolLoopContextGrowth => match latest_tool_result(request) {
+            Some(_) if history_carries_compaction_summary(request) => {
+                final_text_sse("tool loop compacted before the next request.")
+            }
+            Some(_) => final_text_sse("tool loop continued without compaction."),
+            None => tool_use_sse_with_context(
+                "toolu_tool_loop_growth",
+                "read_file",
+                &[r#"{"path":"fixture.txt"}"#],
+                TOOL_LOOP_GROWTH_CONTEXT_TOKENS,
+            ),
+        },
         Scenario::TokenCostReporting => {
             final_text_sse_with_usage("token cost reporting parity complete.", 1_000, 500)
         }
@@ -1013,6 +1067,26 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             50_000,
             200,
         ),
+        Scenario::ContextLimitThenText => text_message_response(
+            "msg_context_limit_then_text",
+            "context limit recovery complete.",
+        ),
+        Scenario::ToolLoopContextGrowth => match latest_tool_result(request) {
+            Some(_) if history_carries_compaction_summary(request) => text_message_response(
+                "msg_tool_loop_growth_final",
+                "tool loop compacted before the next request.",
+            ),
+            Some(_) => text_message_response(
+                "msg_tool_loop_growth_final",
+                "tool loop continued without compaction.",
+            ),
+            None => tool_message_response(
+                "msg_tool_loop_growth_tool",
+                "toolu_tool_loop_growth",
+                "read_file",
+                json!({"path": "fixture.txt"}),
+            ),
+        },
         Scenario::TokenCostReporting => text_message_response_with_usage(
             "msg_token_cost_reporting",
             "token cost reporting parity complete.",
@@ -1246,6 +1320,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
         Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
+        Scenario::ContextLimitThenText => "req_context_limit_then_text",
+        Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
     }
 }
 
@@ -1507,11 +1583,37 @@ fn streaming_text_sse() -> String {
 }
 
 fn tool_use_sse(tool_id: &str, tool_name: &str, partial_json_chunks: &[&str]) -> String {
-    tool_uses_sse(&[ToolUseSse {
-        tool_id,
-        tool_name,
-        partial_json_chunks,
-    }])
+    tool_uses_sse_with_context(
+        &[ToolUseSse {
+            tool_id,
+            tool_name,
+            partial_json_chunks,
+        }],
+        12,
+    )
+}
+
+/// Context (`input_tokens`) reported by the [`Scenario::ToolLoopContextGrowth`]
+/// tool-use response: above the runtime's auto-compact threshold for the
+/// mock's 200K / 64K model (`200K - 64K - 13K = 123K`), below the window.
+pub const TOOL_LOOP_GROWTH_CONTEXT_TOKENS: u32 = 150_000;
+
+/// [`tool_use_sse`] with an explicit reported context size, for scenarios
+/// that drive the runtime's usage-based auto-compaction.
+fn tool_use_sse_with_context(
+    tool_id: &str,
+    tool_name: &str,
+    partial_json_chunks: &[&str],
+    input_tokens: u32,
+) -> String {
+    tool_uses_sse_with_context(
+        &[ToolUseSse {
+            tool_id,
+            tool_name,
+            partial_json_chunks,
+        }],
+        input_tokens,
+    )
 }
 
 struct ToolUseSse<'a> {
@@ -1521,6 +1623,10 @@ struct ToolUseSse<'a> {
 }
 
 fn tool_uses_sse(tool_uses: &[ToolUseSse<'_>]) -> String {
+    tool_uses_sse_with_context(tool_uses, 12)
+}
+
+fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -> String {
     let mut body = String::new();
     let message_id = tool_uses.first().map_or_else(
         || "msg_tool_use".to_string(),
@@ -1539,7 +1645,7 @@ fn tool_uses_sse(tool_uses: &[ToolUseSse<'_>]) -> String {
                 "model": DEFAULT_MODEL,
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": usage_json(12, 0)
+                "usage": usage_json(input_tokens, 0)
             }
         }),
     );
@@ -1584,7 +1690,7 @@ fn tool_uses_sse(tool_uses: &[ToolUseSse<'_>]) -> String {
         json!({
             "type": "message_delta",
             "delta": {"stop_reason": "tool_use", "stop_sequence": null},
-            "usage": usage_json(12, 4)
+            "usage": usage_json(input_tokens, 4)
         }),
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));

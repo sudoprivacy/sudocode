@@ -57,6 +57,8 @@ pub use runtime::{
     QuestionOption,
     QuestionPromptAnswer,
     QuestionPromptRequest,
+    // What the HTTP transport is doing while it retries a failed request.
+    RetryEvent,
     // Incremental + cumulative token usage (AssistantEvent::Usage,
     // TurnSummary::{turn_usage,session_usage}).
     TokenUsage,
@@ -166,6 +168,10 @@ pub enum EngineEvent {
     /// `CliHookProgressReporter` stderr sink in the REPL, now surfaced through
     /// the seam. Structured; the renderer formats it.
     HookProgress(HookProgressEvent),
+    /// The HTTP transport is retrying a failed request (provider 429/5xx).
+    /// Without it a backoff is indistinguishable from a slow model: seconds of
+    /// nothing, repeatedly. Structured; the renderer formats it.
+    Retry(RetryEvent),
     /// Incremental token usage for the in-flight assistant message (was
     /// `AssistantEvent::Usage`, previously only reaching `TurnSummary`).
     Usage(TokenUsage),

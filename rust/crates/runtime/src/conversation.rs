@@ -147,6 +147,13 @@ pub trait ApiClient: Send {
             "compaction not supported by this API client",
         ))
     }
+
+    /// Install (or clear) the sink the transport reports retries to.
+    ///
+    /// Called once per turn with the current observer's sink, because the
+    /// renderer a turn belongs to changes while the client does not. Clients
+    /// whose transport has no retry loop ignore it.
+    fn set_retry_sink(&mut self, _sink: Option<crate::conversation::RetrySink>) {}
 }
 
 /// Optional observer for runtime events emitted while processing a turn.
@@ -217,6 +224,16 @@ pub trait RuntimeObserver {
     /// self` hooks above: the reporter is invoked from the (synchronous) hook
     /// runner, so it needs a `Send + Sync` value, not a borrow of the observer.
     fn hook_progress_sink(&self) -> Option<HookProgressSink> {
+        None
+    }
+
+    /// Sink for the HTTP transport's retry loop, installed into the API client
+    /// at the start of each turn (see `run_turn_with_blocks`). Same reason as
+    /// `hook_progress_sink` for not being a `&mut self` hook: the transport
+    /// reports from its own async task, so it needs an owned `Send + Sync`
+    /// value. A renderer that returns `None` leaves the client's own default
+    /// behaviour in place.
+    fn retry_sink(&self) -> Option<RetrySink> {
         None
     }
 }
@@ -300,6 +317,56 @@ impl HookProgressSink {
 impl std::fmt::Debug for HookProgressSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HookProgressSink(..)")
+    }
+}
+
+/// What the HTTP transport is doing while it retries a failed request.
+///
+/// A provider 429 or 5xx is retried with backoff, and from the outside that is
+/// indistinguishable from the model being slow — several seconds of nothing,
+/// repeatedly. The transport therefore reports what it is doing, and this is
+/// the shape that report takes on its way to a renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryEvent {
+    /// A request failed and the transport is waiting before trying again.
+    /// `attempt` is 1-based.
+    Waiting {
+        attempt: u32,
+        max_retries: u32,
+        reason: String,
+    },
+    /// The wait is over and the request is going back out.
+    Resumed,
+}
+
+/// A `Send + Sync` sink a renderer installs (via
+/// [`RuntimeObserver::retry_sink`]) to receive [`RetryEvent`]s from the HTTP
+/// transport's retry loop.
+///
+/// The seam analogue of [`HookProgressSink`], and it exists for the same
+/// reason: the emitter is neither the observer nor on the observer's thread —
+/// here it is the transport, below the runtime — so it needs an owned
+/// `Send + Sync` value rather than a borrow. The runtime hands it to the API
+/// client for the turn; the client adapts it to whatever notifier its
+/// transport wants.
+#[derive(Clone)]
+pub struct RetrySink(std::sync::Arc<dyn Fn(RetryEvent) + Send + Sync>);
+
+impl RetrySink {
+    /// Wrap a retry handler.
+    pub fn new(f: impl Fn(RetryEvent) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(f))
+    }
+
+    /// Report one retry event to the renderer.
+    pub fn emit(&self, event: RetryEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for RetrySink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetrySink(..)")
     }
 }
 
@@ -699,15 +766,6 @@ where
         self.tool_executor
             .set_abort_signal(hook_abort_signal.clone());
         self.hook_abort_signal = hook_abort_signal;
-        self
-    }
-
-    #[must_use]
-    pub fn with_hook_progress_reporter(
-        mut self,
-        hook_progress_reporter: Box<dyn HookProgressReporter + Send>,
-    ) -> Self {
-        self.hook_progress_reporter = Some(hook_progress_reporter);
         self
     }
 
@@ -1273,16 +1331,17 @@ where
     #[allow(clippy::too_many_lines)]
     /// Run a turn, then tear down what was installed *for* that turn.
     ///
-    /// The hook-progress reporter is the one such thing. It is rebuilt from the
-    /// observer at the start of every turn, so it must not survive the turn
-    /// either — and it used to, because nothing cleared it. That pins the
-    /// renderer's live event channel open after the turn has already returned.
-    /// The REPL never noticed; the ACP server waits for exactly that channel to
-    /// close before answering `session/prompt`, and so waited forever.
+    /// Two such things: the hook-progress reporter and the API client's retry
+    /// sink. Both are rebuilt from the observer at the start of every turn, so
+    /// neither may survive it — and the reporter used to, because nothing
+    /// cleared it. Anything holding a clone of the renderer's event channel
+    /// pins that channel open after the turn has already returned. The REPL
+    /// never notices; the ACP server waits for exactly that channel to close
+    /// before answering `session/prompt`, and so waits forever.
     ///
-    /// Only cleared when this turn installed it: a reporter supplied at build
-    /// time through [`with_hook_progress_reporter`](Self::with_hook_progress_reporter)
-    /// is not per-turn and stays.
+    /// The reporter is only cleared when this turn installed it, since one can
+    /// also be supplied at build time. The retry sink has no build-time form,
+    /// so it is always cleared.
     pub async fn run_turn_with_blocks(
         &mut self,
         blocks: Vec<ContentBlock>,
@@ -1299,6 +1358,7 @@ where
         if installs_hook_reporter {
             self.hook_progress_reporter = None;
         }
+        self.api_client.set_retry_sink(None);
         summary
     }
 
@@ -1376,6 +1436,12 @@ where
         {
             self.hook_progress_reporter = Some(Box::new(SinkHookReporter(sink)));
         }
+
+        // Retry reporting follows the observer, so it is set unconditionally —
+        // passing `None` when this observer wants none is what stops a previous
+        // turn's renderer from still receiving events.
+        self.api_client
+            .set_retry_sink(observer.as_deref().and_then(RuntimeObserver::retry_sink));
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();

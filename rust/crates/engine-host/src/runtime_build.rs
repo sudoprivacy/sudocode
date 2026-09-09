@@ -394,6 +394,13 @@ pub(crate) fn build_runtime_with_plugin_state(
     if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
         system_prompt.dynamic_sections.push(section);
     }
+    // Deferred tools listing: inject `<available-deferred-tools>` so the
+    // model knows which tools exist beyond the core set visible in the API
+    // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.
+    let deferred_section = tool_registry.deferred_tools_prompt_section();
+    if !deferred_section.is_empty() {
+        system_prompt.dynamic_sections.push(deferred_section);
+    }
     // nexus A2A: teach the model its A2A identity + how to reach peers, so the
     // standalone loop knows it can `send_message` to a named peer.
     if let Some(session) = a2a {

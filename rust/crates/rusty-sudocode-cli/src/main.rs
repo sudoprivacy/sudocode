@@ -4819,9 +4819,7 @@ impl LiveCli {
                 // owns the TTY, so a dialoguer widget on this thread would
                 // fight it and corrupt the terminal — issue #577. Fall back
                 // to the plain list + `/session switch <id>` hint there.
-                if !self.is_async_mode()
-                    && io::stdin().is_terminal()
-                    && io::stdout().is_terminal()
+                if !self.is_async_mode() && io::stdin().is_terminal() && io::stdout().is_terminal()
                 {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
@@ -4860,9 +4858,7 @@ impl LiveCli {
                 }
                 self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
                 if self.is_async_mode() {
-                    self.out_println(
-                        "Use `/session switch <session-id>` to switch to a session.",
-                    );
+                    self.out_println("Use `/session switch <session-id>` to switch to a session.");
                 }
                 Ok(false)
             }

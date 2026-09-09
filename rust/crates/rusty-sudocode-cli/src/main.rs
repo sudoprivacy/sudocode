@@ -143,11 +143,11 @@ use runtime::{
     check_base_commit, compact_session_sync, estimate_block_tokens, estimate_session_tokens,
     format_stale_base_warning, format_usd, load_oauth_credentials, load_system_prompt,
     pricing_for_model, resolve_expected_base, resolve_sandbox_status, should_compact, ApiClient,
-    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
-    ConversationMessage, ConversationRuntime, McpServer, McpServerManager, McpServerSpec, McpTool,
-    MessageRole, ModelPricing, PermissionMode, PermissionPolicy, ProjectContext, PromptCacheEvent,
-    ResolvedPermissionMode, RuntimeError, Session, SystemPrompt, TokenUsage, ToolError,
-    ToolExecutor, UsageTracker,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigScope, ConfigSource,
+    ContentBlock, ConversationMessage, ConversationRuntime, McpServer, McpServerManager,
+    McpServerSpec, McpTool, MessageRole, MigrationScope, ModelPricing, PermissionMode,
+    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
+    Session, SystemPrompt, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -259,6 +259,243 @@ fn enable_windows_ansi_support() {
 
 #[cfg(not(windows))]
 fn enable_windows_ansi_support() {}
+
+/// Environment variable that suppresses the startup config migration.
+const SKIP_CONFIG_MIGRATION_ENV: &str = "SCODE_SKIP_CONFIG_MIGRATION";
+
+/// One-time repair of the legacy config shape, run before any command.
+///
+/// **Temporary shim — added 2026-09, delete once installs have turned over.**
+/// `scode config migrate` stays the explicit entry point; this exists because
+/// the shape it repairs costs every user money silently. A stale `api` override
+/// keeps prompt caching off, and the only evidence is a bill, so expecting each
+/// user to learn about a command they have no reason to run would leave most
+/// configs wrong indefinitely.
+///
+/// Three properties make it safe to run unattended, and all three are load
+/// bearing:
+///
+/// * **Non-fatal.** Any failure leaves the config untouched and the command
+///   proceeds. A migration that can block startup is worse than the shape it
+///   repairs.
+/// * **Quiet unless it acts**, and never on stdout — that carries
+///   `--output-format json`, which a stray line would corrupt.
+/// * **Visible when it acts.** It writes a backup and says what it changed. A
+///   silent fixer would reproduce exactly the invisibility that let the original
+///   problem run for months.
+///
+/// The migration itself holds a lock across its whole read-modify-write, so
+/// several agents starting at once converge instead of clobbering each other.
+fn auto_migrate_legacy_config() {
+    if env::var_os(SKIP_CONFIG_MIGRATION_ENV).is_some() {
+        return;
+    }
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    // The narrow scope, not `Full`. Two reasons pointing the same way: dropping
+    // `provider` produces a file older builds refuse to load, which is not
+    // something to do to someone unasked; and deciding about `api` in general
+    // reads the capabilities SSOT, a `OnceLock` that freezes empty if touched
+    // before the program loads the real file. What is left is safe for other
+    // builds, answerable from the model id — and is the half with a running cost.
+    match ConfigLoader::default_for(&cwd)
+        .migrate_legacy_config_shape(MigrationScope::CacheDisablingApiOverrides)
+    {
+        Ok(report) if report.changed() => {
+            eprintln!(
+                "scode: removed {} api override(s) from {} that were disabling prompt caching",
+                report.cleared_apis.len(),
+                report.path.display()
+            );
+            eprintln!("  affected: {}", report.cleared_apis.join(", "));
+            if let Some(backup) = &report.backup {
+                eprintln!("  previous version: {}", backup.display());
+            }
+            eprintln!("  run `scode config migrate` to also collapse the per-model account copies");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!(
+                "scode: left the config alone ({error}) — run `scode config migrate` for detail, \
+                 or set {SKIP_CONFIG_MIGRATION_ENV}=1 to stop trying"
+            );
+        }
+    }
+}
+
+/// `scode config migrate` — drop the per-model copies of the account and wire
+/// format, leaving each fact stated once.
+///
+/// Prints exactly what changed and where the backup went. A fixer that edits
+/// config silently would reproduce the problem it is fixing: config drift is
+/// invisible, which is why it went unnoticed long enough to misroute a whole
+/// session's spending.
+fn run_config_migrate(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let report =
+        ConfigLoader::default_for(&cwd).migrate_legacy_config_shape(MigrationScope::Full)?;
+    match output_format {
+        CliOutputFormat::Text => {
+            if !report.changed() {
+                println!(
+                    "nothing to migrate — {} already states each fact once",
+                    report.path.display()
+                );
+                return Ok(());
+            }
+            println!("migrated {}", report.path.display());
+            if let Some(account) = &report.wrote_auth_profile {
+                println!("  auth_profile = {account}  (recorded before dropping the pins, so routing never lapses)");
+            }
+            if !report.cleared_providers.is_empty() {
+                println!(
+                    "  dropped pinned provider from {} model(s): {}",
+                    report.cleared_providers.len(),
+                    report.cleared_providers.join(", ")
+                );
+            }
+            if !report.cleared_apis.is_empty() {
+                println!(
+                    "  dropped redundant api override from {} model(s): {}",
+                    report.cleared_apis.len(),
+                    report.cleared_apis.join(", ")
+                );
+                println!("  (wire format now comes from the model capabilities SSOT — this is what re-enables prompt caching)");
+            }
+            if let Some(backup) = &report.backup {
+                println!("  backup      {}", backup.display());
+            }
+            if !report.cleared_providers.is_empty() {
+                // Dropping `provider` is the irreversible half: builds predating
+                // the optional-`provider` parser refuse to load a file without
+                // it. That is why it happens here, where someone asked for it,
+                // and never on the startup path — and why it is said out loud
+                // rather than left to surface as an unattributable boot error on
+                // whichever other scode build shares this config.
+                println!(
+                    "  note        scode builds older than this one cannot read the result; \
+                     restore the backup above if you need one to run"
+                );
+            }
+        }
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "kind": "config-migrate",
+                "changed": report.changed(),
+                "path": report.path.display().to_string(),
+                "auth_profile": report.wrote_auth_profile,
+                "cleared_providers": report.cleared_providers,
+                "cleared_apis": report.cleared_apis,
+                "backup": report.backup.map(|path| path.display().to_string()),
+            }))?
+        ),
+    }
+    Ok(())
+}
+
+/// `scode config account [<name>] [--global]` — show, or set, the account that
+/// requests are billed to.
+///
+/// Writing goes through `ConfigLoader::set_auth_profile`, the same entry point
+/// the interactive picker uses, so "record which account pays" has one
+/// implementation rather than one per surface — the drift this whole area is
+/// being repaired for.
+///
+/// An unknown name is rejected here rather than written: a typo that reaches the
+/// config file turns into a refusal at the next request, far from the command
+/// that caused it.
+fn run_config_account(
+    account: Option<&str>,
+    global: bool,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let config = loader.load_sudocode_config()?;
+    let known: Vec<&str> = config
+        .auth_modes
+        .get("proxy")
+        .map(|accounts| accounts.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let candidates = || {
+        if known.is_empty() {
+            "<none configured under auth_modes.proxy>".to_string()
+        } else {
+            known.join(", ")
+        }
+    };
+
+    let Some(account) = account else {
+        let (global_path, project_path) = loader.auth_profile_paths();
+        match output_format {
+            CliOutputFormat::Text => {
+                println!(
+                    "account   {}",
+                    config
+                        .selected_account
+                        .as_deref()
+                        .unwrap_or("<none selected>")
+                );
+                println!("available {}", candidates());
+                println!(
+                    "set here  scode config account <name>            → {}",
+                    project_path.display()
+                );
+                println!(
+                    "machine   scode config account <name> --global   → {}",
+                    global_path.display()
+                );
+                for conflict in &config.auth_profile_conflicts {
+                    println!(
+                        "warning   auth_profile in {} is ignored — remove it",
+                        conflict.display()
+                    );
+                }
+            }
+            CliOutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind": "config-account",
+                    "account": config.selected_account,
+                    "available": known,
+                    "project_path": project_path.display().to_string(),
+                    "global_path": global_path.display().to_string(),
+                    "ignored": config
+                        .auth_profile_conflicts
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>(),
+                }))?
+            ),
+        }
+        return Ok(());
+    };
+
+    if !known.contains(&account) {
+        return Err(format!("unknown account '{account}'. Available: {}", candidates()).into());
+    }
+    let scope = if global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    let written = loader.set_auth_profile(account, scope)?;
+    match output_format {
+        CliOutputFormat::Text => println!("account = {account}  ({})", written.display()),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "kind": "config-account",
+                "account": account,
+                "scope": if global { "global" } else { "project" },
+                "path": written.display().to_string(),
+            }))?
+        ),
+    }
+    Ok(())
+}
 
 fn main() {
     // Must run before any output so early raw ANSI escapes render correctly on
@@ -412,6 +649,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (action, prompt_overrides) = parse_args_with_prompt_overrides(&args)?;
     // Only writer in the process; a second `set` cannot happen.
     set_cli_prompt_overrides(prompt_overrides);
+    auto_migrate_legacy_config();
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
     // If an ensure_authenticated() call is ever added below this point it
@@ -548,7 +786,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // drop; the renderer keeps none, so there is nothing to shut down
             // here.
         }
-        CliAction::Doctor { output_format } => run_doctor(output_format)?,
+        CliAction::Doctor { fix, output_format } => {
+            // Repair before reporting, so the report a user reads is the state
+            // they are actually left in rather than the one just replaced.
+            if fix {
+                run_config_migrate(output_format)?;
+            }
+            run_doctor(output_format)?;
+        }
         CliAction::Acp {
             model,
             model_flag_raw,
@@ -575,7 +820,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // corresponding _json helpers already exposed for resume sessions.
         CliAction::Config {
             section,
+            value,
+            global,
             output_format,
+        } if section.as_deref() == Some("account") => {
+            run_config_account(value.as_deref(), global, output_format)?;
+        }
+        CliAction::Config {
+            section,
+            output_format,
+            ..
+        } if section.as_deref() == Some("migrate") => {
+            run_config_migrate(output_format)?;
+        }
+        CliAction::Config {
+            section,
+            output_format,
+            ..
         } => match output_format {
             CliOutputFormat::Text => {
                 println!("{}", render_config_report(section.as_deref())?);

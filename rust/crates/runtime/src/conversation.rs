@@ -2684,10 +2684,20 @@ fn merge_auto_compaction(
     }
 }
 
-/// Per-model auto-compact threshold: `context_window - max_output - buffer`.
+/// Per-model auto-compact threshold:
+/// `context_window - request max_tokens - buffer`.
 ///
-/// Matches CC's dynamic threshold calculation instead of a flat 100K default.
-/// Falls back to the env-var or built-in default when the model is unknown.
+/// The provider rejects a request once `input + max_tokens` passes the
+/// window, and the API client's local preflight mirrors that same sum. The
+/// output reservation subtracted here is therefore the `max_tokens` chat
+/// requests are actually sent with
+/// ([`crate::model_capabilities::request_max_output_tokens`]), not the
+/// compaction summary's much smaller cap: with a 200K window and 64K
+/// `max_tokens` the provider rejects at 136K, so the old
+/// `min(max_output, 20K)` form put the threshold at 167K — above the entire
+/// band where rejections happen, where it could never fire in time.
+///
+/// Falls back to the env-var override when set.
 #[must_use]
 pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     // Env-var override takes precedence (explicit user intent).
@@ -2700,11 +2710,9 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     }
 
     let context_window = crate::model_capabilities::context_window_or_default(model);
-    let max_output = crate::model_capabilities::max_output_tokens_or_default(model);
-    // Clamp max_output to avoid overflow on small context windows
-    let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
+    let max_output = crate::model_capabilities::request_max_output_tokens(model);
     let buffer = autocompact_buffer_tokens(model);
-    context_window.saturating_sub(effective_max_output + buffer)
+    context_window.saturating_sub(max_output.saturating_add(buffer))
 }
 
 fn build_assistant_message(
@@ -4834,16 +4842,18 @@ mod tests {
         let _g = env_guard();
         // Ensure no env-var override is active.
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
-        // The threshold is context_window - min(max_output, 20K) - buffer.
-        // For claude-sonnet-4-6 (200K context, 64K output):
-        //   buffer = 13K (200K < 400K), threshold = 200K - 20K - 13K = 167K
+        // The threshold is context_window - request max_tokens - buffer.
+        // For claude-sonnet-4-6 (200K context, 64K request max_tokens):
+        //   buffer = 13K (200K < 400K), threshold = 200K - 64K - 13K = 123K.
+        // The provider rejects this model at 200K - 64K = 136K, so the
+        // threshold has to sit below that to ever fire.
         let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
-        assert_eq!(threshold, 167_000);
+        assert_eq!(threshold, 123_000);
 
-        // Unknown model falls back to SSOT default (1M context, 64K output):
-        //   buffer = 50K (1M >= 800K), threshold = 1M - 20K - 50K = 930K
+        // Unknown model: SSOT default window (1M) and the 64K request
+        // heuristic — buffer = 50K (1M >= 800K), threshold = 886K.
         let unknown = auto_compact_threshold_for_model("some-unknown-model");
-        assert_eq!(unknown, 930_000);
+        assert_eq!(unknown, 886_000);
     }
 
     // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is

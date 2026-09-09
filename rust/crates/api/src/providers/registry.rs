@@ -107,22 +107,10 @@ pub fn model_token_limit_from_config(
 /// while keeping sensible defaults for unknown models.
 #[must_use]
 pub fn max_tokens_for_model(model_id: &str) -> u32 {
-    // An explicit `models.<alias>.maxOutputTokens` is the user's own number
-    // for a model the compiled-in table may not know — take it as written,
-    // above or below the heuristic.
-    if let Some(configured) = runtime::model_capabilities::config_max_output_tokens(model_id) {
-        return configured;
-    }
-
-    let heuristic = if model_id.contains("opus") {
-        32_000
-    } else {
-        64_000
-    };
-
-    model_token_limit(model_id)
-        .map(|limit| heuristic.min(limit.max_output_tokens))
-        .unwrap_or(heuristic)
+    // Single source of truth shared with everything that budgets history
+    // against the context window, so "how much output does this request
+    // reserve" and "when must we compact" can never disagree.
+    runtime::model_capabilities::request_max_output_tokens(model_id)
 }
 
 /// Return the effective max output tokens by resolving an alias through

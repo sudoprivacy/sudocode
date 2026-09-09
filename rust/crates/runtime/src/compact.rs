@@ -137,6 +137,70 @@ pub fn autocompact_buffer_tokens(model: &str) -> u32 {
     }
 }
 
+/// The numbers the context-window guard subtracts from the model's window,
+/// and the arithmetic that turns them into a history budget.
+///
+/// Two signals get compared against this budget and they are in different
+/// units: a local estimate of the conversation (history only —
+/// [`Self::history_budget`]) and the context the provider reported for the
+/// latest response (system prompt and tool definitions included —
+/// [`Self::reported_context_budget`]). Keep them apart; mixing them
+/// double-counts or drops the request overhead.
+///
+/// Two callers need this and they sit in different crates: the per-turn
+/// preflight in the engine host (which knows the provider's output
+/// reservation and the rendered tool definitions) and the in-turn check in
+/// the runtime tool loop (which does not). Sharing the struct keeps one
+/// formula while each layer supplies the inputs it actually has — see
+/// [`ApiClient::context_budget`](crate::conversation::ApiClient::context_budget).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    /// The model's full context window.
+    pub context_limit: usize,
+    /// Output space reserved for the response that has not been generated yet.
+    pub max_output_tokens: usize,
+    /// Rendered system prompt + tool definitions: present on every request and
+    /// not something compaction can shrink.
+    pub overhead_tokens: usize,
+    /// Headroom so a turn that grows while it runs does not land exactly on
+    /// the limit. Zero when checking the hard limit rather than the trigger.
+    pub buffer_tokens: usize,
+}
+
+impl ContextBudget {
+    /// Tokens of history that still fit, buffer included.
+    ///
+    /// Compare this against a *local estimate* of the conversation — the
+    /// estimate covers history only, so the overhead is subtracted here.
+    #[must_use]
+    pub fn history_budget(&self) -> usize {
+        self.context_limit
+            .saturating_sub(self.max_output_tokens + self.overhead_tokens + self.buffer_tokens)
+    }
+
+    /// Tokens of *provider-reported* context that still fit, buffer included.
+    ///
+    /// Compare this against a number that came back from the provider
+    /// (`input_tokens` + cache reads + cache writes). That number already
+    /// counts the system prompt and the tool definitions, so unlike
+    /// [`Self::history_budget`] the overhead must not be subtracted again —
+    /// doing so would trigger a compaction one overhead's worth of tokens
+    /// early on every model.
+    #[must_use]
+    pub fn reported_context_budget(&self) -> usize {
+        self.context_limit
+            .saturating_sub(self.max_output_tokens + self.buffer_tokens)
+    }
+
+    /// Whether `estimated_tokens` of history fits under the hard limit. The
+    /// buffer is deliberately not applied here: this is the question "would
+    /// the provider accept this request", not "should we compact first".
+    #[must_use]
+    pub fn fits(&self, estimated_tokens: usize) -> bool {
+        estimated_tokens + self.overhead_tokens + self.max_output_tokens <= self.context_limit
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Post-compact file restore (CC parity)
 // ---------------------------------------------------------------------------
@@ -392,7 +456,7 @@ fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
     }
 }
 
-fn estimate_message_tokens(message: &ConversationMessage) -> usize {
+pub(crate) fn estimate_message_tokens(message: &ConversationMessage) -> usize {
     message
         .blocks
         .iter()
@@ -598,6 +662,8 @@ fn is_prompt_too_long(error_msg: &str) -> bool {
         // request before it leaves the process; treat it like the provider's
         // own prompt-too-long so the head-truncation retry still applies.
         || lower.contains("context_window_blocked")
+        // Anthropic: "input length and `max_tokens` exceed context limit".
+        || lower.contains("context limit")
         || lower.contains("context window")
 }
 

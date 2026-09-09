@@ -1624,6 +1624,278 @@ async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
     workspace.cleanup();
 }
 
+/// Create a session, run one seed turn so its transcript exists, then
+/// replace the transcript with `pairs` small user/assistant exchanges of
+/// plain text (no parity markers, so a compaction request over them falls
+/// through to the mock's `llm_compaction_roundtrip` detection). Small enough
+/// that the ACP pre-send budget check never compacts on its own; what the
+/// history provides is enough compactable messages (more than the four
+/// preserved verbatim) for an in-turn compaction to have something to remove.
+async fn seed_filler_history(
+    server: &MockAnthropicService,
+    workspace: &TestWorkspace,
+    pairs: usize,
+) -> (String, PathBuf) {
+    let session_id = {
+        let mut client = spawn_stdio_client(workspace);
+        scenario_initialize(&mut client).await;
+        let session_id = scenario_session_new(&mut client, &workspace.root).await;
+        let (_notifs, resp) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}streaming_text") }]
+                }),
+            )
+            .await;
+        assert!(
+            resp["result"].get("stopReason").is_some(),
+            "seed turn should complete: {resp}"
+        );
+        client.shutdown().await;
+        session_id
+    };
+    // The seed turn's requests are not part of what the test inspects.
+    let _ = server.captured_requests().await;
+
+    let transcript_path = find_session_transcript(&workspace.root, &session_id);
+    let mut session =
+        runtime::Session::load_from_path(&transcript_path).expect("seed transcript should load");
+    session.messages.clear();
+    for turn in 0..pairs {
+        session
+            .push_user_text(format!(
+                "user turn {turn}: earlier discussion about the migration plan."
+            ))
+            .expect("seed user message");
+        session
+            .push_message(runtime::ConversationMessage::assistant(vec![
+                runtime::ContentBlock::Text {
+                    text: format!("assistant turn {turn}: acknowledged, continuing the plan."),
+                },
+            ]))
+            .expect("seed assistant message");
+    }
+    session
+        .save_to_path(&transcript_path)
+        .expect("seeded transcript should persist");
+    (session_id, transcript_path)
+}
+
+/// Regression: the overflow error a long Anthropic session actually gets is
+/// `400 input length and max_tokens exceed context limit` — raised as soon
+/// as `input + max_tokens` passes the window, long before the input alone
+/// does ("prompt is too long"). That text matched none of the API client's
+/// context-window markers — and even once it did, the API client threw the
+/// classification away when it built the `RuntimeError`. Either gap alone
+/// left the runtime unable to recognise the rejection: no compaction, no
+/// retry, the rejected prompt still in the transcript, and ACP surfacing the
+/// raw provider text. The mock rejects until the history carries a
+/// compaction summary; the turn must be answered from a compacted request.
+#[tokio::test]
+async fn acp_stdio_context_limit_rejection_is_compacted_and_retried() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-context-limit");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 3).await;
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let (_load_notifs, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id,
+                "cwd": workspace.root.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load should succeed, got: {load_resp}"
+    );
+
+    let before = server.captured_requests().await.len();
+    let (text, _tools) = run_scenario_collect_text(
+        &mut client,
+        &session_id,
+        "context_limit_then_text",
+        Duration::from_secs(30),
+        "prompt rejected with `exceed context limit` must be compacted and retried",
+    )
+    .await;
+    assert!(
+        text.contains("context limit recovery complete."),
+        "turn should be answered after compaction, got: {text:?}"
+    );
+
+    let requests = server.captured_requests().await;
+    let scenarios = requests[before..]
+        .iter()
+        .map(|request| request.scenario.as_str())
+        .collect::<Vec<_>>();
+    let rejected = requests[before..]
+        .iter()
+        .position(|request| {
+            request.stream
+                && request.scenario == "context_limit_then_text"
+                && !request
+                    .raw_body
+                    .contains("continued from a previous conversation")
+        })
+        .unwrap_or_else(|| {
+            panic!("the first attempt should have been rejected; saw {scenarios:?}")
+        });
+    let compacted = requests[before..]
+        .iter()
+        .position(|request| request.scenario == "llm_compaction_roundtrip")
+        .unwrap_or_else(|| {
+            panic!("the rejection should trigger LLM compaction; saw {scenarios:?}")
+        });
+    let answered = requests[before..]
+        .iter()
+        .rposition(|request| {
+            request.stream
+                && request.scenario == "context_limit_then_text"
+                && request
+                    .raw_body
+                    .contains("continued from a previous conversation")
+        })
+        .unwrap_or_else(|| panic!("the retry should carry the summary; saw {scenarios:?}"));
+    assert!(
+        rejected < compacted && compacted < answered,
+        "expected reject -> compact -> retry, saw {scenarios:?}"
+    );
+
+    let reloaded =
+        runtime::Session::load_from_path(&transcript_path).expect("compacted transcript loads");
+    assert!(
+        reloaded.compaction.is_some(),
+        "transcript on disk should record the compaction"
+    );
+    assert!(
+        reloaded
+            .messages
+            .last()
+            .is_some_and(|message| message.role == runtime::MessageRole::Assistant),
+        "the answered turn should be persisted after the compacted history: {:?}",
+        reloaded
+            .messages
+            .iter()
+            .map(|message| message.role)
+            .collect::<Vec<_>>()
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Regression: auto-compaction only ran at the end of a turn, so a tool loop
+/// could grow the context from "under the budget" straight into a provider
+/// rejection with no compaction in between.
+///
+/// This is also the case the in-turn guard's *local estimate* cannot see:
+/// the tool result here is a one-line file, so the estimate stays tiny while
+/// the provider reports 150K of context. Only the reported-context arm of
+/// the budget notices, which is why the guard consults both. The runtime
+/// must compact before building the next request of the same turn, and the
+/// follow-up request must carry the summary alongside the tool result.
+#[tokio::test]
+async fn acp_stdio_tool_loop_compacts_before_next_request() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-tool-loop-growth");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    fs::write(
+        workspace.root.join("fixture.txt"),
+        "tool loop fixture line\n",
+    )
+    .expect("fixture should be written");
+    let (session_id, _transcript_path) = seed_filler_history(&server, &workspace, 2).await;
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let (_load_notifs, load_resp) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id,
+                "cwd": workspace.root.to_string_lossy().to_string(),
+                "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(
+        load_resp.get("error").is_none(),
+        "session/load should succeed, got: {load_resp}"
+    );
+
+    let before = server.captured_requests().await.len();
+    let (text, tools) = run_scenario_collect_text(
+        &mut client,
+        &session_id,
+        "tool_loop_context_growth",
+        Duration::from_secs(30),
+        "tool loop whose context passes the threshold mid-turn",
+    )
+    .await;
+    assert!(
+        text.contains("tool loop compacted before the next request."),
+        "the request after the tool result should carry a compaction summary; got: {text:?} \
+         (tool outputs: {tools:?})"
+    );
+
+    let requests = server.captured_requests().await;
+    let scenarios = requests[before..]
+        .iter()
+        .map(|request| request.scenario.as_str())
+        .collect::<Vec<_>>();
+    let tool_use = requests[before..]
+        .iter()
+        .position(|request| {
+            request.stream
+                && request.scenario == "tool_loop_context_growth"
+                && !request.raw_body.contains("tool_result")
+        })
+        .unwrap_or_else(|| panic!("the first request should ask for the tool; saw {scenarios:?}"));
+    let compacted = requests[before..]
+        .iter()
+        .position(|request| request.scenario == "llm_compaction_roundtrip")
+        .unwrap_or_else(|| {
+            panic!("the reported context should trigger LLM compaction; saw {scenarios:?}")
+        });
+    let follow_up = requests[before..]
+        .iter()
+        .rposition(|request| {
+            request.stream
+                && request.scenario == "tool_loop_context_growth"
+                && request.raw_body.contains("tool_result")
+        })
+        .unwrap_or_else(|| panic!("the tool result should be sent back; saw {scenarios:?}"));
+    assert!(
+        tool_use < compacted && compacted < follow_up,
+        "expected tool use -> compact -> follow-up, saw {scenarios:?}"
+    );
+    assert!(
+        requests[before + follow_up]
+            .raw_body
+            .contains("continued from a previous conversation"),
+        "follow-up request should carry the compaction summary; body head: {}",
+        &requests[before + follow_up].raw_body
+            [..requests[before + follow_up].raw_body.len().min(400)]
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// Locate `<root>/.scode/sessions/<fingerprint>/<id>/transcript.jsonl`.
 fn find_session_transcript(root: &std::path::Path, session_id: &str) -> PathBuf {
     let sessions = root.join(".scode").join("sessions");

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use engine_core::AuthMode;
 use plugins::PluginLoadOutcome;
 use runtime::{
-    estimate_block_tokens, estimate_session_tokens, CompactionConfig, PermissionMode, SystemPrompt,
+    estimate_block_tokens, estimate_session_tokens, ApiClient, CompactionConfig, PermissionMode,
+    SystemPrompt,
 };
 use serde_json::{Map, Value};
 
@@ -635,21 +636,26 @@ impl engine_core::EngineDelegate for SessionEngine {
         // Pre-send auto-compaction, budgeted the way the API preflight is
         // (context window minus max output, the fixed per-request overhead, and
         // the autocompact buffer) so a too-large request never reaches the
-        // provider — the #545 wedge fix, on the engine turn path. The session's
-        // own model is the SSOT for the context-window lookup (build + set_model
-        // keep it current). Compacts through the LLM path and rewrites the
-        // persisted transcript; the runtime also compacts-and-resends once
+        // provider — the #545 wedge fix, on the engine turn path. Compacts
+        // through the LLM path and rewrites the persisted transcript; the
+        // runtime also compacts before every in-turn request and salvages
         // reactively inside run_turn if the provider still rejects.
+        //
+        // The budget comes from the API client rather than being rebuilt here:
+        // the client is the only layer that knows the output reservation its
+        // requests will carry and the tool definitions it attaches, and it is
+        // the same call the runtime's in-turn guard makes. Two copies of this
+        // arithmetic drifting apart is what makes the preflight pass a request
+        // the in-turn guard then compacts, or the reverse.
         let model = session.runtime.session().model.clone().unwrap_or_default();
-        let context_limit = runtime::model_capabilities::context_window_or_default(&model) as usize;
-        let max_output_tokens = engine_core::max_tokens_for_model(&model) as usize;
-        let overhead_tokens = session
+        let budget = session
             .runtime
             .api_client()
-            .fixed_request_overhead_tokens(session.runtime.system_prompt());
-        let buffer_tokens = runtime::autocompact_buffer_tokens(&model) as usize;
-        let history_budget =
-            context_limit.saturating_sub(max_output_tokens + overhead_tokens + buffer_tokens);
+            .context_budget(&model, session.runtime.system_prompt());
+        let context_limit = budget.context_limit;
+        let max_output_tokens = budget.max_output_tokens;
+        let overhead_tokens = budget.overhead_tokens;
+        let history_budget = budget.history_budget();
         let prompt_tokens: usize = blocks.iter().map(estimate_block_tokens).sum();
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let mut pre_send_compaction = None;
@@ -676,18 +682,20 @@ impl engine_core::EngineDelegate for SessionEngine {
                     attrs
                 });
             }
-            pre_send_compaction =
-                self.rt()
-                    .block_on(session.runtime.compact_in_place(CompactionConfig {
-                        max_estimated_tokens: 0, // force compaction
-                        ..CompactionConfig::default()
-                    }));
+            pre_send_compaction = self.rt().block_on(session.runtime.compact_in_place(
+                CompactionConfig {
+                    // Bypass the size heuristic: the budget check above is
+                    // the decision, and `should_compact`'s coarser default
+                    // gate would only be able to veto it.
+                    max_estimated_tokens: 0,
+                    ..CompactionConfig::default()
+                },
+                runtime::CompactionTrigger::Preflight,
+            ));
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
-            if new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens
-                > context_limit
-            {
+            if !budget.fits(new_estimated_tokens + prompt_tokens) {
                 return Err(context_overflow_user_message(
                     session.runtime.session(),
                     new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,

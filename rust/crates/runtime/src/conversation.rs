@@ -10,8 +10,9 @@ use telemetry::SessionTracer;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
-    compact_session_sync_after_llm_failure, estimate_session_tokens, CompactionConfig,
-    CompactionError, CompactionResult, ReadFileTracker,
+    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
+    CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
+    ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{
@@ -154,6 +155,39 @@ pub trait ApiClient: Send {
     /// renderer a turn belongs to changes while the client does not. Clients
     /// whose transport has no retry loop ignore it.
     fn set_retry_sink(&mut self, _sink: Option<crate::conversation::RetrySink>) {}
+
+    /// The context-window budget for a request this client would send.
+    ///
+    /// The runtime's in-turn guard and the engine host's preflight both
+    /// compact against whatever this returns, so it must describe the
+    /// request this client will actually build. Three of the four numbers
+    /// are derivable from the model alone and the default handles them; the
+    /// fourth, `overhead_tokens`, is not — it includes the tool definitions
+    /// the client attaches to every request, which the runtime cannot see.
+    /// The default therefore accounts only for the system prompt and a
+    /// client that attaches tools should override, as `EngineApiClient` and
+    /// `ProviderRuntimeClient` do. Under-reporting the overhead makes the
+    /// budget too generous and lets the guard miss an overflow it should
+    /// have caught.
+    fn context_budget(&self, model: &str, system_prompt: &SystemPrompt) -> ContextBudget {
+        let overhead_tokens = if system_prompt.is_empty() {
+            0
+        } else {
+            estimate_block_tokens(&ContentBlock::Text {
+                text: system_prompt.render(),
+            })
+        };
+        ContextBudget {
+            context_limit: crate::model_capabilities::context_window_or_default(model) as usize,
+            // The `max_tokens` a request is sent with, not the model's
+            // nominal output ceiling: for gpt-5.4 (128K nominal, 64K
+            // requested) and opus (64K nominal, 32K requested) those differ,
+            // and the provider only ever adds the requested number.
+            max_output_tokens: crate::model_capabilities::request_max_output_tokens(model) as usize,
+            overhead_tokens,
+            buffer_tokens: autocompact_buffer_tokens(model) as usize,
+        }
+    }
 }
 
 /// Optional observer for runtime events emitted while processing a turn.
@@ -594,6 +628,73 @@ impl CompactionMethod {
         match self {
             Self::LlmSummary => "llm summary",
             Self::LocalHeuristic => "local heuristic",
+        }
+    }
+}
+
+/// How many times a single turn may compact its own history.
+///
+/// This was once per turn, which is what let a many-step turn die mid-flight:
+/// the salvage fired on the first rejection and the second overflow ended the
+/// turn. A long tool-using turn legitimately needs more than one pass.
+///
+/// The allowance is bounded rather than open because every compaction is an
+/// LLM round-trip the user pays for and waits on. Eight is chosen from what
+/// a compaction actually buys: each pass replaces everything before
+/// `CompactionConfig::preserve_recent_messages` with one summary, so a turn
+/// that needs a ninth pass has already summarised summaries eight times and
+/// is not making progress — what is left is the preserved tail, and no
+/// further pass can shrink it. Spending the allowance is therefore the
+/// signal that the overflow is structural, and it surfaces as a real error
+/// instead of an unbounded compaction loop. Worst case per turn is eight
+/// extra round-trips.
+const MAX_TURN_COMPACTIONS: usize = 8;
+
+/// Model assumed when a session has not recorded one. Capability lookups and
+/// compaction both need a name; using different fallbacks in different places
+/// would budget against one model and compact against another.
+const DEFAULT_COMPACTION_MODEL: &str = "claude-sonnet-4-6";
+
+/// The config every guard in this file compacts with.
+///
+/// `max_estimated_tokens: 0` disables [`should_compact`]'s size heuristic —
+/// its default 10K gate — leaving only the message-count floor
+/// (`preserve_recent_messages`). That is deliberate: the caller has already
+/// decided from its own context budget that this session must shrink, so
+/// re-asking a coarser question here could only override that decision with
+/// a worse-informed one. What it does *not* bypass is the tail protection:
+/// with nothing removable, compaction still reports back a no-op.
+fn forced_compaction_config() -> CompactionConfig {
+    CompactionConfig {
+        max_estimated_tokens: 0,
+        ..CompactionConfig::default()
+    }
+}
+
+/// Which guard asked for a compaction. Recorded on every attempt so a
+/// context-overflow report can be diagnosed from the session log: until this
+/// existed only the engine host's preflight emitted an event, and the two
+/// paths that actually run during a turn were silent — making a compaction
+/// that ran and worked indistinguishable from one that never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTrigger {
+    /// The per-turn preflight, before the turn starts.
+    Preflight,
+    /// The in-turn budget check, before dispatching an iteration's request.
+    InTurnBudget,
+    /// Salvage after the provider rejected a request as too large.
+    ProviderRejection,
+    /// The post-turn usage-threshold check.
+    PostTurnUsage,
+}
+
+impl CompactionTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::InTurnBudget => "in_turn_budget",
+            Self::ProviderRejection => "provider_rejection",
+            Self::PostTurnUsage => "post_turn_usage",
         }
     }
 }
@@ -1448,7 +1549,8 @@ where
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
         let mut retried_empty_post_tool_deliverable = false;
-        let mut retried_context_window_overflow = false;
+        let mut turn_compactions = 0usize;
+        let mut recorded_compaction_budget_exhausted = false;
         let mut overflow_compaction: Option<AutoCompactionEvent> = None;
         let mut response_model: Option<String> = None;
 
@@ -1477,6 +1579,39 @@ where
                 );
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
+            }
+
+            // Compact before dispatching, not after the provider rejects.
+            // A turn that takes many tool-call steps grows its own history
+            // while it runs; the per-turn preflight ran once, before any of
+            // those steps existed. Without this the first the runtime hears
+            // of the overflow is a rejection, and the single salvage below
+            // is all a long turn ever gets.
+            if self.next_request_exceeds_budget() {
+                if turn_compactions < MAX_TURN_COMPACTIONS {
+                    if let Some(event) = self
+                        .compact_in_place(
+                            forced_compaction_config(),
+                            CompactionTrigger::InTurnBudget,
+                        )
+                        .await
+                    {
+                        overflow_compaction =
+                            merge_auto_compaction(overflow_compaction, Some(event));
+                    }
+                    // Counted whether or not anything was removed: a pass
+                    // that shrinks nothing has still spent its round-trip,
+                    // and repeating it every iteration would burn the rest
+                    // of the turn on compactions that cannot help.
+                    turn_compactions += 1;
+                } else if !recorded_compaction_budget_exhausted {
+                    // The guard wants to compact and cannot. Every request
+                    // from here on is expected to be rejected, so say so
+                    // once — otherwise the turn's failure looks like the
+                    // guard never ran.
+                    self.record_compaction_budget_exhausted(CompactionTrigger::InTurnBudget);
+                    recorded_compaction_budget_exhausted = true;
+                }
             }
 
             let request = ApiRequest {
@@ -1514,15 +1649,19 @@ where
                 Err(error) => {
                     // A context-window rejection is the one request failure
                     // the runtime can fix on its own: compact the history and
-                    // resend. Once per turn — if the preserved tail is still
-                    // too large the error is real and must surface.
-                    if error.is_context_window_blocked() && !retried_context_window_overflow {
-                        retried_context_window_overflow = true;
-                        let config = CompactionConfig {
-                            max_estimated_tokens: 0,
-                            ..CompactionConfig::default()
-                        };
-                        if let Some(event) = self.compact_in_place(config).await {
+                    // resend. Shares the turn's compaction allowance with the
+                    // proactive check above; when compaction can no longer
+                    // remove anything the error is real and must surface.
+                    if error.is_context_window_blocked() && turn_compactions < MAX_TURN_COMPACTIONS
+                    {
+                        if let Some(event) = self
+                            .compact_in_place(
+                                forced_compaction_config(),
+                                CompactionTrigger::ProviderRejection,
+                            )
+                            .await
+                        {
+                            turn_compactions += 1;
                             overflow_compaction =
                                 merge_auto_compaction(overflow_compaction, Some(event));
                             continue;
@@ -2386,10 +2525,57 @@ where
         self.session
     }
 
+    /// Model name used for capability lookups and compaction. The single
+    /// home of the fallback, so the in-turn budget is always derived from
+    /// the same model the compaction itself will run against.
+    fn compaction_model(&self) -> String {
+        self.session
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_COMPACTION_MODEL.to_string())
+    }
+
+    /// Whether the request this iteration is about to build would not fit.
+    ///
+    /// Both available signals are consulted, because each is blind where the
+    /// other sees. The local estimate covers history the provider has never
+    /// counted — the tool results a long turn keeps pushing — but it is only
+    /// a character-count heuristic. The provider's reported context is exact
+    /// for everything it has already processed but says nothing about what
+    /// was pushed since. Either one over its own budget means compact.
+    fn next_request_exceeds_budget(&self) -> bool {
+        let budget = self
+            .api_client
+            .context_budget(self.compaction_model().as_str(), &self.system_prompt);
+        estimate_session_tokens(&self.session) > budget.history_budget()
+            || self.projected_context_tokens() as usize > budget.reported_context_budget()
+    }
+
+    /// Best estimate of the context the next request will carry: the context
+    /// the provider reported for the latest response, plus everything pushed
+    /// since that response (tool results, injected reminders) that no usage
+    /// report has counted yet. At the start of a turn there is no reported
+    /// context and this is near zero — the per-turn preflight covers that
+    /// point; between iterations of a tool loop it is what notices growth
+    /// the local estimate undercounts.
+    fn projected_context_tokens(&self) -> u32 {
+        let reported = self.usage_tracker.current_turn_usage().context_tokens();
+        let unreported: usize = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .take_while(|message| message.role != MessageRole::Assistant)
+            .flat_map(|message| message.blocks.iter())
+            .map(estimate_block_tokens)
+            .sum();
+        reported.saturating_add(u32::try_from(unreported).unwrap_or(u32::MAX))
+    }
+
     async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
         let running = self.running_model();
         let model = if running.is_empty() {
-            "claude-sonnet-4-6"
+            DEFAULT_COMPACTION_MODEL
         } else {
             running
         };
@@ -2413,11 +2599,9 @@ where
             return None;
         }
 
-        let config = CompactionConfig {
-            max_estimated_tokens: 0,
-            ..CompactionConfig::default()
-        };
-        let event = self.compact_in_place(config).await;
+        let event = self
+            .compact_in_place(forced_compaction_config(), CompactionTrigger::PostTurnUsage)
+            .await;
         if event.is_some() {
             // Success → reset the noop counter so the breaker only trips on
             // SUSTAINED inability to shrink, not on transient threshold dance.
@@ -2441,12 +2625,10 @@ where
     pub async fn compact_in_place(
         &mut self,
         config: CompactionConfig,
+        trigger: CompactionTrigger,
     ) -> Option<AutoCompactionEvent> {
-        let model = self
-            .session
-            .model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        let estimated_before = estimate_session_tokens(&self.session);
+        let model = self.compaction_model();
 
         let result = match compact_session(
             &self.session,
@@ -2470,8 +2652,10 @@ where
         };
 
         if result.removed_message_count == 0 {
+            self.record_compaction(trigger, 0, estimated_before, estimated_before, None);
             return None;
         }
+        let summary_source = result.summary_source.clone();
 
         // Post-compact file restore: re-inject recently-read file content
         // so the model doesn't lose knowledge of files it just worked with.
@@ -2495,6 +2679,15 @@ where
         if let Err(error) = self.session.rewrite_persisted() {
             self.record_session_persist_error("compaction", &error.to_string());
         }
+
+        let estimated_after = estimate_session_tokens(&self.session);
+        self.record_compaction(
+            trigger,
+            result.removed_message_count,
+            estimated_before,
+            estimated_after,
+            Some(&summary_source),
+        );
 
         Some(AutoCompactionEvent {
             removed_message_count: result.removed_message_count,
@@ -2532,6 +2725,71 @@ where
         );
         attributes.insert("error".to_string(), Value::String(error.to_string()));
         session_tracer.record("session_persist_error", attributes);
+    }
+
+    fn record_compaction(
+        &self,
+        trigger: CompactionTrigger,
+        removed_message_count: usize,
+        estimated_before: usize,
+        estimated_after: usize,
+        summary_source: Option<&CompactionSummarySource>,
+    ) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+        let mut attributes = Map::new();
+        attributes.insert(
+            "trigger".to_string(),
+            Value::String(trigger.as_str().to_string()),
+        );
+        attributes.insert(
+            "removed_messages".to_string(),
+            Value::from(removed_message_count as u64),
+        );
+        attributes.insert(
+            "estimated_tokens_before".to_string(),
+            Value::from(estimated_before as u64),
+        );
+        attributes.insert(
+            "estimated_tokens_after".to_string(),
+            Value::from(estimated_after as u64),
+        );
+        // `local` means the structural fallback ran: it counts messages and
+        // lists tool names, it does not summarise content. Telling the two
+        // apart is the difference between "the summary is thin" and "the
+        // summariser never ran".
+        if let Some(source) = summary_source {
+            attributes.insert(
+                "summary_source".to_string(),
+                Value::String(source.to_string()),
+            );
+        }
+        session_tracer.record("session_compacted", attributes);
+    }
+
+    /// The turn's compaction allowance is spent while a guard still wants to
+    /// compact. Recorded once per turn: it is the difference between "the
+    /// context guard never fired" and "it fired until it ran out", which is
+    /// the first thing to know when a turn dies of context overflow.
+    fn record_compaction_budget_exhausted(&self, trigger: CompactionTrigger) {
+        let Some(session_tracer) = &self.session_tracer else {
+            return;
+        };
+        let mut attributes = Map::new();
+        attributes.insert(
+            "trigger".to_string(),
+            Value::String(trigger.as_str().to_string()),
+        );
+        attributes.insert(
+            "max_turn_compactions".to_string(),
+            Value::from(MAX_TURN_COMPACTIONS as u64),
+        );
+        attributes.insert(
+            "estimated_tokens".to_string(),
+            Value::from(estimate_session_tokens(&self.session) as u64),
+        );
+        session_tracer.record("session_compaction_budget_exhausted", attributes);
     }
 
     fn record_turn_started(&self, user_input: &str) {
@@ -2684,10 +2942,20 @@ fn merge_auto_compaction(
     }
 }
 
-/// Per-model auto-compact threshold: `context_window - max_output - buffer`.
+/// Per-model auto-compact threshold:
+/// `context_window - request max_tokens - buffer`.
 ///
-/// Matches CC's dynamic threshold calculation instead of a flat 100K default.
-/// Falls back to the env-var or built-in default when the model is unknown.
+/// The provider rejects a request once `input + max_tokens` passes the
+/// window, and the API client's local preflight mirrors that same sum. The
+/// output reservation subtracted here is therefore the `max_tokens` chat
+/// requests are actually sent with
+/// ([`crate::model_capabilities::request_max_output_tokens`]), not the
+/// compaction summary's much smaller cap: with a 200K window and 64K
+/// `max_tokens` the provider rejects at 136K, so the old
+/// `min(max_output, 20K)` form put the threshold at 167K — above the entire
+/// band where rejections happen, where it could never fire in time.
+///
+/// Falls back to the env-var override when set.
 #[must_use]
 pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     // Env-var override takes precedence (explicit user intent).
@@ -2700,11 +2968,9 @@ pub fn auto_compact_threshold_for_model(model: &str) -> u32 {
     }
 
     let context_window = crate::model_capabilities::context_window_or_default(model);
-    let max_output = crate::model_capabilities::max_output_tokens_or_default(model);
-    // Clamp max_output to avoid overflow on small context windows
-    let effective_max_output = std::cmp::min(max_output, crate::compact::COMPACT_MAX_OUTPUT_TOKENS);
+    let max_output = crate::model_capabilities::request_max_output_tokens(model);
     let buffer = autocompact_buffer_tokens(model);
-    context_window.saturating_sub(effective_max_output + buffer)
+    context_window.saturating_sub(max_output.saturating_add(buffer))
 }
 
 fn build_assistant_message(
@@ -4834,16 +5100,18 @@ mod tests {
         let _g = env_guard();
         // Ensure no env-var override is active.
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
-        // The threshold is context_window - min(max_output, 20K) - buffer.
-        // For claude-sonnet-4-6 (200K context, 64K output):
-        //   buffer = 13K (200K < 400K), threshold = 200K - 20K - 13K = 167K
+        // The threshold is context_window - request max_tokens - buffer.
+        // For claude-sonnet-4-6 (200K context, 64K request max_tokens):
+        //   buffer = 13K (200K < 400K), threshold = 200K - 64K - 13K = 123K.
+        // The provider rejects this model at 200K - 64K = 136K, so the
+        // threshold has to sit below that to ever fire.
         let threshold = auto_compact_threshold_for_model("claude-sonnet-4-6");
-        assert_eq!(threshold, 167_000);
+        assert_eq!(threshold, 123_000);
 
-        // Unknown model falls back to SSOT default (1M context, 64K output):
-        //   buffer = 50K (1M >= 800K), threshold = 1M - 20K - 50K = 930K
+        // Unknown model: SSOT default window (1M) and the 64K request
+        // heuristic — buffer = 50K (1M >= 800K), threshold = 886K.
         let unknown = auto_compact_threshold_for_model("some-unknown-model");
-        assert_eq!(unknown, 930_000);
+        assert_eq!(unknown, 886_000);
     }
 
     // Circuit-breaker for consecutive auto-compact no-ops (PR #249) is
@@ -5046,6 +5314,361 @@ mod tests {
         assert!(error
             .to_string()
             .contains("conversation loop exceeded the maximum number of iterations"));
+    }
+
+    /// A turn that grows past the window mid-flight must be compacted
+    /// *before* the request is dispatched. Reproduces the production failure:
+    /// the agent takes many tool-call steps in one turn, the history outgrows
+    /// the window, and the only salvage is a single reactive compaction after
+    /// the provider has already rejected — so the second overflow kills the
+    /// turn.
+    #[tokio::test]
+    async fn turn_compacts_proactively_instead_of_waiting_for_a_rejection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const LIMIT: usize = 4_000;
+        const STEPS: usize = 12;
+
+        struct BudgetedApi {
+            rejections: Arc<AtomicUsize>,
+            steps: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ApiClient for BudgetedApi {
+            fn context_budget(
+                &self,
+                _model: &str,
+                _system_prompt: &SystemPrompt,
+            ) -> crate::compact::ContextBudget {
+                crate::compact::ContextBudget {
+                    context_limit: LIMIT,
+                    max_output_tokens: 200,
+                    overhead_tokens: 100,
+                    buffer_tokens: 300,
+                }
+            }
+
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                let session_tokens: usize = request
+                    .messages
+                    .iter()
+                    .map(crate::compact::estimate_message_tokens)
+                    .sum();
+                if session_tokens + 100 + 200 > LIMIT {
+                    self.rejections.fetch_add(1, Ordering::Relaxed);
+                    return Err(RuntimeError::context_window_blocked(
+                        "prompt is too long for this model".to_string(),
+                    ));
+                }
+                let step = self.steps.fetch_add(1, Ordering::Relaxed);
+                if step < STEPS {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: format!("tool-{step}"),
+                            name: "bulk".to_string(),
+                            input: "go".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ]))
+                } else {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]))
+                }
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<crate::session::ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                Ok("<summary>Steps so far were bulk tool calls.</summary>".to_string())
+            }
+        }
+
+        let rejections = Arc::new(AtomicUsize::new(0));
+        let steps = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            BudgetedApi {
+                rejections: Arc::clone(&rejections),
+                steps: Arc::clone(&steps),
+            },
+            // Each tool result adds ~1000 estimated tokens, so the 3.4K
+            // history budget is exhausted after three or four steps.
+            StaticToolExecutor::new().register("bulk", |_| Ok("x".repeat(4_000))),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_max_iterations(64);
+
+        let summary = runtime
+            .run_turn("do many steps", None, None)
+            .await
+            .expect("a turn that outgrows the window mid-flight should compact and finish");
+
+        assert!(
+            summary.iterations > STEPS,
+            "expected the turn to run all its steps, got {}",
+            summary.iterations
+        );
+        assert_eq!(
+            rejections.load(Ordering::Relaxed),
+            0,
+            "the runtime should compact before dispatching, never letting the provider reject"
+        );
+    }
+
+    /// Recorded `session_compacted` traces that actually removed something,
+    /// in the order they were emitted.
+    fn effective_compaction_traces(
+        sink: &MemoryTelemetrySink,
+    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        sink.events()
+            .iter()
+            .filter_map(|event| match event {
+                TelemetryEvent::SessionTrace(trace) if trace.name == "session_compacted" => {
+                    Some(trace.attributes.clone())
+                }
+                _ => None,
+            })
+            .filter(|attrs| {
+                attrs
+                    .get("removed_messages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            })
+            .collect()
+    }
+
+    /// Every compaction that runs must leave a trace. The two paths that
+    /// fire during a real turn used to record nothing at all — only the
+    /// engine host's preflight did — so a session log showed no compaction
+    /// even when one had run and worked, which is exactly what makes a
+    /// context-overflow report undiagnosable.
+    #[tokio::test]
+    async fn in_turn_compaction_is_recorded_with_its_trigger_and_summary_source() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const LIMIT: usize = 4_000;
+
+        struct TinyBudgetApi {
+            steps: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ApiClient for TinyBudgetApi {
+            fn context_budget(
+                &self,
+                _model: &str,
+                _system_prompt: &SystemPrompt,
+            ) -> crate::compact::ContextBudget {
+                crate::compact::ContextBudget {
+                    context_limit: LIMIT,
+                    max_output_tokens: 200,
+                    overhead_tokens: 100,
+                    buffer_tokens: 300,
+                }
+            }
+
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                let step = self.steps.fetch_add(1, Ordering::Relaxed);
+                if step < 6 {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: format!("tool-{step}"),
+                            name: "bulk".to_string(),
+                            input: "go".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ]))
+                } else {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]))
+                }
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<crate::session::ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                Ok("<summary>Bulk steps.</summary>".to_string())
+            }
+        }
+
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("session-compaction-trace", sink.clone());
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            TinyBudgetApi {
+                steps: Arc::new(AtomicUsize::new(0)),
+            },
+            StaticToolExecutor::new().register("bulk", |_| Ok("x".repeat(4_000))),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_max_iterations(64)
+        .with_session_tracer(tracer);
+
+        runtime
+            .run_turn("do many steps", None, None)
+            .await
+            .expect("turn should finish");
+
+        let compactions = effective_compaction_traces(&sink);
+        let attrs = compactions
+            .first()
+            .expect("an in-turn compaction that removed messages must be recorded");
+        assert_eq!(
+            attrs.get("trigger").and_then(serde_json::Value::as_str),
+            Some("in_turn_budget")
+        );
+        assert_eq!(
+            attrs
+                .get("summary_source")
+                .and_then(serde_json::Value::as_str),
+            Some("llm"),
+            "the log must distinguish an LLM summary from the local structural fallback"
+        );
+        let before = attrs
+            .get("estimated_tokens_before")
+            .and_then(serde_json::Value::as_u64)
+            .expect("before estimate");
+        let after = attrs
+            .get("estimated_tokens_after")
+            .and_then(serde_json::Value::as_u64)
+            .expect("after estimate");
+        assert!(after < before, "compaction should shrink the estimate");
+    }
+
+    /// Reproduces the reported production failure, using only surface that
+    /// predates this change so it can be run against `main` unmodified.
+    ///
+    /// The salvage compaction was capped at once per turn. A turn that takes
+    /// many tool-call steps grows its own history while it runs, so the first
+    /// rejection was recovered, the history grew again, and the second
+    /// rejection ended the turn with `retried_context_window_overflow`
+    /// already spent. A long turn must be able to compact as often as it
+    /// needs and still terminate.
+    ///
+    /// The client here does not override `context_budget`, so the proactive
+    /// guard cannot see the artificially small limit and the turn is carried
+    /// entirely by the salvage path — which is what isolates the allowance.
+    #[tokio::test]
+    async fn a_long_turn_survives_repeated_context_window_rejections() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Small enough that a handful of tool results overflow it, so one
+        /// compaction cannot carry the whole turn.
+        const LIMIT: usize = 4_000;
+        const STEPS: usize = 20;
+
+        struct GrindingApi {
+            steps: Arc<AtomicUsize>,
+            rejections: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl ApiClient for GrindingApi {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                let session_tokens: usize = request
+                    .messages
+                    .iter()
+                    .map(crate::compact::estimate_message_tokens)
+                    .sum();
+                if session_tokens + 300 > LIMIT {
+                    self.rejections.fetch_add(1, Ordering::Relaxed);
+                    return Err(RuntimeError::context_window_blocked(
+                        "input length and `max_tokens` exceed context limit".to_string(),
+                    ));
+                }
+                let step = self.steps.fetch_add(1, Ordering::Relaxed);
+                if step < STEPS {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: format!("tool-{step}"),
+                            name: "bulk".to_string(),
+                            input: "go".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ]))
+                } else {
+                    Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]))
+                }
+            }
+
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<crate::session::ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                Ok("<summary>Bulk steps so far.</summary>".to_string())
+            }
+        }
+
+        let sink = Arc::new(MemoryTelemetrySink::default());
+        let tracer = SessionTracer::new("session-many-compactions", sink.clone());
+        let rejections = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            GrindingApi {
+                steps: Arc::new(AtomicUsize::new(0)),
+                rejections: Arc::clone(&rejections),
+            },
+            StaticToolExecutor::new().register("bulk", |_| Ok("x".repeat(2_000))),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        )
+        .with_max_iterations(128)
+        .with_session_tracer(tracer);
+
+        let summary = runtime
+            .run_turn("grind", None, None)
+            .await
+            .expect("a long turn should compact as often as it needs and finish");
+        assert!(summary.iterations > STEPS);
+        assert!(
+            rejections.load(Ordering::Relaxed) > 1,
+            "the scenario is only a regression test if more than one rejection happened, saw {}",
+            rejections.load(Ordering::Relaxed)
+        );
+
+        let compactions = effective_compaction_traces(&sink).len();
+        assert!(
+            compactions > 1,
+            "a turn this long needs more than one compaction, saw {compactions}"
+        );
+        assert!(
+            compactions <= super::MAX_TURN_COMPACTIONS,
+            "compaction must stay bounded, saw {compactions}"
+        );
     }
 
     #[tokio::test]

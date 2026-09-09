@@ -6740,8 +6740,54 @@ fn load_provider_fallback_config() -> ProviderFallbackConfig {
         })
 }
 
+/// Turn a provider error into a [`RuntimeError`] that keeps its
+/// classification, so the runtime's compact-and-resend salvage can recognise
+/// a context-window rejection instead of treating it as a fatal generic
+/// failure. Subagent turns run the same tool loop and overflow the same way.
+fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
+    if error.is_context_window_failure() {
+        RuntimeError::context_window_blocked(error.to_string())
+    } else {
+        RuntimeError::new(error.to_string())
+    }
+}
+
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    /// The runtime's default cannot see the tool definitions attached to
+    /// every request, and this client attaches the subagent's whole allowed
+    /// set. Left to the default the budget would be too generous by exactly
+    /// that much, and the in-turn guard would miss overflows it should catch.
+    ///
+    /// Keyed on the head of the provider chain: that is the model the next
+    /// request is built for, and budgeting against a fallback the request
+    /// will not carry would let the guard and the provider disagree.
+    fn context_budget(
+        &self,
+        model: &str,
+        system_prompt: &runtime::SystemPrompt,
+    ) -> runtime::ContextBudget {
+        let request_model = self
+            .chain
+            .first()
+            .map_or(model, |entry| entry.model.as_str());
+        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+            .into_iter()
+            .map(ToolDefinition::from)
+            .collect::<Vec<_>>();
+        let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
+        runtime::ContextBudget {
+            context_limit: runtime::model_capabilities::context_window_or_default(request_model)
+                as usize,
+            max_output_tokens: max_tokens_for_model(request_model) as usize,
+            overhead_tokens: api::estimate_request_overhead_tokens(
+                system.as_deref(),
+                (!tools.is_empty()).then_some(tools.as_slice()),
+            ) as usize,
+            buffer_tokens: runtime::autocompact_buffer_tokens(request_model) as usize,
+        }
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
@@ -6777,14 +6823,14 @@ impl ApiClient for ProviderRuntimeClient {
                     );
                     last_error = Some(error);
                 }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
+                Err(error) => return Err(runtime_error_from_api(&error)),
             }
         }
 
-        Err(RuntimeError::new(last_error.map_or_else(
-            || String::from("provider chain exhausted with no attempts"),
-            |error| error.to_string(),
-        )))
+        Err(last_error.map_or_else(
+            || RuntimeError::new("provider chain exhausted with no attempts"),
+            |error| runtime_error_from_api(&error),
+        ))
     }
 }
 

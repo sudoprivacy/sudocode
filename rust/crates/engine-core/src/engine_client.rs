@@ -99,8 +99,8 @@ impl EngineApiClient {
     ///
     /// One method rather than four call sites deciding for themselves — the
     /// duplication this whole area is being repaired for.
-    fn user_visible(&self, error: &api::ApiError) -> String {
-        user_visible_error(
+    fn runtime_error(&self, error: &api::ApiError) -> RuntimeError {
+        runtime_error_from_api(
             &self.session_id,
             self.account.as_deref(),
             &self.model,
@@ -155,21 +155,19 @@ impl EngineApiClient {
             .client
             .stream_message(message_request, None)
             .await
-            .map_err(|error| RuntimeError::new(self.user_visible(&error)))?;
+            .map_err(|error| self.runtime_error(&error))?;
 
         let prefetched_next = if apply_stall_timeout {
             match tokio::time::timeout(POST_TOOL_STALL_TIMEOUT, provider_stream.next_event()).await
             {
-                Ok(inner) => {
-                    match inner.map_err(|error| RuntimeError::new(self.user_visible(&error)))? {
-                        Some(event) => Some(Some(event)),
-                        None => {
-                            return Err(RuntimeError::new(
-                                "post-tool stall: model stream ended before first event",
-                            ));
-                        }
+                Ok(inner) => match inner.map_err(|error| self.runtime_error(&error))? {
+                    Some(event) => Some(Some(event)),
+                    None => {
+                        return Err(RuntimeError::new(
+                            "post-tool stall: model stream ended before first event",
+                        ));
                     }
-                }
+                },
                 Err(_elapsed) => {
                     return Err(RuntimeError::new(
                         "post-tool stall: model did not respond within timeout",
@@ -213,12 +211,12 @@ impl EngineApiClient {
                         prefetched_next
                     } else {
                         state.provider_stream.next_event().await.map_err(|error| {
-                            RuntimeError::new(user_visible_error(
+                            runtime_error_from_api(
                                 &state.session_id,
                                 state.account.as_deref(),
                                 &state.model,
                                 &error,
-                            ))
+                            )
                         })?
                     };
 
@@ -241,12 +239,12 @@ impl EngineApiClient {
                                     .send_message(&fallback_request, None)
                                     .await
                                     .map_err(|error| {
-                                        RuntimeError::new(user_visible_error(
+                                        runtime_error_from_api(
                                             &state.session_id,
                                             state.account.as_deref(),
                                             &state.model,
                                             &error,
-                                        ))
+                                        )
                                     })?;
                                 state.buffer.extend(response_to_events(response));
                                 if let Some(record) = state.client.take_last_prompt_cache_record() {
@@ -433,6 +431,30 @@ fn user_visible_error(
 ) -> String {
     let rendered = api::format_user_visible_api_error(session_id, error);
     api::explain_model_not_served(account, model, &rendered).unwrap_or(rendered)
+}
+
+/// Turn a provider error into a [`RuntimeError`] that keeps its
+/// classification.
+///
+/// A context-window rejection is the one request failure the runtime can fix
+/// on its own — it compacts the history and resends. That recovery is gated
+/// on `RuntimeError::is_context_window_blocked`, which is set by
+/// construction, not sniffed from the message. Building every provider
+/// failure with `RuntimeError::new` therefore left the flag false on the one
+/// error it exists for, and the salvage path could never run against a real
+/// provider. Route every conversion here.
+fn runtime_error_from_api(
+    session_id: &str,
+    account: Option<&str>,
+    model: &str,
+    error: &api::ApiError,
+) -> RuntimeError {
+    let message = user_visible_error(session_id, account, model, error);
+    if error.is_context_window_failure() {
+        RuntimeError::context_window_blocked(message)
+    } else {
+        RuntimeError::new(message)
+    }
 }
 
 struct StreamState {

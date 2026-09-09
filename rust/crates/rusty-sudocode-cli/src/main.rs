@@ -4814,9 +4814,13 @@ impl LiveCli {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         match action {
             None | Some("list") => {
-                // On a TTY (sync mode), present a fuzzy picker that switches
-                // on Enter and is silent on Esc. In async mode, the input
-                if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                // On a TTY, present a fuzzy picker that switches on Enter and
+                // is silent on Esc. In async (iocraft) mode the render loop
+                // owns the TTY, so a dialoguer widget on this thread would
+                // fight it and corrupt the terminal — issue #577. Fall back
+                // to the plain list + `/session switch <id>` hint there.
+                if !self.is_async_mode() && io::stdin().is_terminal() && io::stdout().is_terminal()
+                {
                     let sessions = list_managed_sessions()?;
                     if sessions.is_empty() {
                         self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
@@ -4853,6 +4857,9 @@ impl LiveCli {
                     return self.handle_session_command(Some("switch"), Some(&target));
                 }
                 self.out_println(render_session_list(&self.lifecycle.session_handle().id)?);
+                if self.is_async_mode() {
+                    self.out_println("Use `/session switch <session-id>` to switch to a session.");
+                }
                 Ok(false)
             }
             Some("switch") => {
@@ -4894,6 +4901,16 @@ impl LiveCli {
                 if handle.id == self.lifecycle.session_handle().id {
                     self.out_println(format!(
                         "delete: refusing to delete the active session '{}'.\nSwitch to another session first with /session switch <session-id>.",
+                        handle.id
+                    ));
+                    return Ok(false);
+                }
+                if self.is_async_mode() {
+                    // In async (iocraft) mode the render loop owns the TTY;
+                    // a blocking `read_line` prompt on this thread deadlocks
+                    // with it — see issue #577. Require `--force` instead.
+                    self.out_println(format!(
+                        "delete: interactive confirmation is not available in the async REPL.\nRun `/session delete {} --force` to skip confirmation.",
                         handle.id
                     ));
                     return Ok(false);

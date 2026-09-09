@@ -2899,16 +2899,17 @@ fn run_repl_iocraft_dispatch(
         }
     }
 
-    // The iocraft render loop thread may not exit cleanly on all
-    // platforms (Windows PTY). Drop the channels to signal it, then
-    // proceed — process exit will clean up the thread.
-    // Persist session before dropping the repl — the UI thread may still
-    // be alive and we need the mutex accessible.
+    // Persist the session before shutting down the REPL — the UI thread may
+    // still be alive and the shared CLI mutex must remain accessible.
     {
         let cli_lock = cli_shared.lock().expect("LiveCli mutex");
         let _ = cli_lock.persist_session();
     }
-    drop(repl);
+    // Let iocraft unwind its render loop before exiting. Its terminal guard
+    // restores raw mode, bracketed paste, cursor visibility, and mouse mode.
+    // On Windows PTYs that do not exit promptly, join() abandons the thread
+    // after a bounded wait and process exit remains the fallback.
+    repl.join();
 
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.

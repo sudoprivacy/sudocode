@@ -5427,6 +5427,29 @@ mod tests {
         );
     }
 
+    /// Recorded `session_compacted` traces that actually removed something,
+    /// in the order they were emitted.
+    fn effective_compaction_traces(
+        sink: &MemoryTelemetrySink,
+    ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        sink.events()
+            .iter()
+            .filter_map(|event| match event {
+                TelemetryEvent::SessionTrace(trace) if trace.name == "session_compacted" => {
+                    Some(trace.attributes.clone())
+                }
+                _ => None,
+            })
+            .filter(|attrs| {
+                attrs
+                    .get("removed_messages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            })
+            .collect()
+    }
+
     /// Every compaction that runs must leave a trace. The two paths that
     /// fire during a real turn used to record nothing at all — only the
     /// engine host's preflight did — so a session log showed no compaction
@@ -5510,31 +5533,10 @@ mod tests {
             .await
             .expect("turn should finish");
 
-        let events = sink.events();
-        let compactions: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                TelemetryEvent::SessionTrace(trace) if trace.name == "session_compacted" => {
-                    Some(&trace.attributes)
-                }
-                _ => None,
-            })
-            .collect();
-
-        assert!(
-            !compactions.is_empty(),
-            "an in-turn compaction must be recorded"
-        );
+        let compactions = effective_compaction_traces(&sink);
         let attrs = compactions
-            .iter()
-            .find(|attrs| {
-                attrs
-                    .get("removed_messages")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0)
-                    > 0
-            })
-            .expect("at least one recorded compaction should have removed messages");
+            .first()
+            .expect("an in-turn compaction that removed messages must be recorded");
         assert_eq!(
             attrs.get("trigger").and_then(serde_json::Value::as_str),
             Some("in_turn_budget")
@@ -5658,20 +5660,7 @@ mod tests {
             rejections.load(Ordering::Relaxed)
         );
 
-        let compactions = sink
-            .events()
-            .iter()
-            .filter(|event| {
-                matches!(event, TelemetryEvent::SessionTrace(trace)
-                    if trace.name == "session_compacted"
-                        && trace
-                            .attributes
-                            .get("removed_messages")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0)
-                            > 0)
-            })
-            .count();
+        let compactions = effective_compaction_traces(&sink).len();
         assert!(
             compactions > 1,
             "a turn this long needs more than one compaction, saw {compactions}"

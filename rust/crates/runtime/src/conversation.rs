@@ -930,6 +930,21 @@ where
             .unwrap_or_default()
     }
 
+    /// The model the runtime is actually running on — the config SSOT model it
+    /// was built with (`prompt_known_model`, set from `RuntimeConfig.model` and
+    /// re-set on every `/model` rebuild). Used to size the auto-compaction
+    /// context window and to tag assistant messages. Unlike [`Self::active_model`]
+    /// this prefers `prompt_known_model` over the persisted `session.model`,
+    /// because on resume `session.model` still records the transcript's old
+    /// model while the runtime already runs on the current config default.
+    /// Empty only when a unit test builds a runtime without announcing a model.
+    fn running_model(&self) -> &str {
+        self.prompt_known_model
+            .as_deref()
+            .or(self.session.model.as_deref())
+            .unwrap_or_default()
+    }
+
     /// `true` when some message already announced the active model to the
     /// assistant, via either the first-turn announcement or a change reminder.
     /// Scanning the session self-heals after compaction removes the carrier.
@@ -1586,7 +1601,10 @@ where
                     }
                 };
             response_model = iter_response_model;
-            assistant_message.model.clone_from(&self.session.model);
+            assistant_message.model = {
+                let running = self.running_model();
+                (!running.is_empty()).then(|| running.to_string())
+            };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
@@ -2303,7 +2321,12 @@ where
     }
 
     async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
-        let model = self.session.model.as_deref().unwrap_or("claude-sonnet-4-6");
+        let running = self.running_model();
+        let model = if running.is_empty() {
+            "claude-sonnet-4-6"
+        } else {
+            running
+        };
         let threshold = auto_compact_threshold_for_model(model);
         // Compare the context the provider actually processed on the latest
         // response (uncached input + cache reads + cache writes) against the

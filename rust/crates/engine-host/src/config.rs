@@ -76,7 +76,14 @@ pub fn lookup_default_model() -> Option<(String, String, ModelSource)> {
 
 pub fn resolve_model_alias(model: &str) -> &str {
     match model {
-        "auto" | "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
+        // `auto` means "no explicit model chosen — use the default". It resolves
+        // to the compiled-in default model (the same one config falls back to),
+        // NOT to a specific family: picking sonnet here silently overrode a
+        // user's configured default. Kept as a concrete constant rather than a
+        // re-lookup so there is no recursion when a config default is itself
+        // `auto`.
+        "auto" => DEFAULT_MODEL,
+        "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
         "claude-opus" | "opus" => "claude-opus-4-6",
         "claude-haiku" | "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
@@ -316,4 +323,33 @@ fn resolve_configured_auth_mode_for_entry(
         "no auth mode available for model '{model}'. Run /model to configure it, \
          or pass --auth=<subscription|proxy|api-key> explicitly."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_model_alias, DEFAULT_MODEL};
+
+    #[test]
+    fn auto_alias_resolves_to_the_default_model_not_sonnet() {
+        // uto means "use the default", so it must resolve to the compiled-in
+        // default (currently claude-opus-4-8), NOT hardcode a specific family.
+        assert_eq!(resolve_model_alias("auto"), DEFAULT_MODEL);
+        assert_ne!(resolve_model_alias("auto"), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn family_aliases_still_resolve_to_their_family() {
+        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251213");
+    }
+
+    #[test]
+    fn unknown_model_passes_through_unchanged() {
+        assert_eq!(resolve_model_alias("claude-opus-4-8"), "claude-opus-4-8");
+        assert_eq!(
+            resolve_model_alias("some-custom/model"),
+            "some-custom/model"
+        );
+    }
 }

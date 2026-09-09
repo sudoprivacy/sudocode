@@ -162,11 +162,6 @@ impl SpinnerState {
         self.active.store(false, Ordering::SeqCst);
     }
 
-    /// Set the current turn phase.
-    pub fn set_phase(&self, phase: TurnPhase) {
-        *self.phase.lock().unwrap() = phase;
-    }
-
     /// Read the current turn phase.
     pub fn phase(&self) -> TurnPhase {
         self.phase.lock().unwrap().clone()

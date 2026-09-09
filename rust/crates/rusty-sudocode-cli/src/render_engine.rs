@@ -13,7 +13,7 @@ use std::io::{self, Write};
 
 use engine_events::{
     EngineEvent, HookProgressEvent, PermissionRequest, QuestionPromptRequest, RequestId,
-    ToolProgressEvent,
+    RetryEvent, ToolProgressEvent,
 };
 
 use crate::cli::format::{format_tool_call_start, format_tool_result};
@@ -85,6 +85,43 @@ impl EngineEventRenderer {
     fn resume_spinner(&self) {
         if let Some(s) = &self.spinner {
             s.resume();
+        }
+    }
+
+    /// Show that the transport is retrying a failed request.
+    ///
+    /// The line is unconditional. A status-line phase alone would be invisible
+    /// on the paths that have no phase to set — the rustyline REPL and
+    /// `--print` both hold a spinner whose `phase` is `None` — and "the
+    /// indicator exists but not where you are looking" is how this stopped
+    /// being visible in the first place. Where a phase IS available (iocraft)
+    /// it is set too, so a long backoff also reads on the live status line
+    /// rather than only in scrollback.
+    fn render_retry(&mut self, event: &RetryEvent) {
+        {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:/Users/songym/AppData/Local/Temp/claude/C--Users-songym-cursor-projects-nexus/98991364-6741-4069-89d2-900c0379fb58/scratchpad/retry_dbg.log") { let _ = writeln!(f, "renderer render_retry {:?}", event); }
+        }
+        match event {
+            RetryEvent::Waiting {
+                attempt,
+                max_retries,
+                reason,
+            } => {
+                self.pause_spinner();
+                self.write_out(&format!(
+                    "{DIM}  \u{27f3} retry {attempt}/{max_retries} \u{2014} {reason}{RESET}\n"
+                ));
+                self.resume_spinner();
+                if let Some(spinner) = &self.spinner {
+                    spinner.set_retry(*attempt, *max_retries, reason.clone());
+                }
+            }
+            RetryEvent::Resumed => {
+                if let Some(spinner) = &self.spinner {
+                    spinner.set_thinking(true);
+                }
+            }
         }
     }
 
@@ -164,6 +201,10 @@ impl EngineEventRenderer {
             }
             EngineEvent::HookProgress(ev) => {
                 render_hook_progress(&ev);
+                RenderOutcome::Continue
+            }
+            EngineEvent::Retry(ev) => {
+                self.render_retry(&ev);
                 RenderOutcome::Continue
             }
             EngineEvent::Notice { text } => {

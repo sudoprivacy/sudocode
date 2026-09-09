@@ -94,13 +94,13 @@ pub use compact::{
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
-    ConfigSource, McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig,
-    McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
-    McpWebSocketServerConfig, ModelConfigEntry, ModelProviderMapping, OAuthConfig,
-    ProviderConnectionConfig, ProviderFallbackConfig, ResolvedPermissionMode, RuntimeConfig,
-    RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
-    ScopedMcpServerConfig, SudoCodeConfig, WebSearchConfig, SAMPLE_SUDOCODE_JSON,
-    SUDOCODE_SETTINGS_SCHEMA_NAME,
+    ConfigMigration, ConfigScope, ConfigSource, McpConfigCollection, McpManagedProxyServerConfig,
+    McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig,
+    McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, MigrationScope, ModelConfigEntry,
+    ModelProviderMapping, OAuthConfig, ProviderConnectionConfig, ProviderFallbackConfig,
+    ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
+    RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig, SudoCodeConfig,
+    WebSearchConfig, SAMPLE_SUDOCODE_JSON, SUDOCODE_SETTINGS_SCHEMA_NAME,
 };
 pub use config_schema::{
     resolve_input_kind, ConfigInputKind, FieldSchema, FieldType, SETTINGS_SCHEMA, SUDOCODE_SCHEMA,
@@ -112,8 +112,9 @@ pub use config_validate::{
 pub use conversation::{
     auto_compact_threshold_for_model, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
     AutoCompactionEvent, CompactionMethod, ConversationRuntime, HookProgressSink, ProgressSink,
-    PromptCacheEvent, RuntimeError, RuntimeObserver, StaticToolExecutor, ToolDispatchContext,
-    ToolError, ToolExecutor, ToolProgressEvent, TurnSummary, FORK_BOILERPLATE_TAG,
+    PromptCacheEvent, RetryEvent, RetrySink, RuntimeError, RuntimeObserver, StaticToolExecutor,
+    ToolDispatchContext, ToolError, ToolExecutor, ToolProgressEvent, TurnSummary,
+    FORK_BOILERPLATE_TAG,
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{

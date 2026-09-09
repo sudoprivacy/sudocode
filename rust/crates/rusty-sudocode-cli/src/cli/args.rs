@@ -142,15 +142,28 @@ enum Cmd {
     /// Show sandbox status
     Sandbox,
     /// Run local-only health report
-    Doctor,
+    Doctor {
+        /// Repair the config problems the report can fix deterministically,
+        /// printing what changed and where the backup went
+        #[arg(long)]
+        fix: bool,
+    },
     /// Show session state
     State,
     /// Initialize workspace
     Init,
     /// Show or inspect merged configuration
     Config {
-        /// Config section to inspect (env, hooks, model, plugins)
+        /// Config section to inspect (env, hooks, model, plugins), or `account`
+        /// to show — or with a name, set — the account requests are billed to
         section: Option<String>,
+        /// Value to set for the section, e.g. the account name for `config account`
+        value: Option<String>,
+        /// Write the machine-wide default instead of this project's setting.
+        /// Off by default: a project-scoped choice cannot surprise the other
+        /// repos, or the other agents, on the same machine.
+        #[arg(long)]
+        global: bool,
     },
     /// Show working tree diff
     Diff,
@@ -329,6 +342,7 @@ pub(crate) enum CliAction {
         auth_mode: Option<AuthMode>,
     },
     Doctor {
+        fix: bool,
         output_format: CliOutputFormat,
     },
     Acp {
@@ -348,6 +362,8 @@ pub(crate) enum CliAction {
     },
     Config {
         section: Option<String>,
+        value: Option<String>,
+        global: bool,
         output_format: CliOutputFormat,
     },
     Diff {
@@ -562,11 +578,17 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 output_format,
             }),
             Cmd::Sandbox => Ok(CliAction::Sandbox { output_format }),
-            Cmd::Doctor => Ok(CliAction::Doctor { output_format }),
+            Cmd::Doctor { fix } => Ok(CliAction::Doctor { fix, output_format }),
             Cmd::State => Ok(CliAction::State { output_format }),
             Cmd::Init => Ok(CliAction::Init { output_format }),
-            Cmd::Config { section } => Ok(CliAction::Config {
+            Cmd::Config {
                 section,
+                value,
+                global,
+            } => Ok(CliAction::Config {
+                section,
+                value,
+                global,
                 output_format,
             }),
             Cmd::Diff => Ok(CliAction::Diff { output_format }),
@@ -1276,6 +1298,7 @@ mod tests {
             models,
             web_search: Default::default(),
             selected_account: None,
+            auth_profile_conflicts: Vec::new(),
         };
 
         assert_eq!(
@@ -1301,6 +1324,8 @@ mod tests {
         .is_informational());
         assert!(CliAction::Config {
             section: None,
+            value: None,
+            global: false,
             output_format: CliOutputFormat::Text
         }
         .is_informational());
@@ -1311,6 +1336,7 @@ mod tests {
     #[test]
     fn non_informational_variants_are_not_whitelisted() {
         assert!(!CliAction::Doctor {
+            fix: false,
             output_format: CliOutputFormat::Text
         }
         .is_informational());

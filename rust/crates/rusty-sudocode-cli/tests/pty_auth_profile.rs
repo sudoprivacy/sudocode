@@ -99,29 +99,66 @@ fn doctor_resolves_selected_account_when_auth_profile_set() {
     assert_eq!(exit, 0);
 }
 
-/// Without `auth_profile`, the resolver keeps the pre-existing behavior — the
-/// first configured proxy account — so the default path is unchanged
-/// (regression guard for the "credentials untouched by default" promise).
+/// Several accounts configured and none selected: `doctor` names the candidates
+/// and the command that fixes it, rather than reporting whichever account sorts
+/// first as if it were a decision.
+///
+/// The old behavior — silently taking the alphabetically first account — is what
+/// let a session bill an account nobody chose, so a report that answers
+/// confidently here would be reporting a coin flip.
 #[test]
-fn doctor_defaults_to_first_account_without_auth_profile() {
+fn doctor_reports_ambiguity_when_no_account_is_selected() {
     let env = TestEnv::new("auth-profile-resolve-default");
     write_two_account_config(&env);
-    // No auth_profile persisted — exercise the default resolution path.
+    // No auth_profile persisted, and no per-entry pins either — the shape a
+    // migrated config has. With pins present the startup migration would record
+    // an account and resolve the ambiguity before `doctor` ever saw it, which is
+    // the point of that migration; this test is about what remains afterwards.
+    strip_model_account_pins(&env);
 
     let mut sess = env.spawn(&["doctor"]);
     sess.set_default_timeout(Duration::from_secs(30));
 
-    // First account is `sudorouter` (from the sample); its base_url is distinct
-    // from team-b's, so this proves the default did NOT pick the added account.
-    sess.expect("account=sudorouter").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("doctor should default to the first account: {e}\nPTY screen:\n{screen}");
-    });
+    // Assert the short summary line, not the detail: the detail carries the
+    // candidate list and the fix command, which the terminal wraps at width —
+    // its wording is covered by the `select_proxy_account` unit tests instead.
+    sess.expect("could not resolve a proxy account")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("doctor should report the ambiguity: {e}\nPTY screen:\n{screen}");
+        });
+    // `doctor` must still run to completion — it is the command someone reaches
+    // for to diagnose this, so it cannot be taken down by the thing it reports.
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("doctor exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0);
+}
+
+/// Drop `providers.proxy.provider` from every model entry, leaving the config in
+/// the shape `scode config migrate` produces: the account named once, not copied
+/// into each entry.
+fn strip_model_account_pins(env: &TestEnv) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read sudocode.json"))
+            .expect("sudocode.json parses");
+    if let Some(models) = config["models"].as_object_mut() {
+        for entry in models.values_mut() {
+            if let Some(proxy) = entry
+                .pointer_mut("/providers/proxy")
+                .and_then(|p| p.as_object_mut())
+            {
+                proxy.remove("provider");
+            }
+        }
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&config).expect("serialize sudocode.json"),
+    )
+    .expect("write unpinned sudocode.json");
 }
 
 /// Write a global `sudocode.json` with two named proxy accounts (the real sample

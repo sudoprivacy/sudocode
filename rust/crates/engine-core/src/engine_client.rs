@@ -307,6 +307,31 @@ impl ApiClient for EngineApiClient {
         }));
     }
 
+    /// The runtime's default derives these from the capabilities table and
+    /// the system prompt alone. This client knows better on both counts: the
+    /// output reservation it will actually request and the tool definitions
+    /// it attaches to every request. Overriding keeps the in-turn guard and
+    /// the engine host's preflight working off the same numbers.
+    fn context_budget(
+        &self,
+        _model: &str,
+        system_prompt: &runtime::SystemPrompt,
+    ) -> runtime::ContextBudget {
+        // Keyed on `self.model`, not the caller's model name, because that is
+        // provably what the request will carry (`stream` below builds its
+        // `MessageRequest` with `self.model` and
+        // `api::max_tokens_for_model(&self.model)`). Budgeting against
+        // anything else would let the guard and the provider's rejection
+        // disagree.
+        runtime::ContextBudget {
+            context_limit: runtime::model_capabilities::context_window_or_default(&self.model)
+                as usize,
+            max_output_tokens: api::max_tokens_for_model(&self.model) as usize,
+            overhead_tokens: self.fixed_request_overhead_tokens(system_prompt),
+            buffer_tokens: runtime::autocompact_buffer_tokens(&self.model) as usize,
+        }
+    }
+
     async fn send_compaction(
         &mut self,
         model: &str,

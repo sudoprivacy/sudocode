@@ -562,6 +562,34 @@ fn submit_dialpad_selection(
 // Paste placeholder helpers (CC-style [Pasted text #N +M lines] placeholders)
 // ---------------------------------------------------------------------------
 
+/// Paste length (in characters) at or below which a paste is inserted
+/// literally instead of collapsed into a placeholder. Mirrors Claude Code's
+/// `PASTE_THRESHOLD` (800).
+const PASTE_PLACEHOLDER_CHAR_THRESHOLD: usize = 800;
+
+/// Line count above which a paste collapses into a placeholder regardless of
+/// length. Mirrors Claude Code's `maxLines` default (2): 1–2 line pastes stay
+/// literal, 3+ lines become a placeholder.
+const PASTE_PLACEHOLDER_MAX_LINES: usize = 2;
+
+/// Decide whether a paste should be shown as a compact `[Pasted text #N]`
+/// placeholder (true) or inserted into the input box literally (false).
+///
+/// Matches Claude Code: only long (> 800 chars) or multi-line (> 2 lines)
+/// pastes collapse into a placeholder; short single-/double-line pastes are
+/// inserted verbatim so the box shows exactly what was pasted. `text` is
+/// expected to be newline-normalized already.
+fn should_use_paste_placeholder(text: &str) -> bool {
+    let newline_count = text.chars().filter(|&c| c == '\n').count();
+    text.chars().count() > PASTE_PLACEHOLDER_CHAR_THRESHOLD
+        || newline_count > PASTE_PLACEHOLDER_MAX_LINES
+}
+
+/// Normalize pasted line endings to `\n`.
+fn normalize_paste_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Format a placeholder reference for pasted text.
 /// Matches the CC convention so history/session files are compatible.
 fn format_paste_placeholder(id: u32, text: &str) -> String {
@@ -576,6 +604,11 @@ fn format_paste_placeholder(id: u32, text: &str) -> String {
 /// Replace all `[Pasted text #N ...]` placeholders in `input` with the real
 /// text from `store`, producing the final string to send to the LLM.
 /// The store is consumed after each submit — it is ephemeral by design.
+///
+/// Scans left to right and copies each placeholder's replacement into a fresh
+/// output buffer. Inserted text is never re-scanned, so a stored paste whose
+/// own text happens to contain a `[Pasted text #N]` string can never cause an
+/// infinite loop (it is emitted verbatim, not re-expanded).
 fn expand_paste_placeholders(
     input: &str,
     store: &std::collections::HashMap<u32, String>,
@@ -583,39 +616,43 @@ fn expand_paste_placeholders(
     if store.is_empty() || !input.contains("[Pasted text #") {
         return input.to_string();
     }
-    // Walk placeholder matches from right to left so byte offsets stay valid.
-    let re_str = r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]";
-    // Hand-rolled scan: no regex dep wanted here.
-    let mut result = input.to_string();
     let placeholder_prefix = "[Pasted text #";
-    loop {
-        let Some(start) = result.rfind(placeholder_prefix) else {
-            break;
-        };
-        let tail = &result[start + placeholder_prefix.len()..];
-        let Some(id_end) = tail.find(|c: char| !c.is_ascii_digit()) else {
-            break;
-        };
-        if id_end == 0 {
-            break;
-        }
-        let Ok(id) = tail[..id_end].parse::<u32>() else {
-            break;
-        };
-        let rest = &tail[id_end..];
-        let end_bracket = if rest.starts_with("]") {
-            start + placeholder_prefix.len() + id_end + 1
-        } else if let Some(bracket) = rest.find("]") {
-            start + placeholder_prefix.len() + id_end + bracket + 1
-        } else {
-            break;
-        };
-        if let Some(real_text) = store.get(&id) {
-            result.replace_range(start..end_bracket, real_text);
-        } else {
-            break; // unknown id, stop to avoid infinite loop
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(rel_start) = rest.find(placeholder_prefix) {
+        // Copy everything before the candidate placeholder unchanged.
+        result.push_str(&rest[..rel_start]);
+        let after_prefix = &rest[rel_start + placeholder_prefix.len()..];
+
+        // Parse the numeric id, then the optional " +N lines" and closing "]".
+        let id_end = after_prefix.find(|c: char| !c.is_ascii_digit());
+        let matched = id_end.and_then(|id_end| {
+            if id_end == 0 {
+                return None;
+            }
+            let id = after_prefix[..id_end].parse::<u32>().ok()?;
+            let tail = &after_prefix[id_end..];
+            let close = tail.find(']')?;
+            let real_text = store.get(&id)?;
+            // Byte length consumed from `after_prefix` including the ']'.
+            Some((id_end + close + 1, real_text))
+        });
+
+        match matched {
+            Some((consumed_after_prefix, real_text)) => {
+                // Emit the real text verbatim; do NOT rescan it.
+                result.push_str(real_text);
+                rest = &after_prefix[consumed_after_prefix..];
+            }
+            None => {
+                // Not a valid/known placeholder: emit the literal prefix and
+                // continue scanning after it so we make forward progress.
+                result.push_str(placeholder_prefix);
+                rest = after_prefix;
+            }
         }
     }
+    result.push_str(rest);
     result
 }
 
@@ -1631,6 +1668,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 input_value.set(new_val);
                             },
                             on_paste: move |pasted: String| {
+                                // Normalize CR / CRLF line endings first so
+                                // line counting, the placeholder, and the
+                                // expanded text are all consistent (Windows
+                                // Terminal pastes carry \r or \r\n).
+                                let pasted = normalize_paste_newlines(&pasted);
+                                let current = input_value.read().clone();
+                                // Match Claude Code: only long or multi-line
+                                // pastes collapse into a compact placeholder;
+                                // short single-/double-line pastes insert
+                                // literally so the box shows what you pasted.
+                                if !should_use_paste_placeholder(&pasted) {
+                                    input_value.set(format!("{current}{pasted}"));
+                                    return;
+                                }
                                 // Store the real text and replace with a
                                 // compact placeholder so the input box does
                                 // not overflow with potentially huge content.
@@ -1639,7 +1690,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 let placeholder = format_paste_placeholder(id, &pasted);
                                 paste_store.write().insert(id, pasted);
                                 // Append the placeholder to whatever is already in the box.
-                                let current = input_value.read().clone();
                                 input_value.set(if current.is_empty() {
                                     placeholder
                                 } else {

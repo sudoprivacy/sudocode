@@ -1010,13 +1010,11 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
+source = "git+https://github.com/sudoprivacy/crossterm.git?branch=feat%2Fwindows-vt-bracketed-paste#236374f0f95d201e70402d704731b8b69cacbd56"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
  "derive_more",
- "document-features",
  "futures-core",
  "mio",
  "parking_lot",
@@ -1303,15 +1301,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
-]
-
-[[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
 ]
 
 [[package]]
@@ -2226,7 +2215,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#6706fc92daed498e8556968cbda34f3f1858045b"
+source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#d89223e97398e12d5d3fb7ab76d570ba1c4f5a87"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm 0.29.0",
@@ -2241,7 +2230,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#6706fc92daed498e8556968cbda34f3f1858045b"
+source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#d89223e97398e12d5d3fb7ab76d570ba1c4f5a87"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2515,12 +2504,6 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
-
-[[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lock_api"

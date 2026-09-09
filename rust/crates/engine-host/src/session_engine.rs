@@ -30,6 +30,33 @@ use crate::session::{
     load_session_reference, new_cli_session_for, SessionHandle,
 };
 
+/// Resolve which model a resumed session runs on — the Claude Code rule, where
+/// the config is the single source of truth for the model.
+///
+/// - An explicit `--model` flag always wins (`model_flag_raw` is `Some`).
+/// - Otherwise the current config default is used (`resolve_repl_model`), so
+///   changing the global model applies to resumed sessions too.
+///
+/// The persisted transcript's `session.model` is deliberately NOT consulted: it
+/// is only a descriptive record of the model the transcript last ran on (shown
+/// in the resume list / `/status`), never the selector. `/model` switches within
+/// a session are runtime-only and do not survive resume. Auto-compaction sizes
+/// the context window from the runtime's active model (this same config SSOT),
+/// so it stays correct regardless of what the transcript records.
+///
+/// `already_resolved_default` is the model the caller already computed for the
+/// no-flag case (the config default); when a flag was passed it is the resolved
+/// flag value. Kept as one helper so every resume path resolves identically.
+fn resume_model_from_config_ssot(
+    model_flag_raw: Option<&str>,
+    already_resolved_default: &str,
+) -> String {
+    match model_flag_raw {
+        Some(_) => already_resolved_default.to_string(),
+        None => resolve_repl_model(already_resolved_default.to_string()),
+    }
+}
+
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
 
 pub struct AcpCliSession {
@@ -56,8 +83,9 @@ pub struct AcpCliSession {
 /// returning the seam's neutral `TurnComplete`. Every renderer shares this one
 /// core — nothing renders here.
 ///
-/// The active model is the session's own (`session.model`); this type keeps no
-/// separate copy.
+/// The active model is the model the runtime was built with from the config
+/// SSOT (see [`resume_model_from_config_ssot`] and `ConversationRuntime`'s
+/// `running_model`); `session.model` is only a descriptive record.
 /// Outcome of a model switch, returned by [`SessionEngine::set_model_impl`] so
 /// each seam consumer formats it its own way: the REPL renders a
 /// `format_model_switch_report` / `format_model_report`; the pump/ACP path takes
@@ -222,18 +250,9 @@ impl SessionEngine {
     ) -> Result<Self, String> {
         let cwd = canonical_session_cwd(cwd)?;
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
-        // A persisted transcript carries the model it was last run with
-        // (`build_runtime_with_plugin_state` records it). Prefer that over the
-        // directory's default: resuming a session that had been switched to
-        // another model must not silently drop back to the config model, which
-        // would run the rest of the conversation on the wrong model and
-        // mis-size the context window for auto-compaction. An explicit
-        // `--model` flag still wins.
-        let resolved_model = match (&model_flag_raw, &session.model) {
-            (Some(_), _) => model.clone(),
-            (None, Some(persisted)) => persisted.clone(),
-            (None, None) => resolve_repl_model(model.clone()),
-        };
+        // Model resolution on resume follows Claude Code: the config is the
+        // single source of truth. See [`resume_model_from_config_ssot`].
+        let resolved_model = resume_model_from_config_ssot(model_flag_raw.as_deref(), &model);
         let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
         let sudocode_config = require_sudocode_config_for_cwd(&cwd)?;
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
@@ -1149,5 +1168,30 @@ impl SessionLifecycle for SessionEngine {
             .save_to_path(&path)
             .map_err(|e| e.to_string())?;
         Ok((removed, kept, skipped, summary_source))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_model_from_config_ssot;
+
+    #[test]
+    fn resume_model_flag_wins_and_is_used_verbatim() {
+        // An explicit --model flag (already alias-resolved by the caller) is
+        // used as-is on resume, regardless of what the transcript recorded.
+        let resolved = resume_model_from_config_ssot(Some("claude-opus-4-8"), "claude-opus-4-8");
+        assert_eq!(resolved, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn resume_never_consults_the_session_pin() {
+        // Structural guarantee: the resolver takes only the flag and the
+        // config-resolved default — it has no parameter for the persisted
+        // `session.model`, so a stale transcript model can never drive
+        // selection. This test documents that contract at the type level; if
+        // someone re-adds a `session.model` argument, it will fail to compile
+        // against this call and force a review of the SSOT rule.
+        let with_flag = resume_model_from_config_ssot(Some("m"), "m");
+        assert_eq!(with_flag, "m");
     }
 }

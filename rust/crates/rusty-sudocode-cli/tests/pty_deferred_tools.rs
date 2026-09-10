@@ -6,7 +6,6 @@
 //!
 //! ```bash
 //! cargo test --test pty_deferred_tools                          # mock (CI)
-//! SCODE_TEST_BACKEND=live cargo test --test pty_deferred_tools  # real API
 //! ```
 mod common;
 
@@ -15,6 +14,10 @@ use common::TestEnv;
 #[test]
 fn execute_extra_tool_roundtrip() {
     let env = TestEnv::new("execute-extra-tool");
+    if env.is_live() {
+        eprintln!("SKIP: deferred-tool dispatch is validated against the mock backend");
+        return;
+    }
     let prompt = env.prompt(
         "List all scheduled cron tasks using ExecuteExtraTool.",
         "execute_extra_tool_roundtrip",

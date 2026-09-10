@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_sync,
+    autocompact_buffer_tokens, compact_session, compact_session_cache_safe, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
     CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
     ReadFileTracker,
@@ -146,6 +146,27 @@ pub trait ApiClient: Send {
     ) -> Result<String, RuntimeError> {
         Err(RuntimeError::new(
             "compaction not supported by this API client",
+        ))
+    }
+
+    /// Cache-safe compaction: sends the compaction prompt over the same
+    /// system-prompt + message prefix the previous conversation turn used,
+    /// enabling the provider's prompt cache to hit on the shared prefix.
+    ///
+    /// `request` carries the runtime's system prompt and the full session
+    /// messages (identical to the last regular turn). `compaction_prompt`
+    /// is appended as a final user message. Returns the raw summary text.
+    ///
+    /// The default implementation returns an error — providers that support
+    /// prompt caching override this.
+    async fn send_cache_safe_compaction(
+        &mut self,
+        _request: ApiRequest,
+        _compaction_prompt: &str,
+        _max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        Err(RuntimeError::new(
+            "cache-safe compaction not supported by this API client",
         ))
     }
 
@@ -1581,6 +1602,8 @@ where
                 return Err(error);
             }
 
+            crate::compact::microcompact_messages(&mut self.session.messages);
+
             // Compact before dispatching, not after the provider rejects.
             // A turn that takes many tool-call steps grows its own history
             // while it runs; the per-turn preflight ran once, before any of
@@ -1599,16 +1622,8 @@ where
                         overflow_compaction =
                             merge_auto_compaction(overflow_compaction, Some(event));
                     }
-                    // Counted whether or not anything was removed: a pass
-                    // that shrinks nothing has still spent its round-trip,
-                    // and repeating it every iteration would burn the rest
-                    // of the turn on compactions that cannot help.
                     turn_compactions += 1;
                 } else if !recorded_compaction_budget_exhausted {
-                    // The guard wants to compact and cannot. Every request
-                    // from here on is expected to be rejected, so say so
-                    // once — otherwise the turn's failure looks like the
-                    // guard never ran.
                     self.record_compaction_budget_exhausted(CompactionTrigger::InTurnBudget);
                     recorded_compaction_budget_exhausted = true;
                 }
@@ -2376,6 +2391,24 @@ where
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+        // Try cache-safe compaction first: reuses the main conversation's
+        // system prompt + message prefix so the provider's prompt cache hits.
+        // Falls back to the stripped-message path on failure (unsupported
+        // client, PTL, transient error).
+        if let Ok(result) = compact_session_cache_safe(
+            &self.session,
+            config,
+            &mut self.api_client,
+            &model,
+            &self.system_prompt,
+            custom_instructions,
+        )
+        .await
+        {
+            return (result, CompactionMethod::LlmSummary);
+        }
+
         match compact_session(
             &self.session,
             config,

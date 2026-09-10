@@ -7991,12 +7991,6 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             path: &["autoCompactEnabled"],
             options: None,
         },
-        "autoMemoryEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::Boolean,
-            path: &["autoMemoryEnabled"],
-            options: None,
-        },
         "autoDreamEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::Boolean,

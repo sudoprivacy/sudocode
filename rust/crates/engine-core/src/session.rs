@@ -48,7 +48,7 @@
 //! ACP delegate already does exactly this.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -175,6 +175,7 @@ enum PendingAnswer {
 struct RequestTable {
     pending: Arc<Mutex<HashMap<RequestId, PendingAnswer>>>,
     next_id: Arc<AtomicU64>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl RequestTable {
@@ -183,10 +184,13 @@ impl RequestTable {
     }
 
     fn insert(&self, id: RequestId, answer: PendingAnswer) {
-        self.pending
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, answer);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.cancelled.load(Ordering::SeqCst) {
+            pending.insert(id, answer);
+        }
     }
 
     fn take(&self, id: RequestId) -> Option<PendingAnswer> {
@@ -194,6 +198,16 @@ impl RequestTable {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&id)
+    }
+
+    /// Dropping the answer senders wakes a worker blocked in a permission or
+    /// question prompt when the enclosing turn is cancelled.
+    fn cancel_all(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -324,10 +338,14 @@ async fn run_one_turn(
                 Some(EngineCommand::Close) => {
                     closing = true;
                     abort.abort();
+                    table.cancel_all();
                 }
                 // Cancel / a dropped channel abort the in-flight turn; it then
                 // finishes (cancelled) and we fall through to the `result` arm.
-                Some(EngineCommand::Cancel) | None => abort.abort(),
+                Some(EngineCommand::Cancel) | None => {
+                    abort.abort();
+                    table.cancel_all();
+                }
                 // A Prompt arriving mid-turn is a renderer bug (renderers serialize
                 // turns). Ignore it rather than interleave.
                 Some(_) => {}

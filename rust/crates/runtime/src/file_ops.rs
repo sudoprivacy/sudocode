@@ -509,6 +509,15 @@ pub fn glob_search(
 
 /// Runs a regex search over workspace files with optional context lines.
 pub fn grep_search(fs: &dyn FsBackend, input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
+    grep_search_with_abort(fs, input, None)
+}
+
+/// Runs [`grep_search`] while observing the turn's cancellation signal.
+pub fn grep_search_with_abort(
+    fs: &dyn FsBackend,
+    input: &GrepSearchInput,
+    abort_signal: Option<&crate::HookAbortSignal>,
+) -> io::Result<GrepSearchOutput> {
     let base_path = match input.path.as_deref() {
         Some(p) => fs.normalize(p)?,
         None => fs.working_root()?,
@@ -537,7 +546,8 @@ pub fn grep_search(fs: &dyn FsBackend, input: &GrepSearchInput) -> io::Result<Gr
     let mut content_lines = Vec::new();
     let mut total_matches = 0usize;
 
-    for file_path in collect_search_files_via_backend(fs, &base_path) {
+    for file_path in collect_search_files_via_backend(fs, &base_path, abort_signal)? {
+        check_abort(abort_signal)?;
         if !matches_optional_filters(Path::new(&file_path), glob_filter.as_ref(), file_type) {
             continue;
         }
@@ -558,6 +568,9 @@ pub fn grep_search(fs: &dyn FsBackend, input: &GrepSearchInput) -> io::Result<Gr
         let lines: Vec<&str> = file_contents.lines().collect();
         let mut matched_lines = Vec::new();
         for (index, line) in lines.iter().enumerate() {
+            if index % 256 == 0 {
+                check_abort(abort_signal)?;
+            }
             if regex.is_match(line) {
                 total_matches += 1;
                 matched_lines.push(index);
@@ -688,15 +701,47 @@ fn is_absolute_path(p: &str) -> bool {
 /// Unlike `glob_search` this does NOT prune heavy directories — grep over an
 /// explicit path searches everything the caller pointed at (parity with the
 /// prior `WalkDir`-over-everything behaviour).
-fn collect_search_files_via_backend(fs: &dyn FsBackend, base: &str) -> Vec<String> {
+fn collect_search_files_via_backend(
+    fs: &dyn FsBackend,
+    base: &str,
+    abort_signal: Option<&crate::HookAbortSignal>,
+) -> io::Result<Vec<String>> {
     if let Ok(meta) = fs.stat(base) {
         if meta.is_file {
-            return vec![base.to_string()];
+            return Ok(vec![base.to_string()]);
         }
     }
     let mut files = Vec::new();
-    walk_files_via_backend(fs, base, &|_| false, &mut files);
-    files
+    walk_search_files_via_backend(fs, base, abort_signal, &mut files)?;
+    Ok(files)
+}
+
+fn walk_search_files_via_backend(
+    fs: &dyn FsBackend,
+    root: &str,
+    abort_signal: Option<&crate::HookAbortSignal>,
+    out: &mut Vec<String>,
+) -> io::Result<()> {
+    check_abort(abort_signal)?;
+    for entry in fs.readdir(root).unwrap_or_default() {
+        let child = fs.join_path(root, &entry.name);
+        if entry.is_dir {
+            walk_search_files_via_backend(fs, &child, abort_signal, out)?;
+        } else {
+            out.push(child);
+        }
+    }
+    Ok(())
+}
+
+fn check_abort(abort_signal: Option<&crate::HookAbortSignal>) -> io::Result<()> {
+    if abort_signal.is_some_and(crate::HookAbortSignal::is_aborted) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "tool execution cancelled",
+        ));
+    }
+    Ok(())
 }
 
 fn matches_optional_filters(

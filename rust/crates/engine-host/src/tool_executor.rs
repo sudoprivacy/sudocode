@@ -1,10 +1,9 @@
-use std::cell::RefCell;
 use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
     ContentBlock, PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
-    QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor,
+    QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor, WorkspaceRootHandoff,
 };
 use serde::Deserialize;
 use tools::GlobalToolRegistry;
@@ -97,10 +96,9 @@ pub struct CliToolExecutor {
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     // Single-threaded interior mutability: `execute` is `&self` (so a
     // concurrency-safe batch can share the dispatcher), but the interactive
-    // AskUserQuestion prompter needs `&mut` to drive a prompt. AskUserQuestion
-    // is non-concurrency-safe (runs serial), so a `RefCell` (not a `Mutex`) is
-    // correct — the CLI turn loop is single-threaded.
-    question_prompter: RefCell<Option<Box<dyn QuestionPrompter>>>,
+    // AskUserQuestion prompts remain serial, but normal tools now run on the
+    // blocking pool, so the prompter must be protected across threads.
+    question_prompter: Mutex<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
     /// Optional nexus A2A send capability. When set (nexus-A2A configured),
     /// `send_message` writes to the peer's `/agents/<to>/chat-with-me`
@@ -120,7 +118,7 @@ impl CliToolExecutor {
             allowed_tools,
             tool_registry,
             mcp_state,
-            question_prompter: RefCell::new(None),
+            question_prompter: Mutex::new(None),
             abort_signal: None,
             mailbox_sender: None,
         }
@@ -135,7 +133,10 @@ impl CliToolExecutor {
     }
 
     pub fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
-        *self.question_prompter.get_mut() = Some(prompter);
+        *self
+            .question_prompter
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prompter);
     }
 
     fn execute_search_tool(&self, value: serde_json::Value) -> Result<String, ToolError> {
@@ -156,59 +157,59 @@ impl CliToolExecutor {
         ))
         .map_err(|error| ToolError::new(error.to_string()))
     }
+}
 
-    fn execute_runtime_tool(
-        &self,
-        tool_name: &str,
-        value: serde_json::Value,
-    ) -> Result<String, ToolError> {
-        let Some(mcp_state) = &self.mcp_state else {
-            return Err(ToolError::new(format!(
-                "runtime tool `{tool_name}` is unavailable without configured MCP servers"
-            )));
-        };
-        let mut mcp_state = mcp_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+fn execute_runtime_tool_with_state(
+    mcp_state: Option<&Arc<Mutex<RuntimeMcpState>>>,
+    tool_name: &str,
+    value: serde_json::Value,
+) -> Result<String, ToolError> {
+    let Some(mcp_state) = mcp_state else {
+        return Err(ToolError::new(format!(
+            "runtime tool `{tool_name}` is unavailable without configured MCP servers"
+        )));
+    };
+    let mut mcp_state = mcp_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        match tool_name {
-            "MCPTool" => {
-                let input: McpToolRequest = serde_json::from_value(value)
-                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-                let qualified_name = input
-                    .qualified_name
-                    .or(input.tool)
-                    .ok_or_else(|| ToolError::new("missing required field `qualifiedName`"))?;
-                mcp_state.call_tool(&qualified_name, input.arguments)
-            }
-            "ListMcpResourcesTool" => {
-                let input: ListMcpResourcesRequest = serde_json::from_value(value)
-                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-                match input.server {
-                    Some(server_name) => mcp_state.list_resources_for_server(&server_name),
-                    None => mcp_state.list_resources_for_all_servers(),
-                }
-            }
-            "ReadMcpResourceTool" => {
-                let input: ReadMcpResourceRequest = serde_json::from_value(value)
-                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-                mcp_state.read_resource(&input.server, &input.uri)
-            }
-            "ListMcpPromptsTool" => {
-                let input: ListMcpPromptsRequest = serde_json::from_value(value)
-                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-                match input.server {
-                    Some(server_name) => mcp_state.list_prompts_for_server(&server_name),
-                    None => mcp_state.list_prompts_for_all_servers(),
-                }
-            }
-            "GetMcpPromptTool" => {
-                let input: GetMcpPromptRequest = serde_json::from_value(value)
-                    .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-                mcp_state.get_prompt(&input.server, &input.name, input.arguments)
-            }
-            _ => mcp_state.call_tool(tool_name, Some(value)),
+    match tool_name {
+        "MCPTool" => {
+            let input: McpToolRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            let qualified_name = input
+                .qualified_name
+                .or(input.tool)
+                .ok_or_else(|| ToolError::new("missing required field `qualifiedName`"))?;
+            mcp_state.call_tool(&qualified_name, input.arguments)
         }
+        "ListMcpResourcesTool" => {
+            let input: ListMcpResourcesRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            match input.server {
+                Some(server_name) => mcp_state.list_resources_for_server(&server_name),
+                None => mcp_state.list_resources_for_all_servers(),
+            }
+        }
+        "ReadMcpResourceTool" => {
+            let input: ReadMcpResourceRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            mcp_state.read_resource(&input.server, &input.uri)
+        }
+        "ListMcpPromptsTool" => {
+            let input: ListMcpPromptsRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            match input.server {
+                Some(server_name) => mcp_state.list_prompts_for_server(&server_name),
+                None => mcp_state.list_prompts_for_all_servers(),
+            }
+        }
+        "GetMcpPromptTool" => {
+            let input: GetMcpPromptRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            mcp_state.get_prompt(&input.server, &input.name, input.arguments)
+        }
+        _ => mcp_state.call_tool(tool_name, Some(value)),
     }
 }
 
@@ -267,18 +268,14 @@ impl ToolExecutor for CliToolExecutor {
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
         }
-        // nexus A2A: when configured, `send_message` routes to the peer's
-        // replicated DT_STREAM inbox over gRPC — the SAME shared handler the
-        // co-host's `ManagedToolExecutor` uses (only the transport differs).
-        // Absent config the tool is never advertised, so this is unreachable.
-        if tool_name == "send_message" {
-            if let Some(sender) = &self.mailbox_sender {
-                return runtime::spawn_task::handle_send_message(sender, input)
-                    .map_err(ToolError::new);
-            }
-        }
         let value = parse_tool_call_input(input)?;
-        if tool_name == "AskUserQuestion" && self.question_prompter.borrow().is_some() {
+        if tool_name == "AskUserQuestion"
+            && self
+                .question_prompter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        {
             return self.execute_ask_user_question(value);
         }
         // Intercept ExitPlanMode to ask the user (across the seam) how to
@@ -287,61 +284,88 @@ impl ToolExecutor for CliToolExecutor {
         // works on every renderer (REPL dialog, iocraft, ACP client) and on
         // Windows (no raw stdin read_line). `handle_exit_plan_mode` itself falls
         // back to "execute normally" for non-interactive / no-prompter contexts.
-        if tool_name == "ExitPlanMode" && self.question_prompter.borrow().is_some() {
+        if tool_name == "ExitPlanMode"
+            && self
+                .question_prompter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        {
             return self.handle_exit_plan_mode(&value, ctx);
         }
-        // Live bash/MCP progress crosses the seam: when the renderer supplied a
-        // progress sink (`ctx.progress_sink`), forward STRUCTURED progress to it
-        // and the renderer formats + draws it (EngineEvent::ToolProgress). The
-        // executor never writes progress to the terminal itself.
-        if tool_name == "bash" {
-            if let Some(sink) = ctx.progress_sink.clone() {
-                runtime::set_bash_progress_callback(bash_progress_forward(sink));
+        let (tool_name, value) = if tool_name == "ExecuteExtraTool" {
+            let req: ExecuteExtraToolRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            let target = tools::canonicalize_tool_name(&req.tool_name);
+            if tools::is_core_tool(&target) {
+                return Err(ToolError::new(format!(
+                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
+                    req.tool_name
+                )));
             }
-        }
-
-        if tool_name == "ExecuteExtraTool" {
-            return self.execute_extra_tool(value, ctx);
-        }
-
-        let is_mcp_tool = self.tool_registry.has_runtime_tool(tool_name);
-        if is_mcp_tool {
-            if let Some(sink) = ctx.progress_sink.clone() {
-                runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
-            }
-        }
-
-        let result = if tool_name == "ToolSearch" {
-            self.execute_search_tool(value)
-        } else if is_mcp_tool {
-            self.execute_runtime_tool(tool_name, value)
+            (target, req.params)
         } else {
-            self.tool_registry
-                .execute_with_abort_and_context(
-                    tool_name,
-                    &value,
-                    self.abort_signal.as_ref(),
-                    Some(ctx),
-                )
-                .map_err(ToolError::new)
+            (tool_name.to_string(), value)
         };
 
-        // Ensure the thread-local is cleaned up regardless of the code
-        // path that was taken (the callback is consumed inside
-        // `execute_bash_with_abort`, but clear defensively).
-        if tool_name == "bash" {
-            runtime::clear_bash_progress_callback();
+        let is_mcp_tool = self.tool_registry.has_runtime_tool(&tool_name);
+        if tool_name == "ToolSearch" {
+            self.execute_search_tool(value)
+        } else {
+            // Core filesystem tools and MCP clients perform blocking work. Keep
+            // them off the turn's polling thread so Ctrl-C can win the runtime's
+            // cancellation select while a slow search or remote server is active.
+            let registry = self.tool_registry.clone();
+            let mcp_state = self.mcp_state.clone();
+            let mailbox_sender = self.mailbox_sender.clone();
+            let abort_signal = self.abort_signal.clone();
+            let ctx = ctx.clone();
+            let workspace = WorkspaceRootHandoff::capture();
+            tokio::task::spawn_blocking(move || {
+                let _workspace = workspace.enter();
+                if tool_name == "bash" {
+                    if let Some(sink) = ctx.progress_sink.clone() {
+                        runtime::set_bash_progress_callback(bash_progress_forward(sink));
+                    }
+                }
+                if is_mcp_tool {
+                    if let Some(sink) = ctx.progress_sink.clone() {
+                        runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
+                    }
+                }
+
+                let result = if tool_name == "send_message" {
+                    mailbox_sender
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ToolError::new("send_message is unavailable without nexus A2A")
+                        })
+                        .and_then(|sender| {
+                            runtime::spawn_task::handle_send_message(
+                                sender,
+                                &serde_json::to_string(&value).unwrap_or_default(),
+                            )
+                            .map_err(ToolError::new)
+                        })
+                } else if is_mcp_tool {
+                    execute_runtime_tool_with_state(mcp_state.as_ref(), &tool_name, value)
+                } else {
+                    registry
+                        .execute_with_abort_and_context(
+                            &tool_name,
+                            &value,
+                            abort_signal.as_ref(),
+                            Some(&ctx),
+                        )
+                        .map_err(ToolError::new)
+                };
+                runtime::clear_bash_progress_callback();
+                runtime::clear_mcp_progress_callback();
+                result
+            })
+            .await
+            .map_err(|error| ToolError::new(format!("tool task join error: {error}")))?
         }
-        if is_mcp_tool {
-            runtime::clear_mcp_progress_callback();
-        }
-        // Task-list panel updates are a RENDERER concern: the renderer derives
-        // them from `EngineEvent::ToolResult` for the Task* tools (which it
-        // already receives across the seam), NOT from an engine-side side-channel.
-        // Tool results reach the renderer via RuntimeObserver::on_tool_result
-        // -> EngineEvent::ToolResult -> EngineEventRenderer (the seam). The
-        // executor stays renderer-agnostic and never writes to the terminal.
-        result
     }
 
     fn set_abort_signal(&mut self, abort_signal: runtime::HookAbortSignal) {
@@ -385,53 +409,14 @@ struct AskUserQuestionCliOption {
 }
 
 impl CliToolExecutor {
-    fn execute_extra_tool(
-        &self,
-        value: serde_json::Value,
-        ctx: &runtime::ToolDispatchContext,
-    ) -> Result<String, ToolError> {
-        let req: ExecuteExtraToolRequest = serde_json::from_value(value)
-            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        let target = tools::canonicalize_tool_name(&req.tool_name);
-        if tools::is_core_tool(&target) {
-            return Err(ToolError::new(format!(
-                "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
-                req.tool_name
-            )));
-        }
-
-        let is_mcp_tool = self.tool_registry.has_runtime_tool(&target);
-        if is_mcp_tool {
-            if let Some(sink) = ctx.progress_sink.clone() {
-                runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
-            }
-        }
-
-        let result = if is_mcp_tool {
-            self.execute_runtime_tool(&target, req.params)
-        } else {
-            self.tool_registry
-                .execute_with_abort_and_context(
-                    &target,
-                    &req.params,
-                    self.abort_signal.as_ref(),
-                    Some(ctx),
-                )
-                .map_err(ToolError::new)
-        };
-
-        if is_mcp_tool {
-            runtime::clear_mcp_progress_callback();
-        }
-
-        result
-    }
-
     fn execute_ask_user_question(&self, value: serde_json::Value) -> Result<String, ToolError> {
         let input: AskUserQuestionCliInput = serde_json::from_value(value)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
 
-        let mut prompter_guard = self.question_prompter.borrow_mut();
+        let mut prompter_guard = self
+            .question_prompter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(prompter) = prompter_guard.as_mut() else {
             return Err(ToolError::new(
                 "AskUserQuestion requires an interactive question prompter",
@@ -651,7 +636,10 @@ impl CliToolExecutor {
 
         // Compute the choice, dropping the prompter borrow before we act on it.
         let choice = {
-            let mut guard = self.question_prompter.borrow_mut();
+            let mut guard = self
+                .question_prompter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(prompter) = guard.as_mut() else {
                 return execute_normally();
             };

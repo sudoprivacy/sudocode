@@ -123,10 +123,19 @@ impl HookAbortSignal {
     /// Returns a future that resolves when the abort signal is triggered.
     /// If already aborted, resolves immediately.
     pub async fn cancelled(&self) {
-        if self.is_aborted() {
-            return;
+        loop {
+            if self.is_aborted() {
+                return;
+            }
+
+            // `Notify::notify_waiters` intentionally does not retain a permit.
+            // Poll as well as waiting so an abort between the check above and
+            // subscription cannot strand a turn forever.
+            tokio::select! {
+                () = self.notify.notified() => {}
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
         }
-        self.notify.notified().await;
     }
 }
 

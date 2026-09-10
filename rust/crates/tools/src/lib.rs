@@ -214,7 +214,7 @@ use runtime::{
     check_freshness,
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
-    glob_search, grep_search,
+    glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     read_file,
     summary_compression::compress_summary_text,
@@ -1795,7 +1795,8 @@ fn execute_tool_with_enforcer(
         }
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GrepSearchInput>(input).and_then(|input| run_grep_search(input, fs))
+            from_value::<GrepSearchInput>(input)
+                .and_then(|input| run_grep_search(input, fs, abort_signal))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
@@ -3465,8 +3466,12 @@ fn run_glob_search(input: GlobSearchInputValue, fs: &dyn FsBackend) -> Result<St
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput, fs: &dyn FsBackend) -> Result<String, String> {
-    to_pretty_json(grep_search(fs, &input).map_err(io_to_string)?)
+fn run_grep_search(
+    input: GrepSearchInput,
+    fs: &dyn FsBackend,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<String, String> {
+    to_pretty_json(runtime::grep_search_with_abort(fs, &input, abort_signal).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]

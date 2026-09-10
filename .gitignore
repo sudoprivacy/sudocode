@@ -19,3 +19,8 @@ status-help.txt
 .sandbox-home/
 .hydra
 sudocode.json
+
+# Task registry written by the tools test-suite into whatever directory it
+# runs in. A test artifact, never a source file — without this every
+# `cargo test` leaves the tree dirty.
+.sudocode-tasks.json

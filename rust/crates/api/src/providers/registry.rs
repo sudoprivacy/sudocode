@@ -476,7 +476,13 @@ pub fn proxy_account_for_model<'a>(
     let alias_lower = model_alias.trim().to_ascii_lowercase();
     let mapping_provider = resolve_model_for_mode(config, &alias_lower, Some("proxy"))
         .and_then(|entry| entry.providers.get("proxy"))
-        .map(|mapping| mapping.provider.as_str());
+        .map(|mapping| mapping.provider.as_str())
+        // An empty `provider` is "no pin", not "an account named empty string".
+        // Migrated configs carry exactly that, so passing it through unfiltered
+        // made this report fail to resolve an account that requests were
+        // resolving fine — the report disagreeing with the billing path, which
+        // is the failure this function exists to prevent.
+        .filter(|name| !name.is_empty());
     select_proxy_account(config, mapping_provider)
 }
 
@@ -1237,6 +1243,30 @@ mod tests {
             resolved.credential,
             Credential::ApiKey("sk-fujitoken-key".to_string())
         );
+    }
+
+    /// A migrated entry carries an empty `provider`, and the reporting path must
+    /// read that as "no pin" exactly as the billing path does. Reading it as an
+    /// account named `""` made `doctor` announce it could not resolve an account
+    /// while requests resolved one fine — the report disagreeing with the bill,
+    /// which is the whole failure this function exists to prevent.
+    #[test]
+    fn reporting_treats_an_empty_pin_as_no_pin() {
+        let mut config = sample_config();
+        assert_eq!(config.auth_modes["proxy"].len(), 1);
+        config
+            .models
+            .get_mut("opus")
+            .expect("opus entry")
+            .providers
+            .get_mut("proxy")
+            .expect("proxy mapping")
+            .provider = String::new();
+        assert!(config.selected_account.is_none());
+
+        let selected = proxy_account_for_model(&config, "opus")
+            .expect("an unpinned entry with one account is not ambiguous");
+        assert_eq!(selected.name, "sudorouter");
     }
 
     /// Unpinned and unselected is the one combination with no answer — it must

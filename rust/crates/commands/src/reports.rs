@@ -1046,6 +1046,36 @@ pub fn render_doctor_report(build: &BuildInfo) -> Result<DoctorReport, Box<dyn s
 /// re-implements the decision can disagree with the code that spends the money,
 /// which is precisely how an unhonored `auth_profile` stayed invisible while
 /// every request billed a different account.
+/// Name the upstream a turn is waiting on: the host being called and the
+/// account paying for it.
+///
+/// Resolves through `api::proxy_account_for_model`, the same selector the
+/// Account check below reports, so a message about a slow turn names the same
+/// account the report does. Lives here rather than in the CLI because the CLI
+/// has no direct `api` dependency — that seam is deliberate.
+///
+/// Falls back to the model alone when resolution fails: a caller that wants to
+/// say "still waiting" is better off saying less than saying nothing.
+#[must_use]
+pub fn describe_upstream_for(cwd: &Path, model: &str) -> String {
+    let loader = ConfigLoader::default_for(cwd);
+    let Ok(config) = loader.load_sudocode_config() else {
+        return format!("model {model}");
+    };
+    match api::proxy_account_for_model(&config, model) {
+        Ok(selected) => {
+            let url: &str = &selected.connection.base_url;
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|rest: &str| rest.split('/').next())
+                .unwrap_or(url);
+            format!("{host} (account {}, model {model})", selected.name)
+        }
+        Err(_) => format!("model {model}"),
+    }
+}
+
 fn check_account_health(config_loader: &ConfigLoader, resolved_model: &str) -> DiagnosticCheck {
     let config = match config_loader.load_sudocode_config() {
         Ok(config) => config,

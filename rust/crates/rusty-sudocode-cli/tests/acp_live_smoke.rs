@@ -520,8 +520,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         let session_update = update["sessionUpdate"].as_str().unwrap_or("unknown");
         eprintln!(
             "  notif[{i}]: sessionUpdate={session_update} title={} status={}",
-            update["title"],
-            update["status"]
+            update["title"], update["status"]
         );
     }
     for (i, u) in completed_updates.iter().enumerate() {

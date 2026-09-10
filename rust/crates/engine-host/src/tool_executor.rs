@@ -55,6 +55,12 @@ pub(crate) struct ToolSearchRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ExecuteExtraToolRequest {
+    tool_name: String,
+    params: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct McpToolRequest {
     #[serde(rename = "qualifiedName")]
     pub(crate) qualified_name: Option<String>,
@@ -294,6 +300,10 @@ impl ToolExecutor for CliToolExecutor {
             }
         }
 
+        if tool_name == "ExecuteExtraTool" {
+            return self.execute_extra_tool(value, ctx);
+        }
+
         let is_mcp_tool = self.tool_registry.has_runtime_tool(tool_name);
         if is_mcp_tool {
             if let Some(sink) = ctx.progress_sink.clone() {
@@ -375,6 +385,48 @@ struct AskUserQuestionCliOption {
 }
 
 impl CliToolExecutor {
+    fn execute_extra_tool(
+        &self,
+        value: serde_json::Value,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<String, ToolError> {
+        let req: ExecuteExtraToolRequest = serde_json::from_value(value)
+            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        let target = tools::canonicalize_tool_name(&req.tool_name);
+        if tools::is_core_tool(&target) {
+            return Err(ToolError::new(format!(
+                "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
+                req.tool_name
+            )));
+        }
+
+        let is_mcp_tool = self.tool_registry.has_runtime_tool(&target);
+        if is_mcp_tool {
+            if let Some(sink) = ctx.progress_sink.clone() {
+                runtime::set_mcp_progress_callback(mcp_progress_forward(sink));
+            }
+        }
+
+        let result = if is_mcp_tool {
+            self.execute_runtime_tool(&target, req.params)
+        } else {
+            self.tool_registry
+                .execute_with_abort_and_context(
+                    &target,
+                    &req.params,
+                    self.abort_signal.as_ref(),
+                    Some(ctx),
+                )
+                .map_err(ToolError::new)
+        };
+
+        if is_mcp_tool {
+            runtime::clear_mcp_progress_callback();
+        }
+
+        result
+    }
+
     fn execute_ask_user_question(&self, value: serde_json::Value) -> Result<String, ToolError> {
         let input: AskUserQuestionCliInput = serde_json::from_value(value)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;

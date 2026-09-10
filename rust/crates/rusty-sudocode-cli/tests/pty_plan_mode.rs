@@ -102,7 +102,10 @@ fn require_mock(env: &TestEnv, test_name: &str) -> bool {
 #[test]
 fn enter_plan_mode_writes_settings_and_state_from_fresh_workspace() {
     let env = TestEnv::new("plan-mode-enter-fresh");
-    if !require_mock(&env, "enter_plan_mode_writes_settings_and_state_from_fresh_workspace") {
+    if !require_mock(
+        &env,
+        "enter_plan_mode_writes_settings_and_state_from_fresh_workspace",
+    ) {
         return;
     }
 

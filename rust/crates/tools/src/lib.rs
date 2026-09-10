@@ -727,7 +727,7 @@ impl GlobalToolRegistry {
     }
 
     /// Format the `<available-deferred-tools>` XML block for system prompt
-    /// injection. Each tool gets one line: `name — description`.
+    /// injection. Name-only lines (CC parity — saves tokens).
     #[must_use]
     pub fn deferred_tools_prompt_section(&self) -> String {
         let listing = self.deferred_tool_listing();
@@ -736,16 +736,10 @@ impl GlobalToolRegistry {
         }
         let mut lines = vec![
             "<available-deferred-tools>".to_string(),
-            "The following tools are available but not loaded by default. Use ToolSearch to load their full schema, then ExecuteExtraTool to call them.".to_string(),
+            "The following deferred tools are available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:".to_string(),
         ];
-        for (name, desc) in &listing {
-            let short_desc = desc.split('\n').next().unwrap_or(desc);
-            let short_desc = if short_desc.len() > 120 {
-                format!("{}…", &short_desc[..117])
-            } else {
-                short_desc.to_string()
-            };
-            lines.push(format!("{name} — {short_desc}"));
+        for (name, _) in &listing {
+            lines.push(name.clone());
         }
         lines.push("</available-deferred-tools>".to_string());
         lines.join("\n")
@@ -1091,12 +1085,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "ToolSearch",
-            description: "Search for deferred or specialized tools by exact name or keywords.",
+            description: "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> in the system prompt. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools\u{2019} complete schemas. Once a tool\u{2019}s schema appears in the result, call it through ExecuteExtraTool.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
-                    "max_results": { "type": "integer", "minimum": 1 }
+                    "query": {
+                        "type": "string",
+                        "description": "Query to find deferred tools. Use \"select:<name>[,<name>...]\" for direct selection, or keywords to search."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of results to return (default: 5)"
+                    }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -7026,8 +7027,7 @@ const CORE_TOOLS: &[&str] = &[
     "edit_file",
     "glob_search",
     "grep_search",
-    "WebFetch",
-    "WebSearch",
+    "Sleep",
     "Skill",
     "agent_spawn",
     "pid_fork",
@@ -7075,6 +7075,29 @@ fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpe
             })
             .take(max_results)
             .collect();
+    }
+
+    // Fast path: exact name match (case-insensitive). CC returns immediately
+    // without scoring when the query matches a tool name exactly.
+    if let Some(exact) = specs
+        .iter()
+        .find(|spec| spec.name.to_lowercase() == lowered)
+    {
+        return vec![exact.name.clone()];
+    }
+
+    // Fast path: `mcp__<server>__` prefix scan — if the query starts with
+    // `mcp__`, collect all tools sharing that prefix.
+    if lowered.starts_with("mcp__") {
+        let prefix_matches: Vec<String> = specs
+            .iter()
+            .filter(|spec| spec.name.to_lowercase().starts_with(&lowered))
+            .map(|spec| spec.name.clone())
+            .take(max_results)
+            .collect();
+        if !prefix_matches.is_empty() {
+            return prefix_matches;
+        }
     }
 
     let mut required = Vec::new();
@@ -8458,9 +8481,10 @@ mod tests {
         global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
         normalize_pid_input, normalize_send_input, normalize_subagent_type,
         permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
-        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
-        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
-        LaneEventName, LaneFailureClass, SubagentToolExecutor,
+        run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files, AgentInput,
+        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
+        GlobalToolRegistry, LaneEventName, LaneFailureClass, SearchableToolSpec,
+        SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -9755,6 +9779,78 @@ mod tests {
     }
 
     #[test]
+    fn tool_search_exact_name_match_fast_path() {
+        let specs = vec![
+            SearchableToolSpec {
+                name: "CronCreate".to_string(),
+                description: "Create a cron job".to_string(),
+            },
+            SearchableToolSpec {
+                name: "CronList".to_string(),
+                description: "List cron jobs".to_string(),
+            },
+            SearchableToolSpec {
+                name: "CronDelete".to_string(),
+                description: "Delete a cron job".to_string(),
+            },
+        ];
+        let result = search_tool_specs("CronCreate", 5, &specs);
+        assert_eq!(result, vec!["CronCreate"]);
+
+        let result_lower = search_tool_specs("croncreate", 5, &specs);
+        assert_eq!(result_lower, vec!["CronCreate"]);
+    }
+
+    #[test]
+    fn tool_search_mcp_prefix_scan() {
+        let specs = vec![
+            SearchableToolSpec {
+                name: "mcp__server__toolA".to_string(),
+                description: "Tool A".to_string(),
+            },
+            SearchableToolSpec {
+                name: "mcp__server__toolB".to_string(),
+                description: "Tool B".to_string(),
+            },
+            SearchableToolSpec {
+                name: "mcp__other__toolC".to_string(),
+                description: "Tool C".to_string(),
+            },
+            SearchableToolSpec {
+                name: "CronCreate".to_string(),
+                description: "Create a cron job".to_string(),
+            },
+        ];
+        let result = search_tool_specs("mcp__server__", 10, &specs);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"mcp__server__toolA".to_string()));
+        assert!(result.contains(&"mcp__server__toolB".to_string()));
+
+        let exact = search_tool_specs("mcp__server__toolA", 10, &specs);
+        assert_eq!(exact, vec!["mcp__server__toolA"]);
+    }
+
+    #[test]
+    fn tool_search_prompt_explains_workflow() {
+        let spec = mvp_tool_specs()
+            .into_iter()
+            .find(|s| s.name == "ToolSearch")
+            .expect("ToolSearch spec should exist");
+        assert!(
+            spec.description.contains("deferred"),
+            "ToolSearch prompt should explain deferred tools"
+        );
+        assert!(
+            spec.description.contains("ExecuteExtraTool"),
+            "ToolSearch prompt should mention ExecuteExtraTool"
+        );
+        assert!(
+            spec.description.contains("select:"),
+            "ToolSearch prompt should document select: query form"
+        );
+    }
+
+    #[test]
     fn core_tools_are_subset_of_mvp_tool_specs() {
         let all_names: BTreeSet<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
         for &core in super::CORE_TOOLS {
@@ -9779,10 +9875,21 @@ mod tests {
         assert!(core_names.contains("ToolSearch"));
         assert!(core_names.contains("ExecuteExtraTool"));
         assert!(
+            core_names.contains("Sleep"),
+            "Sleep should be core (CC parity)"
+        );
+        assert!(
             !core_names.contains("CronCreate"),
             "CronCreate should be deferred"
         );
-        assert!(!core_names.contains("Sleep"), "Sleep should be deferred");
+        assert!(
+            !core_names.contains("WebFetch"),
+            "WebFetch should be deferred (CC parity)"
+        );
+        assert!(
+            !core_names.contains("WebSearch"),
+            "WebSearch should be deferred (CC parity)"
+        );
         assert!(
             !core_names.contains("TaskCreate"),
             "TaskCreate should be deferred"
@@ -9795,9 +9902,17 @@ mod tests {
         let listing = registry.deferred_tool_listing();
         let names: BTreeSet<_> = listing.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains("CronCreate"));
-        assert!(names.contains("Sleep"));
+        assert!(
+            names.contains("WebFetch"),
+            "WebFetch should be deferred (CC parity)"
+        );
+        assert!(
+            names.contains("WebSearch"),
+            "WebSearch should be deferred (CC parity)"
+        );
         assert!(names.contains("TaskCreate"));
         assert!(!names.contains("bash"), "bash is core");
+        assert!(!names.contains("Sleep"), "Sleep is core (CC parity)");
         assert!(!names.contains("ToolSearch"), "ToolSearch is core");
         assert!(
             !names.contains("ExecuteExtraTool"),
@@ -9817,12 +9932,35 @@ mod tests {
         let section = registry.deferred_tools_prompt_section();
         assert!(section.starts_with("<available-deferred-tools>"));
         assert!(section.ends_with("</available-deferred-tools>"));
-        assert!(section.contains("CronCreate"));
-        assert!(section.contains("Sleep"));
         assert!(
-            !section.contains("\nbash —"),
+            section.contains("\nCronCreate\n"),
+            "CronCreate should be listed"
+        );
+        assert!(
+            section.contains("\nWebFetch\n"),
+            "WebFetch should be deferred"
+        );
+        assert!(
+            section.contains("\nWebSearch\n"),
+            "WebSearch should be deferred"
+        );
+        assert!(
+            !section.contains("\nSleep\n"),
+            "Sleep is core — should not appear"
+        );
+        assert!(
+            !section.contains("\nbash\n"),
             "core tools should not appear"
         );
+        for line in section.lines().skip(2) {
+            if line == "</available-deferred-tools>" {
+                break;
+            }
+            assert!(
+                !line.contains(" — "),
+                "tool line should be name-only (CC parity), got: {line}"
+            );
+        }
     }
 
     #[test]

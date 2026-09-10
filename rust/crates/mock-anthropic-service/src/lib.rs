@@ -181,6 +181,7 @@ enum Scenario {
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
     ExecuteExtraToolRoundtrip,
+    ExecuteExtraToolMcpRoundtrip,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -226,6 +227,7 @@ impl Scenario {
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
+            "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
             _ => None,
         }
     }
@@ -267,6 +269,7 @@ impl Scenario {
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
+            Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
         }
     }
 }
@@ -282,6 +285,15 @@ async fn handle_connection(
     let normalized_body = normalize_system_field(&raw_body);
     let request: MessageRequest = serde_json::from_str(&normalized_body)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    // Cache-safe compaction sends the full conversation with a compaction
+    // prompt appended. Reject it with a proper HTTP 400 so the runtime
+    // falls back to the standard compaction path.
+    if is_cache_safe_compaction(&request) {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"mock: cache-safe compaction not supported"}}"#;
+        let response = http_response("400 Bad Request", "application/json", body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     let scenario = detect_scenario(&request)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parity scenario"))?;
 
@@ -436,6 +448,24 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     }
 
     None
+}
+
+fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
+    let is_standard_compaction = request
+        .system
+        .as_ref()
+        .map_or(false, |s| s.contains("summarizing conversations"));
+    if is_standard_compaction {
+        return false;
+    }
+    request.messages.last().map_or(false, |msg| {
+        msg.content.iter().any(|block| match block {
+            InputContentBlock::Text { text } => {
+                text.contains("create a detailed summary of the conversation")
+            }
+            _ => false,
+        })
+    })
 }
 
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
@@ -881,6 +911,19 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"tool_name":"CronList","params":{}}"#],
             ),
         },
+        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "execute_extra_tool_mcp roundtrip complete: {}",
+                mcp_echo_verdict(&tool_output)
+            )),
+            None => tool_use_sse(
+                "toolu_execute_extra_mcp",
+                "ExecuteExtraTool",
+                &[
+                    r#"{"tool_name":"mcp__parity__echo","params":{"text":"hello from deferred mcp"}}"#,
+                ],
+            ),
+        },
     }
 }
 
@@ -1306,6 +1349,21 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"tool_name": "CronList", "params": {}}),
             ),
         },
+        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_execute_extra_mcp_final",
+                &format!(
+                    "execute_extra_tool_mcp roundtrip complete: {}",
+                    mcp_echo_verdict(&tool_output)
+                ),
+            ),
+            None => tool_message_response(
+                "msg_execute_extra_mcp",
+                "toolu_execute_extra_mcp",
+                "ExecuteExtraTool",
+                json!({"tool_name": "mcp__parity__echo", "params": {"text": "hello from deferred mcp"}}),
+            ),
+        },
     }
 }
 
@@ -1348,6 +1406,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
+        Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
     }
 }
 

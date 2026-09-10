@@ -7336,7 +7336,7 @@ const CORE_TOOLS: &[&str] = &[
     "AskUserQuestion",
 ];
 
-fn is_core_tool(name: &str) -> bool {
+pub fn is_core_tool(name: &str) -> bool {
     CORE_TOOLS.contains(&name)
 }
 

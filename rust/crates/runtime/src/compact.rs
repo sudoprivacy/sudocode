@@ -800,6 +800,88 @@ pub async fn compact_session<C: ApiClient>(
     })
 }
 
+/// Cache-safe compaction: sends the compaction prompt over the same
+/// system-prompt + message prefix the previous conversation turn used,
+/// enabling prompt cache reuse. Falls back to [`CompactionError::ApiError`]
+/// when the API client doesn't support it.
+///
+/// Matches CC's `streamCompactSummary` path with `tengu_compact_cache_prefix`.
+pub async fn compact_session_cache_safe<C: ApiClient>(
+    session: &Session,
+    config: CompactionConfig,
+    api_client: &mut C,
+    model: &str,
+    system_prompt: &crate::prompt::SystemPrompt,
+    custom_instructions: Option<&str>,
+) -> Result<CompactionResult, CompactionError> {
+    if !should_compact(session, config) {
+        return Err(CompactionError::NothingToCompact);
+    }
+
+    let existing_summary = session
+        .messages
+        .first()
+        .and_then(extract_existing_compacted_summary);
+    let compacted_prefix_len = usize::from(existing_summary.is_some());
+
+    let raw_keep_from = session
+        .messages
+        .len()
+        .saturating_sub(config.preserve_recent_messages);
+    let keep_from = find_safe_compaction_boundary(session, raw_keep_from, compacted_prefix_len);
+
+    let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
+    let removed = &session.messages[compacted_prefix_len..keep_from];
+    let preserved = session.messages[keep_from..].to_vec();
+
+    if removed.is_empty() {
+        return Err(CompactionError::NothingToCompact);
+    }
+
+    let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
+    let prompt = build_compaction_prompt(custom_instructions);
+
+    let max_tokens = std::cmp::min(
+        COMPACT_MAX_OUTPUT_TOKENS,
+        crate::model_capabilities::max_output_tokens_or_default(model),
+    );
+
+    let request = crate::conversation::ApiRequest {
+        system_prompt: system_prompt.clone(),
+        messages: session.messages.clone(),
+        trace_id: None,
+    };
+
+    let llm_summary = api_client
+        .send_cache_safe_compaction(request, &prompt, max_tokens)
+        .await
+        .map_err(|error| CompactionError::ApiError(error.to_string()))?;
+
+    let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
+    let formatted_summary = format_compact_summary(&summary);
+    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+
+    let mut compacted_messages = vec![ConversationMessage {
+        role: MessageRole::System,
+        blocks: vec![ContentBlock::Text { text: continuation }],
+        usage: None,
+        model: None,
+    }];
+    compacted_messages.extend(preserved);
+
+    let mut compacted_session = session.clone();
+    compacted_session.messages = compacted_messages;
+    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+
+    Ok(CompactionResult {
+        summary,
+        formatted_summary,
+        compacted_session,
+        removed_message_count: removed.len(),
+        summary_source: CompactionSummarySource::Llm,
+    })
+}
+
 /// Local fallback for callers whose LLM compaction attempt failed with
 /// `error`; identical to [`compact_session_sync`] except that the result
 /// records why the lossier local summary was used.
@@ -1121,6 +1203,102 @@ fn extract_existing_compacted_summary(message: &ConversationMessage) -> Option<S
         .split_once(&format!("\n{COMPACT_DIRECT_RESUME_INSTRUCTION}"))
         .map_or(summary, |(value, _)| value);
     Some(summary.trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Microcompact (CC parity: time-based tool result clearing)
+// ---------------------------------------------------------------------------
+
+/// Tool names whose results are safe to content-clear after they age out.
+/// Matches CC's `COMPACTABLE_TOOLS` list.
+const COMPACTABLE_TOOLS: &[&str] = &[
+    "read_file",
+    "Read",
+    "bash",
+    "Bash",
+    "grep_search",
+    "Grep",
+    "glob_search",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "edit_file",
+    "Edit",
+    "write_file",
+    "Write",
+    "read_tool_output",
+];
+
+const CLEARED_TOOL_RESULT_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+/// How many recent tool results to keep per tool name.
+/// Older results from compactable tools are content-cleared.
+const MICROCOMPACT_KEEP_RECENT: usize = 2;
+
+/// Content-clear old compactable tool results in `messages` to reduce
+/// token count before sending an API request. Returns the number of
+/// tool results that were cleared.
+///
+/// Only clears `ToolResult` blocks from compactable tools. Keeps the
+/// most recent `MICROCOMPACT_KEEP_RECENT` results per tool name.
+/// Already-cleared results (matching the placeholder) are not counted.
+///
+/// Matches CC's time-based microcompact path.
+pub fn microcompact_messages(messages: &mut [ConversationMessage]) -> usize {
+    // Collect indices of all compactable tool results, newest first.
+    let mut tool_result_indices: Vec<(usize, usize, String)> = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate().rev() {
+        for (block_idx, block) in msg.blocks.iter().enumerate() {
+            if let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            {
+                if is_compactable_tool(tool_name) && output != CLEARED_TOOL_RESULT_PLACEHOLDER {
+                    tool_result_indices.push((msg_idx, block_idx, tool_name.clone()));
+                }
+            }
+        }
+    }
+
+    // Count per tool name, keeping the most recent MICROCOMPACT_KEEP_RECENT.
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut to_clear: Vec<(usize, usize)> = Vec::new();
+    for (msg_idx, block_idx, tool_name) in &tool_result_indices {
+        let canonical = canonicalize_compactable_tool(tool_name);
+        let count = counts.entry(canonical).or_insert(0);
+        *count += 1;
+        if *count > MICROCOMPACT_KEEP_RECENT {
+            to_clear.push((*msg_idx, *block_idx));
+        }
+    }
+
+    // Apply the clearing.
+    let cleared_count = to_clear.len();
+    for (msg_idx, block_idx) in to_clear {
+        if let Some(ContentBlock::ToolResult { output, .. }) =
+            messages[msg_idx].blocks.get_mut(block_idx)
+        {
+            *output = CLEARED_TOOL_RESULT_PLACEHOLDER.to_string();
+        }
+    }
+
+    cleared_count
+}
+
+fn is_compactable_tool(name: &str) -> bool {
+    COMPACTABLE_TOOLS.contains(&name)
+}
+
+fn canonicalize_compactable_tool(name: &str) -> String {
+    match name {
+        "Read" | "read_file" => "read_file".to_string(),
+        "Bash" | "bash" => "bash".to_string(),
+        "Grep" | "grep_search" => "grep_search".to_string(),
+        "Glob" | "glob_search" => "glob_search".to_string(),
+        "Edit" | "edit_file" => "edit_file".to_string(),
+        "Write" | "write_file" => "write_file".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
@@ -2533,5 +2711,224 @@ mod tests {
             ConversationMessage::user_text("two"),
         ];
         assert!(super::truncate_head_for_ptl(&messages).is_none());
+    }
+
+    #[test]
+    fn microcompact_clears_old_tool_results() {
+        let mut messages = vec![
+            ConversationMessage::user_text("hello"),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"a.txt"}"#.to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    output: "content of a.txt".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t2".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"b.txt"}"#.to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t2".to_string(),
+                    tool_name: "read_file".to_string(),
+                    output: "content of b.txt".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t3".to_string(),
+                name: "read_file".to_string(),
+                input: r#"{"path":"c.txt"}"#.to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t3".to_string(),
+                    tool_name: "read_file".to_string(),
+                    output: "content of c.txt".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+
+        let cleared = super::microcompact_messages(&mut messages);
+
+        // 3 read_file results, keep 2 most recent → 1 cleared
+        assert_eq!(cleared, 1);
+
+        // Oldest result (a.txt) should be cleared
+        if let ContentBlock::ToolResult { output, .. } = &messages[2].blocks[0] {
+            assert_eq!(output, super::CLEARED_TOOL_RESULT_PLACEHOLDER);
+        } else {
+            panic!("expected ToolResult");
+        }
+
+        // b.txt and c.txt should be preserved
+        if let ContentBlock::ToolResult { output, .. } = &messages[4].blocks[0] {
+            assert_eq!(output, "content of b.txt");
+        }
+        if let ContentBlock::ToolResult { output, .. } = &messages[6].blocks[0] {
+            assert_eq!(output, "content of c.txt");
+        }
+    }
+
+    #[test]
+    fn microcompact_skips_non_compactable_tools() {
+        let mut messages = vec![
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "CronList".to_string(),
+                input: "{}".to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    tool_name: "CronList".to_string(),
+                    output: "no crons".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+
+        let cleared = super::microcompact_messages(&mut messages);
+        assert_eq!(cleared, 0);
+
+        if let ContentBlock::ToolResult { output, .. } = &messages[1].blocks[0] {
+            assert_eq!(output, "no crons");
+        }
+    }
+
+    #[test]
+    fn microcompact_idempotent_on_already_cleared() {
+        let mut messages = vec![
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"ls"}"#.to_string(),
+                thought_signature: None,
+            }]),
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    tool_name: "bash".to_string(),
+                    output: super::CLEARED_TOOL_RESULT_PLACEHOLDER.to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+
+        let cleared = super::microcompact_messages(&mut messages);
+        assert_eq!(cleared, 0);
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_uses_original_system_prompt() {
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static CACHE_SAFE_CALLED: AtomicBool = AtomicBool::new(false);
+
+        struct CacheSafeClient;
+
+        #[async_trait]
+        impl ApiClient for CacheSafeClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            async fn send_cache_safe_compaction(
+                &mut self,
+                request: ApiRequest,
+                compaction_prompt: &str,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                CACHE_SAFE_CALLED.store(true, Ordering::SeqCst);
+                assert!(
+                    request
+                        .system_prompt
+                        .render()
+                        .contains("test system prompt"),
+                    "cache-safe compaction must use the original system prompt"
+                );
+                assert!(
+                    compaction_prompt.contains("CRITICAL: Respond with TEXT ONLY"),
+                    "compaction prompt must include no-tools preamble"
+                );
+                Ok("<analysis>Cache-safe analysis</analysis>\n<summary>\n1. Primary Request and Intent:\n   Cache-safe compaction test.\n</summary>".to_string())
+            }
+        }
+
+        CACHE_SAFE_CALLED.store(false, Ordering::SeqCst);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+
+        let config = super::CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+        let mut system_prompt = crate::prompt::SystemPrompt::default();
+        system_prompt.override_static_sections("test system prompt");
+
+        let mut client = CacheSafeClient;
+        let result = super::compact_session_cache_safe(
+            &session,
+            config,
+            &mut client,
+            "claude-sonnet-4-6",
+            &system_prompt,
+            None,
+        )
+        .await
+        .expect("cache-safe compaction should succeed");
+
+        assert!(CACHE_SAFE_CALLED.load(Ordering::SeqCst));
+        assert!(result.removed_message_count > 0);
+        assert!(result
+            .formatted_summary
+            .contains("Cache-safe compaction test"));
     }
 }

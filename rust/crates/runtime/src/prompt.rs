@@ -576,7 +576,39 @@ pub fn load_system_prompt_with(
     os_version: impl Into<String>,
     fs: &dyn FsBackend,
 ) -> Result<SystemPrompt, PromptBuildError> {
-    load_system_prompt_impl(cwd, current_date, os_name, os_version, fs, None)
+    load_system_prompt_impl(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        fs,
+        None,
+        crate::memory::MemoryMode::Enabled,
+    )
+}
+
+/// Same as [`load_system_prompt`] but with memory under the caller's control.
+///
+/// [`crate::memory::MemoryMode::Disabled`] builds the prompt with the
+/// disabled provider, so no memory block is appended and the memory
+/// directory is not touched. Everything else about the prompt is identical —
+/// this is a per-caller switch, not a different prompt.
+pub fn load_system_prompt_with_memory(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    memory: crate::memory::MemoryMode,
+) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_impl(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        &StdFsBackend,
+        None,
+        memory,
+    )
 }
 
 /// Same as [`load_system_prompt`] but injects the per-agent-type
@@ -603,6 +635,7 @@ pub fn load_system_prompt_for_agent(
         os_version,
         &StdFsBackend,
         Some(agent_type),
+        crate::memory::MemoryMode::Enabled,
     )
 }
 
@@ -613,6 +646,7 @@ fn load_system_prompt_impl(
     os_version: impl Into<String>,
     fs: &dyn FsBackend,
     agent_type: Option<&str>,
+    memory: crate::memory::MemoryMode,
 ) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
     let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
@@ -628,11 +662,8 @@ fn load_system_prompt_impl(
         None => crate::memory::MemoryPromptVariant::Compact,
     };
     let memory_ctx = crate::memory::MemoryContext::resolve(None, Some(&cwd), agent_type, variant);
-    let builder = crate::memory::append_from_provider(
-        builder_base,
-        &crate::memory::FileMemoryProvider::new(),
-        &memory_ctx,
-    );
+    let builder =
+        crate::memory::append_from_provider(builder_base, memory.provider().as_ref(), &memory_ctx);
     Ok(builder.build())
 }
 

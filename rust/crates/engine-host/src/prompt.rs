@@ -10,7 +10,8 @@ use std::env;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use runtime::{load_system_prompt, SystemPrompt, SystemPromptOverrides};
+use runtime::memory::MemoryMode;
+use runtime::{load_system_prompt_with_memory, SystemPrompt, SystemPromptOverrides};
 
 /// Process-wide `--system-prompt` / `--append-system-prompt` flags, set once
 /// from `run()` and applied by every prompt build in this process (REPL,
@@ -32,16 +33,28 @@ pub fn apply_cli_prompt_overrides(prompt: &mut SystemPrompt) {
 }
 
 pub fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
+    build_system_prompt_for_with_memory(cwd, MemoryMode::Enabled)
+}
+
+/// [`build_system_prompt_for`] with the caller choosing whether memory
+/// participates. `MemoryMode::Enabled` is the process default every
+/// non-ACP path uses; an ACP session passes its own mode
+/// (`_meta.sudocode.memory`).
+pub fn build_system_prompt_for_with_memory(
+    cwd: &Path,
+    memory: MemoryMode,
+) -> Result<SystemPrompt, Box<dyn std::error::Error>> {
     // Use the local date at session-start time (not the build date baked
     // into DEFAULT_DATE) so the cacheable system prompt reflects when the
     // user actually started talking. ConversationRuntime separately tracks
     // this date and emits a system-reminder if the date rolls over
     // mid-session, keeping the prompt cache prefix warm.
-    let mut prompt = load_system_prompt(
+    let mut prompt = load_system_prompt_with_memory(
         cwd.to_path_buf(),
         runtime::today_local(),
         env::consts::OS,
         "unknown",
+        memory,
     )?;
     // Coordinator mode: when the SUDOCODE_COORDINATOR_MODE env var is
     // set, prepend the ported CC-fork coordinator role prompt so it
@@ -58,7 +71,9 @@ pub fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::
 /// `_meta.sudocode.systemPrompt` / `appendSystemPrompt` on top: the former
 /// swaps the static blocks, the latter appends a trailing dynamic block.
 /// Workspace-derived dynamic blocks (environment, `AGENTS.md`, memory,
-/// plugins) stay, so the caller's prompt still knows where it is running.
+/// plugins) stay, so the caller's prompt still knows where it is running —
+/// except that `memory` is the session's own switch
+/// (`_meta.sudocode.memory`), and a disabled session gets no memory block.
 ///
 /// Returns a plain error string; the renderer that owns the ACP wire wraps it
 /// into an `AcpError` (engine-host stays below — and independent of — the ACP
@@ -66,9 +81,10 @@ pub fn build_system_prompt_for(cwd: &Path) -> Result<SystemPrompt, Box<dyn std::
 pub fn build_acp_system_prompt(
     cwd: &Path,
     prompt_overrides: &SystemPromptOverrides,
+    memory: MemoryMode,
 ) -> Result<SystemPrompt, String> {
-    let mut prompt =
-        build_system_prompt_for(cwd).map_err(|e| format!("failed to build system prompt: {e}"))?;
+    let mut prompt = build_system_prompt_for_with_memory(cwd, memory)
+        .map_err(|e| format!("failed to build system prompt: {e}"))?;
     prompt_overrides.apply(&mut prompt);
     Ok(prompt)
 }

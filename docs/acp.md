@@ -105,6 +105,57 @@ Rules:
   true` and `_meta.sudocode.systemPromptAppend: true` so clients can
   feature-detect.
 
+### Per-session memory (`_meta.sudocode.memory`)
+
+`session/new` and `session/load` accept an optional `memory` key under
+`_meta.sudocode` that decides whether **this one session** uses the
+persistent memory system (`~/.scode/projects/<slug>/memory/`, or wherever
+`SUDOCODE_MEMORY_DIR` points).
+
+```json
+{
+  "cwd": "/work/tenant-a",
+  "mcpServers": [],
+  "_meta": {
+    "sudocode": {
+      "memory": "disabled"
+    }
+  }
+}
+```
+
+| Value | Effect |
+|---|---|
+| *(key absent)* | **The default.** Memory behaves exactly as it always has — the auto-memory block is part of the system prompt and the model may write entries. A client that never sends the key sees no change. |
+| `"enabled"` | The explicit spelling of the default. |
+| `"disabled"` | This session neither reads nor writes memory: no auto-memory block in its system prompt (so the model is never told the memory directory exists), and the standing permission to write under that directory is not granted. |
+
+Rules:
+
+- **Session-scoped, not process- or user-scoped.** One `scode acp` process
+  serves many sessions and each carries its own mode: session A can remember
+  while session B, in the same process and the same directory, does not.
+- **Disabling stands memory down; it never deletes.** Nothing under the
+  memory directory is read, written, moved or removed — a disabled session
+  does not even create the directory. Open a later session without the key
+  (or with `"enabled"`) and the same entries are back.
+- The mode is bound to the session for its whole lifetime: a
+  `session/setModel`, an automatic compaction or any other runtime rebuild
+  re-applies it. Like the system-prompt keys it is **not** persisted with the
+  transcript — a client that wants a resumed session to stay memory-less
+  passes the key again on `session/load`.
+- A value outside `"enabled"` / `"disabled"`, or a non-string value, is
+  rejected with `invalid_params` (`-32602`) rather than silently ignored.
+  Trimming aside, matching is exact and case-sensitive: `"off"`, `"Disabled"`
+  and `false` are all errors. Silently defaulting a mistyped value to
+  "enabled" would leave memory on while the caller believed it off, which is
+  the one failure this key must not have.
+- Sub-agents a turn spawns keep their own per-agent-type memory
+  (`agent-memory/<type>/`, a different directory) and are **not** covered by
+  this key today.
+- The `initialize` response advertises `_meta.sudocode.sessionMemory: true`
+  so clients can feature-detect.
+
 ### Slash commands
 
 A `session/prompt` whose text starts with `/` is a slash command, not a model

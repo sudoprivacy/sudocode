@@ -3286,6 +3286,9 @@ impl LiveCli {
                 &cwd,
                 &mcp_servers,
                 runtime::SystemPromptOverrides::default(),
+                // The REPL always uses memory; the per-session switch is an
+                // ACP-client knob (`_meta.sudocode.memory`).
+                runtime::memory::MemoryMode::Enabled,
                 system_prompt,
                 model.clone(),
                 Some(model),

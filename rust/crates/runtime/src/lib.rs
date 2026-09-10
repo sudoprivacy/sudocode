@@ -189,9 +189,9 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with, prepend_bullets,
-    ContextFile, ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder,
-    SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with,
+    load_system_prompt_with_memory, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
+    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,

@@ -662,17 +662,26 @@ fn mcp_progress_forward(sink: runtime::ProgressSink) -> runtime::McpProgressCall
     })
 }
 
+/// `memory` decides whether writes under the session's memory directory are
+/// auto-allowed. A session with memory switched off does not get that
+/// standing permission: memory-off means the session neither reads nor
+/// writes memory, and leaving the allow-rules in would make "does not write"
+/// depend on the model never trying.
 pub fn permission_policy(
     mode: PermissionMode,
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,
     cwd: &std::path::Path,
+    memory: runtime::memory::MemoryMode,
 ) -> Result<PermissionPolicy, String> {
-    let memory_dir = runtime::memory::default_memory_dir_for(cwd);
+    let base = PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules());
+    let base = if memory.is_enabled() {
+        base.with_memory_allow_rules(&runtime::memory::default_memory_dir_for(cwd))
+    } else {
+        base
+    };
     Ok(tool_registry.permission_specs(None)?.into_iter().fold(
-        PermissionPolicy::new(mode)
-            .with_permission_rules(feature_config.permission_rules())
-            .with_memory_allow_rules(&memory_dir),
+        base,
         |policy, (name, required_permission)| {
             policy.with_tool_requirement(name, required_permission)
         },

@@ -290,15 +290,31 @@ struct WaitNotice {
 
 impl WaitNotice {
     /// Start announcing on stderr once a turn passes [`WAIT_NOTICE_FIRST`].
-    fn start(target: String) -> Self {
-        Self::start_with(target, WAIT_NOTICE_FIRST, WAIT_NOTICE_REPEAT, |line| {
-            eprintln!("{line}");
-        })
+    ///
+    /// The upstream is described lazily, inside the thread, on the first line it
+    /// actually prints. Resolving it up front would load the whole config on
+    /// every run — including the overwhelming majority that never wait long
+    /// enough to say anything — and that load warms the model-capabilities SSOT
+    /// as a side effect. Pulling an initialization earlier than it would
+    /// otherwise happen is how a previous change quietly broke an unrelated
+    /// test; a feature that only speaks in the slow case should also only do its
+    /// work there.
+    fn start(model: String) -> Self {
+        let cwd = env::current_dir().unwrap_or_default();
+        Self::start_lazily(
+            move || commands::reports::describe_upstream_for(&cwd, &model),
+            WAIT_NOTICE_FIRST,
+            WAIT_NOTICE_REPEAT,
+            |line| eprintln!("{line}"),
+        )
     }
 
-    /// Seam for tests: injectable clock intervals and sink.
-    fn start_with(
-        target: String,
+    /// Seam for tests: injectable description, clock intervals, and sink.
+    ///
+    /// `describe` runs at most once, and only if the wait lasts long enough to
+    /// report — a turn that finishes normally never calls it.
+    fn start_lazily(
+        describe: impl FnOnce() -> String + Send + 'static,
         first: Duration,
         repeat: Duration,
         emit: impl Fn(String) + Send + 'static,
@@ -307,14 +323,28 @@ impl WaitNotice {
         let thread = thread::spawn(move || {
             let mut interval = first;
             let mut waited = Duration::ZERO;
+            let mut target: Option<String> = None;
+            // `FnOnce` in an `Option` so the loop can take it exactly once and
+            // the compiler enforces that, rather than a comment promising it.
+            let mut describe = Some(describe);
             loop {
                 match stopped.recv_timeout(interval) {
                     // Turn finished, or the guard was dropped: say nothing more.
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
                     Err(RecvTimeoutError::Timeout) => {
                         waited += interval;
+                        let described = match &target {
+                            Some(known) => known.clone(),
+                            None => {
+                                let described = describe
+                                    .take()
+                                    .map_or_else(String::new, |describe| describe());
+                                target = Some(described.clone());
+                                described
+                            }
+                        };
                         emit(format!(
-                            "scode: still waiting on {target} ({}s)",
+                            "scode: still waiting on {described} ({}s)",
                             waited.as_secs()
                         ));
                         interval = repeat;
@@ -336,18 +366,6 @@ impl Drop for WaitNotice {
             let _ = thread.join();
         }
     }
-}
-
-/// What to name in the waiting line: the host being called and the account
-/// paying for it.
-///
-/// Both come from `proxy_account_for_model`, the selector `doctor` reports
-/// through, so a slow turn names the same account the report does. Falls back
-/// to the model alone when resolution fails — a waiting line is worth printing
-/// even when it can say less.
-fn describe_wait_target(model: &str) -> String {
-    let cwd = env::current_dir().unwrap_or_default();
-    commands::reports::describe_upstream_for(&cwd, model)
 }
 
 /// One-time repair of the legacy config shape, run before any command.
@@ -833,9 +851,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Share the splash's env/config resolution so the one-shot prompt
             // can't disagree with the REPL banner.
             let resolved_model = resolve_repl_model(model);
-            // Resolved before the client is built, while the model name is still
-            // in hand and nothing has started waiting yet.
-            let wait_target = describe_wait_target(&resolved_model);
+            let wait_model = resolved_model.clone();
             let mut cli = LiveCli::new(
                 resolved_model,
                 true,
@@ -852,7 +868,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _cancel_guard = SignalCancelGuard::install(cli.engine_handle.commands.clone());
             // Nothing renders until the model answers, so a slow upstream looks
             // exactly like a hang. Say what is being waited on instead.
-            let _wait_notice = WaitNotice::start(wait_target);
+            let _wait_notice = WaitNotice::start(wait_model);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
             drop(_wait_notice);
 
@@ -5752,13 +5768,22 @@ mod wait_notice_tests {
         let lines = Arc::new(Mutex::new(Vec::new()));
         {
             let sink = Arc::clone(&lines);
-            let _notice = WaitNotice::start_with(
-                "example.test".to_string(),
+            let described = Arc::new(Mutex::new(false));
+            let flag = Arc::clone(&described);
+            let _notice = WaitNotice::start_lazily(
+                move || {
+                    *flag.lock().expect("flag") = true;
+                    "example.test".to_string()
+                },
                 Duration::from_secs(2),
                 Duration::from_secs(2),
                 move |line| sink.lock().expect("sink").push(line),
             );
             thread::sleep(Duration::from_millis(20));
+            assert!(
+                !*described.lock().expect("flag"),
+                "a fast turn must not pay for describing an upstream it never names"
+            );
         }
         assert!(
             lines.lock().expect("sink").is_empty(),
@@ -5773,10 +5798,15 @@ mod wait_notice_tests {
     #[test]
     fn keeps_reporting_while_the_turn_runs_then_stops_on_drop() {
         let lines = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(0usize));
         {
             let sink = Arc::clone(&lines);
-            let _notice = WaitNotice::start_with(
-                "example.test".to_string(),
+            let counter = Arc::clone(&calls);
+            let _notice = WaitNotice::start_lazily(
+                move || {
+                    *counter.lock().expect("counter") += 1;
+                    "example.test".to_string()
+                },
                 Duration::from_millis(20),
                 Duration::from_millis(20),
                 move |line| sink.lock().expect("sink").push(line),
@@ -5794,6 +5824,12 @@ mod wait_notice_tests {
             captured[0].contains("example.test"),
             "should name the target, got: {}",
             captured[0]
+        );
+
+        assert_eq!(
+            *calls.lock().expect("counter"),
+            1,
+            "the upstream should be described once and reused, not re-resolved per line"
         );
 
         thread::sleep(Duration::from_millis(60));

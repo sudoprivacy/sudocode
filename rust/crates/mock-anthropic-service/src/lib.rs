@@ -285,6 +285,15 @@ async fn handle_connection(
     let normalized_body = normalize_system_field(&raw_body);
     let request: MessageRequest = serde_json::from_str(&normalized_body)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    // Cache-safe compaction sends the full conversation with a compaction
+    // prompt appended. Reject it with a proper HTTP 400 so the runtime
+    // falls back to the standard compaction path.
+    if is_cache_safe_compaction(&request) {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"mock: cache-safe compaction not supported"}}"#;
+        let response = http_response("400 Bad Request", "application/json", body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     let scenario = detect_scenario(&request)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parity scenario"))?;
 
@@ -439,6 +448,24 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     }
 
     None
+}
+
+fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
+    let is_standard_compaction = request
+        .system
+        .as_ref()
+        .map_or(false, |s| s.contains("summarizing conversations"));
+    if is_standard_compaction {
+        return false;
+    }
+    request.messages.last().map_or(false, |msg| {
+        msg.content.iter().any(|block| match block {
+            InputContentBlock::Text { text } => {
+                text.contains("create a detailed summary of the conversation")
+            }
+            _ => false,
+        })
+    })
 }
 
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {

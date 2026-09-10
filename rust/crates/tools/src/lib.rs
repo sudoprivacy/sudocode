@@ -646,6 +646,108 @@ impl GlobalToolRegistry {
         self.runtime_tools.iter().any(|tool| tool.name == name)
     }
 
+    /// Return only core tool definitions (always visible in the API `tools`
+    /// array). Deferred tools are excluded — the LLM discovers them via
+    /// `<available-deferred-tools>` in the system prompt and executes them
+    /// through `ExecuteExtraTool`.
+    #[must_use]
+    pub fn core_definitions(
+        &self,
+        allowed_tools: Option<&BTreeSet<String>>,
+    ) -> Vec<ToolDefinition> {
+        let coord_gate =
+            |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
+        let builtin = mvp_tool_specs()
+            .into_iter()
+            .filter(|spec| is_core_tool(spec.name))
+            .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
+            .filter(|spec| coord_gate(spec.name))
+            .map(ToolDefinition::from);
+        let runtime = self
+            .runtime_tools
+            .iter()
+            .filter(|tool| is_core_tool(&tool.name))
+            .filter(|tool| allowed_tools.is_none_or(|allowed| allowed.contains(tool.name.as_str())))
+            .filter(|tool| coord_gate(tool.name.as_str()))
+            .map(|tool| ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            });
+        let plugin = self
+            .plugin_tools
+            .iter()
+            .filter(|tool| is_core_tool(tool.definition().name.as_str()))
+            .filter(|tool| {
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+            })
+            .filter(|tool| coord_gate(tool.definition().name.as_str()))
+            .map(|tool| ToolDefinition {
+                name: tool.definition().name.clone(),
+                description: tool.definition().description.clone(),
+                input_schema: tool.definition().input_schema.clone(),
+            });
+        builtin.chain(runtime).chain(plugin).collect()
+    }
+
+    /// Return `(name, description)` pairs for all deferred tools — the data
+    /// that populates the `<available-deferred-tools>` system prompt section.
+    /// MCP and plugin tools are included alongside builtins.
+    #[must_use]
+    pub fn deferred_tool_listing(&self) -> Vec<(String, String)> {
+        let builtin = mvp_tool_specs()
+            .into_iter()
+            .filter(|spec| !is_core_tool(spec.name))
+            .map(|spec| (spec.name.to_string(), spec.description.to_string()));
+        let runtime = self
+            .runtime_tools
+            .iter()
+            .filter(|tool| !is_core_tool(&tool.name))
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    tool.description.clone().unwrap_or_default(),
+                )
+            });
+        let plugin = self
+            .plugin_tools
+            .iter()
+            .filter(|tool| !is_core_tool(tool.definition().name.as_str()))
+            .map(|tool| {
+                (
+                    tool.definition().name.clone(),
+                    tool.definition().description.clone().unwrap_or_default(),
+                )
+            });
+        builtin.chain(runtime).chain(plugin).collect()
+    }
+
+    /// Format the `<available-deferred-tools>` XML block for system prompt
+    /// injection. Each tool gets one line: `name — description`.
+    #[must_use]
+    pub fn deferred_tools_prompt_section(&self) -> String {
+        let listing = self.deferred_tool_listing();
+        if listing.is_empty() {
+            return String::new();
+        }
+        let mut lines = vec![
+            "<available-deferred-tools>".to_string(),
+            "The following tools are available but not loaded by default. Use ToolSearch to load their full schema, then ExecuteExtraTool to call them.".to_string(),
+        ];
+        for (name, desc) in &listing {
+            let short_desc = desc.split('\n').next().unwrap_or(desc);
+            let short_desc = if short_desc.len() > 120 {
+                format!("{}…", &short_desc[..117])
+            } else {
+                short_desc.to_string()
+            };
+            lines.push(format!("{name} — {short_desc}"));
+        }
+        lines.push("</available-deferred-tools>".to_string());
+        lines.join("\n")
+    }
+
     #[must_use]
     pub fn search(
         &self,
@@ -662,7 +764,17 @@ impl GlobalToolRegistry {
             matches,
             query,
             normalized_query,
-            total_deferred_tools: self.searchable_tool_specs().len(),
+            total_deferred_tools: deferred_tool_specs().len()
+                + self
+                    .runtime_tools
+                    .iter()
+                    .filter(|t| !is_core_tool(&t.name))
+                    .count()
+                + self
+                    .plugin_tools
+                    .iter()
+                    .filter(|t| !is_core_tool(t.definition().name.as_str()))
+                    .count(),
             pending_mcp_servers,
             mcp_degraded,
         }
@@ -722,12 +834,10 @@ impl GlobalToolRegistry {
     }
 
     fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
-        let builtin = deferred_tool_specs()
-            .into_iter()
-            .map(|spec| SearchableToolSpec {
-                name: spec.name.to_string(),
-                description: spec.description.to_string(),
-            });
+        let builtin = mvp_tool_specs().into_iter().map(|spec| SearchableToolSpec {
+            name: spec.name.to_string(),
+            description: spec.description.to_string(),
+        });
         let runtime = self.runtime_tools.iter().map(|tool| SearchableToolSpec {
             name: tool.name.clone(),
             description: tool.description.clone().unwrap_or_default(),
@@ -1015,6 +1125,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ExecuteExtraTool",
+            description: "Execute a deferred tool by name. Use ToolSearch to discover available deferred tools and load their schemas before calling this tool.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "The exact name of the target tool to execute (e.g., \"CronCreate\", \"TaskCreate\")."
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "The parameters to pass to the target tool."
+                    }
+                },
+                "required": ["tool_name", "params"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "Sleep",
@@ -1687,6 +1817,17 @@ fn execute_tool_with_enforcer(
             from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
         }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
+        "ExecuteExtraTool" => {
+            let eti: ExecuteExtraToolInput = from_value(input)?;
+            let target = canonicalize_tool_name(&eti.tool_name);
+            if is_core_tool(&target) {
+                return Err(format!(
+                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
+                    eti.tool_name
+                ));
+            }
+            execute_tool_with_enforcer(enforcer, &target, &eti.params, abort_signal, ctx, fs)
+        }
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
@@ -3643,6 +3784,12 @@ struct AgentInput {
 struct ToolSearchInput {
     query: String,
     max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecuteExtraToolInput {
+    tool_name: String,
+    params: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6740,8 +6887,54 @@ fn load_provider_fallback_config() -> ProviderFallbackConfig {
         })
 }
 
+/// Turn a provider error into a [`RuntimeError`] that keeps its
+/// classification, so the runtime's compact-and-resend salvage can recognise
+/// a context-window rejection instead of treating it as a fatal generic
+/// failure. Subagent turns run the same tool loop and overflow the same way.
+fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
+    if error.is_context_window_failure() {
+        RuntimeError::context_window_blocked(error.to_string())
+    } else {
+        RuntimeError::new(error.to_string())
+    }
+}
+
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    /// The runtime's default cannot see the tool definitions attached to
+    /// every request, and this client attaches the subagent's whole allowed
+    /// set. Left to the default the budget would be too generous by exactly
+    /// that much, and the in-turn guard would miss overflows it should catch.
+    ///
+    /// Keyed on the head of the provider chain: that is the model the next
+    /// request is built for, and budgeting against a fallback the request
+    /// will not carry would let the guard and the provider disagree.
+    fn context_budget(
+        &self,
+        model: &str,
+        system_prompt: &runtime::SystemPrompt,
+    ) -> runtime::ContextBudget {
+        let request_model = self
+            .chain
+            .first()
+            .map_or(model, |entry| entry.model.as_str());
+        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+            .into_iter()
+            .map(ToolDefinition::from)
+            .collect::<Vec<_>>();
+        let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
+        runtime::ContextBudget {
+            context_limit: runtime::model_capabilities::context_window_or_default(request_model)
+                as usize,
+            max_output_tokens: max_tokens_for_model(request_model) as usize,
+            overhead_tokens: api::estimate_request_overhead_tokens(
+                system.as_deref(),
+                (!tools.is_empty()).then_some(tools.as_slice()),
+            ) as usize,
+            buffer_tokens: runtime::autocompact_buffer_tokens(request_model) as usize,
+        }
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
@@ -6777,14 +6970,14 @@ impl ApiClient for ProviderRuntimeClient {
                     );
                     last_error = Some(error);
                 }
-                Err(error) => return Err(RuntimeError::new(error.to_string())),
+                Err(error) => return Err(runtime_error_from_api(&error)),
             }
         }
 
-        Err(RuntimeError::new(last_error.map_or_else(
-            || String::from("provider chain exhausted with no attempts"),
-            |error| error.to_string(),
-        )))
+        Err(last_error.map_or_else(
+            || RuntimeError::new("provider chain exhausted with no attempts"),
+            |error| runtime_error_from_api(&error),
+        ))
     }
 }
 
@@ -7119,15 +7312,38 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
     GlobalToolRegistry::builtin().search(&input.query, input.max_results.unwrap_or(5), None, None)
 }
 
+/// Tools always visible in the API `tools` array — the LLM sees their
+/// full schema on every turn. Everything else is "deferred": listed by
+/// name + one-line description in `<available-deferred-tools>` and
+/// accessed through `ToolSearch` (discovery) + `ExecuteExtraTool`
+/// (execution).
+const CORE_TOOLS: &[&str] = &[
+    "bash",
+    "read_file",
+    "read_tool_output",
+    "write_file",
+    "edit_file",
+    "glob_search",
+    "grep_search",
+    "WebFetch",
+    "WebSearch",
+    "Skill",
+    "agent_spawn",
+    "agent_list",
+    "pid_fork",
+    "ToolSearch",
+    "ExecuteExtraTool",
+    "AskUserQuestion",
+];
+
+fn is_core_tool(name: &str) -> bool {
+    CORE_TOOLS.contains(&name)
+}
+
 fn deferred_tool_specs() -> Vec<ToolSpec> {
     mvp_tool_specs()
         .into_iter()
-        .filter(|spec| {
-            !matches!(
-                spec.name,
-                "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search"
-            )
-        })
+        .filter(|spec| !is_core_tool(spec.name))
         .collect()
 }
 
@@ -9707,6 +9923,126 @@ mod tests {
             serde_json::from_str(&selected_with_alias).expect("valid json");
         assert_eq!(selected_with_alias_output["matches"][0], "Agent");
         assert_eq!(selected_with_alias_output["matches"][1], "Skill");
+    }
+
+    #[test]
+    fn core_tools_are_subset_of_mvp_tool_specs() {
+        let all_names: BTreeSet<&str> = mvp_tool_specs().iter().map(|s| s.name).collect();
+        for &core in super::CORE_TOOLS {
+            assert!(
+                all_names.contains(core),
+                "CORE_TOOLS entry `{core}` not found in mvp_tool_specs()"
+            );
+        }
+    }
+
+    #[test]
+    fn core_definitions_excludes_deferred_tools() {
+        let registry = GlobalToolRegistry::builtin();
+        let core = registry.core_definitions(None);
+        let all = registry.definitions(None);
+        assert!(
+            core.len() < all.len(),
+            "core should be a strict subset of all"
+        );
+        let core_names: BTreeSet<_> = core.iter().map(|d| d.name.as_str()).collect();
+        assert!(core_names.contains("bash"));
+        assert!(core_names.contains("ToolSearch"));
+        assert!(core_names.contains("ExecuteExtraTool"));
+        assert!(
+            !core_names.contains("CronCreate"),
+            "CronCreate should be deferred"
+        );
+        assert!(!core_names.contains("Sleep"), "Sleep should be deferred");
+        assert!(
+            !core_names.contains("TaskCreate"),
+            "TaskCreate should be deferred"
+        );
+    }
+
+    #[test]
+    fn deferred_tool_listing_returns_non_core_tools() {
+        let registry = GlobalToolRegistry::builtin();
+        let listing = registry.deferred_tool_listing();
+        let names: BTreeSet<_> = listing.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains("CronCreate"));
+        assert!(names.contains("Sleep"));
+        assert!(names.contains("TaskCreate"));
+        assert!(!names.contains("bash"), "bash is core");
+        assert!(!names.contains("ToolSearch"), "ToolSearch is core");
+        assert!(
+            !names.contains("ExecuteExtraTool"),
+            "ExecuteExtraTool is core"
+        );
+        for (_, desc) in &listing {
+            assert!(
+                !desc.is_empty(),
+                "every deferred tool should have a description"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_tools_prompt_section_has_xml_tags() {
+        let registry = GlobalToolRegistry::builtin();
+        let section = registry.deferred_tools_prompt_section();
+        assert!(section.starts_with("<available-deferred-tools>"));
+        assert!(section.ends_with("</available-deferred-tools>"));
+        assert!(section.contains("CronCreate"));
+        assert!(section.contains("Sleep"));
+        assert!(
+            !section.contains("\nbash —"),
+            "core tools should not appear"
+        );
+    }
+
+    #[test]
+    fn execute_extra_tool_dispatches_to_deferred_tool() {
+        let _guard = env_guard();
+        let result = execute_tool(
+            "ExecuteExtraTool",
+            &json!({
+                "tool_name": "CronList",
+                "params": {}
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "ExecuteExtraTool should dispatch CronList: {result:?}"
+        );
+    }
+
+    #[test]
+    fn execute_extra_tool_rejects_core_tool() {
+        let _guard = env_guard();
+        let result = execute_tool(
+            "ExecuteExtraTool",
+            &json!({
+                "tool_name": "bash",
+                "params": {"command": "echo hi"}
+            }),
+        );
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("core tool"),
+            "should tell model to call core tools directly"
+        );
+    }
+
+    #[test]
+    fn execute_extra_tool_resolves_aliases() {
+        let _guard = env_guard();
+        let result = execute_tool(
+            "ExecuteExtraTool",
+            &json!({
+                "tool_name": "TaskList",
+                "params": {}
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "ExecuteExtraTool should resolve alias TaskList → pid_status: {result:?}"
+        );
     }
 
     #[tokio::test]

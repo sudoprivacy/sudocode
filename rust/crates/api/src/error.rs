@@ -21,6 +21,13 @@ const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "completion tokens",
     "prompt tokens",
     "request is too large",
+    // Anthropic, when `input + max_tokens` overflows the window: "input
+    // length and `max_tokens` exceed context limit: N + M > W". With a 200K
+    // model and 64K max_tokens that fires at 136K of input, long before
+    // "prompt is too long" (input alone over the window), so it is the
+    // overflow a long agentic session actually gets. None of the markers
+    // above match it.
+    "context limit",
 ];
 
 #[derive(Debug)]
@@ -757,6 +764,32 @@ mod tests {
         assert!(error.is_context_window_failure());
         assert_eq!(error.safe_failure_class(), "context_window");
         assert_eq!(error.request_id(), Some("req_ctx_openai_123"));
+    }
+
+    /// Regression: the overflow a long Anthropic session actually gets is
+    /// `input length and max_tokens exceed context limit`, raised as soon as
+    /// `input + max_tokens` passes the window — long before the input alone
+    /// does. That text matched none of the context-window markers, so the
+    /// runtime never classified it: no compaction, no retry, and the raw
+    /// provider text surfaced to the user.
+    #[test]
+    fn classifies_anthropic_input_plus_max_tokens_overflow_as_context_window() {
+        let error = ApiError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error_type: Some("invalid_request_error".to_string()),
+            message: Some(
+                "input length and `max_tokens` exceed context limit: 150000 + 64000 > 200000, decrease input length or `max_tokens` and try again"
+                    .to_string(),
+            ),
+            request_id: Some("req_ctx_limit_123".to_string()),
+            body: String::new(),
+            retryable: false,
+            suggested_action: None,
+            retry_after: None,
+        };
+
+        assert!(error.is_context_window_failure());
+        assert_eq!(error.safe_failure_class(), "context_window");
     }
 
     #[test]

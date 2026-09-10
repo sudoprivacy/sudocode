@@ -26,7 +26,8 @@
 //! sender exactly.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,7 +48,14 @@ const NOTIFICATION_BUDGET: Duration = Duration::from_secs(30);
 struct AcpStdio {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Lines pumped off stdout by a reader thread.
+    ///
+    /// Reading inline would make every budget in this file a lie: a blocking
+    /// `read_line` on a stream that never produces another byte cannot notice
+    /// its own deadline, so a failing assertion presents as a hang and the test
+    /// has to be killed by hand. The pump turns "nothing arrived" into a
+    /// timeout, which is what a test is supposed to report.
+    lines: Receiver<String>,
     next_id: u64,
 }
 
@@ -67,14 +75,22 @@ impl AcpStdio {
     }
 
     fn read_message(&mut self) -> Value {
-        let mut line = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut line)
-            .expect("read from scode acp");
-        assert!(read > 0, "scode acp closed its stdout unexpectedly");
-        serde_json::from_str(&line)
-            .unwrap_or_else(|e| panic!("non-JSON line from acp: {e}: {line}"))
+        self.read_message_within(NOTIFICATION_BUDGET)
+            .unwrap_or_else(|| panic!("no line from scode acp within {NOTIFICATION_BUDGET:?}"))
+    }
+
+    /// The next line, or `None` if the stream stayed silent for `budget`.
+    fn read_message_within(&mut self, budget: Duration) -> Option<Value> {
+        match self.lines.recv_timeout(budget) {
+            Ok(line) => Some(
+                serde_json::from_str(&line)
+                    .unwrap_or_else(|e| panic!("non-JSON line from acp: {e}: {line}")),
+            ),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("scode acp closed its stdout unexpectedly")
+            }
+        }
     }
 
     /// Read notifications until one satisfies `matches`, or the budget expires.
@@ -83,16 +99,29 @@ impl AcpStdio {
     /// notifications: what is under test is precisely whether the server can
     /// speak to the client with nothing in flight.
     fn await_notification(&mut self, matches: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + NOTIFICATION_BUDGET;
+        self.try_await_notification(matches, NOTIFICATION_BUDGET)
+            .unwrap_or_else(|seen| {
+                panic!("no matching notification within {NOTIFICATION_BUDGET:?}; saw {seen:#?}")
+            })
+    }
+
+    /// `Ok(notification)` or `Err(everything that did arrive)` — so a test can
+    /// assert that something did NOT show up without the absence being a hang.
+    fn try_await_notification(
+        &mut self,
+        matches: impl Fn(&Value) -> bool,
+        budget: Duration,
+    ) -> Result<Value, Vec<Value>> {
+        let deadline = Instant::now() + budget;
         let mut seen = Vec::new();
-        while Instant::now() < deadline {
-            let msg = self.read_message();
-            if msg.get("method").is_some() && matches(&msg) {
-                return msg;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match self.read_message_within(remaining) {
+                Some(msg) if msg.get("method").is_some() && matches(&msg) => return Ok(msg),
+                Some(msg) => seen.push(msg),
+                None => break,
             }
-            seen.push(msg);
         }
-        panic!("no matching notification within {NOTIFICATION_BUDGET:?}; saw {seen:#?}");
+        Err(seen)
     }
 }
 
@@ -100,6 +129,55 @@ impl Drop for AcpStdio {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Start `scode acp` wired to `endpoint` as `agent`, with an isolated config
+/// home so the durable read cursor a test writes cannot leak into another test
+/// or into the developer's own.
+fn spawn_acp(
+    endpoint: &str,
+    agent: &str,
+    peer: &str,
+    workspace: &tempfile::TempDir,
+    config_home: &tempfile::TempDir,
+) -> AcpStdio {
+    // An isolated config home needs a config: the point of isolating it is the
+    // read cursor, not to test scode's behaviour without providers.
+    std::fs::write(
+        config_home.path().join("sudocode.json"),
+        runtime::SAMPLE_SUDOCODE_JSON,
+    )
+    .expect("seed the isolated config home");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.arg("acp")
+        .current_dir(workspace.path())
+        .env("SUDO_CODE_CONFIG_HOME", config_home.path())
+        .env("NEXUS_A2A_ENDPOINT", endpoint)
+        .env("NEXUS_A2A_AGENT", agent)
+        .env("NEXUS_A2A_PEER", peer)
+        .env("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut child = cmd.spawn().expect("spawn scode acp");
+    let stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    AcpStdio {
+        child,
+        stdin,
+        lines,
+        next_id: 0,
     }
 }
 
@@ -117,25 +195,8 @@ fn a2a_peer_message_reaches_an_acp_client() {
     ensure_inbox(&client, PEER_AGENT, "").expect("provision the peer inbox");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
-    cmd.arg("acp")
-        .current_dir(workspace.path())
-        .env("NEXUS_A2A_ENDPOINT", &endpoint)
-        .env("NEXUS_A2A_AGENT", SELF_AGENT)
-        .env("NEXUS_A2A_PEER", PEER_AGENT)
-        .env("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    let mut child = cmd.spawn().expect("spawn scode acp");
-    let stdin = child.stdin.take().expect("stdin piped");
-    let stdout = child.stdout.take().expect("stdout piped");
-    let mut acp = AcpStdio {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout),
-        next_id: 0,
-    };
+    let config_home = tempfile::tempdir().expect("temp config home");
+    let mut acp = spawn_acp(&endpoint, SELF_AGENT, PEER_AGENT, &workspace, &config_home);
 
     let init = acp.request(
         "initialize",
@@ -182,5 +243,137 @@ fn a2a_peer_message_reaches_an_acp_client() {
         notification["params"]["_meta"]["sudocode"]["a2a"]["from"], PEER_AGENT,
         "the sender is also structured, so a client can tell peer mail from a \
          human typing rather than parsing the prose: {notification}"
+    );
+}
+
+/// A message that arrives while nothing is listening is still delivered to the
+/// next receiver.
+///
+/// The receiver used to seek to the tail on every start, which made delivery
+/// depend on the receiver happening to be running at the moment of the send.
+/// Two agents handing off asynchronously then lose mail that the sender was
+/// told was delivered and that is sitting durably in the stream — observed live
+/// in the Win↔Mac duet, where a reply landed while the peer was between
+/// processes and no later reader ever looked back at it.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    // A fresh identity per run, so "has this client ever read?" is unambiguous.
+    let agent = format!("offline-probe-{}", std::process::id());
+    let peer = format!("{agent}-peer");
+
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
+    ensure_inbox(&client, &agent, "").expect("provision the agent inbox");
+    ensure_inbox(&client, &peer, "").expect("provision the peer inbox");
+
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let config_home = tempfile::tempdir().expect("temp config home");
+
+    // First run: establishes the cursor, then goes away.
+    let cursor_file = config_home.path().join(format!("a2a-cursor-{agent}"));
+    {
+        let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
+        acp.request(
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        );
+        acp.request(
+            "session/new",
+            json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+        );
+        // Wait for the cursor to actually exist before killing the process.
+        // The premise of this test is "a client that HAS read this inbox
+        // before"; without the wait it would sometimes assert that against a
+        // client that was killed mid-handshake, which is a different scenario
+        // and would fail for the wrong reason.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cursor_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            cursor_file.exists(),
+            "the first run should record a read cursor at {}",
+            cursor_file.display()
+        );
+    } // dropped: the receiver is gone
+
+    // The peer writes into a mailbox nobody is watching.
+    let body = "sent while the receiver was down";
+    send(&client, &peer, &agent, body, "").expect("peer writes while nothing listens");
+
+    // Second run: must pick up where the first left off.
+    let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
+    acp.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    acp.request(
+        "session/new",
+        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    let notification = acp.await_notification(|msg| {
+        msg["method"] == "session/update"
+            && msg["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+    });
+    let text = notification["params"]["update"]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("update carries text: {notification}"));
+    assert!(
+        text.contains(body),
+        "a message sent while offline must survive to the next start: {text}"
+    );
+}
+
+/// A receiver that has never read this inbox does not replay its history.
+///
+/// The other direction, and the reason the fix is a resumed cursor rather than
+/// "always start from zero": an agent that was never party to a conversation
+/// should not wake up and answer all of it. That is the re-reply storm the
+/// co-host path had to fix once already.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn a_first_time_receiver_does_not_replay_history() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let agent = format!("virgin-probe-{}", std::process::id());
+    let peer = format!("{agent}-peer");
+
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
+    ensure_inbox(&client, &agent, "").expect("provision the agent inbox");
+    ensure_inbox(&client, &peer, "").expect("provision the peer inbox");
+
+    // History accumulates before this client has ever existed.
+    send(&client, &peer, &agent, "ancient history", "").expect("write history");
+
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let config_home = tempfile::tempdir().expect("temp config home");
+    let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
+    acp.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    acp.request(
+        "session/new",
+        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+
+    // A live message proves the receiver is working, and its arrival is the
+    // point at which "history was not replayed" becomes a fact rather than a
+    // race with a slow delivery.
+    let live = "sent after the receiver came up";
+    std::thread::sleep(Duration::from_millis(500));
+    send(&client, &peer, &agent, live, "").expect("write a live message");
+    let notification = acp.await_notification(|msg| {
+        msg["method"] == "session/update"
+            && msg["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+    });
+    let text = notification["params"]["update"]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("update carries text: {notification}"));
+    assert!(
+        text.contains(live) && !text.contains("ancient history"),
+        "the first delivery should be the live message, not replayed history: {text}"
     );
 }

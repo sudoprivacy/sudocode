@@ -152,6 +152,33 @@ pub fn config_max_output_tokens(model_id: &str) -> Option<u32> {
     config_limit_for(base).and_then(|over| over.max_output_tokens)
 }
 
+/// The `max_tokens` a chat request for this model is sent with.
+///
+/// An explicit `models.<alias>.maxOutputTokens` is the user's own number and
+/// is taken as written. Otherwise a heuristic default (32K for opus, 64K for
+/// everything else) capped by the model's registered `max_output_tokens`
+/// when the model is known.
+///
+/// This is the number the provider — and the API client's local preflight —
+/// adds to the input when deciding whether a request fits the context
+/// window, so everything that budgets history against the window must
+/// subtract *this*, not the model's nominal `max_output_tokens` and not the
+/// compaction summary's much smaller reservation. Consumers: the
+/// auto-compaction threshold, [`crate::ContextBudget`], and
+/// `api::max_tokens_for_model`, which builds the request itself.
+#[must_use]
+pub fn request_max_output_tokens(model_id: &str) -> u32 {
+    if let Some(configured) = config_max_output_tokens(model_id) {
+        return configured;
+    }
+    let heuristic = if model_id.contains("opus") {
+        32_000
+    } else {
+        64_000
+    };
+    lookup(model_id).map_or(heuristic, |cap| heuristic.min(cap.max_output_tokens))
+}
+
 /// Look up the configured override for a wire model ID, if any.
 fn config_limit_for(base: &str) -> Option<ModelLimitOverride> {
     let guard = CONFIG_LIMITS.read().ok()?;

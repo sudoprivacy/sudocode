@@ -538,9 +538,10 @@ fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bo
 fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> String {
     content
         .iter()
-        .map(|block| match block {
-            api::ToolResultContentBlock::Text { text } => text.clone(),
-            api::ToolResultContentBlock::Json { value } => value.to_string(),
+        .filter_map(|block| match block {
+            api::ToolResultContentBlock::Text { text } => Some(text.clone()),
+            api::ToolResultContentBlock::Json { value } => Some(value.to_string()),
+            api::ToolResultContentBlock::ToolReference { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

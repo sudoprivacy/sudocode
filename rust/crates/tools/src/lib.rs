@@ -422,6 +422,7 @@ impl From<ToolSpec> for ToolDefinition {
             name: spec.name.to_string(),
             description: Some(spec.description.to_string()),
             input_schema: spec.input_schema,
+            defer_loading: false,
         }
     }
 }
@@ -599,6 +600,7 @@ impl GlobalToolRegistry {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
+                defer_loading: false,
             });
         let plugin = self
             .plugin_tools
@@ -612,6 +614,7 @@ impl GlobalToolRegistry {
                 name: tool.definition().name.clone(),
                 description: tool.definition().description.clone(),
                 input_schema: tool.definition().input_schema.clone(),
+                defer_loading: false,
             });
         builtin.chain(runtime).chain(plugin).collect()
     }
@@ -649,10 +652,11 @@ impl GlobalToolRegistry {
         self.runtime_tools.iter().any(|tool| tool.name == name)
     }
 
-    /// Return only core tool definitions (always visible in the API `tools`
-    /// array). Deferred tools are excluded — the LLM discovers them via
-    /// `<available-deferred-tools>` in the system prompt and executes them
-    /// through `ExecuteExtraTool`.
+    /// Return all tool definitions for the API `tools` array. Core tools
+    /// have `defer_loading: false` (always active); deferred tools have
+    /// `defer_loading: true` (the API knows their schemas but doesn't count
+    /// them against context until the model discovers them via ToolSearch).
+    /// Requires the `advanced-tool-use` beta header.
     #[must_use]
     pub fn core_definitions(
         &self,
@@ -662,25 +666,28 @@ impl GlobalToolRegistry {
             |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
         let builtin = mvp_tool_specs()
             .into_iter()
-            .filter(|spec| is_core_tool(spec.name))
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
             .filter(|spec| coord_gate(spec.name))
-            .map(ToolDefinition::from);
+            .map(|spec| {
+                let deferred = !is_core_tool(spec.name);
+                let mut def = ToolDefinition::from(spec);
+                def.defer_loading = deferred;
+                def
+            });
         let runtime = self
             .runtime_tools
             .iter()
-            .filter(|tool| is_core_tool(&tool.name))
             .filter(|tool| allowed_tools.is_none_or(|allowed| allowed.contains(tool.name.as_str())))
             .filter(|tool| coord_gate(tool.name.as_str()))
             .map(|tool| ToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
+                defer_loading: !is_core_tool(&tool.name),
             });
         let plugin = self
             .plugin_tools
             .iter()
-            .filter(|tool| is_core_tool(tool.definition().name.as_str()))
             .filter(|tool| {
                 allowed_tools
                     .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
@@ -690,6 +697,7 @@ impl GlobalToolRegistry {
                 name: tool.definition().name.clone(),
                 description: tool.definition().description.clone(),
                 input_schema: tool.definition().input_schema.clone(),
+                defer_loading: !is_core_tool(tool.definition().name.as_str()),
             });
         builtin.chain(runtime).chain(plugin).collect()
     }
@@ -6867,16 +6875,34 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 }),
                 ContentBlock::ToolResult {
                     tool_use_id,
+                    tool_name,
                     output,
                     is_error,
-                    ..
-                } => Some(InputContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: vec![ToolResultContentBlock::Text {
-                        text: output.clone(),
-                    }],
-                    is_error: *is_error,
-                }),
+                } => {
+                    let mut content: Vec<ToolResultContentBlock> =
+                        vec![ToolResultContentBlock::Text {
+                            text: output.clone(),
+                        }];
+                    if tool_name == "ToolSearch" {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
+                            if let Some(matches) = parsed.get("matches").and_then(|m| m.as_array())
+                            {
+                                for m in matches {
+                                    if let Some(name) = m.as_str() {
+                                        content.push(ToolResultContentBlock::ToolReference {
+                                            tool_name: name.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(InputContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content,
+                        is_error: *is_error,
+                    })
+                }
                 ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
                     source: api::ImageSource {
                         source_type: "base64".to_string(),
@@ -8476,10 +8502,11 @@ mod tests {
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, auto_background_threshold,
         await_agent_output, build_agent_system_prompt, canonicalize_tool_name,
-        classify_lane_failure, derive_agent_state, execute_agent_inline_with_work,
-        execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
-        global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
-        normalize_pid_input, normalize_send_input, normalize_subagent_type,
+        classify_lane_failure, convert_messages, derive_agent_state,
+        execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
+        extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
+        maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
+        normalize_subagent_type,
         permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
         run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files, AgentInput,
         AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
@@ -9862,36 +9889,44 @@ mod tests {
     }
 
     #[test]
-    fn core_definitions_excludes_deferred_tools() {
+    fn core_definitions_includes_all_tools_with_defer_loading() {
         let registry = GlobalToolRegistry::builtin();
         let core = registry.core_definitions(None);
         let all = registry.definitions(None);
-        assert!(
-            core.len() < all.len(),
-            "core should be a strict subset of all"
+        assert_eq!(
+            core.len(),
+            all.len(),
+            "core_definitions should return ALL tools (core + deferred with defer_loading)"
         );
-        let core_names: BTreeSet<_> = core.iter().map(|d| d.name.as_str()).collect();
-        assert!(core_names.contains("bash"));
-        assert!(core_names.contains("ToolSearch"));
-        assert!(core_names.contains("ExecuteExtraTool"));
-        assert!(
-            core_names.contains("Sleep"),
-            "Sleep should be core (CC parity)"
+        let core_tools: BTreeMap<&str, bool> = core
+            .iter()
+            .map(|d| (d.name.as_str(), d.defer_loading))
+            .collect();
+        assert_eq!(core_tools.get("bash"), Some(&false), "bash is core");
+        assert_eq!(
+            core_tools.get("ToolSearch"),
+            Some(&false),
+            "ToolSearch is core"
         );
-        assert!(
-            !core_names.contains("CronCreate"),
+        assert_eq!(core_tools.get("Sleep"), Some(&false), "Sleep is core");
+        assert_eq!(
+            core_tools.get("CronCreate"),
+            Some(&true),
             "CronCreate should be deferred"
         );
-        assert!(
-            !core_names.contains("WebFetch"),
-            "WebFetch should be deferred (CC parity)"
+        assert_eq!(
+            core_tools.get("WebFetch"),
+            Some(&true),
+            "WebFetch should be deferred"
         );
-        assert!(
-            !core_names.contains("WebSearch"),
-            "WebSearch should be deferred (CC parity)"
+        assert_eq!(
+            core_tools.get("WebSearch"),
+            Some(&true),
+            "WebSearch should be deferred"
         );
-        assert!(
-            !core_names.contains("TaskCreate"),
+        assert_eq!(
+            core_tools.get("TaskCreate"),
+            Some(&true),
             "TaskCreate should be deferred"
         );
     }
@@ -9961,6 +9996,48 @@ mod tests {
                 "tool line should be name-only (CC parity), got: {line}"
             );
         }
+    }
+
+    #[test]
+    fn convert_messages_injects_tool_references_for_tool_search() {
+        use runtime::{ContentBlock, ConversationMessage, MessageRole};
+        let output = serde_json::json!({
+            "matches": ["CronCreate", "CronList"],
+            "query": "cron",
+            "normalized_query": "cron",
+            "total_deferred_tools": 10,
+            "pending_mcp_servers": null,
+        });
+        let messages = vec![ConversationMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu_1".to_string(),
+                tool_name: "ToolSearch".to_string(),
+                output: output.to_string(),
+                is_error: false,
+            }],
+            usage: None,
+            model: None,
+        }];
+        let converted = convert_messages(&messages);
+        assert_eq!(converted.len(), 1);
+        let content = match &converted[0].content[0] {
+            api::InputContentBlock::ToolResult { content, .. } => content,
+            _ => panic!("expected ToolResult"),
+        };
+        assert!(content.len() >= 3, "text + 2 tool_references");
+        assert!(matches!(
+            &content[0],
+            api::ToolResultContentBlock::Text { .. }
+        ));
+        assert!(matches!(
+            &content[1],
+            api::ToolResultContentBlock::ToolReference { tool_name } if tool_name == "CronCreate"
+        ));
+        assert!(matches!(
+            &content[2],
+            api::ToolResultContentBlock::ToolReference { tool_name } if tool_name == "CronList"
+        ));
     }
 
     #[test]

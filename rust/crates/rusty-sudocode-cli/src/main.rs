@@ -263,6 +263,111 @@ fn enable_windows_ansi_support() {}
 /// Environment variable that suppresses the startup config migration.
 const SKIP_CONFIG_MIGRATION_ENV: &str = "SCODE_SKIP_CONFIG_MIGRATION";
 
+/// How long a one-shot turn may run before the first "still waiting" line.
+/// Long enough that an ordinary turn never prints one, short enough that a
+/// person does not start doubting the process.
+const WAIT_NOTICE_FIRST: Duration = Duration::from_secs(15);
+/// Cadence after the first line. Slow: this is reassurance, not telemetry.
+const WAIT_NOTICE_REPEAT: Duration = Duration::from_secs(30);
+
+/// Tells the user, on stderr, that a one-shot turn is still waiting — and on
+/// what — when it takes long enough to look like a hang.
+///
+/// The one-shot path renders nothing until the model answers, and the default
+/// read timeout allows a stalled connection five minutes of silence. Those two
+/// facts together make a slow upstream indistinguishable from a hung process.
+/// It is not a hypothetical confusion: it sent one debugging session down six
+/// rounds of bisecting and three throwaway builds looking for a regression that
+/// did not exist, because "no output at all" reads as "broken", never as
+/// "waiting".
+///
+/// Writes to stderr, never stdout — stdout carries `--output-format json`, and
+/// one stray line there would turn a working run into a parse error.
+struct WaitNotice {
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl WaitNotice {
+    /// Start announcing on stderr once a turn passes [`WAIT_NOTICE_FIRST`].
+    ///
+    /// The upstream is described lazily, inside the thread, on the first line it
+    /// actually prints. Resolving it up front would load the whole config on
+    /// every run — including the overwhelming majority that never wait long
+    /// enough to say anything — and that load warms the model-capabilities SSOT
+    /// as a side effect. Pulling an initialization earlier than it would
+    /// otherwise happen is how a previous change quietly broke an unrelated
+    /// test; a feature that only speaks in the slow case should also only do its
+    /// work there.
+    fn start(model: String) -> Self {
+        let cwd = env::current_dir().unwrap_or_default();
+        Self::start_lazily(
+            move || commands::reports::describe_upstream_for(&cwd, &model),
+            WAIT_NOTICE_FIRST,
+            WAIT_NOTICE_REPEAT,
+            |line| eprintln!("{line}"),
+        )
+    }
+
+    /// Seam for tests: injectable description, clock intervals, and sink.
+    ///
+    /// `describe` runs at most once, and only if the wait lasts long enough to
+    /// report — a turn that finishes normally never calls it.
+    fn start_lazily(
+        describe: impl FnOnce() -> String + Send + 'static,
+        first: Duration,
+        repeat: Duration,
+        emit: impl Fn(String) + Send + 'static,
+    ) -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = thread::spawn(move || {
+            let mut interval = first;
+            let mut waited = Duration::ZERO;
+            let mut target: Option<String> = None;
+            // `FnOnce` in an `Option` so the loop can take it exactly once and
+            // the compiler enforces that, rather than a comment promising it.
+            let mut describe = Some(describe);
+            loop {
+                match stopped.recv_timeout(interval) {
+                    // Turn finished, or the guard was dropped: say nothing more.
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {
+                        waited += interval;
+                        let described = match &target {
+                            Some(known) => known.clone(),
+                            None => {
+                                let described = describe
+                                    .take()
+                                    .map_or_else(String::new, |describe| describe());
+                                target = Some(described.clone());
+                                described
+                            }
+                        };
+                        emit(format!(
+                            "scode: still waiting on {described} ({}s)",
+                            waited.as_secs()
+                        ));
+                        interval = repeat;
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for WaitNotice {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// One-time repair of the legacy config shape, run before any command.
 ///
 /// **Temporary shim — added 2026-09, delete once installs have turned over.**
@@ -746,6 +851,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Share the splash's env/config resolution so the one-shot prompt
             // can't disagree with the REPL banner.
             let resolved_model = resolve_repl_model(model);
+            let wait_model = resolved_model.clone();
             let mut cli = LiveCli::new(
                 resolved_model,
                 true,
@@ -760,7 +866,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // REPL wires this through its input path; the one-shot path has no
             // key reader, so install a scoped signal→Cancel monitor here.
             let _cancel_guard = SignalCancelGuard::install(cli.engine_handle.commands.clone());
+            // Nothing renders until the model answers, so a slow upstream looks
+            // exactly like a hang. Say what is being waited on instead.
+            let _wait_notice = WaitNotice::start(wait_model);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
+            drop(_wait_notice);
 
             // Record token usage and session ended event for non-interactive prompt mode
             let duration_ms = session_start.elapsed().as_millis() as u64;
@@ -5644,6 +5754,91 @@ fn slash_command_completion_candidates_with_sessions(
     }
 
     completions.into_iter().collect()
+}
+
+#[cfg(test)]
+mod wait_notice_tests {
+    use super::*;
+
+    /// A turn that finishes normally must print nothing. The notice exists for
+    /// the pathological case; if it spoke on every run it would be noise, and
+    /// noise is what people learn to ignore.
+    #[test]
+    fn says_nothing_when_the_turn_finishes_promptly() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        {
+            let sink = Arc::clone(&lines);
+            let described = Arc::new(Mutex::new(false));
+            let flag = Arc::clone(&described);
+            let _notice = WaitNotice::start_lazily(
+                move || {
+                    *flag.lock().expect("flag") = true;
+                    "example.test".to_string()
+                },
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                move |line| sink.lock().expect("sink").push(line),
+            );
+            thread::sleep(Duration::from_millis(20));
+            assert!(
+                !*described.lock().expect("flag"),
+                "a fast turn must not pay for describing an upstream it never names"
+            );
+        }
+        assert!(
+            lines.lock().expect("sink").is_empty(),
+            "a fast turn should be silent, got: {:?}",
+            lines.lock().expect("sink")
+        );
+    }
+
+    /// A turn that keeps running must keep saying so, and must name what it is
+    /// waiting on — "still running" without a target leaves the reader exactly
+    /// as stuck as silence does.
+    #[test]
+    fn keeps_reporting_while_the_turn_runs_then_stops_on_drop() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(0usize));
+        {
+            let sink = Arc::clone(&lines);
+            let counter = Arc::clone(&calls);
+            let _notice = WaitNotice::start_lazily(
+                move || {
+                    *counter.lock().expect("counter") += 1;
+                    "example.test".to_string()
+                },
+                Duration::from_millis(20),
+                Duration::from_millis(20),
+                move |line| sink.lock().expect("sink").push(line),
+            );
+            thread::sleep(Duration::from_millis(300));
+        }
+        // The guard's Drop joins the thread, so nothing can arrive after this.
+        let captured = lines.lock().expect("sink").clone();
+        assert!(
+            captured.len() >= 2,
+            "should keep reporting, got {} line(s): {captured:?}",
+            captured.len()
+        );
+        assert!(
+            captured[0].contains("example.test"),
+            "should name the target, got: {}",
+            captured[0]
+        );
+
+        assert_eq!(
+            *calls.lock().expect("counter"),
+            1,
+            "the upstream should be described once and reused, not re-resolved per line"
+        );
+
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            lines.lock().expect("sink").len(),
+            captured.len(),
+            "dropping the guard must stop the thread, not just detach it"
+        );
+    }
 }
 
 #[cfg(test)]

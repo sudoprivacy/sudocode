@@ -14,6 +14,7 @@
 //! transport (config, dial, send, poll) still lives once in
 //! `runtime::nexus_mailbox`; this module only owns the process-lifetime handle.
 
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -28,6 +29,50 @@ use runtime::HookAbortSignal;
 /// the deadline so the loop can re-check `abort`. This is event-driven, not a
 /// poll interval — an idle receiver costs one parked RPC, not a `sleep` spin.
 const INBOX_WAIT_MS: u64 = 500;
+
+/// Where this client remembers how far it has read its own inbox.
+///
+/// Client-local, and deliberately not in the nexus namespace: the co-host
+/// stores its cursor there because the co-host *is* the node, but a standalone
+/// `scode` is one of possibly several clients of a remote node, and "which
+/// messages has THIS client shown its user" is not the node's business.
+///
+/// Keyed by agent so two identities on one machine do not share a position.
+fn cursor_path_for(agent: &str) -> PathBuf {
+    let safe: String = agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    runtime::config::default_config_home().join(format!("a2a-cursor-{safe}"))
+}
+
+/// The last offset this client consumed, or `None` when it has never run.
+///
+/// `None` and `Some(0)` mean different things and the difference is the point:
+/// never-run seeks to the tail (a first-time receiver should not replay an
+/// inbox it was never party to), while a recorded 0 resumes from the head.
+/// Any unreadable or unparsable cursor is treated as never-run.
+fn load_cursor(agent: &str) -> Option<u64> {
+    std::fs::read_to_string(cursor_path_for(agent))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+}
+
+/// Record how far this client has read. Best-effort: losing a write only costs
+/// the no-loss guarantee on the next start, never correctness now.
+fn save_cursor(agent: &str, offset: u64) {
+    let path = cursor_path_for(agent);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, offset.to_string());
+}
 
 /// The resolved, connected standalone A2A session.
 pub struct Session {
@@ -117,15 +162,33 @@ pub fn spawn_poller(
     std::thread::Builder::new()
         .name("nexus-a2a-receiver".into())
         .spawn(move || {
-            // Seek to tail: a non-blocking (block_ms=0) drain-and-discard once
-            // to fix the cursor at the current end, so only messages that
-            // arrive after startup surface.
-            let mut cursor = match nexus_mailbox::poll_new(&client, &agent, 0, &api_key, 0) {
-                Ok((_history, tail)) => tail,
-                Err(e) => {
-                    eprintln!("[nexus-a2a] initial inbox seek failed: {e}");
-                    0
-                }
+            // Resume where this client left off, so a message that arrived
+            // while nothing was listening is still delivered.
+            //
+            // Seeking to the tail on every start looks reasonable — nobody
+            // wants their history replayed — but it makes delivery depend on
+            // the receiver happening to be running at the moment of the send.
+            // Two agents handing off asynchronously then lose messages that
+            // the sender was told were delivered and that are sitting durably
+            // in the stream: observed live in the Win↔Mac duet, where a reply
+            // landed while the peer was between processes and no later reader
+            // ever looked back at it.
+            //
+            // A first run still seeks to the tail: a receiver that has never
+            // read this inbox was not party to what came before, and replaying
+            // it would be the other failure (the #81 re-reply storm).
+            let mut cursor = match load_cursor(&agent) {
+                Some(saved) => saved,
+                None => match nexus_mailbox::poll_new(&client, &agent, 0, &api_key, 0) {
+                    Ok((_history, tail)) => {
+                        save_cursor(&agent, tail);
+                        tail
+                    }
+                    Err(e) => {
+                        eprintln!("[nexus-a2a] initial inbox seek failed: {e}");
+                        0
+                    }
+                },
             };
             while !abort.is_aborted() {
                 // Block on the tail up to INBOX_WAIT_MS, then drain the burst.
@@ -134,7 +197,16 @@ pub fn spawn_poller(
                         for m in &msgs {
                             sink(m);
                         }
-                        cursor = next;
+                        // Persist only on real forward progress: an idle
+                        // deadline return would otherwise rewrite the same
+                        // offset twice a second. Saving after the sink has run
+                        // makes a crash re-deliver the last message rather than
+                        // drop it — at-least-once, which is the right side to
+                        // err on for mail.
+                        if next > cursor {
+                            cursor = next;
+                            save_cursor(&agent, cursor);
+                        }
                     }
                     Err(e) => {
                         eprintln!("[nexus-a2a] inbox poll failed: {e}");

@@ -966,7 +966,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep_search",
-            description: "Search file contents with a regex pattern.",
+            description: "Search file contents with a regex pattern. WARNING: does NOT prune build/vendor directories (e.g. `target/`, `node_modules/`, `.git/`, `dist/`, `.venv/`) and will read large binaries — walking into a Rust `target/` or similar can hang for a long time. Always scope the search: pass an explicit `path` for a specific subtree you already know, and narrow the file set with `glob` (e.g. `*.rs`) or `type` (e.g. `rust`). Do not run against the workspace root without filters; if you must, set a caller-side timeout first.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -179,8 +179,8 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
     <div class="el"><span class="was">no explicit pid</span> <span class="arw">→</span> <span class="to">ephemeral run handle</span></div>
     <span class="b partial">partial</span></td>
   <td>
-    <div class="el"><b>stays (SQLite):</b> conversation-list index · position/status/pin/cron/channel/user_id — UI-unique</div>
-    <div class="el"><b>→ sudocode</b> (sudowork is a UI; the <i>agent</i> is sudocode): read the whole identity from the engine — durable <code>session-id</code> + <code>agent-name</code>; its <code>messages</code>/<code>acpSessionId</code> copy collapses to a view <span class="b dup">dup</span></div>
+    <div class="el"><b>stays (SQLite):</b> sudowork's own primary key = <code>conversation_id</code> (UUID) + the UI-unique list index (position/status/pin/cron/channel/user_id)</div>
+    <div class="el"><b>→ sudocode</b> (sudowork is a UI; the <i>agent</i> is sudocode): the durable <i>agent</i> identity (<code>session-id</code> + <code>agent-name</code>) is the engine's; sudowork binds to it per-conversation via <code>acpSessionId</code> (a binding, <b>not</b> a dup — see Live/persistent-assistant-pointer row) and keeps <code>messages</code> on SQLite as the richer store (<b>not</b> collapsing — see Transcript-file row). Nexus end-state: reference the engine's <code>session-id</code>/<code>agent-name</code>.</div>
     <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>

@@ -34,7 +34,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 use pty_expect::{PtySession, Result};
@@ -70,6 +70,52 @@ pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Locate the compiled `scode` binary for the current test run.
 #[must_use]
+/// The REPL's input-line marker. The footer and banner never carry it, so a
+/// line containing it is the line the user types on.
+const PROMPT_MARKER: &str = "\u{276f}";
+
+/// Block until the REPL's input line shows `text`, then return.
+///
+/// Use this — not `expect()` — to prove that typed characters landed.
+/// `expect()` matches the unconsumed PTY BYTE STREAM, and iocraft redraws the
+/// whole screen whenever anything changes, so every redraw re-emits the
+/// permanent footer: `… /help for commands · /exit to quit …`. A stream match
+/// on `/exit` is therefore satisfied by chrome that was already on screen
+/// before a single character was typed, and the redraw that satisfies it need
+/// not have anything to do with the keystrokes — the Ctrl-C hint expiring
+/// three seconds later is enough.
+///
+/// What follows such a guard is an Enter racing an input line that may still
+/// be empty. Enter on an empty line submits nothing, so the REPL stays up and
+/// the test learns about it only when its exit budget runs out, with a screen
+/// showing a bare prompt and no clue why. Reading the prompt line off the
+/// RENDERED SCREEN is what actually proves the characters arrived.
+///
+/// # Panics
+/// When the input line has not shown `text` within `budget`; the message
+/// carries `context` and the rendered screen.
+pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, context: &str) {
+    let deadline = Instant::now() + budget;
+    loop {
+        let shown = sess.render(|screen| {
+            screen
+                .contents()
+                .lines()
+                .any(|line| line.contains(PROMPT_MARKER) && line.contains(text))
+        });
+        if shown {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let screen = sess.render(|s| s.contents());
+            panic!(
+                "{context}: the input line never showed {text:?} within {budget:?}\nPTY:\n{screen}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 pub fn scode_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scode"))
 }

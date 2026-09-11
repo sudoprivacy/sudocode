@@ -49,6 +49,32 @@ const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
+
+/// Preserve the bash result wire contract when cancellation wins the race with
+/// the blocking tool task. Other tools have no structured interruption shape.
+fn interrupted_tool_output(tool_name: &str) -> String {
+    if tool_name.eq_ignore_ascii_case("bash") {
+        serde_json::json!({
+            "stdout": "",
+            "stderr": "Command interrupted by user",
+            "rawOutputPath": null,
+            "interrupted": true,
+            "isImage": null,
+            "backgroundTaskId": null,
+            "backgroundedByUser": null,
+            "assistantAutoBackgrounded": null,
+            "dangerouslyDisableSandbox": null,
+            "returnCodeInterpretation": "interrupted",
+            "noOutputExpected": true,
+            "structuredContent": null,
+            "sandboxStatus": null,
+        })
+        .to_string()
+    } else {
+        INTERRUPT_MESSAGE.to_string()
+    }
+}
+
 const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
 <system-reminder>
 The previous model response was empty after a tool completed. The user requested a file deliverable, but the current turn has not produced a matching final file yet. Continue the same task now: create or execute whatever is needed to produce the requested file, then verify it exists before ending the turn.
@@ -1260,8 +1286,8 @@ where
         for (tool_use_id, tool_name) in pending_tool_ids {
             let _ = self.session.push_message(ConversationMessage::tool_result(
                 tool_use_id,
-                tool_name,
-                INTERRUPT_MESSAGE,
+                tool_name.clone(),
+                interrupted_tool_output(&tool_name),
                 true,
             ));
         }
@@ -1394,7 +1420,7 @@ where
             let result_message = ConversationMessage::tool_result(
                 tool_use_id.clone(),
                 tool_name.clone(),
-                INTERRUPT_MESSAGE,
+                interrupted_tool_output(tool_name),
                 true,
             );
             self.push_tool_result_message(observer, iterations, tool_results, result_message)?;
@@ -2005,7 +2031,7 @@ where
                             let result_message = ConversationMessage::tool_result(
                                 p.tool_use_id.clone(),
                                 p.tool_name.clone(),
-                                INTERRUPT_MESSAGE,
+                                interrupted_tool_output(&p.tool_name),
                                 true,
                             );
                             self.push_tool_result_message(
@@ -2236,8 +2262,8 @@ where
                             // "every tool_use has a tool_result" invariant.
                             let result_message = ConversationMessage::tool_result(
                                 tool_use_id,
-                                tool_name,
-                                INTERRUPT_MESSAGE,
+                                tool_name.clone(),
+                                interrupted_tool_output(&tool_name),
                                 true,
                             );
                             self.push_tool_result_message(

@@ -182,6 +182,23 @@ enum Scenario {
     RetryThenSucceed,
     ExecuteExtraToolRoundtrip,
     ExecuteExtraToolMcpRoundtrip,
+    /// Parent turn of the subagent-delegation roundtrip. The parent emits
+    /// three `Agent` tool_use blocks (run synchronously) whose prompts each
+    /// carry a `PARITY_SCENARIO:subagent_calc_child` marker plus one
+    /// addition. Each spawned child inherits the parent's `base_url` (so its
+    /// `/v1/messages` call reaches this same mock) and its first user message
+    /// is exactly that prompt — so [`detect_scenario`] routes the child call
+    /// to [`Scenario::SubagentCalcChild`]. Once all three `tool_result`s are
+    /// back the parent answers with the aggregated JSON. This is the
+    /// deterministic counterpart to the live `live_subagent_smoke_stdio`
+    /// test: it pins the subagent-over-ACP wire contract without depending on
+    /// a real model choosing to delegate.
+    SubagentDelegationParent,
+    /// A spawned child of [`Scenario::SubagentDelegationParent`]. Detected via
+    /// the marker embedded in the child's prompt; replies with only the sum of
+    /// the two addends in that prompt so the parent's tool_result carries a
+    /// clean number (203 / 403 / 603).
+    SubagentCalcChild,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -228,6 +245,8 @@ impl Scenario {
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
             "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
+            "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
+            "subagent_calc_child" => Some(Self::SubagentCalcChild),
             _ => None,
         }
     }
@@ -270,6 +289,8 @@ impl Scenario {
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
             Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
+            Self::SubagentDelegationParent => "subagent_delegation_parent",
+            Self::SubagentCalcChild => "subagent_calc_child",
         }
     }
 }
@@ -520,6 +541,99 @@ fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Collect the numeric results of every `Agent` `tool_result` in the request —
+/// the `Scenario::SubagentDelegationParent` follow-up carries one per spawned
+/// child. Each child answered with just a number (its addition sum), so the
+/// `tool_result` content parses directly to an integer. Non-numeric or missing
+/// results are skipped, so `len()` reflects how many children have returned a
+/// clean answer.
+fn subagent_calc_results(request: &MessageRequest) -> Vec<i64> {
+    let mut agent_tool_ids = std::collections::HashSet::new();
+    for message in &request.messages {
+        for block in &message.content {
+            if let InputContentBlock::ToolUse { id, name, .. } = block {
+                if name == "Agent" {
+                    agent_tool_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    let mut sums = Vec::new();
+    for message in &request.messages {
+        for block in &message.content {
+            if let InputContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            {
+                if !agent_tool_ids.contains(tool_use_id) {
+                    continue;
+                }
+                let text = flatten_tool_result_content(content);
+                if let Some(value) = first_integer_in(&text) {
+                    sums.push(value);
+                }
+            }
+        }
+    }
+    sums
+}
+
+/// Sum the two addends in a `SubagentCalcChild` prompt of the form
+/// "What is <a> + <b>? Reply with ONLY the number." Falls back to 0 if the
+/// expression can't be parsed (which would surface as a wrong assertion in
+/// the test rather than a panic in the mock).
+fn subagent_child_sum(request: &MessageRequest) -> i64 {
+    let prompt = request
+        .messages
+        .iter()
+        .find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                InputContentBlock::Text { text } if text.contains('+') => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+
+    // Grab the integers on either side of the first '+'.
+    if let Some(plus) = prompt.find('+') {
+        let left_val = last_integer_in(&prompt[..plus]);
+        let right_val = first_integer_in(&prompt[plus + 1..]);
+        if let (Some(a), Some(b)) = (left_val, right_val) {
+            return a + b;
+        }
+    }
+    0
+}
+
+/// First run of ASCII digits in `text`, parsed as an integer.
+fn first_integer_in(text: &str) -> Option<i64> {
+    let mut digits = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
+}
+
+/// Last run of ASCII digits in `text`, parsed as an integer.
+fn last_integer_in(text: &str) -> Option<i64> {
+    let mut digits = String::new();
+    for ch in text.chars().rev() {
+        if ch.is_ascii_digit() {
+            digits.insert(0, ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
 }
 
 /// Text every compaction continuation message starts with (see
@@ -924,6 +1038,63 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
+        Scenario::SubagentDelegationParent => {
+            // Count how many Agent tool_results have come back so far. The
+            // parent emits three synchronous `Agent` tool_use blocks in its
+            // FIRST turn; the runtime runs each subagent and feeds one
+            // tool_result per Agent call back on the follow-up request. Once
+            // all three are present the parent emits the aggregated JSON.
+            let agent_results = subagent_calc_results(request);
+            if agent_results.len() >= 3 {
+                let mut sums = agent_results;
+                sums.sort_unstable();
+                final_text_sse(&format!(
+                    "{{\"results\": [{}, {}, {}]}}",
+                    sums[0], sums[1], sums[2]
+                ))
+            } else {
+                // Three Agent tool_use blocks, run synchronously so each
+                // returns a tool_result to this session. Each prompt carries
+                // the child marker so the spawned subagent's own /v1/messages
+                // call routes to `SubagentCalcChild`.
+                tool_uses_sse(&[
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_1",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 101+102","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 101 + 102? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_2",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 201+202","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 201 + 202? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_3",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 301+302","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 301 + 302? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                ])
+            }
+        }
+        Scenario::SubagentCalcChild => {
+            // A spawned child. Its only user message is the parent-supplied
+            // prompt ("What is <a> + <b>? Reply with ONLY the number."). Sum
+            // the two addends and reply with just the number.
+            let sum = subagent_child_sum(request);
+            final_text_sse(&sum.to_string())
+        }
     }
 }
 
@@ -1364,6 +1535,60 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"tool_name": "mcp__parity__echo", "params": {"text": "hello from deferred mcp"}}),
             ),
         },
+        Scenario::SubagentDelegationParent => {
+            let agent_results = subagent_calc_results(request);
+            if agent_results.len() >= 3 {
+                let mut sums = agent_results;
+                sums.sort_unstable();
+                text_message_response(
+                    "msg_subagent_delegation_final",
+                    &format!("{{\"results\": [{}, {}, {}]}}", sums[0], sums[1], sums[2]),
+                )
+            } else {
+                tool_message_response_many(
+                    "msg_subagent_delegation",
+                    &[
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_1",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 101+102",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
+                            }),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_2",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 201+202",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 201 + 202? Reply with ONLY the number."
+                            }),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_3",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 301+302",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 301 + 302? Reply with ONLY the number."
+                            }),
+                        },
+                    ],
+                )
+            }
+        }
+        Scenario::SubagentCalcChild => {
+            let sum = subagent_child_sum(request);
+            text_message_response("msg_subagent_calc_child", &sum.to_string())
+        }
     }
 }
 
@@ -1407,6 +1632,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
         Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
+        Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
+        Scenario::SubagentCalcChild => "req_subagent_calc_child",
     }
 }
 

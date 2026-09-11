@@ -3051,6 +3051,105 @@ async fn acp_session_cancel_survives_model_switch() {
     workspace.cleanup();
 }
 
+/// Deterministic subagent-over-ACP coverage. This is the mock-backed
+/// counterpart to the live `live_subagent_smoke_stdio` test: it pins the
+/// exact ACP wire contract for a parent that delegates to sub-agents without
+/// depending on a real model choosing to delegate.
+///
+/// The parent turn (`SubagentDelegationParent`) emits three synchronous
+/// `Agent` `tool_use` blocks whose prompts each carry a
+/// `PARITY_SCENARIO:subagent_calc_child` marker. Each spawned child inherits
+/// the parent's `base_url` (so its `/v1/messages` call reaches the same mock)
+/// and its first user message is exactly that prompt, so the mock routes the
+/// child call to `SubagentCalcChild`, which answers with the addition sum.
+/// Once all three `tool_result`s are back the parent emits the aggregated JSON.
+#[tokio::test]
+async fn acp_subagent_delegation_deterministic() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("subagent-delegation");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    // Agent tool requires DangerFullAccess to spawn without a permission
+    // prompt — matches the live test's `danger-full-access` client.
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}subagent_delegation_parent")
+                }]
+            }),
+        )
+        .await;
+
+    assert!(
+        !notifs.is_empty(),
+        "subagent delegation prompt should produce notifications"
+    );
+
+    // Exactly three Agent tool_call starts — the wire contract the live test
+    // asserts, now deterministic.
+    let agent_starts: Vec<_> = notifs
+        .iter()
+        .filter(|n| {
+            let update = &n["params"]["update"];
+            update["sessionUpdate"] == "tool_call"
+                && update["title"] == "Agent"
+                && update["status"] == "in_progress"
+        })
+        .collect();
+    assert_eq!(
+        agent_starts.len(),
+        3,
+        "expected exactly 3 Agent tool_call starts, got {}",
+        agent_starts.len()
+    );
+
+    // Each subagent's result surfaces via a completed tool_call_update's
+    // rawOutput.result — collect them and confirm the three sums.
+    let mut agent_results: Vec<String> = notifs
+        .iter()
+        .filter(|n| {
+            let update = &n["params"]["update"];
+            update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed"
+        })
+        .filter_map(|n| {
+            n["params"]["update"]["rawOutput"]["result"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    agent_results.sort();
+    assert!(
+        agent_results.iter().any(|r| r.contains("203"))
+            && agent_results.iter().any(|r| r.contains("403"))
+            && agent_results.iter().any(|r| r.contains("603")),
+        "expected subagent results to contain 203, 403, 603 but got: {agent_results:?}"
+    );
+
+    let result = &resp["result"];
+    assert_eq!(
+        result["stopReason"], "end_turn",
+        "subagent delegation stopReason should be end_turn"
+    );
+    assert!(
+        result.get("usage").is_some(),
+        "subagent delegation response should include usage"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
 /// runtime build (proof written) and its `echo` tool round-trips through the
 /// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).

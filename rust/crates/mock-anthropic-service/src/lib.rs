@@ -976,7 +976,13 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_ask_user_question",
                 "AskUserQuestion",
-                &[r#"{"question":"Which colour?","options":["red","blue"]}"#],
+                // Structured `questions[]` form using `question` per item (the
+                // natural alias for `prompt`). Exercises the alias so this
+                // roundtrip regresses if the item ever stops accepting it.
+                &[
+                    r#"{"questions":[{"id":"q1","question":"Which colour?","#,
+                    r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
+                ],
             ),
         },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
@@ -1472,7 +1478,14 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_ask_user_question_tool",
                 "toolu_ask_user_question",
                 "AskUserQuestion",
-                json!({"question": "Which colour?", "options": ["red", "blue"]}),
+                json!({"questions": [{
+                    "id": "q1",
+                    "question": "Which colour?",
+                    "options": [
+                        {"label": "red", "value": "red"},
+                        {"label": "blue", "value": "blue"}
+                    ]
+                }]}),
             ),
         },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {

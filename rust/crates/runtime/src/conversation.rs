@@ -110,6 +110,10 @@ pub struct ApiRequest {
     /// Optional trace ID for end-to-end request tracking.
     /// Passed through to the HTTP layer as X-Request-ID header.
     pub trace_id: Option<String>,
+    /// Tool names discovered via ToolSearch before compaction removed the
+    /// ToolSearch results. Merged with message-scanned discoveries so
+    /// these tools keep `defer_loading: false` after compaction.
+    pub pre_compact_discovered_tools: std::collections::BTreeSet<String>,
 }
 
 /// Streamed events emitted while processing a single assistant turn.
@@ -1659,6 +1663,12 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
                 trace_id: self.trace_id.clone(),
+                pre_compact_discovered_tools: self
+                    .session
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.pre_compact_discovered_tools.clone())
+                    .unwrap_or_default(),
             };
             // Race the API stream (which includes the retry loop) against
             // the abort signal so ESC/Ctrl-C cancels even during retries.

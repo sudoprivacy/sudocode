@@ -1121,7 +1121,7 @@ mod tests {
                 ("user-agent".to_string(), "sudocode/1.2.3".to_string()),
                 (
                     "anthropic-beta".to_string(),
-                    "claude-code-20250219,prompt-caching-scope-2026-01-05,tools-2026-04-01"
+                    "claude-code-20250219,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,tools-2026-04-01"
                         .to_string(),
                 ),
             ]
@@ -1139,6 +1139,7 @@ mod tests {
             serde_json::json!([
                 "claude-code-20250219",
                 "prompt-caching-scope-2026-01-05",
+                "advanced-tool-use-2025-11-20",
                 "tools-2026-04-01"
             ])
         );

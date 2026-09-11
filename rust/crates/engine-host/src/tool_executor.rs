@@ -54,12 +54,6 @@ pub(crate) struct ToolSearchRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecuteExtraToolRequest {
-    tool_name: String,
-    params: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct McpToolRequest {
     #[serde(rename = "qualifiedName")]
     pub(crate) qualified_name: Option<String>,
@@ -271,43 +265,12 @@ impl ToolExecutor for CliToolExecutor {
         gate(tool_name)?;
         let value = parse_tool_call_input(input)?;
 
-        // `ExecuteExtraTool` is an ENVELOPE, not a tool. Unwrap it FIRST, then
-        // run the tool it names through everything below exactly as if the
-        // model had named it directly.
-        //
-        // Order matters, and it used to be wrong in two ways. The envelope
-        // passed the allow-list as itself and then dispatched whatever it
-        // named, so an allow-list of read-only tools still let a model run
-        // anything deferred by wrapping it — hence the second `gate` here. And
-        // the intercepts below sat ABOVE the unwrap, so a deferred tool reached
-        // through the envelope lost them: `ExitPlanMode` is deferred, and
-        // skipped its confirmation prompt whenever it was invoked the
-        // documented way.
-        //
-        // Core tools are refused inside the envelope because they are already
-        // in the model's tool list — which also means `ExecuteExtraTool` cannot
-        // wrap itself, so this unwraps at most once.
-        let (tool_name, value) = if tools::canonicalize_tool_name(tool_name) == "ExecuteExtraTool" {
-            let req: ExecuteExtraToolRequest = serde_json::from_value(value)
-                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-            if tools::is_core_tool(&tools::canonicalize_tool_name(&req.tool_name)) {
-                return Err(ToolError::new(format!(
-                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
-                    req.tool_name
-                )));
-            }
-            gate(&req.tool_name)?;
-            (req.tool_name, req.params)
-        } else {
-            (tool_name.to_string(), value)
-        };
-
         // Canonicalize ONCE; every intercept below matches the canonical name.
         // Matching the raw name is a recurring bug class here — a model
         // spelling `bash` as `Bash` silently lost its progress sink, and one
         // spelling `send` as `SendMessage` lost the nexus-A2A route and had its
         // cross-machine message written to a local file instead.
-        let tool_name = tools::canonicalize_tool_name(&tool_name);
+        let tool_name = tools::canonicalize_tool_name(tool_name);
 
         if tool_name == "AskUserQuestion"
             && self

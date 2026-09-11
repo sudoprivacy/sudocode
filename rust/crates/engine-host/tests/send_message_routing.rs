@@ -1,5 +1,4 @@
-//! `send` must reach the peer no matter how the model spells or wraps
-//! the call.
+//! `send` must reach the peer no matter how the model spells the call.
 //!
 //! This is the regression guard for a live failure. Three tools were
 //! advertised at once — `SendMessage`, `send`, `send` — differing only
@@ -10,16 +9,8 @@
 //! inbox", and the peer on the other machine waited ten hours for a message
 //! that had never left the host.
 //!
-//! Two independent things had to be true for that to happen, so both are
-//! asserted here:
-//!
-//! * the intercept matched the RAW name, so any other spelling fell through;
-//! * `ExecuteExtraTool` ran a SECOND dispatch path that knew nothing about
-//!   A2A — and since `send` is a deferred tool, the envelope is its
-//!   documented invocation, so even the correct name routed locally.
-//!
 //! The fake sender stands in for the gRPC one. The routing decision is made
-//! entirely by `CliToolExecutor` before any transport is touched, so a daemon
+//! entirely by `HostToolExecutor` before any transport is touched, so a daemon
 //! would only slow the test down without testing more of the decision.
 
 use std::sync::{Arc, Mutex};
@@ -58,19 +49,18 @@ fn call(executor: &CliToolExecutor, tool: &str, input: &str) -> Result<String, S
         })
 }
 
-/// Every way a model can name, shape or wrap the call reaches the peer.
+/// Every way a model can spell the call reaches the peer.
 ///
 /// `SendMessage` is CC's spelling and `send_message` the A2A tool this
 /// replaced — a model reaches for either by habit. `body` is the field the old
 /// A2A schema used, and the field the wire envelope still uses, so a model
-/// that has seen either will reach for it too. The `ExecuteExtraTool` envelope
-/// is the documented way to invoke a deferred tool, which `send` is.
+/// that has seen either will reach for it too.
 ///
-/// Not one of these may quietly become a local file write: the name, the field
-/// and the wrapper are all things a model picks, and none of them is allowed
-/// to decide whether a message crosses the machine.
+/// Not one of these may quietly become a local file write: the name and the
+/// field are things a model picks, and neither is allowed to decide whether a
+/// message crosses the machine.
 #[test]
-fn every_spelling_shape_and_wrapper_reaches_the_peer() {
+fn every_spelling_and_shape_reaches_the_peer() {
     for (tool, input) in [
         ("send", r#"{"to":"mac-ai","message":"canonical name"}"#),
         ("SendMessage", r#"{"to":"mac-ai","message":"CC spelling"}"#),
@@ -81,18 +71,6 @@ fn every_spelling_shape_and_wrapper_reaches_the_peer() {
         // The old A2A input shape, field and all.
         ("send_message", r#"{"to":"mac-ai","body":"body field"}"#),
         ("send", r#"{"to":"mac-ai","body":"body field, new name"}"#),
-        (
-            "ExecuteExtraTool",
-            r#"{"tool_name":"send","params":{"to":"mac-ai","message":"deferred envelope"}}"#,
-        ),
-        (
-            "ExecuteExtraTool",
-            r#"{"tool_name":"SendMessage","params":{"to":"mac-ai","message":"envelope, CC spelling"}}"#,
-        ),
-        (
-            "ExecuteExtraTool",
-            r#"{"tool_name":"send_message","params":{"to":"mac-ai","body":"envelope, old name and field"}}"#,
-        ),
     ] {
         let (executor, delivered) = executor_with_a2a();
         let result =
@@ -120,27 +98,6 @@ fn every_spelling_shape_and_wrapper_reaches_the_peer() {
     }
 }
 
-/// The body travels intact — a wrapper that reached the transport with an
-/// empty or wrong-field message would pass every assertion above while
-/// delivering nothing a peer could read.
-#[test]
-fn the_deferred_envelope_carries_the_body_through() {
-    let (executor, delivered) = executor_with_a2a();
-    call(
-        &executor,
-        "ExecuteExtraTool",
-        r#"{"tool_name":"send","params":{"to":"mac-ai","message":"PING from win-ai"}}"#,
-    )
-    .expect("envelope send must succeed");
-
-    let sent = delivered.lock().expect("sink poisoned").clone();
-    assert_eq!(
-        sent,
-        vec![("mac-ai".to_string(), "PING from win-ai".to_string())],
-        "the envelope must deliver the message verbatim"
-    );
-}
-
 /// Without an A2A sender the same tool delivers locally. This is the contract,
 /// not a fallback: one tool, and the host chooses the destination. If this
 /// starts erroring, a plain workspace session has lost its mailbox.
@@ -162,30 +119,5 @@ fn without_a2a_the_same_tool_delivers_to_the_workspace_mailbox() {
     assert!(
         result.contains("inbox"),
         "without A2A the tool must report a workspace-mailbox write, got: {result}"
-    );
-}
-
-/// `ExecuteExtraTool` must not be a hole in `--allowedTools`.
-///
-/// The envelope used to pass the gate as itself and then dispatch whatever it
-/// named, so an allow-list of read-only tools still let a model run anything
-/// deferred by wrapping it.
-#[test]
-fn the_deferred_envelope_is_gated_by_the_allow_list() {
-    let allowed = GlobalToolRegistry::builtin()
-        .normalize_allowed_tools(&["ExecuteExtraTool".to_string(), "ToolSearch".to_string()])
-        .expect("allow-list parses")
-        .expect("allow-list is non-empty");
-    let executor = CliToolExecutor::new(Some(allowed), GlobalToolRegistry::builtin(), None);
-
-    let error = call(
-        &executor,
-        "ExecuteExtraTool",
-        r#"{"tool_name":"send","params":{"to":"worker","message":"smuggled"}}"#,
-    )
-    .expect_err("a tool absent from --allowedTools must be refused inside the envelope too");
-    assert!(
-        error.contains("not enabled by the current --allowedTools setting"),
-        "the refusal must name the allow-list, got: {error}"
     );
 }

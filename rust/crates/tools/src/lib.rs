@@ -653,15 +653,21 @@ impl GlobalToolRegistry {
     }
 
     /// Return all tool definitions for the API `tools` array. Core tools
-    /// have `defer_loading: false` (always active); deferred tools have
-    /// `defer_loading: true` (the API knows their schemas but doesn't count
-    /// them against context until the model discovers them via ToolSearch).
+    /// and previously-discovered tools have `defer_loading: false` (always
+    /// active); other deferred tools have `defer_loading: true` (the API
+    /// knows their schemas but doesn't count them against context until
+    /// the model discovers them via ToolSearch + `tool_reference`).
     /// Requires the `advanced-tool-use` beta header.
     #[must_use]
     pub fn core_definitions(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
+        discovered_tools: Option<&BTreeSet<String>>,
     ) -> Vec<ToolDefinition> {
+        let is_active = |name: &str| {
+            is_core_tool(name)
+                || discovered_tools.is_some_and(|discovered| discovered.contains(name))
+        };
         let coord_gate =
             |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
         let builtin = mvp_tool_specs()
@@ -669,7 +675,7 @@ impl GlobalToolRegistry {
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
             .filter(|spec| coord_gate(spec.name))
             .map(|spec| {
-                let deferred = !is_core_tool(spec.name);
+                let deferred = !is_active(spec.name);
                 let mut def = ToolDefinition::from(spec);
                 def.defer_loading = deferred;
                 def
@@ -683,7 +689,7 @@ impl GlobalToolRegistry {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
-                defer_loading: !is_core_tool(&tool.name),
+                defer_loading: !is_active(&tool.name),
             });
         let plugin = self
             .plugin_tools
@@ -697,7 +703,7 @@ impl GlobalToolRegistry {
                 name: tool.definition().name.clone(),
                 description: tool.definition().description.clone(),
                 input_schema: tool.definition().input_schema.clone(),
-                defer_loading: !is_core_tool(tool.definition().name.as_str()),
+                defer_loading: !is_active(tool.definition().name.as_str()),
             });
         builtin.chain(runtime).chain(plugin).collect()
     }
@@ -1093,7 +1099,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "ToolSearch",
-            description: "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> in the system prompt. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools\u{2019} complete schemas. Once a tool\u{2019}s schema appears in the result, call it through ExecuteExtraTool.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms",
+            description: "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <available-deferred-tools> in the system prompt. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools\u{2019} complete schemas. Once a tool\u{2019}s schema appears in the result, call it directly by name.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1111,26 +1117,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "ExecuteExtraTool",
-            description: "Execute a deferred tool by name. Use ToolSearch to discover available deferred tools and load their schemas before calling this tool.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "tool_name": {
-                        "type": "string",
-                        "description": "The exact name of the target tool to execute (e.g., \"CronCreate\", \"TaskCreate\")."
-                    },
-                    "params": {
-                        "type": "object",
-                        "description": "The parameters to pass to the target tool."
-                    }
-                },
-                "required": ["tool_name", "params"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
             name: "Sleep",
@@ -1647,17 +1633,6 @@ fn execute_tool_with_enforcer(
             from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
         }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
-        "ExecuteExtraTool" => {
-            let eti: ExecuteExtraToolInput = from_value(input)?;
-            let target = canonicalize_tool_name(&eti.tool_name);
-            if is_core_tool(&target) {
-                return Err(format!(
-                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
-                    eti.tool_name
-                ));
-            }
-            execute_tool_with_enforcer(enforcer, &target, &eti.params, abort_signal, ctx, fs)
-        }
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
@@ -3590,12 +3565,6 @@ struct AgentInput {
 struct ToolSearchInput {
     query: String,
     max_results: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExecuteExtraToolInput {
-    tool_name: String,
-    params: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6843,6 +6812,38 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
         .collect()
 }
 
+/// Scan conversation history for tool names the model has already
+/// discovered via ToolSearch. Returns the set of tool names that
+/// appeared in ToolSearch result `matches` arrays — these should get
+/// `defer_loading: false` in subsequent API calls so the model can
+/// call them directly without re-searching.
+///
+/// Mirrors CC's `extractDiscoveredToolNames()`.
+pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeSet<String> {
+    let mut discovered = BTreeSet::new();
+    for message in messages {
+        for block in &message.blocks {
+            if let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            {
+                if tool_name == "ToolSearch" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
+                        if let Some(matches) = parsed.get("matches").and_then(|m| m.as_array()) {
+                            for m in matches {
+                                if let Some(name) = m.as_str() {
+                                    discovered.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    discovered
+}
+
 /// Convert runtime conversation messages to wire input messages, merging
 /// consecutive tool-result messages into the preceding user message (Anthropic
 /// requires every `tool_use` to have its matching `tool_result` in the same next
@@ -7042,9 +7043,9 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 
 /// Tools always visible in the API `tools` array — the LLM sees their
 /// full schema on every turn. Everything else is "deferred": listed by
-/// name + one-line description in `<available-deferred-tools>` and
-/// accessed through `ToolSearch` (discovery) + `ExecuteExtraTool`
-/// (execution).
+/// name in `<available-deferred-tools>` and discovered via `ToolSearch`.
+/// Once discovered (via `tool_reference` blocks), the API expands their
+/// schemas and the model calls them directly.
 const CORE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
@@ -7058,14 +7059,13 @@ const CORE_TOOLS: &[&str] = &[
     "agent_spawn",
     "pid_fork",
     "ToolSearch",
-    "ExecuteExtraTool",
     "AskUserQuestion",
 ];
 
 pub fn is_core_tool(name: &str) -> bool {
     // Compatibility aliases must share their canonical tool's visibility.
     // Otherwise `Agent` is advertised as deferred even though it dispatches to
-    // core `agent_spawn`, causing ExecuteExtraTool to reject the call.
+    // core `agent_spawn`.
     CORE_TOOLS.contains(&canonicalize_tool_name(name).as_str())
 }
 
@@ -9868,8 +9868,8 @@ mod tests {
             "ToolSearch prompt should explain deferred tools"
         );
         assert!(
-            spec.description.contains("ExecuteExtraTool"),
-            "ToolSearch prompt should mention ExecuteExtraTool"
+            spec.description.contains("call it directly"),
+            "ToolSearch prompt should say to call tools directly"
         );
         assert!(
             spec.description.contains("select:"),
@@ -9891,7 +9891,7 @@ mod tests {
     #[test]
     fn core_definitions_includes_all_tools_with_defer_loading() {
         let registry = GlobalToolRegistry::builtin();
-        let core = registry.core_definitions(None);
+        let core = registry.core_definitions(None, None);
         let all = registry.definitions(None);
         assert_eq!(
             core.len(),
@@ -9951,7 +9951,7 @@ mod tests {
         assert!(!names.contains("ToolSearch"), "ToolSearch is core");
         assert!(
             !names.contains("ExecuteExtraTool"),
-            "ExecuteExtraTool is core"
+            "ExecuteExtraTool was removed"
         );
         for (_, desc) in &listing {
             assert!(
@@ -10041,51 +10041,60 @@ mod tests {
     }
 
     #[test]
-    fn execute_extra_tool_dispatches_to_deferred_tool() {
-        let _guard = env_guard();
-        let result = execute_tool(
-            "ExecuteExtraTool",
-            &json!({
-                "tool_name": "CronList",
-                "params": {}
-            }),
-        );
-        assert!(
-            result.is_ok(),
-            "ExecuteExtraTool should dispatch CronList: {result:?}"
-        );
+    fn extract_discovered_tool_names_from_messages() {
+        use super::extract_discovered_tool_names;
+        use runtime::{ContentBlock, ConversationMessage, MessageRole};
+        let output = serde_json::json!({
+            "matches": ["CronCreate", "CronList"],
+            "query": "cron",
+            "normalized_query": "cron",
+            "total_deferred_tools": 10,
+            "pending_mcp_servers": null,
+        });
+        let messages = vec![
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu_1".to_string(),
+                    tool_name: "ToolSearch".to_string(),
+                    output: output.to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+            ConversationMessage {
+                role: MessageRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tu_2".to_string(),
+                    tool_name: "bash".to_string(),
+                    output: "hello".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+        let discovered = extract_discovered_tool_names(&messages);
+        assert_eq!(discovered.len(), 2);
+        assert!(discovered.contains("CronCreate"));
+        assert!(discovered.contains("CronList"));
     }
 
     #[test]
-    fn execute_extra_tool_rejects_core_tool() {
-        let _guard = env_guard();
-        let result = execute_tool(
-            "ExecuteExtraTool",
-            &json!({
-                "tool_name": "bash",
-                "params": {"command": "echo hi"}
-            }),
-        );
-        assert!(result.is_err());
+    fn discovered_tools_get_defer_loading_false() {
+        let registry = GlobalToolRegistry::builtin();
+        let discovered: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
+        let defs = registry.core_definitions(None, Some(&discovered));
+        let cron_create = defs.iter().find(|d| d.name == "CronCreate").unwrap();
         assert!(
-            result.unwrap_err().contains("core tool"),
-            "should tell model to call core tools directly"
+            !cron_create.defer_loading,
+            "discovered tool should have defer_loading=false"
         );
-    }
-
-    #[test]
-    fn execute_extra_tool_resolves_aliases() {
-        let _guard = env_guard();
-        let result = execute_tool(
-            "ExecuteExtraTool",
-            &json!({
-                "tool_name": "TaskList",
-                "params": {}
-            }),
-        );
+        let cron_list = defs.iter().find(|d| d.name == "CronList").unwrap();
         assert!(
-            result.is_ok(),
-            "ExecuteExtraTool should resolve alias TaskList → pid_status: {result:?}"
+            cron_list.defer_loading,
+            "undiscovered deferred tool should still have defer_loading=true"
         );
     }
 

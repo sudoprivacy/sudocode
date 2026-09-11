@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -775,6 +775,8 @@ pub async fn compact_session<C: ApiClient>(
         return Err(CompactionError::ApiError(last_error));
     };
 
+    let discovered = extract_pre_compact_discovered_tools(session);
+
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
@@ -789,7 +791,12 @@ pub async fn compact_session<C: ApiClient>(
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     Ok(CompactionResult {
         summary,
@@ -850,12 +857,15 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
         system_prompt: system_prompt.clone(),
         messages: session.messages.clone(),
         trace_id: None,
+        pre_compact_discovered_tools: Default::default(),
     };
 
     let llm_summary = api_client
         .send_cache_safe_compaction(request, &prompt, max_tokens)
         .await
         .map_err(|error| CompactionError::ApiError(error.to_string()))?;
+
+    let discovered = extract_pre_compact_discovered_tools(session);
 
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
@@ -871,7 +881,12 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     Ok(CompactionResult {
         summary,
@@ -931,6 +946,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
     let removed = &session.messages[compacted_prefix_len..keep_from];
     let preserved = session.messages[keep_from..].to_vec();
     let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
+    let discovered = extract_pre_compact_discovered_tools(session);
     let summary = merge_compact_summaries(
         existing_summary.as_deref(),
         &summarize_messages_local(removed),
@@ -948,7 +964,12 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     CompactionResult {
         summary,
@@ -1354,6 +1375,39 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
     }
 
     lines
+}
+
+/// Extract tool names previously discovered via ToolSearch from the
+/// session's messages. Scans ToolSearch result blocks for the `matches`
+/// array and collects the tool names. Also merges any names carried
+/// forward from prior compactions (`pre_compact_discovered_tools`).
+fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
+    let mut discovered: BTreeSet<String> = session
+        .compaction
+        .as_ref()
+        .map(|c| c.pre_compact_discovered_tools.clone())
+        .unwrap_or_default();
+    for message in &session.messages {
+        for block in &message.blocks {
+            if let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            {
+                if tool_name == "ToolSearch" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
+                        if let Some(matches) = parsed.get("matches").and_then(|m| m.as_array()) {
+                            for m in matches {
+                                if let Some(name) = m.as_str() {
+                                    discovered.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    discovered
 }
 
 #[cfg(test)]

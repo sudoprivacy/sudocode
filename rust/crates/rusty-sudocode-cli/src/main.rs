@@ -3829,11 +3829,12 @@ impl LiveCli {
             account: account.name(),
         });
         match (ui, output) {
-            // Persist in ChromeSlot (visible until next turn) AND scrollback
-            // (survives scroll, visible in session replay).
-            (Some(ui), Some(out)) => {
+            // Show in the ChromeSlot only (visible until the next turn). The
+            // status line is deliberately NOT echoed to scrollback: the
+            // ChromeSlot already renders it above the separator, and printing
+            // it again duplicated the line in the terminal history.
+            (Some(ui), Some(_)) => {
                 ui.set_turn_result(&line);
-                out.println(&line);
             }
             (Some(ui), None) => ui.set_turn_result(&line),
             (None, Some(out)) => out.println(&line),

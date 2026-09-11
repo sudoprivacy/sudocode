@@ -375,11 +375,13 @@ pub(crate) fn build_runtime_with_plugin_state(
     }
     // nexus A2A: when configured, keep the peer-reply tool available even under
     // an explicit --allowedTools restriction (absent a restriction it is
-    // already advertised). Its handler is the CliToolExecutor intercept wired
-    // below; the co-host advertises the same tool the same way.
+    // already advertised). Its network handler is the CliToolExecutor intercept
+    // wired below; the co-host advertises the same tool the same way. The tool
+    // exists either way — absent A2A it delivers to the workspace mailbox — so
+    // this line controls reachability under a restriction, nothing more.
     if a2a.is_some() {
         if let Some(allowed) = config.allowed_tools.as_mut() {
-            allowed.extend(["send_message".to_string()]);
+            allowed.extend(["send".to_string()]);
         }
     }
     let policy = match permission_policy(
@@ -412,7 +414,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         system_prompt.dynamic_sections.push(deferred_section);
     }
     // nexus A2A: teach the model its A2A identity + how to reach peers, so the
-    // standalone loop knows it can `send_message` to a named peer.
+    // standalone loop knows it can `send` to a named peer.
     if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
@@ -447,9 +449,11 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
-    // nexus A2A: give the CLI executor the send half so `send_message` routes
-    // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
-    // uses). Set only when configured; absent it the tool is never advertised.
+    // nexus A2A: give the CLI executor the send half so `send` routes to the
+    // peer's replicated DT_STREAM inbox (the shared handler the co-host uses)
+    // instead of the workspace mailbox. Set only when configured — this sender
+    // IS the difference between the two destinations, which is why the model is
+    // offered one tool and never asked to pick a transport.
     if let Some(session) = a2a {
         runtime
             .tool_executor_mut()

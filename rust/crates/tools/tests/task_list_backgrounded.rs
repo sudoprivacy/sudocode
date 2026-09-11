@@ -184,8 +184,8 @@ fn tasklist_schema_advertises_backgrounded_only_field() {
     let specs = tools::mvp_tool_specs();
     let task_list = specs
         .into_iter()
-        .find(|s| s.name == "TaskList")
-        .expect("TaskList exists");
+        .find(|s| s.name == "pid_status")
+        .expect("pid_status exists");
     let bg = &task_list.input_schema["properties"]["backgrounded_only"];
     assert_eq!(bg["type"].as_str(), Some("boolean"));
 }

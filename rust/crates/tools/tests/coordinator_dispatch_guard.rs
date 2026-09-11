@@ -59,8 +59,8 @@ fn dispatch_rejects_bash_when_coordinator_mode_is_on() {
         "error must name the coordinator gate (got: `{err}`)"
     );
     assert!(
-        err.contains("Agent(") || err.contains("SendMessage"),
-        "error must instruct the model to delegate via Agent (got: `{err}`)"
+        err.contains("agent_spawn(") || err.contains("send_message"),
+        "error must instruct the model to delegate via agent_spawn (got: `{err}`)"
     );
 }
 
@@ -124,7 +124,7 @@ fn definitions_hides_write_tools_when_coordinator_mode_is_on() {
             "`{hidden}` MUST be hidden from LLM schema when coordinator mode is on"
         );
     }
-    for shown in ["Agent", "SendMessage", "TaskStop", "read_file"] {
+    for shown in ["agent_spawn", "send", "pid_kill", "read_file"] {
         assert!(
             names.contains(shown),
             "`{shown}` MUST remain visible in coordinator mode"
@@ -141,7 +141,7 @@ fn definitions_shows_write_tools_when_coordinator_mode_is_off() {
     let defs = registry.definitions(None);
     let names: std::collections::HashSet<_> = defs.iter().map(|d| d.name.as_str()).collect();
 
-    for shown in ["bash", "write_file", "edit_file", "Agent"] {
+    for shown in ["bash", "write_file", "edit_file", "agent_spawn"] {
         assert!(
             names.contains(shown),
             "with coordinator mode off, `{shown}` MUST be present in tool schema"

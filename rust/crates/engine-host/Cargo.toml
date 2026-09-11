@@ -37,5 +37,11 @@ telemetry = { path = "../telemetry" }
 # skills (incl. plugin-provided roots) in the system prompt.
 commands = { path = "../commands" }
 
+[dev-dependencies]
+# `send_message_routing` drives the executor's async trait method to
+# completion and needs a workspace to prove the local delivery path.
+tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3"
+
 [lints]
 workspace = true

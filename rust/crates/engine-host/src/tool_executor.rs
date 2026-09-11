@@ -256,19 +256,59 @@ impl ToolExecutor for CliToolExecutor {
         // allow-listed run refused every tool call while, because the model then
         // explained itself politely, looking like it had simply chosen not to
         // act. Comparing only the canonical name is wrong too — the allow-list
-        // parser deliberately keeps the *spec* name for PascalCase-native tools
-        // (`--allowedTools TaskList` stores `TaskList`, not its `pid_status`
-        // dispatch alias), so canonicalising `TaskList` would miss its own
-        // entry. Either spelling matching is what "this tool is allowed" means.
-        if self.allowed_tools.as_ref().is_some_and(|allowed| {
-            !allowed.contains(tool_name)
-                && !allowed.contains(&tools::canonicalize_tool_name(tool_name))
-        }) {
-            return Err(ToolError::new(format!(
-                "tool `{tool_name}` is not enabled by the current --allowedTools setting"
-            )));
-        }
+        // parser stores the *spec* name, and not every spec has an alias. Either
+        // spelling matching is what "this tool is allowed" means.
+        let gate = |name: &str| -> Result<(), ToolError> {
+            if self.allowed_tools.as_ref().is_some_and(|allowed| {
+                !allowed.contains(name) && !allowed.contains(&tools::canonicalize_tool_name(name))
+            }) {
+                return Err(ToolError::new(format!(
+                    "tool `{name}` is not enabled by the current --allowedTools setting"
+                )));
+            }
+            Ok(())
+        };
+        gate(tool_name)?;
         let value = parse_tool_call_input(input)?;
+
+        // `ExecuteExtraTool` is an ENVELOPE, not a tool. Unwrap it FIRST, then
+        // run the tool it names through everything below exactly as if the
+        // model had named it directly.
+        //
+        // Order matters, and it used to be wrong in two ways. The envelope
+        // passed the allow-list as itself and then dispatched whatever it
+        // named, so an allow-list of read-only tools still let a model run
+        // anything deferred by wrapping it — hence the second `gate` here. And
+        // the intercepts below sat ABOVE the unwrap, so a deferred tool reached
+        // through the envelope lost them: `ExitPlanMode` is deferred, and
+        // skipped its confirmation prompt whenever it was invoked the
+        // documented way.
+        //
+        // Core tools are refused inside the envelope because they are already
+        // in the model's tool list — which also means `ExecuteExtraTool` cannot
+        // wrap itself, so this unwraps at most once.
+        let (tool_name, value) = if tools::canonicalize_tool_name(tool_name) == "ExecuteExtraTool" {
+            let req: ExecuteExtraToolRequest = serde_json::from_value(value)
+                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+            if tools::is_core_tool(&tools::canonicalize_tool_name(&req.tool_name)) {
+                return Err(ToolError::new(format!(
+                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
+                    req.tool_name
+                )));
+            }
+            gate(&req.tool_name)?;
+            (req.tool_name, req.params)
+        } else {
+            (tool_name.to_string(), value)
+        };
+
+        // Canonicalize ONCE; every intercept below matches the canonical name.
+        // Matching the raw name is a recurring bug class here — a model
+        // spelling `bash` as `Bash` silently lost its progress sink, and one
+        // spelling `send` as `SendMessage` lost the nexus-A2A route and had its
+        // cross-machine message written to a local file instead.
+        let tool_name = tools::canonicalize_tool_name(&tool_name);
+
         if tool_name == "AskUserQuestion"
             && self
                 .question_prompter
@@ -293,20 +333,6 @@ impl ToolExecutor for CliToolExecutor {
         {
             return self.handle_exit_plan_mode(&value, ctx);
         }
-        let (tool_name, value) = if tool_name == "ExecuteExtraTool" {
-            let req: ExecuteExtraToolRequest = serde_json::from_value(value)
-                .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-            let target = tools::canonicalize_tool_name(&req.tool_name);
-            if tools::is_core_tool(&target) {
-                return Err(ToolError::new(format!(
-                    "tool `{}` is a core tool — call it directly instead of through ExecuteExtraTool",
-                    req.tool_name
-                )));
-            }
-            (target, req.params)
-        } else {
-            (tool_name.to_string(), value)
-        };
 
         let is_mcp_tool = self.tool_registry.has_runtime_tool(&tool_name);
         if tool_name == "ToolSearch" {
@@ -334,19 +360,34 @@ impl ToolExecutor for CliToolExecutor {
                     }
                 }
 
-                let result = if tool_name == "send_message" {
-                    mailbox_sender
-                        .as_ref()
-                        .ok_or_else(|| {
-                            ToolError::new("send_message is unavailable without nexus A2A")
-                        })
-                        .and_then(|sender| {
-                            runtime::spawn_task::handle_send_message(
-                                sender,
-                                &serde_json::to_string(&value).unwrap_or_default(),
+                // nexus A2A: when the host wired a mailbox sender, `send`
+                // delivers to the peer's replicated DT_STREAM inbox over gRPC
+                // via the SAME shared handler the co-host uses — only the
+                // transport differs. Absent that sender it falls through to the
+                // registry, whose `send` writes the workspace mailbox.
+                //
+                // Falling through is the contract, not a failure path: `send`
+                // is ONE tool, and which destination it reaches is the host's
+                // choice, never the model's. The input is normalized with the
+                // SAME helper the registry arm uses, so the field a model
+                // picked — `message`, or the wire envelope's `body` — cannot
+                // decide the destination either.
+                let result = if tool_name == "send" {
+                    match mailbox_sender.as_ref() {
+                        Some(sender) => runtime::spawn_task::handle_send_message(
+                            sender,
+                            &tools::normalize_send_input(&value),
+                        )
+                        .map_err(ToolError::new),
+                        None => registry
+                            .execute_with_abort_and_context(
+                                &tool_name,
+                                &value,
+                                abort_signal.as_ref(),
+                                Some(&ctx),
                             )
-                            .map_err(ToolError::new)
-                        })
+                            .map_err(ToolError::new),
+                    }
                 } else if is_mcp_tool {
                     execute_runtime_tool_with_state(mcp_state.as_ref(), &tool_name, value)
                 } else {

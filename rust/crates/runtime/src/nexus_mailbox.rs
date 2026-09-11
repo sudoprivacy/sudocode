@@ -162,8 +162,10 @@ impl Config {
     pub fn peer_system_prompt(&self) -> String {
         let mut s = format!(
             "## Agent-to-agent messaging\n\nYou are reachable on a nexus A2A network as the agent \"{}\". \
-             To message another agent, call the `send_message` tool with a JSON object \
-             {{\"to\": \"<agent name>\", \"body\": \"<your message>\"}}. \
+             To message another agent, call the `send` tool with a JSON object \
+             {{\"to\": \"<agent name>\", \"message\": \"<your message>\"}}. \
+             A successful send returns `message delivered to <agent name>`; any other result \
+             means the message did NOT leave this machine — say so rather than reporting success. \
              Messages other agents send you are delivered into this conversation as they arrive.",
             self.agent
         );
@@ -221,7 +223,7 @@ pub fn send(
 /// standalone counterpart to [`crate::spawn_task::mailbox_sender`] (which is
 /// backed by the in-process kernel). Both feed the SAME shared
 /// [`crate::spawn_task::handle_send_message`], so co-host and standalone
-/// `send_message` share every line except this transport closure.
+/// `send` share every line except this transport closure.
 ///
 /// `from` is the standalone agent's own name (advisory — the node stamps the
 /// authenticated identity under auth-on). `client` is shared (constructed
@@ -405,10 +407,7 @@ mod tests {
         };
         let p = cfg.peer_system_prompt();
         assert!(p.contains("\"operator\""), "prompt must name self: {p}");
-        assert!(
-            p.contains("send_message"),
-            "prompt must teach the tool: {p}"
-        );
+        assert!(p.contains("send"), "prompt must teach the tool: {p}");
         assert!(
             p.contains("win-ai, mac-ai"),
             "prompt must list known peers: {p}"

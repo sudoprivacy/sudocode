@@ -9,7 +9,7 @@
 mod common;
 
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pty_expect::PtySession;
 
@@ -170,6 +170,46 @@ fn down_arrow_moves_cursor_to_end() {
 // on a non-empty buffer, and Down's no-op.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// The REPL's live input line: the last line on screen that starts with the
+/// prompt glyph. Everything above it is transcript — including the prompts of
+/// earlier turns, which is why searching the whole screen cannot tell "the
+/// buffer holds this" from "we submitted this a turn ago".
+fn input_line(sess: &mut PtySession) -> String {
+    sess.render(|s| {
+        s.contents()
+            .lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with('\u{276f}'))
+            .map(|line| line.trim().to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// Wait for the REPL's input line to contain `needle`.
+///
+/// Not `expect`: that matches the byte stream as it arrives, which is not the
+/// same thing as what ends up on screen. iocraft redraws the input line in
+/// pieces with cursor moves between them, so a line the user can plainly read
+/// may never appear contiguously in the stream — and whether it does differs
+/// by platform. That is exactly how an earlier version of these tests passed
+/// on Windows and timed out on Linux with the expected text sitting in the
+/// failure dump.
+fn wait_for_input_line(sess: &mut PtySession, needle: &str, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let line = input_line(sess);
+        if line.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: input line never contained {needle:?} (last saw {line:?})\nPTY screen:\n{}",
+            sess.render(|s| s.contents()),
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Let an arrow key land before the next keystroke is sent.
 ///
 /// A fixed wait, because nothing better exists here: an arrow moves the
@@ -239,35 +279,28 @@ fn up_arrow_moves_to_start_before_recalling_history() {
     seed_history(&env, &mut sess, "remember me");
 
     sess.send("world").expect("type world");
-    sess.expect("world").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("typed text should render: {e}\nPTY screen:\n{screen}");
-    });
+    wait_for_input_line(&mut sess, "world", "typed text should render");
 
     // First Up: move to the start. If it recalled instead, the buffer would
     // be the seeded prompt and "hello " would not land in front of "world".
     press_arrow(&mut sess, "\x1b[A", "first Up");
     sess.send("hello ").expect("type at start");
-    sess.expect("hello world").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!(
-            "first Up on a non-empty buffer should move to the start, not recall \
-             history: {e}\nPTY screen:\n{screen}"
-        );
-    });
+    wait_for_input_line(
+        &mut sess,
+        "hello world",
+        "first Up on a non-empty buffer should move to the start, not recall history",
+    );
 
     // The cursor sits after "hello " now, so one more Up returns it to the
     // start, and only the Up after that — with the cursor already at 0 —
     // recalls.
     press_arrow(&mut sess, "\x1b[A", "second Up");
     sess.send("\x1b[A").expect("third Up");
-    sess.expect("remember me").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!(
-            "Up with the cursor already at the start should recall history: {e}\n\
-             PTY screen:\n{screen}"
-        );
-    });
+    wait_for_input_line(
+        &mut sess,
+        "remember me",
+        "Up with the cursor already at the start should recall history",
+    );
 
     sess.send("\x15").expect("Ctrl-U");
     settle_after_arrow();
@@ -303,22 +336,20 @@ fn up_arrow_moves_between_logical_lines_before_jumping_to_start() {
     // submitting it.
     sess.send("\u{1b}[200~alpha\nbravo\u{1b}[201~")
         .expect("paste two lines");
-    sess.expect("bravo").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("pasted lines should render literally: {e}\nPTY screen:\n{screen}");
-    });
+    // The first of the two pasted lines is the one carrying the prompt glyph;
+    // seeing it means the paste landed literally rather than collapsing into a
+    // `[Pasted text #N]` placeholder.
+    wait_for_input_line(&mut sess, "alpha", "pasted lines should render literally");
 
     // Cursor is at the end of "bravo". Up must land on the "alpha" line at the
     // same column — not jump to offset 0, and not recall history.
     press_arrow(&mut sess, "\x1b[A", "Up from the last line");
     sess.send("X").expect("mark the cursor");
-    sess.expect("alphaX").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!(
-            "Up from the last line should move one logical line up, leaving the \
-             column alone: {e}\nPTY screen:\n{screen}"
-        );
-    });
+    wait_for_input_line(
+        &mut sess,
+        "alphaX",
+        "Up from the last line should move one logical line up, leaving the column alone",
+    );
 
     sess.send("\x15").expect("Ctrl-U");
     settle_after_arrow();
@@ -351,10 +382,7 @@ fn down_arrow_at_end_does_not_navigate_forward_history() {
     seed_history(&env, &mut sess, "do not resurface me");
 
     sess.send("abc").expect("type abc");
-    sess.expect("abc").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("typed text should render: {e}\nPTY screen:\n{screen}");
-    });
+    wait_for_input_line(&mut sess, "abc", "typed text should render");
 
     // Nothing should happen, so there is no state change to wait for — the
     // assertion is about absence, which needs a bounded look.
@@ -369,10 +397,11 @@ fn down_arrow_at_end_does_not_navigate_forward_history() {
 
     // And the cursor is still at the end, so typing appends.
     sess.send("!").expect("type after the no-op Down");
-    sess.expect("abc!").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("Down at the end should leave the cursor alone: {e}\nPTY screen:\n{screen}");
-    });
+    wait_for_input_line(
+        &mut sess,
+        "abc!",
+        "Down at the end must do nothing - no forward history, cursor left alone",
+    );
 
     sess.send("\x15").expect("Ctrl-U");
     settle_after_arrow();
@@ -385,10 +414,7 @@ fn down_arrow_at_end_does_not_navigate_forward_history() {
 /// failure that says what went wrong.
 fn exit_cleanly(sess: &mut PtySession) {
     sess.send("/exit").expect("type /exit");
-    sess.expect("/exit").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("typed /exit should render before Enter: {e}\nPTY screen:\n{screen}");
-    });
+    wait_for_input_line(sess, "/exit", "typed /exit should render before Enter");
     sess.send("\r").expect("send Enter");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -98,10 +98,6 @@ impl EngineEventRenderer {
     /// it is set too, so a long backoff also reads on the live status line
     /// rather than only in scrollback.
     fn render_retry(&mut self, event: &RetryEvent) {
-        {
-            use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("C:/Users/songym/AppData/Local/Temp/claude/C--Users-songym-cursor-projects-nexus/98991364-6741-4069-89d2-900c0379fb58/scratchpad/retry_dbg.log") { let _ = writeln!(f, "renderer render_retry {:?}", event); }
-        }
         match event {
             RetryEvent::Waiting {
                 attempt,

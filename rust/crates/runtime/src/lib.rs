@@ -118,9 +118,10 @@ pub use conversation::{
 };
 pub use file_intent::{detect_file_intent, FileIntent, FileOpKind, UserRequestIntent};
 pub use file_ops::{
-    edit_file, edit_file_with_intent, glob_search, grep_search, read_file, write_file,
-    write_file_with_intent, EditFileOutput, FileOpResult, GlobSearchOutput, GrepSearchInput,
-    GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    edit_file, edit_file_with_intent, glob_search, grep_search, grep_search_with_abort, read_file,
+    write_file, write_file_with_intent, EditFileOutput, FileOpResult, GlobSearchOutput,
+    GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
+    WriteFileOutput,
 };
 pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS_DIR_NAME};
 pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
@@ -189,9 +190,9 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with, prepend_bullets,
-    ContextFile, ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder,
-    SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with,
+    load_system_prompt_with_memory, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
+    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,

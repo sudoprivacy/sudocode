@@ -127,10 +127,19 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
-    // Settle: on macOS CI the signal handler may not be fully wired
-    // when the prompt first renders. A brief pause avoids Ctrl-C
-    // arriving before the REPL's SIGINT handler is installed.
-    std::thread::sleep(Duration::from_millis(200));
+    // Readiness, not a guess. Until iocraft has taken the terminal out of
+    // canonical mode, ^C is still a terminal signal and would kill the child
+    // outright instead of arriving as a key event. The prompt can be on
+    // screen before that happens, so the prompt alone is not the signal —
+    // a keystroke that renders is: it proves iocraft owns the keyboard and
+    // is distributing key events. (A fixed sleep here was the old guard;
+    // any duration is either too short on a loaded runner or wasted.)
+    // Ctrl-C clears the input line, so the probe leaves nothing behind.
+    sess.send("~probe~").expect("type readiness probe");
+    sess.expect("~probe~").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
+    });
 
     // Press Ctrl-C once — should show hint in footer area.
     sess.send("\x03").expect("send Ctrl-C");
@@ -141,8 +150,18 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
             panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
         });
 
-    // Clean exit.
-    sess.send("/exit\r").expect("send /exit");
+    // Clean exit. Type and submit as two steps, waiting for the line to
+    // render in between: Enter is only a submit if the input state has
+    // caught up with the characters, and Ctrl-C just cleared that state.
+    // Sending "/exit\r" as one write makes an unrendered line and its Enter
+    // race, and the failure is silent — an empty line submits nothing, so
+    // the test learns about it 60s later as "no EOF" with no clue why.
+    sess.send("/exit").expect("type /exit");
+    sess.expect("/exit").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("typed /exit should render before Enter: {e}\nPTY:\n{screen}");
+    });
+    sess.send("\r").expect("send Enter");
     sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

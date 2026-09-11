@@ -375,6 +375,64 @@ impl ApiClient for EngineApiClient {
         Ok(text)
     }
 
+    async fn send_cache_safe_compaction(
+        &mut self,
+        request: ApiRequest,
+        compaction_prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+            system_static: Some(request.system_prompt.static_text()),
+            system_dynamic: Some(request.system_prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
+
+        let mut messages = tools::convert_messages(&request.messages);
+        messages.push(InputMessage {
+            role: "user".to_string(),
+            content: vec![api::InputContentBlock::Text {
+                text: compaction_prompt.to_string(),
+            }],
+        });
+
+        let message_request = MessageRequest {
+            model: self.model.clone(),
+            max_tokens,
+            messages,
+            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            reasoning_effort: None,
+            cache_hints,
+            thinking_enabled: false,
+            ..Default::default()
+        };
+
+        let response = self
+            .client
+            .send_message(&message_request, None)
+            .await
+            .map_err(|error| RuntimeError::new(format!("cache-safe compaction error: {error}")))?;
+
+        let text = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                OutputContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        if text.is_empty() {
+            return Err(RuntimeError::new(
+                "cache-safe compaction response contained no text content",
+            ));
+        }
+        Ok(text)
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let is_post_tool = request_ends_with_tool_result(&request);
         let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {

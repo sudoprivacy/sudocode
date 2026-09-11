@@ -7347,7 +7347,10 @@ const CORE_TOOLS: &[&str] = &[
 ];
 
 pub fn is_core_tool(name: &str) -> bool {
-    CORE_TOOLS.contains(&name)
+    // Compatibility aliases must share their canonical tool's visibility.
+    // Otherwise `Agent` is advertised as deferred even though it dispatches to
+    // core `agent_spawn`, causing ExecuteExtraTool to reject the call.
+    CORE_TOOLS.contains(&canonicalize_tool_name(name).as_str())
 }
 
 fn deferred_tool_specs() -> Vec<ToolSpec> {

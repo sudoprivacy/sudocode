@@ -1098,6 +1098,20 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
     let mut next_paste_id = hooks.use_state(|| 1u32);
     let mut text_input_handle = hooks.use_ref_default::<TextInputHandle>();
+    // Where the cursor was when the user pressed the key, which is not where
+    // `text_input_handle` reads during a key handler: `TextInput` is a child
+    // component, and children drain their terminal events before this one
+    // does, so by the time Up/Down is handled here the cursor has already
+    // been moved a line. Deciding against the moved position collapses the
+    // first tier away (an Up from the second line would land on the first
+    // line and immediately jump to offset 0). Recorded once per render,
+    // below, which is the state the next keypress starts from.
+    let mut cursor_at_last_render = hooks.use_state(|| 0usize);
+    // Whether a `TextInput` was mounted by the *previous* render. The
+    // handle outlives the component it points at, so on the frame the slot
+    // flips back from a question panel it still refers to the states of the
+    // `TextInput` that was torn down — reading those panics inside iocraft.
+    let mut text_input_was_mounted = hooks.use_state(|| false);
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -1436,7 +1450,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         } else {
                             let val = input_value.read().clone();
-                            let cursor_pos = text_input_handle.read().cursor_offset();
+                            let cursor_pos = cursor_at_last_render.get().min(val.len());
                             let on_first_line = !val.get(..cursor_pos)
                                 .unwrap_or(&val)
                                 .contains('\n');
@@ -1466,7 +1480,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         } else {
                             let val = input_value.read().clone();
-                            let cursor_pos = text_input_handle.read().cursor_offset();
+                            let cursor_pos = cursor_at_last_render.get().min(val.len());
                             let on_last_line = !val.get(cursor_pos..)
                                 .unwrap_or_default()
                                 .contains('\n');
@@ -1587,6 +1601,31 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             _ => {}
         }
     });
+
+    // Snapshot the cursor for the next keypress to decide against. Guarded:
+    // an unconditional `State::set` — even to the same value — resolves
+    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
+    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
+    // Only while the text input is the live slot: in the question slots no
+    // `TextInput` is mounted, so the handle still reports the offset it had
+    // when one last was, and snapshotting that would set state on renders it
+    // has no business touching.
+    // Snapshot the cursor for the next keypress to decide against. Guarded
+    // twice: only while a `TextInput` is the live slot *and* one was already
+    // mounted a frame ago (see `text_input_was_mounted`), and only set when
+    // the value actually changed — an unconditional `State::set` resolves
+    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
+    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
+    let text_input_is_live = matches!(*input_slot.read(), InputSlot::TextInput);
+    if text_input_is_live && text_input_was_mounted.get() {
+        let live_cursor = text_input_handle.read().cursor_offset();
+        if cursor_at_last_render.get() != live_cursor {
+            cursor_at_last_render.set(live_cursor);
+        }
+    }
+    if text_input_was_mounted.get() != text_input_is_live {
+        text_input_was_mounted.set(text_input_is_live);
+    }
 
     // Exit check: `system` was obtained before the event handler and is
     // NOT captured by the Send closure. The exit flag is set inside the

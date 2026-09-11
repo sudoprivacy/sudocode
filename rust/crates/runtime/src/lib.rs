@@ -71,6 +71,7 @@ pub mod summary_compression;
 pub mod task_packet;
 pub mod task_registry;
 mod time;
+pub mod tool_names;
 #[cfg(test)]
 mod trust_resolver;
 mod usage;

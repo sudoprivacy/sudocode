@@ -22,7 +22,7 @@
 //!
 //! The well-known recipient string [`COORDINATOR_INBOX_RECIPIENT`] is
 //! `coordinator`. Sub-agents write to this recipient via the same
-//! [`crate::agent_mailbox::append_envelope`] path SendMessage uses,
+//! [`crate::agent_mailbox::append_envelope`] path `send` uses,
 //! so the wire format is unchanged.
 //!
 //! ## Non-coordinator sessions
@@ -83,7 +83,7 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
 /// result to the coordinator's next user prompt.
 ///
 /// Non-`task_notification` envelopes in the inbox (e.g., a
-/// hypothetical future SendMessage-to-coordinator flow) are skipped
+/// hypothetical future send_message-to-coordinator flow) are skipped
 /// but ALSO count toward the consumed offset, so mixing kinds in
 /// the same file is safe.
 ///

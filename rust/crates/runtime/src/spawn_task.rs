@@ -4,7 +4,7 @@
 //! on the agent's mailbox (via a blocking `sys_read` on the DT_STREAM tail)
 //! for inbound [`MailboxEnvelope`]s and drives each one through a
 //! [`crate::ConversationRuntime`]. The loop does NOT auto-reply: the agent
-//! decides whether to respond by calling the `send_message` tool during the
+//! decides whether to respond by calling the `send` tool during the
 //! turn (routed through [`mailbox_sender`]). Not calling it = silence, so a
 //! two-agent conversation ends instead of ping-ponging every turn forever.
 //!
@@ -134,33 +134,42 @@ impl Mailbox {
 }
 
 /// A type-erased "send a message to a peer's mailbox" capability handed to the
-/// co-hosted agent's `send_message` tool. This is the ONE place a co-hosted
+/// co-hosted agent's `send` tool. This is the ONE place a co-hosted
 /// agent's reply is written: the poll loop no longer auto-forwards turn output,
 /// so a reply happens ONLY when the agent deliberately calls the tool. It writes
 /// a [`MailboxEnvelope`] (the a2a SSOT) to the recipient's inbox; the a2a stamp
 /// hook overwrites `from` with the authenticated caller when auth is armed.
 pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
-/// Shared handler for the `send_message` A2A tool: parse `{to, body}` from the
-/// raw tool input and hand it to `sender`. BOTH the co-host
+/// Shared handler for the `send` A2A tool: read `{to, message}` from the
+/// parsed tool input and hand it to `sender`. BOTH the co-host
 /// (`ManagedToolExecutor`) and the standalone CLI executor route their
-/// `send_message` here, so the parse + delivery contract is defined ONCE — only
+/// `send` here, so the parse + delivery contract is defined ONCE — only
 /// the `sender` differs by deployment (in-process [`mailbox_sender`] vs gRPC
 /// `crate::nexus_mailbox::grpc_sender`).
 ///
+/// `message` is the TOOL's field name, shared with the workspace-mailbox
+/// delivery the same tool performs when no A2A sender is configured. It is
+/// deliberately NOT the wire field: [`mailbox_sender`] puts the text into a
+/// [`MailboxEnvelope`]'s `body`, because `{from,to,body}` is the a2a
+/// substrate's contract and is not the tool's to rename.
+///
 /// # Errors
-/// Returns a `String` error when the input is not `{to, body}` or the send fails.
-pub fn handle_send_message(sender: &MailboxSender, input: &str) -> Result<String, String> {
-    let v: serde_json::Value = serde_json::from_str(input).map_err(|e| e.to_string())?;
-    let to = v
+/// Returns a `String` error when the input lacks a string `to`/`message`, or
+/// when the send fails.
+pub fn handle_send_message(
+    sender: &MailboxSender,
+    input: &serde_json::Value,
+) -> Result<String, String> {
+    let to = input
         .get("to")
         .and_then(|x| x.as_str())
         .ok_or_else(|| "send_message requires a string 'to'".to_string())?;
-    let body = v
-        .get("body")
+    let message = input
+        .get("message")
         .and_then(|x| x.as_str())
-        .ok_or_else(|| "send_message requires a string 'body'".to_string())?;
-    (sender)(to, body)?;
+        .ok_or_else(|| "send_message requires a string 'message'".to_string())?;
+    (sender)(to, message)?;
     Ok(format!("message delivered to {to}"))
 }
 
@@ -197,7 +206,7 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
 /// in step with them:
 /// * inbound framing — `run_loop` hands each message to the turn as
 ///   `[message from <sender>]\n\n<body>`, so `<sender>` is the reply target;
-/// * the reply path — [`mailbox_sender`] wires the `send_message` tool as the
+/// * the reply path — [`mailbox_sender`] wires the `send` tool as the
 ///   ONLY way a co-hosted agent replies (writing to the sender's inbox).
 ///
 /// Kept next to those two so the wording cannot drift from the framing/tool it
@@ -208,10 +217,10 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
         "# Agent-to-agent messaging\n\
          You are the agent \"{self_id}\", conversing with other agents by message. \
          Each message you receive is shown as `[message from <sender>]` followed by \
-         its text. To reply, call the `send_message` tool with `to` set to that \
+         its text. To reply, call the `send` tool with `to` set to that \
          exact `<sender>` name — the agent that messaged you, never a word copied \
-         from the message text — and `body` set to your reply. Calling \
-         `send_message` is the only way to reply; if you do not call it you stay \
+         from the message text — and `message` set to your reply. Calling \
+         `send` is the only way to reply; if you do not call it you stay \
          silent and the conversation ends."
     )
 }
@@ -356,9 +365,9 @@ fn run_loop<K, C, T, F>(
                             // Drive ONE turn on the inbound message. The sender is
                             // surfaced in the prompt so the agent can address a reply.
                             // The agent decides whether to reply by calling the
-                            // `send_message` tool DURING the turn — the loop NO LONGER
+                            // `send` tool DURING the turn — the loop NO LONGER
                             // harvests the turn's text and auto-forwards it. Not
-                            // calling `send_message` means silence, so the
+                            // calling `send` means silence, so the
                             // conversation ends instead of two agents bouncing every
                             // turn's output back to each other forever (the ping-pong).
                             let turn_input = format!("[message from {sender}]\n\n{body}");
@@ -508,7 +517,7 @@ mod tests {
         // Names the agent so the model knows its own identity …
         assert!(section.contains("chatbot"));
         // … names the ONLY reply path …
-        assert!(section.contains("send_message"));
+        assert!(section.contains("send"));
         // … mirrors the `[message from <sender>]` framing `run_loop` emits …
         assert!(section.contains("[message from <sender>]"));
         // … and encodes the fix: reply target is the sender, never a word

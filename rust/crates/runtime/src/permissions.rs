@@ -245,10 +245,26 @@ impl PermissionPolicy {
         self.active_mode = mode;
     }
 
+    /// The permission a tool needs, defaulting to the strictest when the tool
+    /// is unknown.
+    ///
+    /// The table is keyed by SPEC name while `tool_name` is whatever the model
+    /// spelled, so an unresolved CC spelling does not read as "unknown tool" —
+    /// it reads as `DangerFullAccess`, and the call is refused under any mode
+    /// short of full access. That is how `--allowedTools TaskList` came to
+    /// dispatch nothing at all once `TaskList` stopped being a spec of its own:
+    /// the gate let it through and the permission layer, one lookup later,
+    /// silently required more than the session had. Try the name as given
+    /// first — a plugin may register a literal name that also happens to be an
+    /// alias key — then the canonical tool it names.
     #[must_use]
     pub fn required_mode_for(&self, tool_name: &str) -> PermissionMode {
         self.tool_requirements
             .get(tool_name)
+            .or_else(|| {
+                self.tool_requirements
+                    .get(&crate::tool_names::canonicalize_tool_name(tool_name))
+            })
             .copied()
             .unwrap_or(PermissionMode::DangerFullAccess)
     }
@@ -585,6 +601,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The requirement table is keyed by SPEC name; the model spells tools its
+    /// own way. Resolving one against the other is not a nicety — an unmatched
+    /// name falls through to `DangerFullAccess`, so a CC-spelled call is not
+    /// "unknown", it is REFUSED under every mode below full access, and the
+    /// refusal names a permission problem rather than a spelling one.
+    #[test]
+    fn cc_spelled_tools_resolve_to_their_canonical_requirement() {
+        let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("pid_status", PermissionMode::ReadOnly)
+            .with_tool_requirement("send", PermissionMode::WorkspaceWrite);
+
+        for cc_name in ["TaskList", "TaskGet"] {
+            assert_eq!(
+                policy.required_mode_for(cc_name),
+                PermissionMode::ReadOnly,
+                "`{cc_name}` must resolve to pid_status's requirement, not the \
+                 DangerFullAccess default"
+            );
+            assert_eq!(
+                policy.authorize(cc_name, "{}", None),
+                PermissionOutcome::Allow
+            );
+        }
+        assert_eq!(
+            policy.required_mode_for("SendMessage"),
+            PermissionMode::WorkspaceWrite
+        );
+        // A genuinely unknown tool still gets the strictest default — the
+        // fallback resolves spelling, it must not become a way in.
+        assert_eq!(
+            policy.required_mode_for("MadeUpTool"),
+            PermissionMode::DangerFullAccess
+        );
     }
 
     #[test]

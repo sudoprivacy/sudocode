@@ -334,19 +334,34 @@ impl ToolExecutor for CliToolExecutor {
                     }
                 }
 
-                let result = if tool_name == "send_message" {
-                    mailbox_sender
-                        .as_ref()
-                        .ok_or_else(|| {
-                            ToolError::new("send_message is unavailable without nexus A2A")
-                        })
-                        .and_then(|sender| {
-                            runtime::spawn_task::handle_send_message(
-                                sender,
-                                &serde_json::to_string(&value).unwrap_or_default(),
+                // nexus A2A: when the host wired a mailbox sender, `send`
+                // delivers to the peer's replicated DT_STREAM inbox over gRPC
+                // via the SAME shared handler the co-host uses — only the
+                // transport differs. Absent that sender it falls through to the
+                // registry, whose `send` writes the workspace mailbox.
+                //
+                // Falling through is the contract, not a failure path: `send`
+                // is ONE tool, and which destination it reaches is the host's
+                // choice, never the model's. The input is normalized with the
+                // SAME helper the registry arm uses, so the field a model
+                // picked — `message`, or the wire envelope's `body` — cannot
+                // decide the destination either.
+                let result = if tool_name == "send" {
+                    match mailbox_sender.as_ref() {
+                        Some(sender) => runtime::spawn_task::handle_send_message(
+                            sender,
+                            &tools::normalize_send_input(&value),
+                        )
+                        .map_err(ToolError::new),
+                        None => registry
+                            .execute_with_abort_and_context(
+                                &tool_name,
+                                &value,
+                                abort_signal.as_ref(),
+                                Some(&ctx),
                             )
-                            .map_err(ToolError::new)
-                        })
+                            .map_err(ToolError::new),
+                    }
                 } else if is_mcp_tool {
                     execute_runtime_tool_with_state(mcp_state.as_ref(), &tool_name, value)
                 } else {

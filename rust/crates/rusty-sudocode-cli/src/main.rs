@@ -3616,16 +3616,20 @@ impl LiveCli {
                     output,
                     is_error,
                 } => {
-                    // A successful Task* mutation changes the shared task list.
+                    // A successful task mutation changes the shared task list.
                     // The iocraft REPL's context panel derives live from the
                     // tool-result stream it already receives across the seam —
                     // NOT from an engine-side side-channel into the executor
                     // (that was a boundary leak, removed with `set_ui_sender`).
+                    //
+                    // Canonicalize first: this name is whatever the model
+                    // spelled, and matching it raw is how the `Task*` → `pid_*`
+                    // rename would leave the panel stale on every `pid_kill`.
                     if let Some(ui) = ui {
                         if !*is_error
                             && matches!(
-                                name.as_str(),
-                                "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskStop"
+                                tools::canonicalize_tool_name(name).as_str(),
+                                "TaskCreate" | "TaskUpdate" | "pid_status" | "pid_kill"
                             )
                         {
                             ui.update_context(tools::global_task_list());

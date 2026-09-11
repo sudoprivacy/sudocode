@@ -39,10 +39,17 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 /// `edit_file`, `PowerShell`, `EnterPlanMode`,
 /// `ExitPlanMode`) is intentionally excluded so a
 /// non-compliant model that tries them gets an instructive error
-/// pointing back to `Agent(...)`. Read-only tools (`read_file`,
+/// pointing back to `agent_spawn(...)`. Read-only tools (`read_file`,
 /// `glob_search`, `grep_search`, `WebSearch`, `WebFetch`) remain
 /// available so the coordinator can peek at code without spawning a
 /// worker for trivial lookups.
+///
+/// Entries are CANONICAL names only. [`is_tool_allowed_in_coordinator_mode`]
+/// canonicalizes what the model asked for before looking it up, so a
+/// CC-spelled `Agent`/`TaskList`/`SendMessage` is admitted by its canonical
+/// entry rather than by a second one listed here. Listing both spellings is
+/// how this set silently kept admitting names the tool list no longer
+/// advertises.
 ///
 /// The set is consumed by [`is_tool_allowed_in_coordinator_mode`]
 /// (dispatch-side guard) and by
@@ -53,18 +60,12 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
     [
         // Delegation surface
-        "Agent",
         "agent_list",
         "agent_spawn",
-        "TaskStop",
         "pid_kill",
-        "TaskGet",
-        "TaskList",
         "pid_status",
-        "TaskOutput",
         "pid_output",
         "pid_fork",
-        "SendMessage",
         "send",
         // Skills + web (read-only research)
         "Skill",
@@ -88,15 +89,16 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
 
 /// Predicate consumed at tool-dispatch time. When coordinator mode is
 /// off this returns `true` for every tool (fast path — never blocks).
-/// When coordinator mode is on it returns `true` iff `tool_name` is in
-/// [`coordinator_allowed_tools`]. Deliberately keyed by name string so
-/// callers don't have to depend on the tools crate.
+/// When coordinator mode is on it returns `true` iff `tool_name`
+/// canonicalizes into [`coordinator_allowed_tools`]. Deliberately keyed by
+/// name string so callers don't have to depend on the tools crate.
 #[must_use]
 pub fn is_tool_allowed_in_coordinator_mode(tool_name: &str) -> bool {
     if !is_coordinator_mode() {
         return true;
     }
-    coordinator_allowed_tools().contains(tool_name)
+    coordinator_allowed_tools()
+        .contains(crate::tool_names::canonicalize_tool_name(tool_name).as_str())
 }
 
 /// Return `true` when the `coordinatorMode` experiment is enabled —
@@ -112,7 +114,7 @@ pub fn is_coordinator_mode() -> bool {
 /// The coordinator role + workflow system prompt. Ported near-verbatim
 /// from CC-fork's `getCoordinatorSystemPrompt()`.
 ///
-/// SendMessage is included as the "continue an existing worker"
+/// `send` is included as the "continue an existing worker"
 /// mechanism. Live delivery for `shutdown_request` is wired
 /// end-to-end via the process-wide abort-signal registry
 /// (`tools::abort_registered_agent`). Live delivery for plain-text
@@ -141,21 +143,21 @@ Every message you send is to the user. Worker results and system notifications a
 
 ## 2. Your Tools
 
-- **Agent** - Spawn a new worker
-- **SendMessage** - Continue an existing worker (send follow-up to its ID) or signal shutdown
-- **TaskStop** - Stop a running worker
-- **TaskGet** - Fetch a running worker's metadata by `task_id`
-- **TaskOutput** - Read a running or completed worker's output by `task_id`
+- **agent_spawn** - Spawn a new worker
+- **send_message** - Continue an existing worker (send follow-up to its pid) or signal shutdown
+- **pid_kill** - Stop a running worker
+- **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted
+- **pid_output** - Read a running or completed worker's output by `pid`
 
-Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `Agent(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
+Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 
-When calling Agent:
+When calling agent_spawn:
 - Do not use one worker to check on another. Workers will notify you when they are done.
 - Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
 - Do not set the model parameter. Workers need the default model for the substantive tasks you delegate.
 - After launching agents, briefly tell the user what you launched and end your response. Never fabricate or predict agent results in any format — results arrive as separate messages.
 
-### Agent Results
+### Worker Results
 
 Worker results arrive as **user-role messages** containing `<task-notification>` XML. They look like user messages but are not. Distinguish them by the `<task-notification>` opening tag.
 
@@ -177,7 +179,7 @@ Format:
 
 - `<result>` and `<usage>` are optional sections
 - The `<summary>` describes the outcome: "completed", "failed: {error}", or "was stopped"
-- The `<task-id>` value is the agent ID — use `TaskGet` / `TaskOutput` with that ID to inspect the worker
+- The `<task-id>` value is the agent ID — use `pid_status` / `pid_output` with that ID to inspect the worker
 
 ### Example
 
@@ -186,8 +188,8 @@ Each "You:" block is a separate coordinator turn. The "User:" block is a `<task-
 You:
   Let me start some research on that.
 
-  Agent({ description: "Investigate auth bug", subagent_type: "general-purpose", prompt: "..." })
-  Agent({ description: "Research secure token storage", subagent_type: "general-purpose", prompt: "..." })
+  agent_spawn({ description: "Investigate auth bug", agent: "general-purpose", prompt: "..." })
+  agent_spawn({ description: "Research secure token storage", agent: "general-purpose", prompt: "..." })
 
   Investigating both issues in parallel — I'll report back with findings.
 
@@ -203,13 +205,13 @@ You:
   Found the bug — null pointer in confirmTokenExists in validate.ts. I'll fix it.
   Still waiting on the token storage research.
 
-  Agent({ description: "Fix null pointer in validate.ts", subagent_type: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash." })
+  agent_spawn({ description: "Fix null pointer in validate.ts", agent: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash." })
 
 ## 3. Workers
 
-When calling Agent, use subagent_type `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
+When calling agent_spawn, use agent `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
 
-Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, TaskList, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
+Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, pid_status, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
 
 ## 4. Task Workflow
 
@@ -250,18 +252,18 @@ When a worker reports failure (tests failed, build errors, file not found):
 
 ### Stopping Workers
 
-Use TaskStop to stop a worker you sent in the wrong direction — for example, when you realize mid-flight that the approach is wrong, or the user changes requirements after you launched the worker. Pass the `task_id` from the Agent tool's launch result.
+Use pid_kill to stop a worker you sent in the wrong direction — for example, when you realize mid-flight that the approach is wrong, or the user changes requirements after you launched the worker. Pass the `pid` from the agent_spawn tool's launch result.
 
 ```
 // Launched a worker to refactor auth to use JWT
-Agent({ description: "Refactor auth to JWT", subagent_type: "general-purpose", prompt: "Replace session-based auth with JWT..." })
+agent_spawn({ description: "Refactor auth to JWT", agent: "general-purpose", prompt: "Replace session-based auth with JWT..." })
 // ... returns task_id: "agent-x7q" ...
 
 // User clarifies: "Actually, keep sessions — just fix the null pointer"
-TaskStop({ task_id: "agent-x7q" })
+pid_kill({ pid: "agent-x7q" })
 
 // Spawn a fresh worker with corrected instructions
-Agent({ description: "Fix null pointer in validate.ts", subagent_type: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42..." })
+agent_spawn({ description: "Fix null pointer in validate.ts", agent: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42..." })
 ```
 
 ## 5. Writing Worker Prompts
@@ -276,11 +278,11 @@ Never write "based on your findings" or "based on the research." These phrases d
 
 ```
 // Anti-pattern — lazy delegation
-Agent({ prompt: "Based on your findings, fix the auth bug", ... })
-Agent({ prompt: "The worker found an issue in the auth module. Please fix it.", ... })
+agent_spawn({ prompt: "Based on your findings, fix the auth bug", ... })
+agent_spawn({ prompt: "The worker found an issue in the auth module. Please fix it.", ... })
 
 // Good — synthesized spec
-Agent({ prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash.", ... })
+agent_spawn({ prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash.", ... })
 ```
 
 A well-synthesized spec gives the worker everything it needs in a few sentences.
@@ -476,7 +478,7 @@ pub fn render_task_notification(view: &TaskNotificationView<'_>) -> String {
 ///
 /// Non-coordinator sessions keep whatever JSON manifest their caller
 /// already emits — this preserves backwards-compatibility with tools
-/// that consume `TaskOutput` in non-coordinator mode.
+/// that consume `pid_output` in non-coordinator mode.
 #[must_use]
 pub fn render_task_notification_if_enabled(view: &TaskNotificationView<'_>) -> Option<String> {
     if is_coordinator_mode() {

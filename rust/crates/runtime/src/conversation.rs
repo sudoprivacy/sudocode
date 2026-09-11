@@ -3270,18 +3270,22 @@ fn push_thinking_block(
 /// larger step. Extend cautiously (e.g. same-class writes on distinct paths)
 /// only behind a conflict check.
 fn is_concurrency_safe_tool(tool_name: &str) -> bool {
+    // Canonicalize first: the name arrives as the model spelled it, and a
+    // CC-trained model says `TaskGet` where this codebase says `pid_status`.
+    // Matching the raw name is how the `Task*` → `pid_*` rename silently
+    // dropped these from concurrent batches.
     matches!(
-        tool_name,
+        crate::tool_names::canonicalize_tool_name(tool_name).as_str(),
         // File reads
         "read_file"
             | "glob_search"
             | "grep_search"
             // Search
             | "ToolSearch"
-            // Task reads (CC marks TaskGet read-only; List/Output are symmetric)
-            | "TaskGet"
-            | "TaskList"
-            | "TaskOutput"
+            // Process-status reads (CC marks TaskGet read-only; the
+            // list/output queries are symmetric)
+            | "pid_status"
+            | "pid_output"
     )
 }
 

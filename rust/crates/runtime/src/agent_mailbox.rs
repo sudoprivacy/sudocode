@@ -1,11 +1,11 @@
-//! Filesystem-backed per-agent mailbox for the SendMessage inter-agent
+//! Filesystem-backed per-agent mailbox for the `send` inter-agent
 //! coordination surface.
 //!
 //! Ported semantics from `sudoprivacy/claude-code`'s
 //! `utils/teammateMailbox.ts` — the flag-off default path. Each
 //! recipient has one append-only JSONL file at
 //! `<workspace>/.sudocode-inbox/<recipient>.jsonl`. The receiving
-//! agent (e.g. a task launched by `Agent(run_in_background=true)`) is
+//! agent (e.g. a task launched by `agent_spawn(run_in_background=true)`) is
 //! expected to read new lines from its own inbox and process them at
 //! its next tool round. This crate only writes; consumption lives
 //! wherever the receiving agent loop lives.
@@ -91,7 +91,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Process-global lock so concurrent SendMessage calls into the same
+/// Process-global lock so concurrent `send` calls into the same
 /// recipient's mailbox never interleave partial JSON lines. The lock
 /// covers only the "open, append, flush, close" critical section —
 /// contention is negligible in practice because most agents write to

@@ -105,9 +105,9 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     // the legacy `└ ` or the current `⏺` format — both must end CRLF.
     sess.expect("(?:└ |⏺)[^\n]*\r\n")
         .expect("tool-result line should end with CRLF, not a bare LF");
-    // The status line is printed to scrollback AND persisted in the
-    // StatusSlot::TurnResult ChromeSlot. The scrollback println is the
-    // reliable sync point for PTY expects.
+    // The status line is rendered in the StatusSlot::TurnResult ChromeSlot,
+    // above the upper separator. (It is no longer echoed to scrollback — that
+    // duplicated the line in history.) The ChromeSlot line is the sync point.
     sess.expect("ctx ").expect("turn status line");
     sess.expect("─{20,}")
         .expect("separator redrawn after the status line");

@@ -388,6 +388,10 @@ struct AskUserQuestionCliInput {
 #[serde(rename_all = "camelCase")]
 struct AskUserQuestionCliField {
     id: String,
+    // Accept `question` as an alias for `prompt`: the natural caller mistake
+    // (mirroring the tool's legacy top-level `question` field) otherwise fails
+    // the whole call with a cryptic "missing field `prompt`".
+    #[serde(alias = "question")]
     prompt: String,
     kind: Option<String>,
     required: Option<bool>,

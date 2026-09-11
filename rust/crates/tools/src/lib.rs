@@ -3855,6 +3855,11 @@ struct AskUserQuestionInput {
 #[serde(rename_all = "camelCase")]
 struct AskUserQuestionItem {
     id: String,
+    // Accept `question` as an alias so an item written with the legacy
+    // top-level field name (the natural mistake, since the tool also takes a
+    // top-level `question`) deserializes instead of failing the whole call
+    // with a cryptic "missing field `prompt`".
+    #[serde(alias = "question")]
     prompt: String,
     #[serde(default)]
     kind: Option<String>,

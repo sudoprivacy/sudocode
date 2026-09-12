@@ -439,6 +439,7 @@ impl AnthropicClient {
         strip_unsupported_beta_body_fields(&mut body, request);
         apply_cache_hints(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
+        dump_request_body("messages", &body);
 
         let mut headers: Vec<(String, String)> =
             vec![("content-type".to_string(), "application/json".to_string())];
@@ -547,6 +548,7 @@ impl AnthropicClient {
         strip_unsupported_beta_body_fields(&mut request_body, request);
         apply_cache_hints(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
+        dump_request_body("count_tokens", &request_body);
         let mut builder = self
             .http
             .raw()
@@ -1150,6 +1152,65 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
     }
 }
 
+/// Write the request body that is about to be sent to `SUDOCODE_DUMP_REQUESTS`,
+/// if that variable names a directory. Off by default; costs one env read.
+///
+/// **Why the copy is taken here and not from the wire.** Diagnosing prompt-cache
+/// misses needs the exact bytes of consecutive requests, and every instrument we
+/// reached for first changed what it measured: a recording proxy buffered the
+/// response and broke SSE, so the client retried and every request looked like it
+/// was sent twice; `tcpdump` dropped packets on ~900KB bodies and the request
+/// could not be reassembled; a bare TCP tee terminated TLS and voided the cache
+/// it was supposed to observe. This call site is after serialisation and before
+/// the send, so it can only add a copy on disk — the bytes on the wire are the
+/// same whether it runs or not. That property is the whole point of it.
+fn dump_request_body(kind: &str, body: &Value) {
+    let Some(dir) = dump_request_dir() else {
+        return;
+    };
+    let _ = write_request_dump(std::path::Path::new(&dir), kind, body);
+}
+
+/// The dump directory, or `None` when the switch is off. An unset variable and
+/// an empty one both mean off, so `SUDOCODE_DUMP_REQUESTS=` disables it without
+/// writing into the process's working directory.
+fn dump_request_dir() -> Option<String> {
+    dump_dir_from_env(std::env::var("SUDOCODE_DUMP_REQUESTS").ok().as_deref())
+}
+
+fn dump_dir_from_env(value: Option<&str>) -> Option<String> {
+    match value {
+        Some(dir) if !dir.is_empty() => Some(dir.to_string()),
+        _ => None,
+    }
+}
+
+/// Serialise `body` exactly as the request does and write it under `dir`.
+/// Returns the file written, or `None` if anything failed — dumping is a
+/// diagnostic and must never affect the request it is observing.
+fn write_request_dump(
+    dir: &std::path::Path,
+    kind: &str,
+    body: &Value,
+) -> Option<std::path::PathBuf> {
+    let text = serde_json::to_string(body).ok()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // Nanos disambiguate requests that land in the same millisecond; without
+    // them a fast tool loop silently overwrites its own earlier dumps, which
+    // would make consecutive-request diffing miss exactly the pairs we care about.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("{stamp}-{nanos:09}-{kind}.json"));
+    std::fs::write(&path, text).ok()?;
+    Some(path)
+}
+
 /// Translate provider-agnostic [`CacheHints`] into Anthropic-specific
 /// `cache_control` markers on the JSON body.
 ///
@@ -1620,6 +1681,71 @@ mod tests {
             headers.get("authorization").and_then(|v| v.to_str().ok()),
             Some("Bearer proxy-token")
         );
+    }
+
+    #[test]
+    fn dump_is_off_unless_the_variable_names_a_directory() {
+        // Unset and empty both mean off. Empty especially: treating it as a
+        // path would scatter request bodies through the working directory.
+        assert_eq!(super::dump_dir_from_env(None), None);
+        assert_eq!(super::dump_dir_from_env(Some("")), None);
+        assert_eq!(
+            super::dump_dir_from_env(Some("/tmp/dumps")),
+            Some("/tmp/dumps".to_string())
+        );
+    }
+
+    #[test]
+    fn dumped_json_is_byte_identical_to_the_body_that_would_be_sent() {
+        let dir = std::env::temp_dir().join(format!(
+            "scode-dump-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "static", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        });
+
+        let path = super::write_request_dump(&dir, "messages", &body).expect("dump written");
+
+        let on_disk = std::fs::read_to_string(&path).expect("read dump");
+        // The dump must be the exact string the HTTP body is built from — not a
+        // pretty-printed or re-ordered rendering of it. A dump that differs from
+        // the wire by even key order is useless for diffing consecutive requests,
+        // which is the only thing this switch exists to support.
+        assert_eq!(on_disk, serde_json::to_string(&body).expect("serialize"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consecutive_dumps_in_the_same_millisecond_do_not_overwrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "scode-dump-collide-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let body = serde_json::json!({"model": "claude-sonnet-4-6"});
+        let mut paths = std::collections::HashSet::new();
+        for _ in 0..20 {
+            paths.insert(super::write_request_dump(&dir, "messages", &body).expect("dump"));
+        }
+
+        assert_eq!(
+            paths.len(),
+            20,
+            "each dump needs its own file; a fast tool loop would otherwise \
+             overwrite the very request pairs the dump is meant to compare"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

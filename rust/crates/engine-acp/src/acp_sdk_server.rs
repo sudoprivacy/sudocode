@@ -359,7 +359,12 @@ fn ensure_a2a_receiver(registry: &SharedSessionRegistry, cx: &ConnectionTo<Clien
     // is async. One channel bridges them, the same shape the turn path uses.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let _poller = engine_host::nexus_a2a::spawn_poller(a2a, HookAbortSignal::new(), move |msg| {
-        let _ = tx.send((msg.from.clone(), msg.body.clone()));
+        // Hand-off only, and weaker than the REPL's ack: this channel is
+        // unbounded and the ACP client's receipt is not observable from here,
+        // so the cursor advances once the notification is queued for the
+        // client. A send error means the forwarding task is gone, which is a
+        // refusal and re-delivers.
+        tx.send((msg.from.clone(), msg.body.clone())).is_ok()
     });
 
     let registry = Arc::clone(registry);

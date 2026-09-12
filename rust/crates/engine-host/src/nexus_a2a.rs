@@ -88,7 +88,7 @@ pub fn session() -> Result<Option<&'static Session>, String> {
 pub fn spawn_poller(
     session: &'static Session,
     abort: HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
 ) -> JoinHandle<()> {
     runtime::mailbox::spawn_inbox_poller(
         Arc::clone(&session.mailbox),

@@ -242,6 +242,7 @@ fn local_poller_delivers_sub_agent_message_to_parent() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
 
@@ -276,6 +277,7 @@ fn local_poller_delivers_multiple_messages_in_order() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
 
@@ -322,6 +324,7 @@ fn local_poller_stops_on_abort() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
 
@@ -756,6 +759,7 @@ fn peer_message_poller_to_compose_roundtrip() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
 

@@ -350,13 +350,23 @@ impl InboxCursor {
 /// signals (including from a peer's replicated append); `StdFsBackend` has no
 /// such primitive and falls back to a bounded size poll, which is the one
 /// place this is a poll rather than a wait.
+/// `sink` returns whether the consumer has TAKEN RESPONSIBILITY for the
+/// envelope — not merely that it was handed over. The cursor does not advance
+/// past an envelope that was not accepted, so a consumer that blocks until it
+/// has the message applies back-pressure to the receiver instead of letting
+/// messages pile up in a queue the cursor has already been advanced past.
+///
+/// That distinction is the whole reason this is a `bool`. Saving the cursor
+/// after a `sink` that only enqueues means a crash loses everything still in
+/// the queue, silently, with the sender already told "delivered" — the loss
+/// this cursor exists to prevent, reintroduced one layer up.
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
     cursor_store: InboxCursor,
     block_ms: u64,
     label: &'static str,
     abort: crate::HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("{label}-inbox-poller"))
@@ -386,15 +396,19 @@ pub fn spawn_inbox_poller(
             while !abort.is_aborted() {
                 match mailbox.poll(cursor, block_ms) {
                     Ok((msgs, next)) => {
-                        for m in &msgs {
-                            sink(m);
-                        }
-                        // Persist only on real forward progress: an idle
-                        // deadline return would otherwise rewrite the same
-                        // offset every iteration. Saving AFTER the sink has run
-                        // makes a crash re-deliver rather than drop —
-                        // at-least-once, the right side to err on for mail.
-                        if next > cursor {
+                        let accepted = msgs.iter().all(|m| sink(m));
+                        // Persist only on real forward progress, and only when
+                        // the consumer took every envelope in the batch: an
+                        // idle deadline return would otherwise rewrite the same
+                        // offset every iteration, and advancing past a rejected
+                        // envelope drops it.
+                        //
+                        // A batch is all-or-nothing because the cursor is one
+                        // offset — there is no way to say "past the second but
+                        // not the third". Re-delivering an accepted envelope is
+                        // the tolerable half of that: at-least-once, which is
+                        // the right side to err on for mail.
+                        if accepted && next > cursor {
                             cursor = next;
                             cursor_store.save(cursor);
                         }
@@ -420,7 +434,7 @@ pub fn spawn_local_poller(
     workspace_root: std::path::PathBuf,
     self_id: String,
     abort: crate::HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     let cursor_store = InboxCursor::at(
         crate::agent_mailbox::mailbox_dir(&workspace_root)
@@ -495,6 +509,54 @@ mod tests {
         }
     }
 
+    /// A message the consumer did not take must be re-delivered, not skipped.
+    ///
+    /// This is what makes the durable cursor mean anything above the poller. A
+    /// consumer that only ENQUEUES — hands the envelope to a channel and
+    /// returns — lets the cursor advance past messages still sitting in that
+    /// queue, so a crash loses them silently with the sender already told
+    /// "delivered". Returning `false` until it has actually taken the message
+    /// keeps the cursor and the consumer in step.
+    #[test]
+    fn an_unaccepted_message_is_redelivered() {
+        let ws = temp_workspace("reject-redeliver");
+        let ws_path = std::path::PathBuf::from(&ws);
+        let peer = local_mailbox(&ws, "peer");
+        let cursor_file = crate::agent_mailbox::mailbox_dir(&ws_path).join(".cursor-me");
+
+        // Refuse the first delivery of each body, accept the second.
+        let attempts: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let abort = crate::HookAbortSignal::new();
+        let sink_attempts = Arc::clone(&attempts);
+        let poller =
+            spawn_local_poller(ws_path.clone(), "me".to_string(), abort.clone(), move |m| {
+                let mut log = sink_attempts.lock().unwrap();
+                let first_time = !log.contains(&m.body);
+                log.push(m.body.clone());
+                !first_time
+            });
+        wait_until("the poller to record where it starts", || {
+            cursor_file.exists()
+        });
+
+        peer.send(note("peer", "me", "needs-two-tries"))
+            .expect("send");
+        wait_until("the refused message to come back", || {
+            attempts.lock().unwrap().len() >= 2
+        });
+        abort.abort();
+        poller.join().expect("poller joins");
+
+        let log = attempts.lock().unwrap().clone();
+        assert!(
+            log.len() >= 2 && log.iter().all(|b| b == "needs-two-tries"),
+            "the refused envelope must be offered again, got {log:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     /// The receiver must neither replay a backlog it was never party to nor
     /// lose what arrived while it was not running.
     ///
@@ -525,6 +587,7 @@ mod tests {
         let first =
             spawn_local_poller(ws_path.clone(), "me".to_string(), abort.clone(), move |m| {
                 sink_seen.lock().unwrap().push(m.body.clone());
+                true
             });
         wait_until("the first run to record its cursor", || {
             cursor_file.exists()
@@ -552,6 +615,7 @@ mod tests {
             abort2.clone(),
             move |m| {
                 sink_seen.lock().unwrap().push(m.body.clone());
+                true
             },
         );
         wait_until("offline-1 after the restart", || {
@@ -717,6 +781,7 @@ mod tests {
             abort_clone,
             move |msg| {
                 let _ = tx.send(msg.clone());
+                true
             },
         );
 

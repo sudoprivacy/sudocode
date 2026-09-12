@@ -33,8 +33,22 @@
 //! mechanism and the fix together. Both clean says the mechanism is wrong and
 //! the loss is elsewhere. Both lossy says waiting for the clear is not enough.
 //!
+//! ## Measured so far
+//!
+//! | arm | macOS | Windows |
+//! |---|---|---|
+//! | `stream-hint` | 4/12 rendered | 22/24 rendered |
+//! | `cleared-buffer` | 10/12 rendered | 48/48 rendered |
+//!
+//! Two things worth recording. The loss is NOT macOS-only — Windows reproduces
+//! it too, just rarely enough that the single-round real test almost always
+//! passes there, which is why it read as a macOS problem. And `cleared-buffer`
+//! has not lost a Windows round yet; both of its macOS losses came from the
+//! first run, before the arms were separated from the earlier Ctrl-C/no-Ctrl-C
+//! comparison.
+//!
 //! Reports a rate and dumps every lost round, so one CI run is informative
-//! rather than a coin flip. Windows does not reproduce this; read it off macOS.
+//! rather than a coin flip.
 
 mod common;
 
@@ -43,7 +57,14 @@ use std::time::{Duration, Instant};
 use common::TestEnv;
 use pty_expect::PtySession;
 
-const ROUNDS: usize = 6;
+/// Positive control: enough rounds to show this run can reproduce the loss at
+/// all. Measured at 4 of 6 lost, twice, so 4 rounds losing none would itself be
+/// the surprise.
+const CONTROL_ROUNDS: usize = 8;
+
+/// The arm under test gets the rounds, because 6 was too few to tell 4/6 from
+/// 6/6 — the first two runs disagreed by exactly that much.
+const ROUNDS: usize = 24;
 const RENDER_BUDGET: Duration = Duration::from_secs(10);
 
 /// What the arm waits for after Ctrl-C, before typing.
@@ -52,16 +73,15 @@ enum AfterCtrlC {
     /// The hint as it appears in the PTY byte stream — the real test's guard.
     StreamHint,
     /// The input buffer observably empty — the proposed guard.
-    ClearedBuffer,
-    /// Readiness re-established the way the test establishes it BEFORE Ctrl-C:
-    /// a keystroke that renders, then cleared again.
     ///
-    /// An empty buffer says the clear landed; it does not say keystrokes are
-    /// being delivered to the input again. The key handler routes `Char` by
-    /// `current_slot`, and Ctrl-C's `InputEvent::Abort` has the coordinator call
-    /// `repl.ui.clear_question()` — an out-of-band slot reset. A character that
-    /// renders is the only observation that covers every such state.
-    ReProbe,
+    /// A re-probe arm was measured alongside this one — clear, then type a
+    /// character and wait for it to RENDER, then clear again, on the theory that
+    /// an empty buffer does not prove keystrokes are being delivered (the key
+    /// handler routes `Char` by `current_slot`, and Ctrl-C's `InputEvent::Abort`
+    /// has the coordinator reset slots out of band). It came back 5/6 against
+    /// this arm's 6/6, i.e. no better for twice the work, so the slot-routing
+    /// theory is not the residual and the arm is gone.
+    ClearedBuffer,
 }
 
 /// The text after the last prompt marker on the lowest row carrying one.
@@ -121,7 +141,6 @@ fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
     let label = match arm {
         AfterCtrlC::StreamHint => "stream",
         AfterCtrlC::ClearedBuffer => "cleared",
-        AfterCtrlC::ReProbe => "reprobe",
     };
     let env = TestEnv::new(&format!("ctrlc-{label}-{round}"));
     let root = env.workspace_root().to_path_buf();
@@ -158,22 +177,6 @@ fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
         AfterCtrlC::ClearedBuffer => {
             wait_for_cleared(&mut sess, round)?;
         }
-        AfterCtrlC::ReProbe => {
-            wait_for_cleared(&mut sess, round)?;
-            // A keystroke that renders — the same observation the test uses
-            // for readiness before Ctrl-C, repeated because Ctrl-C changed the
-            // state it was proving.
-            sess.send("~").expect("type re-probe");
-            let (probed, seen, screen) = wait_for_input(&mut sess, "~");
-            if !probed {
-                return Err(format!(
-                    "round {round}: input never accepted a keystroke after Ctrl-C \
-                     (last saw {seen:?})\n{screen}"
-                ));
-            }
-            sess.send("\x15").expect("Ctrl-U to clear the re-probe");
-            wait_for_cleared(&mut sess, round)?;
-        }
     }
 
     sess.send("/exit").expect("type /exit");
@@ -186,9 +189,9 @@ fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn measure(arm: AfterCtrlC) -> usize {
+fn measure(arm: AfterCtrlC, rounds: usize) -> usize {
     let mut lost = 0;
-    for round in 0..ROUNDS {
+    for round in 0..rounds {
         match run_round(arm, round) {
             Ok(()) => eprintln!("[{arm:?}] round {round}: /exit rendered"),
             Err(why) => {
@@ -197,30 +200,29 @@ fn measure(arm: AfterCtrlC) -> usize {
             }
         }
     }
-    eprintln!("[{arm:?}] {}/{ROUNDS} rounds rendered /exit", ROUNDS - lost);
+    eprintln!("[{arm:?}] {}/{rounds} rounds rendered /exit", rounds - lost);
     lost
 }
 
 #[test]
 fn which_post_ctrlc_wait_stops_losing_keystrokes() {
-    let stream_lost = measure(AfterCtrlC::StreamHint);
-    let cleared_lost = measure(AfterCtrlC::ClearedBuffer);
-    let reprobe_lost = measure(AfterCtrlC::ReProbe);
+    // Control first, so a run that cannot reproduce the loss at all says so
+    // before the arm under test is credited with anything.
+    let stream_lost = measure(AfterCtrlC::StreamHint, CONTROL_ROUNDS);
+    let cleared_lost = measure(AfterCtrlC::ClearedBuffer, ROUNDS);
 
     eprintln!(
-        "SUMMARY stream_hint={}/{ROUNDS} cleared_buffer={}/{ROUNDS} reprobe={}/{ROUNDS}",
-        ROUNDS - stream_lost,
-        ROUNDS - cleared_lost,
-        ROUNDS - reprobe_lost
+        "SUMMARY stream_hint={}/{CONTROL_ROUNDS} cleared_buffer={}/{ROUNDS}",
+        CONTROL_ROUNDS - stream_lost,
+        ROUNDS - cleared_lost
     );
 
-    // Fail whenever any arm lost a round, so CI surfaces the dumps. The summary
-    // line is what picks the guard: the previous run measured stream_hint 2/6
-    // and cleared_buffer 4/6, so waiting for the clear helps and is not enough.
+    // Fail whenever either arm lost a round, so CI surfaces the dumps. Two runs
+    // put the control at 4 of 6 lost each time; the arm under test came back
+    // 4/6 then 6/6, which is why it now gets twelve rounds instead of six.
     assert!(
-        stream_lost == 0 && cleared_lost == 0 && reprobe_lost == 0,
-        "keystrokes lost: stream_hint dropped {stream_lost} of {ROUNDS}, \
-         cleared_buffer dropped {cleared_lost} of {ROUNDS}, \
-         reprobe dropped {reprobe_lost} of {ROUNDS}"
+        stream_lost == 0 && cleared_lost == 0,
+        "keystrokes lost: stream_hint dropped {stream_lost} of {CONTROL_ROUNDS} (control), \
+         cleared_buffer dropped {cleared_lost} of {ROUNDS}"
     );
 }

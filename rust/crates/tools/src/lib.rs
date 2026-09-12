@@ -8506,10 +8506,9 @@ mod tests {
         execute_agent_inline_with_work, execute_agent_with_spawn, execute_tool,
         extract_recovery_outcome, final_assistant_text, global_cron_registry, lookup_custom_agent,
         maybe_commit_provenance, mvp_tool_specs, normalize_pid_input, normalize_send_input,
-        normalize_subagent_type,
-        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
-        run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files, AgentInput,
-        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
+        normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
+        push_output_block, run_ask_user_question_v2, search_tool_specs, sweep_orphaned_tmp_files,
+        AgentInput, AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
         GlobalToolRegistry, LaneEventName, LaneFailureClass, SearchableToolSpec,
         SubagentToolExecutor,
     };

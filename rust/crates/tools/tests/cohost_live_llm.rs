@@ -171,10 +171,7 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     // SudoCodeSpawnAdapter calls. Node-local single-stream mailbox (the
     // agent reads + replies on /proc/{pid}/chat-with-me). State transitions
     // are printed so WarmingUp → Ready → Busy → Ready is observable.
-    let mailbox = Mailbox::LocalStream {
-        path: format!("/proc/{pid}/chat-with-me"),
-        self_id: agent_id.to_string(),
-    };
+    let mailbox = Mailbox::local_stream(format!("/proc/{pid}/chat-with-me"), agent_id.to_string());
     let handle = spawn_managed_agent(Arc::clone(&kernel), desc, mailbox, |state, reason| {
         eprintln!("[agent state] {state:?} reason={reason:?}");
     });

@@ -19,7 +19,39 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nexus_vfs_client::NexusVfsClient;
-use runtime::nexus_mailbox::{ensure_inbox, poll_new, send};
+use runtime::agent_mailbox::MailboxEnvelope;
+
+/// The unified mailbox for `agent` over an already-dialled client.
+///
+/// These tests used to call a second transport implementation that lived
+/// beside `Mailbox` and duplicated it — same paths, same framing, same
+/// blocking tail. Production had already moved to `Mailbox`, so the tests were
+/// exercising the copy: green here proved nothing about what ships. They now
+/// drive the same code the running agent does.
+fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
+    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+}
+
+fn send_to(
+    client: &Arc<NexusVfsClient>,
+    from: &str,
+    to: &str,
+    body: &str,
+    auth: &str,
+) -> Result<(), String> {
+    mailbox(client, from, auth).send(MailboxEnvelope {
+        from: from.to_string(),
+        to: to.to_string(),
+        body: body.to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: String::new(),
+        request_id: None,
+    })
+}
+
+use runtime::mailbox::Mailbox;
 
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
@@ -31,18 +63,24 @@ fn live_inbox_roundtrip() {
 
     let me = "scode-probe";
     // Provision our own inbox (idempotent) — the standalone self-provision path.
-    ensure_inbox(&client, me, &auth).expect("ensure inbox");
+    mailbox(&client, me, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox");
 
     // Snapshot the tail so the assertion sees only the message we send below,
     // not any residue from a previous run of this probe.
-    let (_history, start) = poll_new(&client, me, 0, &auth, 0).expect("seek to tail");
+    let (_history, start) = mailbox(&client, me, &auth)
+        .poll(0, 0)
+        .expect("seek to tail");
 
     // A "peer" writes into our inbox (simulates the receive direction), then we
     // poll it back — proving send + poll against the real DT_STREAM.
     let body = "hello over a real dt_stream";
-    send(&client, "peer-x", me, body, &auth).expect("send to inbox");
+    send_to(&client, "peer-x", me, body, &auth).expect("send to inbox");
 
-    let (msgs, next) = poll_new(&client, me, start, &auth, 0).expect("poll new");
+    let (msgs, next) = mailbox(&client, me, &auth)
+        .poll(start, 0)
+        .expect("poll new");
     assert!(next >= start, "cursor must not regress");
     assert!(
         msgs.iter().any(|m| m.from == "peer-x" && m.body == body),
@@ -73,16 +111,21 @@ fn live_blocking_read_wakes_on_write() {
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
 
     let me = "scode-blocking-read-probe";
-    ensure_inbox(&client, me, &auth).expect("ensure inbox");
+    mailbox(&client, me, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox");
     // Fix the cursor at the current tail so the assertions see only what we
     // write below, not residue from a previous run.
-    let (_history, tail) = poll_new(&client, me, 0, &auth, 0).expect("seek to tail");
+    let (_history, tail) = mailbox(&client, me, &auth)
+        .poll(0, 0)
+        .expect("seek to tail");
 
     // Negative path: an idle inbox with no writer must block for the whole
     // timeout and return EMPTY at the deadline — never hang, never early-return.
     let t0 = Instant::now();
-    let (idle_msgs, idle_next) =
-        poll_new(&client, me, tail, &auth, 800).expect("idle blocking read");
+    let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
+        .poll(tail, 800)
+        .expect("idle blocking read");
     let idle_elapsed = t0.elapsed();
     assert!(
         idle_msgs.is_empty(),
@@ -105,14 +148,16 @@ fn live_blocking_read_wakes_on_write() {
         let endpoint = endpoint.clone();
         let auth = auth.clone();
         thread::spawn(move || {
-            let wclient = NexusVfsClient::connect(&endpoint).expect("writer dial");
+            let wclient = Arc::new(NexusVfsClient::connect(&endpoint).expect("writer dial"));
             thread::sleep(Duration::from_millis(400));
-            send(&wclient, "peer-block", me, body, &auth).expect("peer write");
+            send_to(&wclient, "peer-block", me, body, &auth).expect("peer write");
         })
     };
 
     let t1 = Instant::now();
-    let (msgs, next) = poll_new(&client, me, tail, &auth, 5_000).expect("armed blocking read");
+    let (msgs, next) = mailbox(&client, me, &auth)
+        .poll(tail, 5_000)
+        .expect("armed blocking read");
     let woke = t1.elapsed();
     writer.join().expect("writer thread");
 
@@ -154,8 +199,12 @@ fn live_blocking_read_does_not_stall_shared_client() {
 
     let me = "scode-starve-probe";
     let shared = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial shared"));
-    ensure_inbox(&shared, me, &auth).expect("ensure inbox");
-    let (_history, tail) = poll_new(&shared, me, 0, &auth, 0).expect("seek to tail");
+    mailbox(&shared, me, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox");
+    let (_history, tail) = mailbox(&shared, me, &auth)
+        .poll(0, 0)
+        .expect("seek to tail");
 
     // Park a 1.5s blocking read on the SHARED client (no writer → it holds its
     // task the whole time).
@@ -163,7 +212,7 @@ fn live_blocking_read_does_not_stall_shared_client() {
         let shared = Arc::clone(&shared);
         let auth = auth.clone();
         thread::spawn(move || {
-            let _ = poll_new(&shared, me, tail, &auth, 1_500);
+            let _ = mailbox(&shared, me, &auth).poll(tail, 1_500);
         })
     };
     thread::sleep(Duration::from_millis(150)); // let the blocking read park
@@ -196,7 +245,9 @@ fn live_ensure_inbox() {
     let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
-    ensure_inbox(&client, &inbox, &auth).expect("ensure inbox");
+    mailbox(&client, &inbox, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox");
     println!("ensured /agents/{inbox}/chat-with-me");
 }
 
@@ -256,7 +307,7 @@ fn live_collect_inbox() {
     // poll_new reads inbox_path(self_agent), so pass the target inbox name.
     // Its self-filter only drops the inbox owner's OWN writes (none here) —
     // a peer's stamped envelope (e.g. from a real scode send) still surfaces.
-    let (msgs, next) = poll_new(&client, &inbox, 0, &auth, 0).expect("collect");
+    let (msgs, next) = mailbox(&client, &inbox, &auth).poll(0, 0).expect("collect");
     println!(
         "inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}",
         msgs.len()

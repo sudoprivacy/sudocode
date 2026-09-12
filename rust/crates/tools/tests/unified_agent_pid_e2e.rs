@@ -18,6 +18,29 @@ use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::HookAbortSignal;
 use tools::testing::{compose_next_turn_from_envelopes_for_test, run_multi_turn_loop_for_test};
 
+/// Block until the poller has recorded where it starts reading.
+///
+/// A first-ever run seeks to the inbox tail rather than replaying a backlog it
+/// was never party to, so an append that lands DURING that seek is positioned
+/// past and never delivered. Every test below spawns the poller and then sends,
+/// so each has to establish "listening" first or it is racing the seek — which
+/// is exactly how they passed locally and failed on CI.
+///
+/// Asks `InboxCursor` where the file is rather than rebuilding the name: a
+/// rebuilt name is a second definition that compiles.
+fn wait_for_poller_ready(ws: &std::path::Path) {
+    let cursor = runtime::mailbox::InboxCursor::local(ws, "team-lead");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cursor.path().exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the poller never recorded its cursor at {}",
+            cursor.path().display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn unique_workspace(label: &str) -> std::path::PathBuf {
@@ -242,8 +265,10 @@ fn local_poller_delivers_sub_agent_message_to_parent() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
+    wait_for_poller_ready(&ws);
 
     // Sub-agent writes to team-lead's inbox
     agent_mailbox::append_envelope(
@@ -276,8 +301,10 @@ fn local_poller_delivers_multiple_messages_in_order() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
+    wait_for_poller_ready(&ws);
 
     // Multiple sub-agents write to team-lead's inbox
     agent_mailbox::append_envelope(
@@ -322,8 +349,10 @@ fn local_poller_stops_on_abort() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
+    wait_for_poller_ready(&ws);
 
     abort.abort();
     handle.join().expect("poller thread should exit cleanly");
@@ -756,8 +785,10 @@ fn peer_message_poller_to_compose_roundtrip() {
         abort_clone,
         move |msg| {
             let _ = tx.send(msg.clone());
+            true
         },
     );
+    wait_for_poller_ready(&ws);
 
     // Sub-agent sends a message
     agent_mailbox::append_envelope(

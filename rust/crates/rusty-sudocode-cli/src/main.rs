@@ -2272,8 +2272,41 @@ struct SlashSelectionHandler(
 /// `TurnComplete`.
 enum CoordinatorEvent {
     Human(repl_ui::InputEvent),
-    PeerMessage(runtime::agent_mailbox::MailboxEnvelope),
+    /// A peer's message, plus the acknowledgement its receiver waits on.
+    ///
+    /// The receiver must not advance its durable cursor past a message that is
+    /// only sitting in this channel: a crash then loses it silently, with the
+    /// sender already told "delivered". So it blocks on this ack until the
+    /// coordinator loop has taken the message, which makes the channel
+    /// back-pressured rather than a place messages accumulate behind the
+    /// cursor. Dropping the sender is a refusal and re-delivers.
+    PeerMessage(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>),
     TurnComplete,
+}
+
+/// Hand a peer's message to the coordinator loop and block until it is taken.
+///
+/// The return value is what the inbox receiver uses to decide whether to
+/// advance its durable cursor, so "handed over" is not good enough — a message
+/// queued behind a long turn with the cursor already past it is lost on a crash,
+/// silently, after its sender was told it was delivered. Blocking the receive
+/// thread here is the point: it is the back-pressure that keeps the cursor and
+/// the consumer in step.
+///
+/// `false` when the coordinator loop is gone (shutting down) or dropped the ack
+/// without handling the message; either way the receiver re-delivers.
+fn ack_after_coordinator_takes(
+    tx: &mpsc::Sender<CoordinatorEvent>,
+    msg: &runtime::agent_mailbox::MailboxEnvelope,
+) -> bool {
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if tx
+        .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
+        .is_err()
+    {
+        return false;
+    }
+    ack_rx.recv().is_ok()
 }
 
 /// Show an interactive selection question via iocraft's InputSlot and
@@ -2776,9 +2809,7 @@ fn run_repl_iocraft_dispatch(
         let _poller = engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             runtime::HookAbortSignal::new(),
-            move |msg| {
-                let _ = coord_tx_a2a.send(CoordinatorEvent::PeerMessage(msg.clone()));
-            },
+            move |msg| ack_after_coordinator_takes(&coord_tx_a2a, msg),
         );
     }
 
@@ -2793,9 +2824,7 @@ fn run_repl_iocraft_dispatch(
             workspace,
             "team-lead".to_string(),
             runtime::HookAbortSignal::new(),
-            move |msg| {
-                let _ = coord_tx_local.send(CoordinatorEvent::PeerMessage(msg.clone()));
-            },
+            move |msg| ack_after_coordinator_takes(&coord_tx_local, msg),
         );
     }
 
@@ -2846,7 +2875,7 @@ fn run_repl_iocraft_dispatch(
                 }
                 continue;
             }
-            CoordinatorEvent::PeerMessage(msg) => {
+            CoordinatorEvent::PeerMessage(msg, ack) => {
                 repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
                 let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
                 if !turn_active {
@@ -2866,6 +2895,11 @@ fn run_repl_iocraft_dispatch(
                         .unwrap()
                         .submit_during_turn(prompt, input_queue::QueueMode::Queue);
                 }
+                // Taken: the message is this process's responsibility now, so
+                // the receiver may advance its cursor. What remains — the
+                // turn-input queue, an in-flight turn — are the same windows
+                // human input has, and a human can retype.
+                let _ = ack.send(());
                 continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {

@@ -53,6 +53,15 @@ enum AfterCtrlC {
     StreamHint,
     /// The input buffer observably empty — the proposed guard.
     ClearedBuffer,
+    /// Readiness re-established the way the test establishes it BEFORE Ctrl-C:
+    /// a keystroke that renders, then cleared again.
+    ///
+    /// An empty buffer says the clear landed; it does not say keystrokes are
+    /// being delivered to the input again. The key handler routes `Char` by
+    /// `current_slot`, and Ctrl-C's `InputEvent::Abort` has the coordinator call
+    /// `repl.ui.clear_question()` — an out-of-band slot reset. A character that
+    /// renders is the only observation that covers every such state.
+    ReProbe,
 }
 
 /// The text after the last prompt marker on the lowest row carrying one.
@@ -90,10 +99,29 @@ fn wait_for_input(sess: &mut PtySession, needle: &str) -> (bool, String, String)
     }
 }
 
+/// Block until the input buffer reads empty.
+fn wait_for_cleared(sess: &mut PtySession, round: usize) -> Result<(), String> {
+    let deadline = Instant::now() + RENDER_BUDGET;
+    loop {
+        if input_line(sess).is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let line = input_line(sess);
+            let screen = sess.render(|s| s.contents());
+            return Err(format!(
+                "round {round}: buffer still held {line:?}\n{screen}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
     let label = match arm {
         AfterCtrlC::StreamHint => "stream",
         AfterCtrlC::ClearedBuffer => "cleared",
+        AfterCtrlC::ReProbe => "reprobe",
     };
     let env = TestEnv::new(&format!("ctrlc-{label}-{round}"));
     let root = env.workspace_root().to_path_buf();
@@ -128,20 +156,23 @@ fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
             })?;
         }
         AfterCtrlC::ClearedBuffer => {
-            let deadline = Instant::now() + RENDER_BUDGET;
-            loop {
-                if input_line(&mut sess).is_empty() {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    let line = input_line(&mut sess);
-                    let screen = sess.render(|s| s.contents());
-                    return Err(format!(
-                        "round {round}: buffer still held {line:?} after Ctrl-C\n{screen}"
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(25));
+            wait_for_cleared(&mut sess, round)?;
+        }
+        AfterCtrlC::ReProbe => {
+            wait_for_cleared(&mut sess, round)?;
+            // A keystroke that renders — the same observation the test uses
+            // for readiness before Ctrl-C, repeated because Ctrl-C changed the
+            // state it was proving.
+            sess.send("~").expect("type re-probe");
+            let (probed, seen, screen) = wait_for_input(&mut sess, "~");
+            if !probed {
+                return Err(format!(
+                    "round {round}: input never accepted a keystroke after Ctrl-C \
+                     (last saw {seen:?})\n{screen}"
+                ));
             }
+            sess.send("\x15").expect("Ctrl-U to clear the re-probe");
+            wait_for_cleared(&mut sess, round)?;
         }
     }
 
@@ -171,21 +202,25 @@ fn measure(arm: AfterCtrlC) -> usize {
 }
 
 #[test]
-fn stream_hint_wait_versus_cleared_buffer_wait() {
+fn which_post_ctrlc_wait_stops_losing_keystrokes() {
     let stream_lost = measure(AfterCtrlC::StreamHint);
     let cleared_lost = measure(AfterCtrlC::ClearedBuffer);
+    let reprobe_lost = measure(AfterCtrlC::ReProbe);
 
     eprintln!(
-        "SUMMARY stream_hint={}/{ROUNDS} cleared_buffer={}/{ROUNDS}",
+        "SUMMARY stream_hint={}/{ROUNDS} cleared_buffer={}/{ROUNDS} reprobe={}/{ROUNDS}",
         ROUNDS - stream_lost,
-        ROUNDS - cleared_lost
+        ROUNDS - cleared_lost,
+        ROUNDS - reprobe_lost
     );
 
-    // Fail whenever either arm lost a round, so CI surfaces the dumps. The
-    // summary line is what discriminates the hypotheses.
+    // Fail whenever any arm lost a round, so CI surfaces the dumps. The summary
+    // line is what picks the guard: the previous run measured stream_hint 2/6
+    // and cleared_buffer 4/6, so waiting for the clear helps and is not enough.
     assert!(
-        stream_lost == 0 && cleared_lost == 0,
+        stream_lost == 0 && cleared_lost == 0 && reprobe_lost == 0,
         "keystrokes lost: stream_hint dropped {stream_lost} of {ROUNDS}, \
-         cleared_buffer dropped {cleared_lost} of {ROUNDS}"
+         cleared_buffer dropped {cleared_lost} of {ROUNDS}, \
+         reprobe dropped {reprobe_lost} of {ROUNDS}"
     );
 }

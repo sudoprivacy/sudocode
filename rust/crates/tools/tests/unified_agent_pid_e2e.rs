@@ -571,20 +571,10 @@ fn unified_mailbox_read_all_from_multiple_senders() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 7. ENVELOPE WIRE COMPAT: `text` alias → `body`
+// 7. ENVELOPE WIRE FORMAT
 // ═══════════════════════════════════════════════════════════════════════
 
-/// The `text` field alias must deserialize into `body` for backward compat
-/// with old local JSONL data.
-#[test]
-fn envelope_text_alias_deserializes_to_body() {
-    let raw = r#"{"from":"old-agent","to":"worker","text":"hello from old format"}"#;
-    let env: MailboxEnvelope = serde_json::from_str(raw).expect("text alias must parse");
-    assert_eq!(env.body, "hello from old format");
-    assert_eq!(env.from, "old-agent");
-}
-
-/// Serialization always uses `body`, never `text`.
+/// Serialization always uses `body`.
 #[test]
 fn envelope_serializes_body_not_text() {
     let env = MailboxEnvelope {

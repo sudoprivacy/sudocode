@@ -1,28 +1,40 @@
 //! TEMPORARY diagnostic — DO NOT MERGE.
 //!
-//! `iocraft_repl_ctrlc_hint_in_footer` has been failing intermittently on
-//! macOS CI since at least the #603 merge, always at the same step: after
-//! Ctrl-C, the test types `/exit` and the input line never shows it. The last
-//! captured failure had the hint already expired (the footer was back to
-//! normal) and a 10s budget, so the characters were not merely late — they were
-//! gone for the whole budget.
+//! `iocraft_repl_ctrlc_hint_in_footer` has failed intermittently on macOS CI
+//! since at least the #603 merge, always at the same step: after Ctrl-C the
+//! test types `/exit` and the input line never shows it. The captured failure
+//! had the prompt marker on screen, the hint already expired, and `/exit`
+//! absent for the whole 10s budget — the characters were not late, they were
+//! never there.
 //!
-//! A single green run proves nothing about an intermittent failure, so this
-//! measures instead of guessing. Two arms, same REPL, same keystrokes:
+//! ## The mechanism under test
 //!
-//! - `control` types `/exit` with no Ctrl-C before it.
-//! - `after_ctrlc` sends Ctrl-C, waits for the hint, then types `/exit`.
+//! Ctrl-C's handler does both of these in one pass (`repl_ui.rs`):
 //!
-//! Each arm runs `ROUNDS` times and reports how many rounds rendered the text.
-//! The comparison is the whole point: if `control` is clean and `after_ctrlc`
-//! is not, Ctrl-C is implicated and the next question is whether macOS is
-//! delivering it as a signal that resets the terminal mode (the hazard the
-//! readiness probe in `pty_repl_iocraft_features` already documents). If both
-//! arms drop rounds, the loss is in the send/render path and has nothing to do
-//! with Ctrl-C.
+//! ```ignore
+//! footer_hint.set(Some((hint_msg, Instant::now() + Duration::from_secs(3))));
+//! input_value.set(String::new());
+//! ```
 //!
-//! Reports a summary and only then asserts, so one CI run yields a rate rather
-//! than a single dump.
+//! If the frame carrying the hint can reach the PTY before the cleared buffer
+//! is observable, then a test that waits on the hint and types immediately has
+//! its characters inserted by `TextInput` and then wiped. Nothing appears.
+//!
+//! ## The experiment
+//!
+//! Two arms, differing only in what they wait for after Ctrl-C before typing:
+//!
+//! | arm | waits for |
+//! |---|---|
+//! | `stream-hint` | the hint in the PTY BYTE STREAM — what the real test does |
+//! | `cleared-buffer` | the input buffer observably EMPTY — the proposed guard |
+//!
+//! A lossy `stream-hint` arm beside a clean `cleared-buffer` arm confirms the
+//! mechanism and the fix together. Both clean says the mechanism is wrong and
+//! the loss is elsewhere. Both lossy says waiting for the clear is not enough.
+//!
+//! Reports a rate and dumps every lost round, so one CI run is informative
+//! rather than a coin flip. Windows does not reproduce this; read it off macOS.
 
 mod common;
 
@@ -34,24 +46,35 @@ use pty_expect::PtySession;
 const ROUNDS: usize = 6;
 const RENDER_BUDGET: Duration = Duration::from_secs(10);
 
-/// What the prompt row holds: the text after the last prompt glyph on the
-/// lowest row carrying one. Same rule as `pty_arrow_keys::input_line_of`,
-/// which has to survive the chrome rule sharing the input's row.
+/// What the arm waits for after Ctrl-C, before typing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterCtrlC {
+    /// The hint as it appears in the PTY byte stream — the real test's guard.
+    StreamHint,
+    /// The input buffer observably empty — the proposed guard.
+    ClearedBuffer,
+}
+
+/// The text after the last prompt marker on the lowest row carrying one.
+///
+/// Matches the marker anywhere on the row: when the chrome rule fills the
+/// terminal width exactly the input shares that row, so it reads
+/// `────…────❯ abc!` and does not start with the marker.
 fn input_line(sess: &mut PtySession) -> String {
     sess.render(|s| {
         s.contents()
             .lines()
             .rev()
             .find_map(|line| {
-                let glyph = line.rfind('\u{276f}')?;
-                Some(line[glyph + '\u{276f}'.len_utf8()..].trim().to_string())
+                let marker = line.rfind('\u{276f}')?;
+                Some(line[marker + '\u{276f}'.len_utf8()..].trim().to_string())
             })
             .unwrap_or_default()
     })
 }
 
-/// Poll the prompt row for `needle`. Returns whether it showed, plus the last
-/// thing seen and the final screen — the two facts a failing round needs.
+/// Poll the prompt row for `needle`. Returns whether it showed, what was last
+/// seen, and the final screen — the facts a lost round needs to be diagnosed.
 fn wait_for_input(sess: &mut PtySession, needle: &str) -> (bool, String, String) {
     let deadline = Instant::now() + RENDER_BUDGET;
     loop {
@@ -67,10 +90,12 @@ fn wait_for_input(sess: &mut PtySession, needle: &str) -> (bool, String, String)
     }
 }
 
-/// One round. `with_ctrlc` selects the arm. Returns `Ok(())` when `/exit`
-/// rendered, else a description of what the round saw instead.
-fn run_round(label: &str, round: usize, with_ctrlc: bool) -> Result<(), String> {
-    let env = TestEnv::new(&format!("{label}-{round}"));
+fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
+    let label = match arm {
+        AfterCtrlC::StreamHint => "stream",
+        AfterCtrlC::ClearedBuffer => "cleared",
+    };
+    let env = TestEnv::new(&format!("ctrlc-{label}-{round}"));
     let root = env.workspace_root().to_path_buf();
     std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
@@ -80,9 +105,9 @@ fn run_round(label: &str, round: usize, with_ctrlc: bool) -> Result<(), String> 
     );
     sess.set_default_timeout(RENDER_BUDGET);
 
-    // Readiness: a keystroke that RENDERS proves iocraft owns the keyboard.
-    // Read off the screen, not the byte stream — iocraft redraws the input in
-    // pieces, so the text need not appear contiguously in the stream.
+    // Readiness is identical in both arms so it cannot explain a difference: a
+    // keystroke that RENDERS proves iocraft owns the keyboard, which matters
+    // because until it does, ^C is still a terminal signal.
     sess.send("~probe~").expect("type readiness probe");
     let (probed, seen, screen) = wait_for_input(&mut sess, "~probe~");
     if !probed {
@@ -91,46 +116,32 @@ fn run_round(label: &str, round: usize, with_ctrlc: bool) -> Result<(), String> 
         ));
     }
 
-    if with_ctrlc {
-        sess.send("\x03").expect("send Ctrl-C");
-        // The hint is the observable that the Ctrl-C handler ran. Read it off
-        // the screen so a stale stream match cannot satisfy it.
-        let deadline = Instant::now() + RENDER_BUDGET;
-        loop {
-            let shown = sess.render(|s| s.contents().contains("Press Ctrl-C again to exit"));
-            if shown {
-                break;
-            }
-            if Instant::now() >= deadline {
+    sess.send("\x03").expect("send Ctrl-C");
+
+    match arm {
+        AfterCtrlC::StreamHint => {
+            // The real test's guard, verbatim: match the hint in the byte
+            // stream and type at once.
+            sess.expect("Press Ctrl-C again to exit").map_err(|e| {
                 let screen = sess.render(|s| s.contents());
-                return Err(format!(
-                    "round {round}: Ctrl-C hint never appeared\n{screen}"
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(25));
+                format!("round {round}: hint never reached the stream: {e}\n{screen}")
+            })?;
         }
-        // Ctrl-C clears the input, so the probe leaves nothing behind. Confirm
-        // that, so a round that starts with leftovers is not mistaken for one
-        // that lost keystrokes.
-        let after = input_line(&mut sess);
-        if after.contains("~probe~") {
-            return Err(format!(
-                "round {round}: Ctrl-C did not clear the input (saw {after:?})"
-            ));
-        }
-    } else {
-        // Same starting state as the Ctrl-C arm, reached without Ctrl-C, so the
-        // two arms differ in exactly one thing.
-        sess.send("\x15").expect("Ctrl-U to clear");
-        let deadline = Instant::now() + RENDER_BUDGET;
-        loop {
-            if !input_line(&mut sess).contains("~probe~") {
-                break;
+        AfterCtrlC::ClearedBuffer => {
+            let deadline = Instant::now() + RENDER_BUDGET;
+            loop {
+                if input_line(&mut sess).is_empty() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let line = input_line(&mut sess);
+                    let screen = sess.render(|s| s.contents());
+                    return Err(format!(
+                        "round {round}: buffer still held {line:?} after Ctrl-C\n{screen}"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
             }
-            if Instant::now() >= deadline {
-                return Err(format!("round {round}: Ctrl-U never cleared the input"));
-            }
-            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -144,41 +155,37 @@ fn run_round(label: &str, round: usize, with_ctrlc: bool) -> Result<(), String> 
     Ok(())
 }
 
-fn measure(label: &str, with_ctrlc: bool) -> Vec<String> {
-    let mut failures = Vec::new();
+fn measure(arm: AfterCtrlC) -> usize {
+    let mut lost = 0;
     for round in 0..ROUNDS {
-        match run_round(label, round, with_ctrlc) {
-            Ok(()) => eprintln!("[{label}] round {round}: /exit rendered"),
+        match run_round(arm, round) {
+            Ok(()) => eprintln!("[{arm:?}] round {round}: /exit rendered"),
             Err(why) => {
-                eprintln!("[{label}] round {round}: LOST\n{why}");
-                failures.push(why);
+                eprintln!("[{arm:?}] round {round}: LOST\n{why}");
+                lost += 1;
             }
         }
     }
-    eprintln!(
-        "[{label}] {}/{ROUNDS} rounds rendered /exit",
-        ROUNDS - failures.len()
-    );
-    failures
+    eprintln!("[{arm:?}] {}/{ROUNDS} rounds rendered /exit", ROUNDS - lost);
+    lost
 }
 
 #[test]
-fn measure_keystroke_loss_with_and_without_ctrlc() {
-    let control = measure("control", false);
-    let after_ctrlc = measure("after-ctrlc", true);
+fn stream_hint_wait_versus_cleared_buffer_wait() {
+    let stream_lost = measure(AfterCtrlC::StreamHint);
+    let cleared_lost = measure(AfterCtrlC::ClearedBuffer);
 
     eprintln!(
-        "SUMMARY control={}/{ROUNDS} after_ctrlc={}/{ROUNDS}",
-        ROUNDS - control.len(),
-        ROUNDS - after_ctrlc.len()
+        "SUMMARY stream_hint={}/{ROUNDS} cleared_buffer={}/{ROUNDS}",
+        ROUNDS - stream_lost,
+        ROUNDS - cleared_lost
     );
 
-    // Fail whenever either arm dropped a round, so CI surfaces the dumps. The
-    // summary line above is what discriminates the hypotheses.
+    // Fail whenever either arm lost a round, so CI surfaces the dumps. The
+    // summary line is what discriminates the hypotheses.
     assert!(
-        control.is_empty() && after_ctrlc.is_empty(),
-        "keystrokes were lost: control dropped {} of {ROUNDS}, after_ctrlc dropped {} of {ROUNDS}",
-        control.len(),
-        after_ctrlc.len()
+        stream_lost == 0 && cleared_lost == 0,
+        "keystrokes lost: stream_hint dropped {stream_lost} of {ROUNDS}, \
+         cleared_buffer dropped {cleared_lost} of {ROUNDS}"
     );
 }

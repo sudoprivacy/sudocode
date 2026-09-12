@@ -60,6 +60,19 @@ impl Mailbox {
         }
     }
 
+    /// Whether the backend frames appends at `path` itself (a DT_STREAM record
+    /// per append) rather than leaving framing to us (a JSONL line per append).
+    ///
+    /// Asked per call, deliberately — do NOT cache it on the struct. For
+    /// `KernelFsBackend` this is a real `sys_stat`, so the answer CHANGES the
+    /// moment [`Self::ensure_inbox`] creates the stream: resolved once at
+    /// construction it would be `false` forever, and a provisioned DT_STREAM
+    /// inbox would be written and read as JSONL. The call is cheap — a string
+    /// test for the VFS backend, a constant `false` for the file one.
+    fn backend_frames(&self, path: &str) -> bool {
+        self.backend.is_append_stream(path).unwrap_or(false)
+    }
+
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
     ///
     /// The one place that says what a nexus A2A mailbox is made of. Pairing a
@@ -109,7 +122,7 @@ impl Mailbox {
     /// as one, so this returns early; a file backend creates the append log.
     pub fn ensure_inbox(&self) -> Result<(), String> {
         let path = self.own_inbox_path();
-        let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);
+        let is_stream = self.backend_frames(&path);
         if is_stream {
             return Ok(());
         }
@@ -149,7 +162,7 @@ impl Mailbox {
         }
         let path = self.convention.inbox_path(&envelope.to);
 
-        if self.backend.is_append_stream(&path).unwrap_or(false) {
+        if self.backend_frames(&path) {
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())
@@ -205,7 +218,7 @@ impl Mailbox {
     /// never echoes back to us, and skips senderless or empty-body frames.
     pub fn poll(&self, cursor: u64, block_ms: u64) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.own_inbox_path();
-        let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);
+        let is_stream = self.backend_frames(&path);
         if is_stream {
             self.poll_stream(&path, cursor, block_ms)
         } else {
@@ -283,7 +296,7 @@ impl Mailbox {
     /// turns.
     pub fn read_all(&self, recipient: &str) -> Result<Vec<MailboxEnvelope>, String> {
         let path = self.convention.inbox_path(recipient);
-        let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);
+        let is_stream = self.backend_frames(&path);
         if is_stream {
             let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
             Ok(envs)

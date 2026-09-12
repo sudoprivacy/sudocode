@@ -183,3 +183,135 @@ fn non_empty_env(key: &str) -> Option<String> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test-only: the module's own code no longer touches envelopes — the
+    // transport that did moved to `crate::mailbox`. These tests stay because
+    // they pin the WIRE FORMAT, which both transports share.
+    use crate::agent_mailbox::MailboxEnvelope;
+
+    #[test]
+    fn from_env_off_partial_and_full() {
+        // All env cases run in ONE test fn: these NEXUS_A2A_* / NEXUS_* vars
+        // are read by no other test, so sequential mutation here is race-free
+        // even under the parallel test harness.
+        let keys = [
+            ENDPOINT_ENV,
+            AGENT_ENV,
+            PEERS_ENV,
+            API_KEY_ENV,
+            CA_PEM_ENV,
+            CLIENT_CERT_ENV,
+            CLIENT_KEY_ENV,
+            TLS_SERVER_NAME_ENV,
+        ];
+        let clear = || {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+        };
+
+        clear();
+        // Off: no endpoint -> the fast Ok(None) path.
+        assert!(Config::from_env().unwrap().is_none());
+
+        // Partial: endpoint set but no self-name -> fail loud.
+        std::env::set_var(ENDPOINT_ENV, "127.0.0.1:2126");
+        assert!(Config::from_env().is_err());
+
+        // Enabled plaintext (loopback / auth-off): no TLS.
+        std::env::set_var(AGENT_ENV, "operator");
+        std::env::set_var(PEERS_ENV, "win-ai, mac-ai");
+        let cfg = Config::from_env().unwrap().unwrap();
+        assert_eq!(cfg.agent, "operator");
+        assert_eq!(cfg.peers, vec!["win-ai".to_string(), "mac-ai".to_string()]);
+        assert!(cfg.tls.is_none());
+
+        // Partial mTLS: a CA without the client cert/key the cluster's mutual
+        // TLS mandates -> fail loud (never a silent server-auth-only downgrade).
+        std::env::set_var(CA_PEM_ENV, "/tmp/ca.pem");
+        assert!(Config::from_env().is_err());
+        std::env::set_var(CLIENT_CERT_ENV, "/tmp/client.pem");
+        assert!(Config::from_env().is_err());
+
+        // Full mTLS: server name defaults to the cluster SAN.
+        std::env::set_var(CLIENT_KEY_ENV, "/tmp/client.key");
+        let tls = Config::from_env().unwrap().unwrap().tls.unwrap();
+        assert_eq!(tls.ca_pem, "/tmp/ca.pem");
+        assert_eq!(tls.server_name, DEFAULT_TLS_SERVER_NAME);
+
+        clear();
+    }
+
+    #[test]
+    fn peer_prompt_names_self_and_lists_known_peers() {
+        let cfg = Config {
+            endpoint: "127.0.0.1:2126".into(),
+            agent: "operator".into(),
+            peers: vec!["win-ai".into(), "mac-ai".into()],
+            api_key: String::new(),
+            tls: None,
+        };
+        let p = cfg.peer_system_prompt();
+        assert!(p.contains("\"operator\""), "prompt must name self: {p}");
+        assert!(p.contains("send"), "prompt must teach the tool: {p}");
+        assert!(
+            p.contains("win-ai, mac-ai"),
+            "prompt must list known peers: {p}"
+        );
+    }
+
+    #[test]
+    fn peer_prompt_omits_peer_list_when_none_known() {
+        let cfg = Config {
+            endpoint: "127.0.0.1:2126".into(),
+            agent: "operator".into(),
+            peers: vec![],
+            api_key: String::new(),
+            tls: None,
+        };
+        let p = cfg.peer_system_prompt();
+        assert!(p.contains("\"operator\""));
+        assert!(!p.contains("Known peers"), "no peer line when empty: {p}");
+    }
+
+    #[test]
+    fn envelope_round_trips_via_unified_type() {
+        let env = MailboxEnvelope {
+            from: "operator".into(),
+            to: "win-ai".into(),
+            body: "hi".into(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
+        };
+        let back = MailboxEnvelope::from_bytes(&env.to_bytes()).expect("envelope round-trip");
+        assert_eq!(back.from, "operator");
+        assert_eq!(back.body, "hi");
+    }
+
+    #[test]
+    fn unified_envelope_interops_with_a2a_3field_wire() {
+        // A 3-field JSON written by an old a2a::MailboxEnvelope writer
+        // must deserialise into the unified type with extras defaulted.
+        let wire = br#"{"from":"agent-a","to":"agent-b","body":"hello"}"#;
+        let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
+        assert_eq!(env.from, "agent-a");
+        assert_eq!(env.body, "hello");
+        assert!(env.kind.is_empty());
+        assert_eq!(env.timestamp, 0);
+    }
+
+    #[test]
+    fn unified_envelope_reads_legacy_text_field() {
+        // Old local JSONL used "text" instead of "body".
+        let wire = br#"{"from":"a","to":"b","text":"legacy","kind":"message"}"#;
+        let env = MailboxEnvelope::from_bytes(wire).expect("text alias compat");
+        assert_eq!(env.body, "legacy");
+    }
+}

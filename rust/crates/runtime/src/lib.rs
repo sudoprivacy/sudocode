@@ -32,6 +32,7 @@ pub mod image_registry;
 mod json;
 mod lane_events;
 pub mod lsp_client;
+pub mod mailbox;
 mod mcp;
 mod mcp_client;
 mod mcp_connection;

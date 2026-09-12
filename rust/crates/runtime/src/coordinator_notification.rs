@@ -63,7 +63,7 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
     let envelope = MailboxEnvelope {
         from: from.to_string(),
         to: COORDINATOR_INBOX_RECIPIENT.to_string(),
-        text: task_notification_xml.to_string(),
+        body: task_notification_xml.to_string(),
         summary: None,
         timestamp: 0, // filled by append_envelope
         color: None,
@@ -109,7 +109,7 @@ pub fn drain(workspace_root: &Path) -> Result<Vec<String>, String> {
     let out: Vec<String> = envelopes[consumed..]
         .iter()
         .filter(|env| env.kind == kinds::TASK_NOTIFICATION)
-        .map(|env| env.text.clone())
+        .map(|env| env.body.clone())
         .collect();
     write_consumed_offset(workspace_root, envelopes.len())?;
     Ok(out)
@@ -257,7 +257,7 @@ mod tests {
             MailboxEnvelope {
                 from: "team-lead".to_string(),
                 to: COORDINATOR_INBOX_RECIPIENT.to_string(),
-                text: "just chatting".to_string(),
+                body: "just chatting".to_string(),
                 summary: None,
                 timestamp: 0,
                 color: None,

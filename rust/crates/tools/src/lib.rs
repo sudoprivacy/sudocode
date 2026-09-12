@@ -2730,7 +2730,7 @@ fn write_envelope(
     let envelope = MailboxEnvelope {
         from: from.to_string(),
         to: recipient.to_string(),
-        text: text.to_string(),
+        body: text.to_string(),
         summary: summary.map(str::to_string),
         timestamp: 0, // filled in by append_envelope
         color: None,
@@ -5665,7 +5665,7 @@ fn compose_next_turn_from_envelopes(
             header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
         }
         header.push('>');
-        blocks.push(format!("{header}\n{}\n</{tag}>", env.text));
+        blocks.push(format!("{header}\n{}\n</{tag}>", env.body));
     }
     blocks.join("\n\n")
 }
@@ -8682,10 +8682,11 @@ mod tests {
         classify_lane_failure, derive_agent_state, execute_agent_inline_with_work,
         execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
         global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
-        normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput,
-        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, SubagentToolExecutor,
+        normalize_pid_input, normalize_send_input, normalize_subagent_type,
+        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
+        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
+        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        LaneEventName, LaneFailureClass, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -12603,5 +12604,92 @@ printf 'pwsh:%s' "$1"
             )
             .into_bytes()
         }
+    }
+
+    // ── Unified send alias routing ────────────────────────────────────
+
+    #[test]
+    fn canonicalize_send_message_pascal_case_to_send() {
+        assert_eq!(canonicalize_tool_name("SendMessage"), "send");
+    }
+
+    #[test]
+    fn canonicalize_send_message_snake_case_to_send() {
+        assert_eq!(canonicalize_tool_name("send_message"), "send");
+    }
+
+    #[test]
+    fn canonicalize_send_stays_send() {
+        assert_eq!(canonicalize_tool_name("send"), "send");
+    }
+
+    #[test]
+    fn canonicalize_preserves_unknown_tool_name() {
+        assert_eq!(canonicalize_tool_name("bash"), "bash");
+        assert_eq!(canonicalize_tool_name("EnterPlanMode"), "EnterPlanMode");
+    }
+
+    #[test]
+    fn normalize_send_input_bridges_body_to_message() {
+        let input = json!({"to": "worker", "body": "hello"});
+        let out = normalize_send_input(&input);
+        assert_eq!(out["message"], "hello");
+        assert!(out.get("body").is_none(), "body should be removed");
+        assert_eq!(out["to"], "worker");
+    }
+
+    #[test]
+    fn normalize_send_input_preserves_message_when_present() {
+        let input = json!({"to": "worker", "message": "hello", "body": "ignored"});
+        let out = normalize_send_input(&input);
+        assert_eq!(out["message"], "hello");
+        assert_eq!(out["body"], "ignored", "body kept when message exists");
+    }
+
+    #[test]
+    fn normalize_send_input_no_body_no_message() {
+        let input = json!({"to": "worker"});
+        let out = normalize_send_input(&input);
+        assert!(out.get("message").is_none());
+        assert!(out.get("body").is_none());
+    }
+
+    // ── Unified pid alias routing ─────────────────────────────────────
+
+    #[test]
+    fn canonicalize_task_stop_to_pid_kill() {
+        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
+    }
+
+    #[test]
+    fn canonicalize_task_get_and_list_to_pid_status() {
+        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
+        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
+    }
+
+    #[test]
+    fn canonicalize_task_output_to_pid_output() {
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+    }
+
+    #[test]
+    fn canonicalize_agent_to_agent_spawn() {
+        assert_eq!(canonicalize_tool_name("Agent"), "agent_spawn");
+    }
+
+    #[test]
+    fn normalize_pid_input_bridges_pid_to_task_id() {
+        let input = json!({"pid": "abc-123"});
+        let out = normalize_pid_input(&input);
+        assert_eq!(out["task_id"], "abc-123");
+        assert!(out.get("pid").is_none());
+    }
+
+    #[test]
+    fn normalize_pid_input_preserves_task_id_when_present() {
+        let input = json!({"task_id": "existing", "pid": "ignored"});
+        let out = normalize_pid_input(&input);
+        assert_eq!(out["task_id"], "existing");
+        assert_eq!(out["pid"], "ignored", "pid kept when task_id exists");
     }
 }

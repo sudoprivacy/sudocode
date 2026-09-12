@@ -1,41 +1,35 @@
-//! Filesystem-backed per-agent mailbox for the SendMessage inter-agent
-//! coordination surface.
+//! Unified agent mailbox envelope + filesystem-backed local mailbox.
 //!
-//! Ported semantics from `sudoprivacy/claude-code`'s
-//! `utils/teammateMailbox.ts` — the flag-off default path. Each
-//! recipient has one append-only JSONL file at
-//! `<workspace>/.sudocode-inbox/<recipient>.jsonl`. The receiving
-//! agent (e.g. a task launched by `Agent(run_in_background=true)`) is
-//! expected to read new lines from its own inbox and process them at
-//! its next tool round. This crate only writes; consumption lives
-//! wherever the receiving agent loop lives.
+//! [`MailboxEnvelope`] is the SINGLE envelope type for all inter-agent
+//! messaging — both the local JSONL mailbox (`.sudocode-inbox/*.jsonl`,
+//! used by coordinator sub-agents) and the nexus DT_STREAM A2A path
+//! (`/agents/<name>/chat-with-me`, used for cross-machine messaging).
+//! The a2a substrate's `from`-stamping hook operates on raw JSON and
+//! only touches `from`, so the extra fields are transparent to it.
 //!
-//! The mailbox directory is intentionally under the workspace root
-//! (not `~/.nexus/sudocode`) so that per-project state stays with the
-//! project and is naturally cleaned when the workspace is discarded.
+//! ## Wire compatibility
 //!
-//! ## Envelope shape (mirrors CC-fork)
+//! The canonical field name for the message body is `body` (matching
+//! the nexus a2a convention). The `text` alias is accepted on read for
+//! backward compat with existing local JSONL data written before the
+//! unification.
 //!
-//! Each JSONL line is a `MailboxEnvelope`:
+//! All fields beyond `{from, to, body}` carry `#[serde(default)]` and
+//! `skip_serializing_if`, so:
+//! - An envelope written by the old 3-field nexus path deserialises
+//!   cleanly (extras default to zero/None/empty).
+//! - An envelope written with extras is ignored by old readers that
+//!   use `a2a::MailboxEnvelope` (which silently drops unknown fields).
 //!
-//! ```json
-//! {
-//!   "from": "team-lead",
-//!   "to": "researcher",
-//!   "text": "look into the failing test",
-//!   "summary": "investigate flaky test",
-//!   "timestamp": 1234567890,
-//!   "color": null,
-//!   "kind": "message"
-//! }
-//! ```
+//! ## Local JSONL mailbox
+//!
+//! Each recipient has one append-only JSONL file at
+//! `<workspace>/.sudocode-inbox/<recipient>.jsonl`.
 //!
 //! For structured messages (`shutdown_request`,
-//! `shutdown_response`, `plan_approval_response`), `text` is the
-//! JSON-encoded structured body and `kind` is that message type.
-//! Recipients parse `kind` before deciding how to interpret `text`.
-//! This shape lets a single JSONL sink handle both plain text and
-//! structured envelopes without a schema fork.
+//! `shutdown_response`, `plan_approval_response`), `body` is the
+//! JSON-encoded structured payload and `kind` is that message type.
+//! Recipients parse `kind` before deciding how to interpret `body`.
 
 use std::fs;
 use std::io::Write as _;
@@ -45,29 +39,57 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// A single mailbox envelope. `serde` derives ensure the JSONL
-/// wire-format is stable across producer/consumer versions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Unified mailbox envelope — the ONE envelope type for all inter-agent
+/// messaging (local JSONL + nexus DT_STREAM A2A).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxEnvelope {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
+    #[serde(default)]
     pub to: String,
     /// Message body. For `kind == "message"` this is user-facing text.
-    /// For structured `kind` values it is the JSON-encoded body of the
-    /// structured message (parsed by the recipient).
-    pub text: String,
+    /// For structured `kind` values it is the JSON-encoded payload.
+    /// Accepts `"text"` on read for backward compat with old local JSONL.
+    #[serde(default, alias = "text")]
+    pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Unix seconds. `now_secs()` at write time.
+    /// Unix seconds. `now_secs()` at write time for local JSONL;
+    /// 0 when read from nexus (the stream carries its own ordering).
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// Envelope kind: `message` (default) | `shutdown_request` |
-    /// `shutdown_response` | `plan_approval_response`.
+    /// `shutdown_response` | `plan_approval_response` | `task_notification`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     /// Correlator for shutdown/plan-approval request/response pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+impl MailboxEnvelope {
+    /// Serialise to JSON bytes (the nexus DT_STREAM wire format).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).unwrap_or_default()
+    }
+
+    /// Parse from JSON bytes. Returns `None` on non-JSON content.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+/// Default DT_STREAM capacity for mailbox streams (matches
+/// `a2a::mailbox_stamping_policy::MAILBOX_STREAM_CAPACITY`).
+pub const DEFAULT_STREAM_CAPACITY: u64 = 65_536;
 
 /// Serialization-friendly kind constants — recipients match on these
 /// strings.
@@ -171,6 +193,26 @@ pub fn read_all(workspace_root: &Path, recipient: &str) -> Result<Vec<MailboxEnv
     }
     let text =
         fs::read_to_string(&path).map_err(|e| format!("read mailbox {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(env) = serde_json::from_str::<MailboxEnvelope>(trimmed) {
+            out.push(env);
+        }
+    }
+    Ok(out)
+}
+
+/// Read a mailbox JSONL file by path (used by [`crate::mailbox::Mailbox`]).
+pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(p).map_err(|e| format!("read mailbox {path}: {e}"))?;
     let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();

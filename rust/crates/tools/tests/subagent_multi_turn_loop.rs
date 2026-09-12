@@ -60,7 +60,7 @@ fn envelope(kind: &str, from: &str, text: &str) -> MailboxEnvelope {
     MailboxEnvelope {
         from: from.to_string(),
         to: String::new(), // filled by append_envelope
-        text: text.to_string(),
+        body: text.to_string(),
         summary: None,
         timestamp: 0,
         color: None,

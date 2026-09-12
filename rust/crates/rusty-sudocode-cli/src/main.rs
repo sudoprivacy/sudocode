@@ -2149,6 +2149,17 @@ struct SlashSelectionHandler(
     >,
 );
 
+/// Events from all sources into the coordinator REPL loop.
+///
+/// Multi-producer single-consumer: iocraft UI produces `Human`, the
+/// A2A poller produces `PeerMessage`, and the turn runner produces
+/// `TurnComplete`.
+enum CoordinatorEvent {
+    Human(repl_ui::InputEvent),
+    PeerMessage(runtime::agent_mailbox::MailboxEnvelope),
+    TurnComplete,
+}
+
 /// Show an interactive selection question via iocraft's InputSlot and
 /// register a callback to handle the answer. The coordinator loop routes
 /// the `QuestionAnswer` event to the returned handler.
@@ -2611,38 +2622,53 @@ fn run_repl_iocraft_dispatch(
     let shared_mode = input_queue::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
 
-    // Spawn the iocraft REPL UI on a dedicated thread.
+    // Spawn the iocraft REPL UI on a dedicated thread, then decompose the
+    // handle so `input_rx` can be forwarded into the unified event channel.
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
+    let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     // Route LiveCli output through iocraft's OutputSender so it goes
     // through split_for_iocraft and renders correctly in raw mode.
-    cli.iocraft_output = Some(repl.output.clone());
+    cli.iocraft_output = Some(repl_output.clone());
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
-    // nexus A2A receive-half: when configured, surface peer messages into the
-    // REPL as they arrive. The poller runs for the whole interactive session;
-    // its daemon thread is reaped by the `process::exit(0)` at the end of this
-    // dispatch (the render-loop thread is left the same way), so it needs no
-    // explicit shutdown. The session was already dialed in
-    // `build_runtime_for_cwd`, so this just reuses the cached handle.
+    // Unified coordinator event channel. All event sources (UI input,
+    // A2A peer messages, turn completion) converge here so the loop
+    // blocks on a single recv() with no timeout-based polling.
+    let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
+
+    // Bridge: forward iocraft InputEvents as CoordinatorEvent::Human.
+    let coord_tx_input = coord_tx.clone();
+    let _input_bridge = thread::Builder::new()
+        .name("input-bridge".into())
+        .spawn(move || {
+            while let Ok(evt) = input_rx.recv() {
+                if coord_tx_input.send(CoordinatorEvent::Human(evt)).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn input bridge");
+
+    // nexus A2A receive-half: peer messages feed into the coordinator
+    // event channel, replacing the old println side-channel. The REPL
+    // loop handles display and (future) turn injection.
     if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
-        let output = repl.output.clone();
+        let coord_tx_a2a = coord_tx.clone();
         let _poller = engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             runtime::HookAbortSignal::new(),
             move |msg| {
-                output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+                let _ = coord_tx_a2a.send(CoordinatorEvent::PeerMessage(msg.clone()));
             },
         );
     }
 
-    // Coordinator loop on the current thread. Reads InputEvents from the
-    // iocraft UI and dispatches turns via the same TurnInputCoordinator +
-    // runner-thread pattern as the rustyline-based coordinator.
+    // Coordinator loop on the current thread. All events arrive through
+    // `coord_rx` — no timeout-based polling needed.
     let coord = Arc::new(Mutex::new(input_queue::TurnInputCoordinator::new()));
-    let (turn_tx, turn_rx) = mpsc::sync_channel::<()>(1);
     let mut turn_active = false;
     let mut runner_handle: Option<thread::JoinHandle<()>> = None;
     // Pending interactive slash command state: when a slash command needs
@@ -2653,249 +2679,235 @@ fn run_repl_iocraft_dispatch(
     let mut pending_slash_selection: Option<SlashSelectionHandler> = None;
 
     loop {
-        // When idle, block on input; when a turn is running, poll both
-        // channels with a 100ms timeout.
-        let event = if !turn_active {
-            match repl.input_rx.recv() {
-                Ok(evt) => Some(evt),
-                Err(_) => {
-                    cancel_pending_question_answer(&pending_question_answer);
-                    repl.ui.clear_question();
-                    if let Some(h) = runner_handle.take() {
-                        let _ = commands.send(EngineCommand::Cancel);
-                        let _ = h.join();
-                    }
-                    break;
-                }
-            }
-        } else {
-            match repl.input_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(evt) => Some(evt),
-                Err(RecvTimeoutError::Timeout) => {
-                    // Check if a turn finished.
-                    if turn_rx.try_recv().is_ok() {
-                        turn_active = false;
-                        if let Some(h) = runner_handle.take() {
-                            let _ = h.join();
-                        }
-                        let next = coord.lock().unwrap().drain_next();
-                        if let Some(next) = next {
-                            turn_active = true;
-                            runner_handle = Some(spawn_iocraft_turn(
-                                Arc::clone(&cli_shared),
-                                next.prompt,
-                                repl.output.clone(),
-                                repl.ui.clone(),
-                                repl.spinner.clone(),
-                                Arc::clone(&pending_question_answer),
-                                turn_tx.clone(),
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    cancel_pending_question_answer(&pending_question_answer);
-                    repl.ui.clear_question();
-                    // Render loop exited — clean up runner if active.
-                    if let Some(h) = runner_handle.take() {
-                        let _ = commands.send(EngineCommand::Cancel);
-                        let _ = h.join();
-                    }
-                    break;
-                }
-            }
-        };
-
-        let Some(event) = event else { continue };
-
-        match event {
-            repl_ui::InputEvent::Exit => {
+        let event = match coord_rx.recv() {
+            Ok(evt) => evt,
+            Err(_) => {
                 cancel_pending_question_answer(&pending_question_answer);
-                repl.ui.clear_question();
+                repl_ui_cmd.clear_question();
                 if let Some(h) = runner_handle.take() {
                     let _ = commands.send(EngineCommand::Cancel);
                     let _ = h.join();
                 }
-                let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                if let Err(e) = cli_lock.persist_session() {
-                    repl.output
-                        .println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
-                }
                 break;
             }
-            repl_ui::InputEvent::Abort => {
-                cancel_pending_question_answer(&pending_question_answer);
-                repl.ui.clear_question();
-                if runner_handle.is_some() {
-                    let _ = commands.send(EngineCommand::Cancel);
-                }
-            }
-            repl_ui::InputEvent::Submit(text) => {
-                if text.trim() == "/exit" || text.trim() == "/quit" {
-                    cancel_pending_question_answer(&pending_question_answer);
-                    repl.ui.clear_question();
-                    if runner_handle.is_some() {
-                        let _ = commands.send(EngineCommand::Cancel);
-                    }
-                    if let Some(h) = runner_handle.take() {
-                        let _ = h.join();
-                    }
-                    let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                    if let Err(e) = cli_lock.persist_session() {
-                        repl.output
-                            .println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
-                    }
-                    break;
-                }
+        };
 
-                // Try slash command dispatch.
-                let trimmed = text.trim();
-                let is_slash = match SlashCommand::parse(trimmed) {
-                    Ok(Some(SlashCommand::Config { section: None })) => {
-                        // Interactive config tree browser via FieldSchema SSOT.
-                        let cwd = env::current_dir().unwrap_or_default();
-                        let loader = runtime::ConfigLoader::default_for(&cwd);
-                        let settings_path = loader.config_home().join("settings.json");
-                        let sudocode_path = loader.config_home().join("sudocode.json");
-                        pending_slash_selection = Some(cli::config_ui::build_config_tree_handler(
-                            &repl.ui,
-                            settings_path,
-                            sudocode_path,
-                        ));
-                        true
-                    }
-                    Ok(Some(SlashCommand::Model { model: None })) => {
-                        // Interactive model picker via iocraft InputSlot.
-                        let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                        let sudocode_config = load_sudocode_config_for_current_dir();
-                        let config_keys: Vec<String> =
-                            sudocode_config.models.keys().cloned().collect();
-                        let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
-                        let current = cli_lock.lifecycle.current_model();
-                        drop(cli_lock);
-
-                        let options = models
-                            .iter()
-                            .map(|m| repl_ui::QuestionOptionView {
-                                label: m.clone(),
-                                value: m.clone(),
-                                description: None,
-                                recommended: *m == current,
-                                is_navigable: false,
-                            })
-                            .collect();
-                        pending_slash_selection = Some(show_slash_selection(
-                            &repl.ui,
-                            repl_ui::QuestionPromptView {
-                                title: Some("Model".to_string()),
-                                description: Some(format!("Current: {current}")),
-                                index: 0,
-                                total: 1,
-                                prompt: "Select model".to_string(),
-                                options,
-                                allow_custom_input: true,
-                                custom_input_hint: Some("or type a model name".to_string()),
-                                force_fuzzy_select: false,
-                                back_value: None,
-                            },
-                            models,
-                            |model_name, cli, out| {
-                                let mut cli_lock = cli.lock().expect("LiveCli mutex poisoned");
-                                match cli_lock.set_model(Some(model_name)) {
-                                    Ok(true) => {
-                                        if let Err(e) = cli_lock.persist_session() {
-                                            out.println(&format!(
-                                                "{}{e}{}",
-                                                ansi_fg(theme().error),
-                                                RESET
-                                            ));
-                                        }
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => out.println(&format!(
-                                        "{}{e}{}",
-                                        ansi_fg(theme().error),
-                                        RESET
-                                    )),
-                                }
-                                None
-                            },
-                        ));
-                        true
-                    }
-                    Ok(Some(command)) => {
-                        let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                        match cli_lock.handle_repl_command(command) {
-                            Ok(true) => {
-                                if let Err(e) = cli_lock.persist_session() {
-                                    repl.output.println(&format!(
-                                        "{}{e}{}",
-                                        ansi_fg(theme().error),
-                                        RESET
-                                    ));
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(e) => repl.output.println(&format!(
-                                "{}{e}{}",
-                                ansi_fg(theme().error),
-                                RESET
-                            )),
-                        }
-                        true
-                    }
-                    Ok(None) => false,
-                    Err(error) => {
-                        repl.output
-                            .println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
-                        true
-                    }
-                };
-                if is_slash {
-                    continue;
+        match event {
+            CoordinatorEvent::TurnComplete => {
+                turn_active = false;
+                if let Some(h) = runner_handle.take() {
+                    let _ = h.join();
                 }
-
-                // Route to turn.
-                if !turn_active {
-                    let next = coord.lock().unwrap().submit_when_idle(text);
+                let next = coord.lock().unwrap().drain_next();
+                if let Some(next) = next {
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
                         next.prompt,
-                        repl.output.clone(),
-                        repl.ui.clone(),
-                        repl.spinner.clone(),
+                        repl_output.clone(),
+                        repl_ui_cmd.clone(),
+                        repl_spinner.clone(),
                         Arc::clone(&pending_question_answer),
-                        turn_tx.clone(),
+                        coord_tx.clone(),
                     ));
-                } else {
-                    let outcome = coord
-                        .lock()
-                        .unwrap()
-                        .submit_during_turn(text, input_queue::load_queue_mode(&shared_mode));
-                    match outcome {
-                        input_queue::SubmitOutcome::Queued => {}
-                        input_queue::SubmitOutcome::Interrupt => {
+                }
+                continue;
+            }
+            CoordinatorEvent::PeerMessage(msg) => {
+                repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+                continue;
+            }
+            CoordinatorEvent::Human(input_event) => match input_event {
+                repl_ui::InputEvent::Exit => {
+                    cancel_pending_question_answer(&pending_question_answer);
+                    repl_ui_cmd.clear_question();
+                    if let Some(h) = runner_handle.take() {
+                        let _ = commands.send(EngineCommand::Cancel);
+                        let _ = h.join();
+                    }
+                    let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                    if let Err(e) = cli_lock.persist_session() {
+                        repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                    }
+                    break;
+                }
+                repl_ui::InputEvent::Abort => {
+                    cancel_pending_question_answer(&pending_question_answer);
+                    repl_ui_cmd.clear_question();
+                    if runner_handle.is_some() {
+                        let _ = commands.send(EngineCommand::Cancel);
+                    }
+                }
+                repl_ui::InputEvent::Submit(text) => {
+                    if text.trim() == "/exit" || text.trim() == "/quit" {
+                        cancel_pending_question_answer(&pending_question_answer);
+                        repl_ui_cmd.clear_question();
+                        if runner_handle.is_some() {
                             let _ = commands.send(EngineCommand::Cancel);
                         }
-                        input_queue::SubmitOutcome::Rejected => {
-                            repl.output.println(
-                                &format!("{DIM}(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead){RESET}"),
-                            );
+                        if let Some(h) = runner_handle.take() {
+                            let _ = h.join();
+                        }
+                        let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                        if let Err(e) = cli_lock.persist_session() {
+                            repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+                        }
+                        break;
+                    }
+
+                    // Try slash command dispatch.
+                    let trimmed = text.trim();
+                    let is_slash = match SlashCommand::parse(trimmed) {
+                        Ok(Some(SlashCommand::Config { section: None })) => {
+                            // Interactive config tree browser via FieldSchema SSOT.
+                            let cwd = env::current_dir().unwrap_or_default();
+                            let loader = runtime::ConfigLoader::default_for(&cwd);
+                            let settings_path = loader.config_home().join("settings.json");
+                            let sudocode_path = loader.config_home().join("sudocode.json");
+                            pending_slash_selection =
+                                Some(cli::config_ui::build_config_tree_handler(
+                                    &repl_ui_cmd,
+                                    settings_path,
+                                    sudocode_path,
+                                ));
+                            true
+                        }
+                        Ok(Some(SlashCommand::Model { model: None })) => {
+                            // Interactive model picker via iocraft InputSlot.
+                            let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                            let sudocode_config = load_sudocode_config_for_current_dir();
+                            let config_keys: Vec<String> =
+                                sudocode_config.models.keys().cloned().collect();
+                            let models =
+                                runtime::model_capabilities::merge_discovery_ids(&config_keys);
+                            let current = cli_lock.lifecycle.current_model();
+                            drop(cli_lock);
+
+                            let options = models
+                                .iter()
+                                .map(|m| repl_ui::QuestionOptionView {
+                                    label: m.clone(),
+                                    value: m.clone(),
+                                    description: None,
+                                    recommended: *m == current,
+                                    is_navigable: false,
+                                })
+                                .collect();
+                            pending_slash_selection = Some(show_slash_selection(
+                                &repl_ui_cmd,
+                                repl_ui::QuestionPromptView {
+                                    title: Some("Model".to_string()),
+                                    description: Some(format!("Current: {current}")),
+                                    index: 0,
+                                    total: 1,
+                                    prompt: "Select model".to_string(),
+                                    options,
+                                    allow_custom_input: true,
+                                    custom_input_hint: Some("or type a model name".to_string()),
+                                    force_fuzzy_select: false,
+                                    back_value: None,
+                                },
+                                models,
+                                |model_name, cli, out| {
+                                    let mut cli_lock = cli.lock().expect("LiveCli mutex poisoned");
+                                    match cli_lock.set_model(Some(model_name)) {
+                                        Ok(true) => {
+                                            if let Err(e) = cli_lock.persist_session() {
+                                                out.println(&format!(
+                                                    "{}{e}{}",
+                                                    ansi_fg(theme().error),
+                                                    RESET
+                                                ));
+                                            }
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => out.println(&format!(
+                                            "{}{e}{}",
+                                            ansi_fg(theme().error),
+                                            RESET
+                                        )),
+                                    }
+                                    None
+                                },
+                            ));
+                            true
+                        }
+                        Ok(Some(command)) => {
+                            let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                            match cli_lock.handle_repl_command(command) {
+                                Ok(true) => {
+                                    if let Err(e) = cli_lock.persist_session() {
+                                        repl_output.println(&format!(
+                                            "{}{e}{}",
+                                            ansi_fg(theme().error),
+                                            RESET
+                                        ));
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(e) => repl_output.println(&format!(
+                                    "{}{e}{}",
+                                    ansi_fg(theme().error),
+                                    RESET
+                                )),
+                            }
+                            true
+                        }
+                        Ok(None) => false,
+                        Err(error) => {
+                            repl_output.println(&format!(
+                                "{}{error}{}",
+                                ansi_fg(theme().error),
+                                RESET
+                            ));
+                            true
+                        }
+                    };
+                    if is_slash {
+                        continue;
+                    }
+
+                    // Route to turn.
+                    if !turn_active {
+                        let next = coord.lock().unwrap().submit_when_idle(text);
+                        turn_active = true;
+                        runner_handle = Some(spawn_iocraft_turn(
+                            Arc::clone(&cli_shared),
+                            next.prompt,
+                            repl_output.clone(),
+                            repl_ui_cmd.clone(),
+                            repl_spinner.clone(),
+                            Arc::clone(&pending_question_answer),
+                            coord_tx.clone(),
+                        ));
+                    } else {
+                        let outcome = coord
+                            .lock()
+                            .unwrap()
+                            .submit_during_turn(text, input_queue::load_queue_mode(&shared_mode));
+                        match outcome {
+                            input_queue::SubmitOutcome::Queued => {}
+                            input_queue::SubmitOutcome::Interrupt => {
+                                let _ = commands.send(EngineCommand::Cancel);
+                            }
+                            input_queue::SubmitOutcome::Rejected => {
+                                repl_output.println(
+                                    &format!("{DIM}(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead){RESET}"),
+                                );
+                            }
                         }
                     }
                 }
-            }
-            repl_ui::InputEvent::QuestionAnswer(text) => {
-                if let Some(handler) = pending_slash_selection.take() {
-                    pending_slash_selection = (handler.0)(&text, &cli_shared, &repl.output);
-                } else if !consume_pending_question_answer(&pending_question_answer, text) {
-                    repl.output.println(&format!(
-                        "{DIM}(no question is waiting for an answer){RESET}"
-                    ));
+                repl_ui::InputEvent::QuestionAnswer(text) => {
+                    if let Some(handler) = pending_slash_selection.take() {
+                        pending_slash_selection = (handler.0)(&text, &cli_shared, &repl_output);
+                    } else if !consume_pending_question_answer(&pending_question_answer, text) {
+                        repl_output.println(&format!(
+                            "{DIM}(no question is waiting for an answer){RESET}"
+                        ));
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -2905,11 +2917,14 @@ fn run_repl_iocraft_dispatch(
         let cli_lock = cli_shared.lock().expect("LiveCli mutex");
         let _ = cli_lock.persist_session();
     }
+    // Drop coordinator sender so bridge/poller threads see Disconnected,
+    // which drops input_rx and lets the iocraft render loop exit.
+    drop(coord_tx);
     // Let iocraft unwind its render loop before exiting. Its terminal guard
     // restores raw mode, bracketed paste, cursor visibility, and mouse mode.
-    // On Windows PTYs that do not exit promptly, join() abandons the thread
-    // after a bounded wait and process exit remains the fallback.
-    repl.join();
+    // On Windows PTYs that do not exit promptly, the join closure abandons
+    // the thread after a bounded wait and process exit remains the fallback.
+    (repl_join)();
 
     // Unwrap the Arc and finalize telemetry. If the runner thread
     // still holds a clone, force-exit — session is already persisted.
@@ -2955,7 +2970,7 @@ fn spawn_iocraft_turn(
     ui: repl_ui::UiCommandSender,
     spinner: repl_ui::SpinnerState,
     pending_question_answer: PendingQuestionAnswer,
-    done_tx: mpsc::SyncSender<()>,
+    done_tx: mpsc::Sender<CoordinatorEvent>,
 ) -> thread::JoinHandle<()> {
     // The engine owns the abort signal (reset at the start of each turn, fired
     // by the pump on EngineCommand::Cancel), so the runner no longer manages it.
@@ -2968,7 +2983,7 @@ fn spawn_iocraft_turn(
             {
                 output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
             }
-            let _ = done_tx.send(());
+            let _ = done_tx.send(CoordinatorEvent::TurnComplete);
         })
         .expect("spawn repl-runner thread")
 }

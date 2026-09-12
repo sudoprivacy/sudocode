@@ -869,6 +869,38 @@ impl ReplHandle {
             let _ = h.join();
         }
     }
+
+    /// Decompose into parts for the coordinator event channel bridge.
+    /// The returned join closure replaces `self.join()` — call it after
+    /// the coordinator loop exits.
+    #[allow(clippy::type_complexity)]
+    pub fn split(
+        self,
+    ) -> (
+        OutputSender,
+        UiCommandSender,
+        Receiver<InputEvent>,
+        SpinnerState,
+        Box<dyn FnOnce()>,
+    ) {
+        let join_fn = {
+            let ui_thread = self.ui_thread;
+            Box::new(move || {
+                if let Some(h) = ui_thread {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(300);
+                    while !h.is_finished() {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let _ = h.join();
+                }
+            })
+        };
+        (self.output, self.ui, self.input_rx, self.spinner, join_fn)
+    }
 }
 
 /// Strip ANSI escape sequences (ESC[...m) to count visible characters.

@@ -293,6 +293,11 @@ fn write_envelope(
         from: from.to_string(),
         to: to.to_string(),
         body: body.to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: String::new(),
+        request_id: None,
     };
     let reqs = [WriteRequest {
         path: path.to_string(),

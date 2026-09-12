@@ -181,6 +181,7 @@ enum Scenario {
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
     ExecuteExtraToolRoundtrip,
+    UnifiedSendRoundtrip,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -226,6 +227,7 @@ impl Scenario {
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
+            "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             _ => None,
         }
     }
@@ -267,6 +269,7 @@ impl Scenario {
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
+            Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
         }
     }
 }
@@ -881,6 +884,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"tool_name":"CronList","params":{}}"#],
             ),
         },
+        Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_unified_send",
+                "send",
+                &[
+                    r#"{"to":"test-peer","message":"hello from unified send","summary":"greeting test"}"#,
+                ],
+            ),
+        },
     }
 }
 
@@ -1306,6 +1321,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"tool_name": "CronList", "params": {}}),
             ),
         },
+        Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_unified_send_final",
+                &format!("unified send roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_unified_send_tool",
+                "toolu_unified_send",
+                "send",
+                json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
+            ),
+        },
     }
 }
 
@@ -1348,6 +1375,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
+        Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
     }
 }
 

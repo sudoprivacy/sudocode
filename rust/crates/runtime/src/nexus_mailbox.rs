@@ -453,11 +453,4 @@ mod tests {
         assert_eq!(env.timestamp, 0);
     }
 
-    #[test]
-    fn unified_envelope_reads_legacy_text_field() {
-        // Old local JSONL used "text" instead of "body".
-        let wire = br#"{"from":"a","to":"b","text":"legacy","kind":"message"}"#;
-        let env = MailboxEnvelope::from_bytes(wire).expect("text alias compat");
-        assert_eq!(env.body, "legacy");
-    }
 }

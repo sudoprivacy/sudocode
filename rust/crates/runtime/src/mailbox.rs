@@ -90,28 +90,55 @@ impl Mailbox {
     }
 
     /// Send a message to a recipient's inbox.
+    ///
+    /// A DT_STREAM backend frames the append itself, so the envelope goes
+    /// through the backend. JSONL has no framing of its own — a message is a
+    /// line — and that branch goes through
+    /// [`crate::agent_mailbox::append_envelope`], which is the one writer of
+    /// this format.
+    ///
+    /// It used to be two: this method built the line itself (timestamp,
+    /// recipient, serialize, newline, create the directory) while
+    /// `coordinator_notification` called `append_envelope`, so the same format
+    /// had two implementations that could drift apart. One of them also holds a
+    /// write lock the other did not — `write_all` may in principle issue
+    /// several `write` calls for one buffer, and the reader skips a line it
+    /// cannot parse, so an interleave would be a silently dropped message. I
+    /// could NOT reproduce that: for a regular file an `O_APPEND` write is
+    /// effectively atomic, and six concurrent senders pushing 256 KiB lines
+    /// interleaved nothing on Windows. Treat the lock as defensive rather than
+    /// load-bearing; the reason for going through one writer is that the format
+    /// has one definition.
     pub fn send(&self, mut envelope: MailboxEnvelope) -> Result<(), String> {
         if envelope.from.is_empty() {
             envelope.from = self.self_id.clone();
         }
         let path = self.convention.inbox_path(&envelope.to);
 
-        let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);
-        let data = if is_stream {
-            envelope.to_bytes()
-        } else {
-            if envelope.timestamp == 0 {
-                envelope.timestamp = now_secs();
+        if self.backend.is_append_stream(&path).unwrap_or(false) {
+            return self
+                .backend
+                .append(&path, &envelope.to_bytes())
+                .map_err(|e| format!("mailbox send to {path}: {e}"));
+        }
+
+        match &self.convention {
+            InboxConvention::LocalJsonl { root } => {
+                let recipient = envelope.to.clone();
+                crate::agent_mailbox::append_envelope(
+                    std::path::Path::new(root),
+                    &recipient,
+                    envelope,
+                )
+                .map(|_| ())
             }
-            let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
-            let _ = std::fs::create_dir_all(parent);
-            let mut line = serde_json::to_vec(&envelope).unwrap_or_default();
-            line.push(b'\n');
-            line
-        };
-        self.backend
-            .append(&path, &data)
-            .map_err(|e| format!("mailbox send to {path}: {e}"))
+            // A non-stream path under a stream convention means the inbox was
+            // never provisioned. Say so rather than writing a line into a
+            // location nothing tails.
+            InboxConvention::NexusA2a => Err(format!(
+                "mailbox send to {path}: not an append stream — inbox not provisioned"
+            )),
+        }
     }
 
     /// Read new messages from own inbox starting at `cursor`.

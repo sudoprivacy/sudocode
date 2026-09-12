@@ -2249,7 +2249,26 @@ fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
     if let Some(agent_id) = &input.agent_id {
-        return await_agent_output(agent_id, input.block, input.timeout_ms);
+        let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
+        if input.merge {
+            if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
+                if let Some(obj) = parsed.as_object_mut() {
+                    obj.insert("merge".to_string(), json!(true));
+                    let store = agent_store_dir().ok();
+                    if let Some(store) = store {
+                        let session_path = agent_session_path(&store, agent_id.trim());
+                        if session_path.exists() {
+                            obj.insert(
+                                "session_path".to_string(),
+                                json!(session_path.display().to_string()),
+                            );
+                        }
+                    }
+                }
+                result = serde_json::to_string_pretty(&parsed).unwrap_or(result);
+            }
+        }
+        return Ok(result);
     }
     let task_id = input
         .task_id
@@ -3996,6 +4015,11 @@ struct TaskOutputInput {
     block: bool,
     #[serde(default = "default_agent_await_timeout_ms")]
     timeout_ms: u64,
+    /// When true, the agent's session context should be merged back
+    /// into the caller's conversation. Surfaced in the output JSON
+    /// as `"merge": true` so the framework layer can act on it.
+    #[serde(default)]
+    merge: bool,
 }
 
 const fn default_block_true() -> bool {

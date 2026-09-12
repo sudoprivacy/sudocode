@@ -4351,6 +4351,33 @@ pub fn render_skills_prompt_section(
     render_skills_section(&skills)
 }
 
+/// Every dynamic system-prompt section derivable from the working directory
+/// alone, in the order a live session emits them.
+///
+/// The live runtime (`engine_host::runtime_build`) and the `scode
+/// system-prompt` preview both render from this one list, so the preview
+/// cannot claim a prompt the session does not send. They used to each carry
+/// their own sequence of pushes, kept in step by a comment, and the preview had
+/// already fallen behind.
+///
+/// Sections needing more than a cwd stay with the runtime builder and are the
+/// documented reason the preview is a subset: the deferred-tool listing needs
+/// the tool registry, and the A2A identity needs a dialed session.
+#[must_use]
+pub fn cwd_prompt_sections(
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Vec<String> {
+    let mut sections = Vec::new();
+    // Skills first: the model should know what it can load before it is told
+    // what it can delegate to.
+    if let Some(section) = render_skills_prompt_section(cwd, plugin_load_outcome) {
+        sections.push(section);
+    }
+    sections.push(runtime::agent_types::render_agent_types_prompt_section(cwd));
+    sections
+}
+
 fn render_skill_install_report(skill: &InstalledSkill) -> String {
     let mut lines = vec![
         "Skills".to_string(),

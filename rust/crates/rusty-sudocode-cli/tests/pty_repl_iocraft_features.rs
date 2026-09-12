@@ -56,13 +56,15 @@ fn iocraft_repl_keyboard_input_not_frozen() {
     // appear in the iocraft TextInput and be rendered to the PTY.
     sess.send("/exit").expect("type /exit");
 
-    // Wait for iocraft to render the typed text. If the render loop is
-    // starving term.wait() (the bug), this will timeout — the text
-    // never appears because key events are never distributed.
-    sess.expect("/exit").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("typed text must appear in terminal (keyboard input frozen?): {e}\nPTY:\n{screen}");
-    });
+    // Wait for iocraft to render the typed text on the INPUT LINE. If the
+    // render loop is starving term.wait() (the bug), this times out — the
+    // characters never appear because key events are never distributed.
+    common::expect_input_line(
+        &sess,
+        "/exit",
+        Duration::from_secs(10),
+        "typed text must appear in terminal (keyboard input frozen?)",
+    );
 
     // Now press Enter to submit /exit and verify clean process exit.
     sess.send("\r").expect("press Enter");
@@ -157,10 +159,12 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
     // race, and the failure is silent — an empty line submits nothing, so
     // the test learns about it 60s later as "no EOF" with no clue why.
     sess.send("/exit").expect("type /exit");
-    sess.expect("/exit").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("typed /exit should render before Enter: {e}\nPTY:\n{screen}");
-    });
+    common::expect_input_line(
+        &sess,
+        "/exit",
+        Duration::from_secs(10),
+        "typed /exit should render before Enter",
+    );
     sess.send("\r").expect("send Enter");
     sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {

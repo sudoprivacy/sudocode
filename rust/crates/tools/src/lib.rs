@@ -5649,7 +5649,7 @@ fn run_single_turn(
 /// Multiple envelopes are concatenated with a blank line so the
 /// model treats them as distinct messages. Order preserves the
 /// mailbox write order (JSONL is append-only).
-fn compose_next_turn_from_envelopes(
+pub fn compose_next_turn_from_envelopes(
     envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
 ) -> String {
     let mut blocks = Vec::with_capacity(envelopes.len());

@@ -2715,6 +2715,24 @@ fn run_repl_iocraft_dispatch(
             }
             CoordinatorEvent::PeerMessage(msg) => {
                 repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+                let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
+                if !turn_active {
+                    turn_active = true;
+                    runner_handle = Some(spawn_iocraft_turn(
+                        Arc::clone(&cli_shared),
+                        prompt,
+                        repl_output.clone(),
+                        repl_ui_cmd.clone(),
+                        repl_spinner.clone(),
+                        Arc::clone(&pending_question_answer),
+                        coord_tx.clone(),
+                    ));
+                } else {
+                    coord
+                        .lock()
+                        .unwrap()
+                        .submit_during_turn(prompt, input_queue::QueueMode::Queue);
+                }
                 continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {

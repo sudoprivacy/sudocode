@@ -60,6 +60,28 @@ impl Mailbox {
         }
     }
 
+    /// A nexus A2A mailbox for `agent` over an already-dialled client.
+    ///
+    /// The one place that says what a nexus A2A mailbox is made of. Pairing a
+    /// backend with a convention by hand at each call site is how they end up
+    /// mismatched — a `LocalJsonl` convention over a VFS backend writes lines
+    /// nothing tails, and the mistake is silent.
+    #[must_use]
+    pub fn over_nexus(
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        agent: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            Arc::new(crate::fs_backend::NexusVfsFsBackend::from_arc(
+                client,
+                auth_token.into(),
+            )),
+            agent.into(),
+            InboxConvention::NexusA2a,
+        )
+    }
+
     #[must_use]
     pub fn self_id(&self) -> &str {
         &self.self_id
@@ -75,9 +97,16 @@ impl Mailbox {
         self.convention.inbox_path(&self.self_id)
     }
 
-    /// Provision this agent's inbox (idempotent). For DT_STREAM backends
-    /// this creates the stream; for file backends this is a no-op (the
-    /// file is created lazily on first write).
+    /// Provision this agent's inbox (idempotent).
+    ///
+    /// A terminal `scode` is not a managed agent, so nothing registers an
+    /// inbox on its behalf — it has to ensure its own exists before a receiver
+    /// can read it. The capacity comes from the a2a SSOT
+    /// ([`crate::agent_mailbox::DEFAULT_STREAM_CAPACITY`]) so an inbox created
+    /// standalone is byte-identical to one a co-host created.
+    ///
+    /// For a DT_STREAM backend the stream already exists once the path resolves
+    /// as one, so this returns early; a file backend creates the append log.
     pub fn ensure_inbox(&self) -> Result<(), String> {
         let path = self.own_inbox_path();
         let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);
@@ -90,6 +119,11 @@ impl Mailbox {
     }
 
     /// Send a message to a recipient's inbox.
+    ///
+    /// The `from` we write is ADVISORY. Under auth-on the daemon's
+    /// `MailboxStampingHook` overwrites it with the authenticated caller's
+    /// identity, so it cannot be forged; under auth-off it is used as-is.
+    /// Nothing above this layer should treat it as proof of origin.
     ///
     /// A DT_STREAM backend frames the append itself, so the envelope goes
     /// through the backend. JSONL has no framing of its own — a message is a
@@ -144,10 +178,31 @@ impl Mailbox {
     /// Read new messages from own inbox starting at `cursor`.
     ///
     /// Returns `(messages, next_cursor)`. The caller persists `next_cursor`
-    /// across calls. `block_ms > 0` makes the read block until new data
-    /// arrives or the timeout elapses.
+    /// across calls. `block_ms == 0` is a pure non-blocking drain — a
+    /// seek-to-tail or a one-shot collect. `block_ms > 0` makes the FIRST read
+    /// a blocking tail read and then drains whatever else is buffered without
+    /// blocking, so a burst surfaces in one call.
     ///
-    /// Messages from `self_id` are filtered out (no echo).
+    /// ## Why a blocking read rather than a watch
+    ///
+    /// On a DT_STREAM backend the server parks up to `block_ms` on the
+    /// stream's per-path condvar and wakes sub-millisecond on the next write —
+    /// node-local or a peer's replicated append — so an idle receiver costs one
+    /// parked RPC instead of a `sleep` loop.
+    ///
+    /// Both a blocking read and `sys_watch` do wake for the WAL mailbox: the
+    /// apply observer signals the file-watch AND the stream condvar. The
+    /// blocking read wins because it is ONE round trip that returns the frame
+    /// AT the cursor, where `sys_watch` reports only "something changed" and
+    /// still needs a follow-up read — two round trips and no cursor precision.
+    /// A blocking read is the cursor-aware tail primitive this mailbox is built
+    /// on; `sys_watch` is the generic inotify-style path-change notifier.
+    ///
+    /// `StdFsBackend` has no such primitive and falls back to a bounded size
+    /// poll, which is the one place this waits by polling.
+    ///
+    /// Skips our OWN writes (`from == self_id`) so a shared read/write stream
+    /// never echoes back to us, and skips senderless or empty-body frames.
     pub fn poll(&self, cursor: u64, block_ms: u64) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.own_inbox_path();
         let is_stream = self.backend.is_append_stream(&path).unwrap_or(false);

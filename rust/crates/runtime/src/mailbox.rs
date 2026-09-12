@@ -252,49 +252,168 @@ fn now_secs() -> u64 {
 
 const LOCAL_POLL_BLOCK_MS: u64 = 1000;
 
-/// Spawn a background thread that polls a local JSONL inbox for
-/// incoming peer messages and invokes `sink` for each one.
+/// A receiver's read position, persisted so it survives the process.
 ///
-/// The thread blocks up to 1s per iteration waiting for new data,
-/// then loops. File-not-found is handled gracefully (the file may
-/// not exist until a sub-agent first writes to it).
+/// Not an optimisation. Two agents handing off asynchronously otherwise lose
+/// every message that arrives while the receiver is between processes: the
+/// sender was told it was delivered, it sits durably in the inbox, and a
+/// receiver that seeks to the tail on every start never looks back at it. That
+/// was observed live in the Win↔Mac duet.
+///
+/// The other failure is the opposite one, so a FIRST run still seeks to the
+/// tail: a receiver that has never read this inbox was not party to what came
+/// before, and replaying it is the #81 re-reply storm.
+#[derive(Debug, Clone)]
+pub struct InboxCursor {
+    path: std::path::PathBuf,
+}
+
+impl InboxCursor {
+    /// Keep the cursor in `path`. Sanitise `name` into a filename with
+    /// [`Self::file_name`] when deriving one from an agent name.
+    #[must_use]
+    pub fn at(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// `<prefix><name>` with everything outside `[A-Za-z0-9_-]` folded to `_`,
+    /// so an agent name is safe to use as a filename on every platform.
+    #[must_use]
+    pub fn file_name(prefix: &str, name: &str) -> String {
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{prefix}{safe}")
+    }
+
+    fn load(&self) -> Option<u64> {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+    }
+
+    fn save(&self, offset: u64) {
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.path, offset.to_string());
+    }
+}
+
+/// Spawn the background inbox receiver: park on the tail, hand each new
+/// envelope to `sink`, persist the cursor.
+///
+/// The ONE receive loop. It used to be two — this one over gRPC for A2A and a
+/// second for the local JSONL inbox — and because the loop was duplicated the
+/// two copies drifted: the local one kept its cursor in a local variable
+/// starting at 0, so every process start replayed the whole inbox. The loop
+/// does not vary by transport, only the `mailbox` handed to it does, so there
+/// is nothing for a second copy to do except diverge.
+///
+/// Event-driven, not polling, wherever the backend can be: each iteration
+/// parks inside [`Mailbox::poll`] until the backend reports new data or
+/// `block_ms` elapses. A DT_STREAM backend parks on a condvar the kernel
+/// signals (including from a peer's replicated append); `StdFsBackend` has no
+/// such primitive and falls back to a bounded size poll, which is the one
+/// place this is a poll rather than a wait.
+pub fn spawn_inbox_poller(
+    mailbox: Arc<Mailbox>,
+    cursor_store: InboxCursor,
+    block_ms: u64,
+    label: &'static str,
+    abort: crate::HookAbortSignal,
+    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("{label}-inbox-poller"))
+        .spawn(move || {
+            let mut cursor = match cursor_store.load() {
+                Some(saved) => saved,
+                // Never read before: seek to the tail rather than replay.
+                //
+                // The accepted cost is that a send landing DURING this seek is
+                // positioned past and never delivered. That window exists only
+                // on a receiver's first-ever run, and the alternative — start
+                // at 0 — replays a backlog this receiver was never party to,
+                // which is the #81 re-reply storm. A caller that must not miss
+                // a first message should create the inbox before advertising
+                // the agent, not widen this window.
+                None => match mailbox.poll(0, 0) {
+                    Ok((_history, tail)) => {
+                        cursor_store.save(tail);
+                        tail
+                    }
+                    Err(e) => {
+                        eprintln!("[{label}] initial inbox seek failed: {e}");
+                        0
+                    }
+                },
+            };
+            while !abort.is_aborted() {
+                match mailbox.poll(cursor, block_ms) {
+                    Ok((msgs, next)) => {
+                        for m in &msgs {
+                            sink(m);
+                        }
+                        // Persist only on real forward progress: an idle
+                        // deadline return would otherwise rewrite the same
+                        // offset every iteration. Saving AFTER the sink has run
+                        // makes a crash re-deliver rather than drop —
+                        // at-least-once, the right side to err on for mail.
+                        if next > cursor {
+                            cursor = next;
+                            cursor_store.save(cursor);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[{label}] inbox poll failed: {e}");
+                        // Avoid a hot error loop when the backend is sick; the
+                        // blocking read itself paces the happy path.
+                        std::thread::sleep(std::time::Duration::from_millis(block_ms.max(1)));
+                    }
+                }
+            }
+        })
+        .expect("spawn inbox poller thread")
+}
+
+/// [`spawn_inbox_poller`] over the workspace's local JSONL inbox.
+///
+/// Owns only the two things that are local-specific: the backend/convention
+/// pair, and where the cursor lives — a dotfile beside the inbox it tracks, so
+/// it is scoped to the workspace and swept with it.
 pub fn spawn_local_poller(
     workspace_root: std::path::PathBuf,
     self_id: String,
     abort: crate::HookAbortSignal,
     sink: impl Fn(&MailboxEnvelope) + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("local-inbox-poller".into())
-        .spawn(move || {
-            let backend: Arc<dyn crate::fs_backend::FsBackend> =
-                Arc::new(crate::fs_backend::StdFsBackend);
-            let mailbox = Mailbox::new(
-                backend,
-                self_id,
-                InboxConvention::LocalJsonl {
-                    root: workspace_root.to_string_lossy().into_owned(),
-                },
-            );
-            let mut cursor = 0u64;
-            while !abort.is_aborted() {
-                match mailbox.poll(cursor, LOCAL_POLL_BLOCK_MS) {
-                    Ok((msgs, next)) => {
-                        for m in &msgs {
-                            sink(m);
-                        }
-                        if next > cursor {
-                            cursor = next;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[local-inbox] poll failed: {e}");
-                        std::thread::sleep(std::time::Duration::from_millis(LOCAL_POLL_BLOCK_MS));
-                    }
-                }
-            }
-        })
-        .expect("spawn local-inbox-poller thread")
+    let cursor_store = InboxCursor::at(
+        crate::agent_mailbox::mailbox_dir(&workspace_root)
+            .join(InboxCursor::file_name(".cursor-", &self_id)),
+    );
+    let mailbox = Arc::new(Mailbox::new(
+        Arc::new(crate::fs_backend::StdFsBackend),
+        self_id,
+        InboxConvention::LocalJsonl {
+            root: workspace_root.to_string_lossy().into_owned(),
+        },
+    ));
+    spawn_inbox_poller(
+        mailbox,
+        cursor_store,
+        LOCAL_POLL_BLOCK_MS,
+        "local-inbox",
+        abort,
+        sink,
+    )
 }
 
 #[cfg(test)]
@@ -323,6 +442,105 @@ mod tests {
                 root: root.to_string(),
             },
         )
+    }
+
+    fn note(from: &str, to: &str, body: &str) -> MailboxEnvelope {
+        MailboxEnvelope {
+            from: from.to_string(),
+            to: to.to_string(),
+            body: body.to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
+        }
+    }
+
+    fn wait_until(label: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {label}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The receiver must neither replay a backlog it was never party to nor
+    /// lose what arrived while it was not running.
+    ///
+    /// Both halves in one test because they are the two ways to get this wrong
+    /// and a fix for either one alone reintroduces the other. Replaying the
+    /// backlog is the #81 re-reply storm; losing the offline message is the
+    /// Win↔Mac duet handoff, where the sender was told "delivered", the
+    /// envelope sat durably in the inbox, and no later reader looked back.
+    ///
+    /// This is the regression the duplicated receive loop caused: the local
+    /// copy kept its cursor in a local variable starting at 0.
+    #[test]
+    fn local_poller_resumes_from_its_cursor_instead_of_replaying() {
+        let ws = temp_workspace("poller-resume");
+        let ws_path = std::path::PathBuf::from(&ws);
+        let peer = local_mailbox(&ws, "peer");
+
+        // A backlog that predates any receiver.
+        peer.send(note("peer", "me", "backlog-1")).expect("send");
+        peer.send(note("peer", "me", "backlog-2")).expect("send");
+
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cursor_file = crate::agent_mailbox::mailbox_dir(&ws_path).join(".cursor-me");
+
+        // First run: never read this inbox before, so seek to the tail.
+        let abort = crate::HookAbortSignal::new();
+        let sink_seen = Arc::clone(&seen);
+        let first =
+            spawn_local_poller(ws_path.clone(), "me".to_string(), abort.clone(), move |m| {
+                sink_seen.lock().unwrap().push(m.body.clone());
+            });
+        wait_until("the first run to record its cursor", || {
+            cursor_file.exists()
+        });
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a first run must not replay the backlog, got {:?}",
+            seen.lock().unwrap()
+        );
+
+        // Delivered while it is listening.
+        peer.send(note("peer", "me", "live-1")).expect("send");
+        wait_until("live-1", || seen.lock().unwrap().len() == 1);
+        abort.abort();
+        first.join().expect("first poller joins");
+
+        // Arrives with nobody listening — must survive the gap.
+        peer.send(note("peer", "me", "offline-1")).expect("send");
+
+        let abort2 = crate::HookAbortSignal::new();
+        let sink_seen = Arc::clone(&seen);
+        let second = spawn_local_poller(
+            ws_path.clone(),
+            "me".to_string(),
+            abort2.clone(),
+            move |m| {
+                sink_seen.lock().unwrap().push(m.body.clone());
+            },
+        );
+        wait_until("offline-1 after the restart", || {
+            seen.lock().unwrap().len() == 2
+        });
+        abort2.abort();
+        second.join().expect("second poller joins");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["live-1".to_string(), "offline-1".to_string()],
+            "exactly the two messages addressed to a running-or-restarted receiver, \
+             in order, with no backlog replay"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
@@ -474,6 +692,18 @@ mod tests {
                 let _ = tx.send(msg.clone());
             },
         );
+
+        // Wait for the poller to have recorded where it starts reading before
+        // sending anything. A first-ever run seeks to the tail — the
+        // alternative is replaying a backlog it was never party to (#81) — so a
+        // send that lands DURING that seek is positioned past and never
+        // delivered. This test is about a message arriving while the receiver
+        // is listening, which means it has to establish "listening" first.
+        wait_until("the poller to record where it starts", || {
+            crate::agent_mailbox::mailbox_dir(std::path::Path::new(&ws))
+                .join(".cursor-team-lead")
+                .exists()
+        });
 
         // Write a message from a sub-agent to team-lead's inbox.
         let mb = local_mailbox(&ws, "sub-agent-1");

@@ -168,14 +168,21 @@ impl Mailbox {
     /// ([`crate::agent_mailbox::DEFAULT_STREAM_CAPACITY`]) so an inbox created
     /// standalone is byte-identical to one a co-host created.
     ///
-    /// For a DT_STREAM backend the stream already exists once the path resolves
-    /// as one, so this returns early; a file backend creates the append log.
+    /// Unconditional, because every backend's `create_append_log` is already
+    /// idempotent — the file one writes only when the path is absent, the
+    /// kernel one returns early on an existing entry, and the VFS one is
+    /// `ensure_stream`.
+    ///
+    /// It used to skip the call when [`Self::backend_frames`] said the path was
+    /// a stream, which read as "already provisioned" and was not. For the VFS
+    /// backend that predicate is a test of the path's SHAPE — every
+    /// `…/chat-with-me` answers yes — so the check was always true and the
+    /// stream was never created. A standalone agent's inbox therefore did not
+    /// exist, and its receiver got `StreamNotFound` on every poll. Unit tests
+    /// could not see it: the shape is right, the code runs, and only a real
+    /// daemon has an opinion about whether the stream is there.
     pub fn ensure_inbox(&self) -> Result<(), String> {
         let path = self.own_inbox_path();
-        let is_stream = self.backend_frames(&path);
-        if is_stream {
-            return Ok(());
-        }
         self.backend
             .create_append_log(&path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
             .map_err(|e| format!("ensure inbox {path}: {e}"))

@@ -60,7 +60,6 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
     [
         // Delegation surface
-        "agent_list",
         "agent_spawn",
         "pid_kill",
         "pid_status",

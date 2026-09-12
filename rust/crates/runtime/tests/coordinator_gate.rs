@@ -57,7 +57,6 @@ fn allowlist_contains_delegation_surface() {
     let allowed = coordinator_allowed_tools();
     for name in [
         "agent_spawn",
-        "agent_list",
         "send",
         "pid_kill",
         "pid_status",

@@ -1048,26 +1048,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
-        // ── agent_list ────────────────────────────────────────────────
-        // Discovery tool: list all available agent types (builtin +
-        // custom `.md` agents from ~/.nexus/sudocode/agents/ and
-        // .sudocode/agents/).
-        ToolSpec {
-            name: "agent_list",
-            description: "List all available agent types with their names, descriptions, and capabilities.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
         // ── agent_spawn ───────────────────────────────────────────────
         // The one spawn tool. `fresh: false` (default) auto-resumes the
         // agent's most recent session; `true` starts a clean one. A model
         // trained on the CC tool set will name this `Agent` and pass
         // `subagent_type`; `TOOL_ALIASES` + `normalize_agent_spawn_input`
         // accept that spelling without advertising it as a second tool.
+        //
+        // This spec is STATIC — nothing here names an agent type, so it stays
+        // byte-identical whatever is installed. `agent_spawn` is a CORE tool,
+        // so its description rides in the cached tools block, and the volatile
+        // catalog belongs in the `<available-agent-types>` dynamic prompt
+        // section instead. See `runtime::agent_types` for the measurement
+        // behind that split.
         ToolSpec {
             name: "agent_spawn",
             description: concat!(
@@ -1080,7 +1073,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "agent": { "type": "string", "description": "Agent type specialization: general-purpose (default), Explore (read-only research), Plan (planning), Verification (bash + read), scode-guide, statusline-setup." },
+                    "agent": { "type": "string", "description": "Agent type specialization. The available types are listed in the <available-agent-types> section of the system prompt; defaults to general-purpose." },
                     "prompt": { "type": "string", "description": "The full task prompt for the agent." },
                     "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
@@ -1628,7 +1621,6 @@ fn execute_tool_with_enforcer(
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "agent_list" => run_agent_list(),
         // agent_spawn. A CC-trained model names this `Agent`;
         // TOOL_ALIASES folds that spelling onto this arm. Normalize `agent` →
         // `subagent_type` so the new schema's field name maps to
@@ -3344,66 +3336,6 @@ fn run_web_search(input: WebSearchInput) -> Result<String, String> {
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
-}
-
-/// List all available agent types: builtins + custom `.md` agents.
-fn run_agent_list() -> Result<String, String> {
-    let builtins = vec![
-        json!({
-            "name": "general-purpose",
-            "description": "General-purpose agent for research, implementation, and multi-step tasks.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Explore",
-            "description": "Read-only research agent: read_file, glob, grep, web search.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Plan",
-            "description": "Planning agent: read-only exploration + task management.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Verification",
-            "description": "Verification agent: bash + read-only tools for testing changes.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "scode-guide",
-            "description": "Help agent for scode usage questions.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "statusline-setup",
-            "description": "Configure the status line display.",
-            "builtin": true,
-        }),
-    ];
-
-    let mut custom = Vec::new();
-    if let Ok(cwd) = current_workspace_root() {
-        for dir in runtime::custom_agents::standard_custom_agent_dirs(&cwd) {
-            for def in runtime::custom_agents::load_md_agents(&dir) {
-                // Avoid duplicating builtins that a user might shadow
-                if is_builtin_subagent(&def.name) {
-                    continue;
-                }
-                custom.push(json!({
-                    "name": def.name,
-                    "description": def.description,
-                    "builtin": false,
-                    "tools": def.tools,
-                }));
-            }
-        }
-    }
-
-    let all: Vec<_> = builtins.into_iter().chain(custom).collect();
-    to_pretty_json(json!({
-        "agents": all,
-        "count": all.len(),
-    }))
 }
 
 fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
@@ -5634,126 +5566,15 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
                 return tools.iter().cloned().collect();
             }
         }
-        return general_purpose_tools();
+        return runtime::agent_types::general_purpose_tools();
     }
-    let tools = match subagent_type {
-        "Explore" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-        ],
-        "Plan" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "StructuredOutput",
-        ],
-        "Verification" => vec![
-            "bash",
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "StructuredOutput",
-            "PowerShell",
-        ],
-        "scode-guide" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-        ],
-        "statusline-setup" => vec![
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob_search",
-            "grep_search",
-            "ToolSearch",
-        ],
-        // Fork subagent — inherits the parent's exact tool pool
-        // (mirrors CC-fork's `tools: ['*']`). Sudocode doesn't thread
-        // the parent's allowed_tools into `prepare_agent_job`, so we
-        // approximate `*` as the maximal set: every tool a normal
-        // general-purpose subagent gets, PLUS Agent so the child can
-        // still spawn NON-fork sub-agents. Fork-inside-fork recursion
-        // is blocked at call time by
-        // `ToolDispatchContext::is_inside_fork_child`.
-        "fork" => vec![
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "Skill",
-            "ToolSearch",
-            "Sleep",
-            "Config",
-            "StructuredOutput",
-            "PowerShell",
-            "Agent",
-            "SendMessage",
-        ],
-        _ => return general_purpose_tools(),
-    };
-    tools.into_iter().map(str::to_string).collect()
-}
-
-/// The maximal tool set a general-purpose sub-agent may invoke —
-/// SSOT for both the explicit `general-purpose` preset and the
-/// fallback path (unknown built-in name AND custom `.md` agents whose
-/// frontmatter says `tools: '*'` / omits the field).
-fn general_purpose_tools() -> BTreeSet<String> {
-    [
-        "bash",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "glob_search",
-        "grep_search",
-        "WebFetch",
-        "WebSearch",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "Skill",
-        "ToolSearch",
-        "Sleep",
-        "Config",
-        "StructuredOutput",
-        "PowerShell",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    // Built-in presets and their tool pools are data in
+    // `runtime::agent_types::BUILTIN_AGENT_TYPES` — the same registry the
+    // `<available-agent-types>` prompt section renders from, so a preset can
+    // never be advertised to the model with one tool set and then run with
+    // another. An unknown name inherits the general-purpose pool.
+    runtime::agent_types::builtin_allowed_tools(subagent_type)
+        .unwrap_or_else(runtime::agent_types::general_purpose_tools)
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -7175,7 +6996,6 @@ const CORE_TOOLS: &[&str] = &[
     "WebSearch",
     "Skill",
     "agent_spawn",
-    "agent_list",
     "pid_fork",
     "ToolSearch",
     "ExecuteExtraTool",
@@ -7273,7 +7093,7 @@ fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpe
                 // A CC tool name is an exact hit on the tool it aliases, and
                 // must outscore every tool that merely shares the word:
                 // `AgentTool` means CC's `Agent`, i.e. `agent_spawn`, not
-                // `agent_list`.
+                // whatever else happens to start with `agent`.
                 if canonical_name == alias_token(&canonical_term) {
                     score += 12;
                 }
@@ -7315,7 +7135,8 @@ fn normalize_tool_search_query(query: &str) -> String {
 /// NAMES, so `AgentTool` → token `agent` has to be fed back through the table
 /// as a name to reach `agent_spawn` → token `agentspawn`. Comparing the two
 /// forms directly is why `AgentTool` scored no better against `agent_spawn`
-/// than against `agent_list` and the tie went to whichever spec came first.
+/// than against any other `agent`-prefixed spec, and the tie went to
+/// whichever spec came first.
 fn alias_token(token: &str) -> String {
     canonical_tool_token(&canonicalize_tool_name(token))
 }
@@ -7415,17 +7236,12 @@ fn lookup_custom_agent(
 /// Built-in preset names that must NOT be shadowed by a custom `.md`
 /// agent — the built-in behavior wins, even if a user drops a
 /// same-named .md file under `~/.nexus/sudocode/agents/`.
+///
+/// Delegates to the one registry, so this set cannot drift from the tool pools
+/// [`allowed_tools_for_subagent`] hands out or from the catalog the model is
+/// shown in `<available-agent-types>`.
 fn is_builtin_subagent(name: &str) -> bool {
-    matches!(
-        name,
-        "general-purpose"
-            | "Explore"
-            | "Plan"
-            | "Verification"
-            | "scode-guide"
-            | "statusline-setup"
-            | "fork"
-    )
+    runtime::agent_types::is_builtin_agent_type(name)
 }
 
 /// Prefix inserted before the caller's directive text inside a fork
@@ -9021,7 +8837,6 @@ mod tests {
             ("pid_output", "pid_output"),
             ("agent_spawn", "agent_spawn"),
             ("send", "send"),
-            ("agent_list", "agent_list"),
         ] {
             let allowed = registry
                 .normalize_allowed_tools(&[requested.to_string()])
@@ -10679,6 +10494,39 @@ mod tests {
         assert!(verification.contains("bash"));
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
+    }
+
+    /// `agent_spawn`'s spec must never enumerate agent types.
+    ///
+    /// It is a CORE tool, so its description and schema ride in the cached
+    /// tools block. Enumerating types there means installing a `.md` agent
+    /// rewrites the description and busts that cache — the cost Claude Code
+    /// measured at ~10.2% of fleet `cache_creation` tokens. The catalog belongs
+    /// in the `<available-agent-types>` dynamic prompt section instead (see
+    /// `runtime::agent_types`).
+    ///
+    /// A failure here is the cache property breaking, not a stale assertion:
+    /// move the text into the prompt section rather than relaxing this test.
+    #[test]
+    fn agent_spawn_spec_enumerates_no_agent_type() {
+        let spec = mvp_tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "agent_spawn")
+            .expect("agent_spawn must be a tool");
+        let rendered = format!("{} {}", spec.description, spec.input_schema);
+        for agent in runtime::agent_types::BUILTIN_AGENT_TYPES {
+            // Naming the DEFAULT is a stable part of the call contract, not a
+            // catalog entry — it does not change when an agent is installed.
+            if agent.name == "general-purpose" {
+                continue;
+            }
+            assert!(
+                !rendered.contains(agent.name),
+                "agent_spawn's spec names the agent type `{}`; the catalog belongs in \
+                 <available-agent-types>, not in the cached tools block",
+                agent.name
+            );
+        }
     }
 
     #[derive(Debug)]

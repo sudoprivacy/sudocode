@@ -406,6 +406,14 @@ pub(crate) fn build_runtime_with_plugin_state(
     if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
         system_prompt.dynamic_sections.push(section);
     }
+    // Agent-type catalog: inject `<available-agent-types>` so the model knows
+    // what to pass as `agent_spawn`'s `agent`. It lives here, and NOT in
+    // `agent_spawn`'s description, because that description sits in the cached
+    // tools block while this list changes whenever a `.md` agent is added —
+    // see `runtime::agent_types` for the cache measurement behind the split.
+    system_prompt
+        .dynamic_sections
+        .push(runtime::agent_types::render_agent_types_prompt_section(cwd));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
     // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.

@@ -61,7 +61,6 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
     [
         // Canonical delegation surface
         "agent_spawn",
-        "agent_list",
         "send",
         "pid_kill",
         "pid_status",
@@ -149,7 +148,6 @@ Every message you send is to the user. Worker results and system notifications a
 - **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted (alias: `TaskGet`)
 - **pid_output** - Read a running or completed worker's output by `pid` (alias: `TaskOutput`)
 - **pid_fork** - Fork the current session into a background worker
-- **agent_list** - List all known agents / workers
 
 Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 

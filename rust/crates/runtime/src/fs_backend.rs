@@ -856,7 +856,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        if path.ends_with("/chat-with-me") {
+        if path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX) {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
@@ -874,7 +874,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(path.ends_with("/chat-with-me"))
+        Ok(path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

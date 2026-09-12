@@ -48,7 +48,7 @@ pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
 pub use crate::agent_mailbox::MailboxEnvelope;
-pub use a2a::CHAT_WITH_ME_SUFFIX;
+pub use crate::mailbox::CHAT_WITH_ME_SUFFIX;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
 use crate::hooks::HookAbortSignal;

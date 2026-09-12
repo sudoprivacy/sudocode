@@ -16,6 +16,29 @@ use std::sync::Arc;
 use crate::agent_mailbox::MailboxEnvelope;
 use crate::fs_backend::FsBackend;
 
+/// The leaf of an A2A inbox path, re-exported so scode spells it the same way
+/// the daemon's mailbox-stamping policy does.
+///
+/// The SSOT is `a2a`, in the infra crate — the daemon decides which paths it
+/// stamps, so scode reading the constant rather than retyping it is what keeps
+/// the two in agreement. Re-exported HERE, and used from here, so there is one
+/// hop rather than each module reaching for `a2a` on its own.
+pub use a2a::CHAT_WITH_ME_SUFFIX;
+
+/// Directory an A2A inbox lives under.
+///
+/// scode's convention, not nexus's: nexus supplies the zone prefix, routing and
+/// replication, and is deliberately agnostic about what the names under it
+/// mean. So this constant belongs to scode and lives with the convention that
+/// uses it.
+pub const A2A_INBOX_BASE: &str = "/agents";
+
+/// Directory a local JSONL inbox lives under, relative to the workspace root.
+///
+/// Owned by [`crate::agent_mailbox`] — it builds every path under this — and
+/// re-exported here so the convention reads as one thing in one place.
+pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
+
 /// How agent names map to inbox paths.
 #[derive(Debug, Clone)]
 pub enum InboxConvention {
@@ -27,14 +50,19 @@ pub enum InboxConvention {
 
 impl InboxConvention {
     /// Resolve the inbox path for an agent name.
+    ///
+    /// One function for both directions a caller needs: pass your own name for
+    /// the inbox you read, pass a sender's for the inbox you reply into. There
+    /// is nothing else to a "reply path".
     #[must_use]
+    #[inline]
     pub fn inbox_path(&self, name: &str) -> String {
         match self {
             InboxConvention::LocalJsonl { root } => {
-                format!("{root}/.sudocode-inbox/{name}.jsonl")
+                format!("{root}/{LOCAL_INBOX_DIR}/{name}.jsonl")
             }
             InboxConvention::NexusA2a => {
-                format!("/agents/{name}/chat-with-me")
+                format!("{A2A_INBOX_BASE}/{name}{CHAT_WITH_ME_SUFFIX}")
             }
         }
     }
@@ -69,6 +97,7 @@ impl Mailbox {
     /// construction it would be `false` forever, and a provisioned DT_STREAM
     /// inbox would be written and read as JSONL. The call is cheap — a string
     /// test for the VFS backend, a constant `false` for the file one.
+    #[inline]
     fn backend_frames(&self, path: &str) -> bool {
         self.backend.is_append_stream(path).unwrap_or(false)
     }
@@ -96,16 +125,19 @@ impl Mailbox {
     }
 
     #[must_use]
+    #[inline]
     pub fn self_id(&self) -> &str {
         &self.self_id
     }
 
     #[must_use]
+    #[inline]
     pub fn inbox_path(&self, agent: &str) -> String {
         self.convention.inbox_path(agent)
     }
 
     #[must_use]
+    #[inline]
     pub fn own_inbox_path(&self) -> String {
         self.convention.inbox_path(&self.self_id)
     }

@@ -120,12 +120,20 @@ fn now_secs() -> u64 {
 /// distinct recipients.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Directory the workspace-local JSONL inboxes live in.
+///
+/// The layout SSOT for the local convention: `mailbox_dir` and
+/// `mailbox_path` build every path under it, and
+/// `crate::mailbox::InboxConvention::LocalJsonl` re-exports it rather than
+/// re-spelling it.
+pub const LOCAL_INBOX_DIR: &str = ".sudocode-inbox";
+
 /// Resolve the mailbox directory for a workspace root. Callers must
 /// ensure the directory exists before writing; [`append_envelope`]
 /// creates it lazily.
 #[must_use]
 pub fn mailbox_dir(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".sudocode-inbox")
+    workspace_root.join(LOCAL_INBOX_DIR)
 }
 
 /// Resolve the mailbox file for a recipient. The recipient string is

@@ -208,7 +208,7 @@ where
         // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
         // host addresses it by name; raft replicates the reply back.
         let mailbox = Mailbox::A2aInbox {
-            base: "/agents".to_string(),
+            base: runtime::mailbox::A2A_INBOX_BASE.to_string(),
             self_name: desc.name.clone(),
         };
         let handle = spawn_managed_agent(kernel, desc, mailbox, move |state, reason| {

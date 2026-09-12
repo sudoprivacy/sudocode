@@ -9,43 +9,53 @@
 //!
 //! ## The mechanism under test
 //!
-//! Ctrl-C's handler does both of these in one pass (`repl_ui.rs`):
+//! Ctrl-C's handler performs three real `State::set` calls in one pass
+//! (`repl_ui.rs`):
 //!
 //! ```ignore
+//! last_ctrlc.set(Some(now));
 //! footer_hint.set(Some((hint_msg, Instant::now() + Duration::from_secs(3))));
 //! input_value.set(String::new());
 //! ```
 //!
-//! If the frame carrying the hint can reach the PTY before the cleared buffer
-//! is observable, then a test that waits on the hint and types immediately has
-//! its characters inserted by `TextInput` and then wiped. Nothing appears.
+//! Per this REPL's own render model — spelled out in the comment above the
+//! spinner block and guarded by `iocraft_repl_keyboard_input_not_frozen` — a
+//! `State::set` resolves `component.wait()`, and doing so repeatedly starves
+//! `term.wait()`, which is where key events get distributed. Keystrokes
+//! arriving inside that window are dropped outright: the buffer reads empty and
+//! the characters never render, which is the symptom exactly.
+//!
+//! Note the "only set when the value changed" discipline already in `repl_ui`
+//! does not apply here. All three sets are genuine changes.
 //!
 //! ## The experiment
 //!
-//! Two arms, differing only in what they wait for after Ctrl-C before typing:
+//! Three arms, differing only in what they wait for after Ctrl-C before typing:
 //!
 //! | arm | waits for |
 //! |---|---|
-//! | `stream-hint` | the hint in the PTY BYTE STREAM — what the real test does |
-//! | `cleared-buffer` | the input buffer observably EMPTY — the proposed guard |
+//! | `stream-hint` | the hint in the PTY BYTE STREAM — the real test's guard |
+//! | `cleared-buffer` | the input buffer observably EMPTY |
+//! | `quiesced` | cleared, AND the screen unchanged across three polls |
 //!
-//! A lossy `stream-hint` arm beside a clean `cleared-buffer` arm confirms the
-//! mechanism and the fix together. Both clean says the mechanism is wrong and
-//! the loss is elsewhere. Both lossy says waiting for the clear is not enough.
+//! `quiesced` clean while `cleared-buffer` loses ⇒ the window is the
+//! post-Ctrl-C render churn, and the product fix is to coalesce those three
+//! mutations into one. Both lossy ⇒ the loss is not about render churn.
 //!
 //! ## Measured so far
 //!
-//! | arm | macOS | Windows |
+//! | arm | macOS lost | Windows lost |
 //! |---|---|---|
-//! | `stream-hint` | 4/12 rendered | 22/24 rendered |
-//! | `cleared-buffer` | 10/12 rendered | 48/48 rendered |
+//! | `stream-hint` | 8/20 (40%) | 2/24 |
+//! | `cleared-buffer` | 5/36 (14%) | 0/48 |
 //!
-//! Two things worth recording. The loss is NOT macOS-only — Windows reproduces
-//! it too, just rarely enough that the single-round real test almost always
-//! passes there, which is why it read as a macOS problem. And `cleared-buffer`
-//! has not lost a Windows round yet; both of its macOS losses came from the
-//! first run, before the arms were separated from the earlier Ctrl-C/no-Ctrl-C
-//! comparison.
+//! Three things worth recording. The loss is NOT macOS-only — Windows
+//! reproduces it, just rarely enough that the single-round real test almost
+//! always passes there, which is why it read as a macOS problem. The rate
+//! swings hard with runner load: the control came back 4-of-6 lost twice and
+//! 0-of-8 once from identical code, so no single run discriminates and only a
+//! within-run comparison means anything. And waiting for the clear reduces the
+//! loss without removing it, so it is a mitigation, not a fix.
 //!
 //! Reports a rate and dumps every lost round, so one CI run is informative
 //! rather than a coin flip.
@@ -64,7 +74,7 @@ const CONTROL_ROUNDS: usize = 8;
 
 /// The arm under test gets the rounds, because 6 was too few to tell 4/6 from
 /// 6/6 — the first two runs disagreed by exactly that much.
-const ROUNDS: usize = 24;
+const ROUNDS: usize = 12;
 const RENDER_BUDGET: Duration = Duration::from_secs(10);
 
 /// What the arm waits for after Ctrl-C, before typing.
@@ -82,6 +92,24 @@ enum AfterCtrlC {
     /// this arm's 6/6, i.e. no better for twice the work, so the slot-routing
     /// theory is not the residual and the arm is gone.
     ClearedBuffer,
+    /// Cleared, and then the screen unchanged across several polls — the render
+    /// loop observably QUIESCED.
+    ///
+    /// Tests the mechanism directly. Ctrl-C's handler performs three real
+    /// `State::set` calls in one pass (`last_ctrlc`, `footer_hint`,
+    /// `input_value`), and per this REPL's own render model each one resolves
+    /// `component.wait()`; a run of them starves `term.wait()`, which is where
+    /// key events get distributed. Keystrokes arriving inside that window are
+    /// dropped outright — buffer empty, characters never rendered, which is the
+    /// observed symptom exactly.
+    ///
+    /// Clean here while `ClearedBuffer` still loses ⇒ the window is the
+    /// post-Ctrl-C render churn, and the product fix is to coalesce those three
+    /// mutations into one. Still lossy ⇒ the loss is not about render churn.
+    ///
+    /// The "only set when the value changed" discipline already in `repl_ui`
+    /// cannot help either way: all three of these sets are genuine changes.
+    ClearedThenQuiesced,
 }
 
 /// The text after the last prompt marker on the lowest row carrying one.
@@ -137,10 +165,40 @@ fn wait_for_cleared(sess: &mut PtySession, round: usize) -> Result<(), String> {
     }
 }
 
+/// Block until the screen stops changing — the render loop has nothing left to
+/// flush, so it is no longer resolving `component.wait()` ahead of
+/// `term.wait()`.
+///
+/// Three identical consecutive polls rather than one comparison: a single pair
+/// can match across the gap between two frames of the same churn.
+fn wait_for_quiescence(sess: &mut PtySession, round: usize) -> Result<(), String> {
+    const STABLE_POLLS: usize = 3;
+    let deadline = Instant::now() + RENDER_BUDGET;
+    let mut previous = sess.render(|s| s.contents());
+    let mut stable = 0;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let current = sess.render(|s| s.contents());
+        if current == previous {
+            stable += 1;
+            if stable >= STABLE_POLLS {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+            previous = current;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("round {round}: screen never stopped changing"));
+        }
+    }
+}
+
 fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
     let label = match arm {
         AfterCtrlC::StreamHint => "stream",
         AfterCtrlC::ClearedBuffer => "cleared",
+        AfterCtrlC::ClearedThenQuiesced => "quiesced",
     };
     let env = TestEnv::new(&format!("ctrlc-{label}-{round}"));
     let root = env.workspace_root().to_path_buf();
@@ -177,6 +235,10 @@ fn run_round(arm: AfterCtrlC, round: usize) -> Result<(), String> {
         AfterCtrlC::ClearedBuffer => {
             wait_for_cleared(&mut sess, round)?;
         }
+        AfterCtrlC::ClearedThenQuiesced => {
+            wait_for_cleared(&mut sess, round)?;
+            wait_for_quiescence(&mut sess, round)?;
+        }
     }
 
     sess.send("/exit").expect("type /exit");
@@ -210,19 +272,23 @@ fn which_post_ctrlc_wait_stops_losing_keystrokes() {
     // before the arm under test is credited with anything.
     let stream_lost = measure(AfterCtrlC::StreamHint, CONTROL_ROUNDS);
     let cleared_lost = measure(AfterCtrlC::ClearedBuffer, ROUNDS);
+    let quiesced_lost = measure(AfterCtrlC::ClearedThenQuiesced, ROUNDS);
 
     eprintln!(
-        "SUMMARY stream_hint={}/{CONTROL_ROUNDS} cleared_buffer={}/{ROUNDS}",
+        "SUMMARY stream_hint={}/{CONTROL_ROUNDS} cleared_buffer={}/{ROUNDS} quiesced={}/{ROUNDS}",
         CONTROL_ROUNDS - stream_lost,
-        ROUNDS - cleared_lost
+        ROUNDS - cleared_lost,
+        ROUNDS - quiesced_lost
     );
 
-    // Fail whenever either arm lost a round, so CI surfaces the dumps. Two runs
-    // put the control at 4 of 6 lost each time; the arm under test came back
-    // 4/6 then 6/6, which is why it now gets twelve rounds instead of six.
+    // Fail whenever any arm lost a round, so CI surfaces the dumps. The control
+    // has come back 4-of-6 lost twice and 0-of-8 once, so it establishes only
+    // whether a given run can reproduce at all; the comparison that matters is
+    // `cleared` against `quiesced` within one run.
     assert!(
-        stream_lost == 0 && cleared_lost == 0,
+        stream_lost == 0 && cleared_lost == 0 && quiesced_lost == 0,
         "keystrokes lost: stream_hint dropped {stream_lost} of {CONTROL_ROUNDS} (control), \
-         cleared_buffer dropped {cleared_lost} of {ROUNDS}"
+         cleared_buffer dropped {cleared_lost} of {ROUNDS}, \
+         quiesced dropped {quiesced_lost} of {ROUNDS}"
     );
 }

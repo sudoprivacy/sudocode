@@ -620,14 +620,23 @@ fn coordinator_allowed_tools_includes_canonical_names() {
 }
 
 #[test]
-fn coordinator_allowed_tools_includes_deprecated_aliases() {
-    let allowed = runtime::coordinator_mode::coordinator_allowed_tools();
-    assert!(allowed.contains("Agent"));
-    assert!(allowed.contains("SendMessage"));
-    assert!(allowed.contains("TaskStop"));
-    assert!(allowed.contains("TaskGet"));
-    assert!(allowed.contains("TaskList"));
-    assert!(allowed.contains("TaskOutput"));
+fn coordinator_predicate_admits_deprecated_aliases_via_canonicalization() {
+    use runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode;
+    std::env::set_var("SUDOCODE_COORDINATOR_MODE", "1");
+    for alias in [
+        "Agent",
+        "SendMessage",
+        "TaskStop",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+    ] {
+        assert!(
+            is_tool_allowed_in_coordinator_mode(alias),
+            "deprecated alias `{alias}` should be admitted via canonicalization"
+        );
+    }
+    std::env::remove_var("SUDOCODE_COORDINATOR_MODE");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -683,7 +692,11 @@ fn peer_message_poller_to_compose_roundtrip() {
     agent_mailbox::append_envelope(
         &ws,
         "team-lead",
-        envelope(kinds::MESSAGE, "researcher", "found critical vulnerability in auth.rs"),
+        envelope(
+            kinds::MESSAGE,
+            "researcher",
+            "found critical vulnerability in auth.rs",
+        ),
     )
     .unwrap();
 

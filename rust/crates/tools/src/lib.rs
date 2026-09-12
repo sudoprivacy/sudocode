@@ -59,6 +59,7 @@ pub mod testing {
             name: None,
             model: None,
             run_in_background: Some(true),
+            fresh: None,
             auth_mode: None,
             permission_mode: None,
         };
@@ -3757,6 +3758,10 @@ struct AgentInput {
     model: Option<String>,
     #[serde(default)]
     run_in_background: Option<bool>,
+    /// When true, start a clean session. When false (default), resume
+    /// the most recent session for this agent name if one exists.
+    #[serde(default)]
+    fresh: Option<bool>,
     /// Explicit auth mode: `"api-key"`, `"proxy"`, or `"subscription"`.
     /// When set, overrides the config's auto-detect priority.
     auth_mode: Option<String>,
@@ -4951,6 +4956,9 @@ fn prepare_agent_job(
             .expect("fork ctx presence checked above");
         let messages = build_forked_messages(&input.prompt, parent_assistant);
         (build_fork_child_message(&input.prompt), messages)
+    } else if !input.fresh.unwrap_or(false) {
+        let resumed = find_resumable_session(&agent_name);
+        (input.prompt.clone(), resumed.unwrap_or_default())
     } else {
         (input.prompt.clone(), Vec::new())
     };
@@ -5322,6 +5330,8 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             Ok(final_assistant_text(&summary))
         },
     )?;
+
+    persist_agent_session(&job.manifest, conv_runtime.session());
 
     // Fold telemetry into the on-disk manifest BEFORE any downstream
     // step (summarizer, persist) reads it, so the terminal-state
@@ -7468,6 +7478,58 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     }
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-agents"))
+}
+
+fn agent_session_path(store_dir: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
+    store_dir.join(format!("{agent_id}.session.jsonl"))
+}
+
+/// Persist the agent's conversation session to disk so a future
+/// `agent_spawn(fresh: false)` with the same name can resume it.
+fn persist_agent_session(manifest: &AgentOutput, session: &Session) {
+    let Ok(store) = agent_store_dir() else {
+        return;
+    };
+    let path = agent_session_path(&store, &manifest.agent_id);
+    if let Err(e) = session.save_to_path(&path) {
+        eprintln!("sudocode: failed to persist agent session: {e}");
+    }
+}
+
+/// Find the most recent completed agent with the given slugified name
+/// and return its persisted session messages. Returns `None` when no
+/// resumable session exists.
+fn find_resumable_session(agent_name: &str) -> Option<Vec<ConversationMessage>> {
+    let store = agent_store_dir().ok()?;
+    if !store.exists() {
+        return None;
+    }
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let entries = std::fs::read_dir(&store).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
+            continue;
+        };
+        if manifest.status != "completed" {
+            continue;
+        }
+        if slugify_agent_name(&manifest.name) != agent_name {
+            continue;
+        }
+        candidates.push((manifest.agent_id, manifest.created_at));
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    let best_id = &candidates.first()?.0;
+    let session_path = agent_session_path(&store, best_id);
+    let session = Session::load_from_path(&session_path).ok()?;
+    Some(session.messages.clone())
 }
 
 fn make_agent_id() -> String {
@@ -10065,6 +10127,7 @@ mod tests {
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10155,6 +10218,7 @@ mod tests {
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10215,6 +10279,7 @@ mod tests {
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10265,6 +10330,7 @@ mod tests {
                 name: Some("summary-floor".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10313,6 +10379,7 @@ mod tests {
                 name: Some("recovery-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10364,6 +10431,7 @@ mod tests {
                 name: Some("review-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10407,6 +10475,7 @@ mod tests {
                 name: Some("backlog-scan".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10456,6 +10525,7 @@ mod tests {
                 name: Some("artifact-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10529,6 +10599,7 @@ mod tests {
                 name: Some("cron-closeout".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10573,6 +10644,7 @@ mod tests {
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10874,6 +10946,7 @@ mod tests {
                 name: Some("calc-task".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10920,6 +10993,7 @@ mod tests {
                 name: Some("fail-calc".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10963,6 +11037,7 @@ mod tests {
                 name: Some("slow-calc".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11010,6 +11085,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11041,6 +11117,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11510,6 +11587,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11572,6 +11650,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },

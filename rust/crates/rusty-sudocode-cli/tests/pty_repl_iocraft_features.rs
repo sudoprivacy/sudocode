@@ -803,3 +803,57 @@ fn config_tree_navigate_back_and_toggle() {
     });
     assert_eq!(exit, 0, "clean exit code");
 }
+
+/// Regression: the `/model` picker sets `allow_custom_input` but renders as a
+/// FuzzySelect (the bundled model list is long). Typing a name that matches no
+/// listed model must still be submittable — Enter uses the typed filter text as
+/// the answer instead of doing nothing. (The sibling DialPad path, used when a
+/// question has <=9 options, is fixed the same way.)
+#[test]
+fn model_picker_accepts_custom_typed_name() {
+    let env = TestEnv::new("dialpad-custom-input");
+    let root = env.workspace_root().to_path_buf();
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Open the model picker.
+    sess.send("/model\r").expect("send /model");
+    sess.expect("(?i)select model").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("model picker prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Type a model name that matches none of the listed options. The filter
+    // empties, and the custom-input hint must appear.
+    sess.send("zzz-custom-model").expect("type custom model");
+    sess.expect("(?i)type a model name").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("custom-input hint missing on no-match: {e}\nPTY:\n{screen}");
+    });
+
+    // Enter submits the typed value as the answer; the switch names it.
+    sess.send("\r").expect("submit custom model");
+    sess.expect("zzz-custom-model").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("custom model not applied: {e}\nPTY:\n{screen}");
+    });
+
+    std::thread::sleep(Duration::from_millis(400));
+    sess.set_default_timeout(Duration::from_secs(20));
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}

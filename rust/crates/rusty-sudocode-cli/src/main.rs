@@ -5890,12 +5890,14 @@ mod wait_notice_tests {
     /// A turn that keeps running must keep saying so, and must name what it is
     /// waiting on — "still running" without a target leaves the reader exactly
     /// as stuck as silence does.
+    ///
+    /// Uses channel-based synchronization instead of sleep to avoid flaky
+    /// timing on loaded CI runners.
     #[test]
     fn keeps_reporting_while_the_turn_runs_then_stops_on_drop() {
-        let lines = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         let calls = Arc::new(Mutex::new(0usize));
         {
-            let sink = Arc::clone(&lines);
             let counter = Arc::clone(&calls);
             let _notice = WaitNotice::start_lazily(
                 move || {
@@ -5904,22 +5906,29 @@ mod wait_notice_tests {
                 },
                 Duration::from_millis(20),
                 Duration::from_millis(20),
-                move |line| sink.lock().expect("sink").push(line),
+                move |line| {
+                    tx.send(line).ok();
+                },
             );
-            thread::sleep(Duration::from_millis(300));
+
+            // Wait for at least 2 lines deterministically via channel recv.
+            let line1 = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("should receive first notice line");
+            let line2 = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("should receive second notice line");
+
+            assert!(
+                line1.contains("example.test"),
+                "should name the target, got: {line1}",
+            );
+            assert!(
+                line2.contains("example.test"),
+                "should name the target, got: {line2}",
+            );
         }
         // The guard's Drop joins the thread, so nothing can arrive after this.
-        let captured = lines.lock().expect("sink").clone();
-        assert!(
-            captured.len() >= 2,
-            "should keep reporting, got {} line(s): {captured:?}",
-            captured.len()
-        );
-        assert!(
-            captured[0].contains("example.test"),
-            "should name the target, got: {}",
-            captured[0]
-        );
 
         assert_eq!(
             *calls.lock().expect("counter"),
@@ -5927,10 +5936,10 @@ mod wait_notice_tests {
             "the upstream should be described once and reused, not re-resolved per line"
         );
 
-        thread::sleep(Duration::from_millis(60));
-        assert_eq!(
-            lines.lock().expect("sink").len(),
-            captured.len(),
+        // After drop, the sender is gone and the thread is joined.
+        // Verify no more lines arrive.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
             "dropping the guard must stop the thread, not just detach it"
         );
     }

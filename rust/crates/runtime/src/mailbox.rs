@@ -428,6 +428,28 @@ impl InboxCursor {
         Self { path }
     }
 
+    /// Where a workspace-local receiver keeps its position: a dotfile beside
+    /// the inbox it tracks, so it is scoped to the workspace and swept with it.
+    ///
+    /// The one definition of that location. A caller that needs to know whether
+    /// a receiver has started — a test with a message to send, say — asks here
+    /// rather than rebuilding the name, because a rebuilt name is a second
+    /// definition that compiles.
+    #[must_use]
+    pub fn local(workspace_root: &std::path::Path, self_id: &str) -> Self {
+        Self::at(
+            crate::agent_mailbox::mailbox_dir(workspace_root)
+                .join(Self::file_name(".cursor-", self_id)),
+        )
+    }
+
+    /// The file this cursor lives in.
+    #[must_use]
+    #[inline]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// `<prefix><name>` with everything outside `[A-Za-z0-9_-]` folded to `_`,
     /// so an agent name is safe to use as a filename on every platform.
     #[must_use]
@@ -561,10 +583,7 @@ pub fn spawn_local_poller(
     abort: crate::HookAbortSignal,
     sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
-    let cursor_store = InboxCursor::at(
-        crate::agent_mailbox::mailbox_dir(&workspace_root)
-            .join(InboxCursor::file_name(".cursor-", &self_id)),
-    );
+    let cursor_store = InboxCursor::local(&workspace_root, &self_id);
     let mailbox = Arc::new(Mailbox::new(
         Arc::new(crate::fs_backend::StdFsBackend),
         self_id,
@@ -647,7 +666,7 @@ mod tests {
         let ws = temp_workspace("reject-redeliver");
         let ws_path = std::path::PathBuf::from(&ws);
         let peer = local_mailbox(&ws, "peer");
-        let cursor_file = crate::agent_mailbox::mailbox_dir(&ws_path).join(".cursor-me");
+        let cursor_file = InboxCursor::local(&ws_path, "me").path().to_path_buf();
 
         // Refuse the first delivery of each body, accept the second.
         let attempts: Arc<std::sync::Mutex<Vec<String>>> =
@@ -704,7 +723,7 @@ mod tests {
         peer.send(note("peer", "me", "backlog-2")).expect("send");
 
         let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let cursor_file = crate::agent_mailbox::mailbox_dir(&ws_path).join(".cursor-me");
+        let cursor_file = InboxCursor::local(&ws_path, "me").path().to_path_buf();
 
         // First run: never read this inbox before, so seek to the tail.
         let abort = crate::HookAbortSignal::new();
@@ -917,8 +936,8 @@ mod tests {
         // delivered. This test is about a message arriving while the receiver
         // is listening, which means it has to establish "listening" first.
         wait_until("the poller to record where it starts", || {
-            crate::agent_mailbox::mailbox_dir(std::path::Path::new(&ws))
-                .join(".cursor-team-lead")
+            InboxCursor::local(std::path::Path::new(&ws), "team-lead")
+                .path()
                 .exists()
         });
 

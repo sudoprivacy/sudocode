@@ -1632,7 +1632,14 @@ where
                 return Err(error);
             }
 
-            crate::compact::microcompact_messages(&mut self.session.messages);
+            // Nothing rewrites history here. A microcompact pass used to run
+            // on this line, content-clearing older tool results before every
+            // request; see the commit that removed it for the measurements.
+            // The short version: editing an earlier message invalidates the
+            // provider's cached prefix from that point on, so eliding a few KB
+            // of stale output cost a full re-cache of the entire conversation.
+            // Context pressure is handled below, by compaction, which rebuilds
+            // the prefix anyway and so can clear for free.
 
             // Compact before dispatching, not after the provider rejects.
             // A turn that takes many tool-call steps grows its own history
@@ -3862,6 +3869,144 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The prompt-cache invariant: a request may only ever *append* to the
+    /// previous one.
+    ///
+    /// Anthropic's prompt cache matches a byte-exact prefix. Mutating anything
+    /// the previous request already sent — a system block, a tool definition,
+    /// or an older message — invalidates the cache from that point on, and the
+    /// whole remaining context is re-written at 1.25x input price instead of
+    /// being read at 0.1x. A pre-request pass that content-cleared stale tool
+    /// results used to break exactly this: on a live session it rebuilt ~314k
+    /// tokens on 24% of turns, 99% of all cache-creation traffic, to elide a
+    /// few KB of stale output.
+    ///
+    /// This test drives enough tool calls to trip that pass (it kept the two
+    /// most recent results per tool name, so the fourth `bash` call cleared the
+    /// first) and asserts the prefix is untouched — segment by segment, so a
+    /// failure names the message that moved.
+    #[tokio::test]
+    async fn consecutive_requests_only_append_and_never_rewrite_the_cached_prefix() {
+        /// Enough `bash` results that a keep-the-last-2 policy has to clear one.
+        const TOOL_CALLS: usize = 5;
+
+        #[derive(Clone)]
+        struct Recorded {
+            system_static: String,
+            system_dynamic: String,
+            messages: Vec<crate::session::ConversationMessage>,
+        }
+
+        struct RecordingClient {
+            seen: Arc<std::sync::Mutex<Vec<Recorded>>>,
+        }
+
+        #[async_trait]
+        impl ApiClient for RecordingClient {
+            async fn stream(
+                &mut self,
+                request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                let calls = {
+                    let mut seen = self.seen.lock().expect("record requests");
+                    seen.push(Recorded {
+                        system_static: request.system_prompt.static_text(),
+                        system_dynamic: request.system_prompt.dynamic_text(),
+                        messages: request.messages.clone(),
+                    });
+                    seen.len()
+                };
+
+                if calls > TOOL_CALLS {
+                    return Ok(events_to_stream(vec![
+                        AssistantEvent::TextDelta("done".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]));
+                }
+                Ok(events_to_stream(vec![
+                    AssistantEvent::ToolUse {
+                        id: format!("bash-{calls}"),
+                        name: "bash".to_string(),
+                        input: String::new(),
+                        thought_signature: None,
+                    },
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        struct AllowAll;
+        impl PermissionPrompter for AllowAll {
+            fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+                PermissionPromptDecision::Allow
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Recorded>::new()));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            RecordingClient {
+                seen: Arc::clone(&seen),
+            },
+            // Output big enough that clearing it would be a visible saving —
+            // i.e. exactly the case the old pass considered worth rewriting.
+            StaticToolExecutor::new().register("bash", |_input| Ok("out ".repeat(400))),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            SystemPrompt::default(),
+        );
+
+        runtime
+            .run_turn("run bash a few times", Some(&mut AllowAll), None)
+            .await
+            .expect("conversation loop should succeed");
+
+        let seen = seen.lock().expect("read records").clone();
+        assert!(
+            seen.len() > TOOL_CALLS,
+            "expected the tool loop to issue more than {TOOL_CALLS} requests, got {}",
+            seen.len()
+        );
+
+        for (index, pair) in seen.windows(2).enumerate() {
+            let (before, after) = (&pair[0], &pair[1]);
+
+            assert_eq!(
+                before.system_static,
+                after.system_static,
+                "request {} rewrote the static system block; the cached prefix \
+                 starts there, so every later token has to be re-cached",
+                index + 1
+            );
+            assert_eq!(
+                before.system_dynamic,
+                after.system_dynamic,
+                "request {} rewrote the dynamic system block, invalidating the \
+                 whole message history behind it",
+                index + 1
+            );
+
+            assert!(
+                after.messages.len() >= before.messages.len(),
+                "request {} dropped messages ({} -> {}); a request may only \
+                 append to its predecessor",
+                index + 1,
+                before.messages.len(),
+                after.messages.len()
+            );
+
+            for (position, old) in before.messages.iter().enumerate() {
+                assert_eq!(
+                    old,
+                    &after.messages[position],
+                    "request {} rewrote message[{position}] — the provider has \
+                     already cached it, so the entire context from here on is \
+                     re-written instead of read",
+                    index + 1
+                );
+            }
+        }
     }
 
     #[tokio::test]

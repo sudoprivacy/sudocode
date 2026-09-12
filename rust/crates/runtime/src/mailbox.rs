@@ -250,6 +250,53 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+const LOCAL_POLL_BLOCK_MS: u64 = 1000;
+
+/// Spawn a background thread that polls a local JSONL inbox for
+/// incoming peer messages and invokes `sink` for each one.
+///
+/// The thread blocks up to 1s per iteration waiting for new data,
+/// then loops. File-not-found is handled gracefully (the file may
+/// not exist until a sub-agent first writes to it).
+pub fn spawn_local_poller(
+    workspace_root: std::path::PathBuf,
+    self_id: String,
+    abort: crate::HookAbortSignal,
+    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("local-inbox-poller".into())
+        .spawn(move || {
+            let backend: Arc<dyn crate::fs_backend::FsBackend> =
+                Arc::new(crate::fs_backend::StdFsBackend);
+            let mailbox = Mailbox::new(
+                backend,
+                self_id,
+                InboxConvention::LocalJsonl {
+                    root: workspace_root.to_string_lossy().into_owned(),
+                },
+            );
+            let mut cursor = 0u64;
+            while !abort.is_aborted() {
+                match mailbox.poll(cursor, LOCAL_POLL_BLOCK_MS) {
+                    Ok((msgs, next)) => {
+                        for m in &msgs {
+                            sink(m);
+                        }
+                        if next > cursor {
+                            cursor = next;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[local-inbox] poll failed: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(LOCAL_POLL_BLOCK_MS));
+                    }
+                }
+            }
+        })
+        .expect("spawn local-inbox-poller thread")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +457,43 @@ mod tests {
 
         let nexus = InboxConvention::NexusA2a;
         assert_eq!(nexus.inbox_path("win-ai"), "/agents/win-ai/chat-with-me");
+    }
+
+    #[test]
+    fn spawn_local_poller_delivers_messages() {
+        let ws = temp_workspace("local-poller");
+        let (tx, rx) = std::sync::mpsc::channel::<MailboxEnvelope>();
+        let abort = crate::HookAbortSignal::new();
+        let abort_clone = abort.clone();
+
+        let _handle = super::spawn_local_poller(
+            std::path::PathBuf::from(&ws),
+            "team-lead".to_string(),
+            abort_clone,
+            move |msg| {
+                let _ = tx.send(msg.clone());
+            },
+        );
+
+        // Write a message from a sub-agent to team-lead's inbox.
+        let mb = local_mailbox(&ws, "sub-agent-1");
+        mb.send(MailboxEnvelope {
+            from: "sub-agent-1".to_string(),
+            to: "team-lead".to_string(),
+            body: "task complete".to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
+        })
+        .unwrap();
+
+        let msg = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(msg.from, "sub-agent-1");
+        assert_eq!(msg.body, "task complete");
+
+        abort.abort();
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

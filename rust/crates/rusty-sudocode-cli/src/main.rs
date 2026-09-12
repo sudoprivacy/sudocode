@@ -2666,6 +2666,23 @@ fn run_repl_iocraft_dispatch(
         );
     }
 
+    // Local JSONL inbox poller: picks up messages that sub-agents
+    // write to `.sudocode-inbox/team-lead.jsonl` via the `send` tool.
+    // Complements the nexus A2A poller above — together they close the
+    // receive loop for both local and cross-machine messaging.
+    {
+        let coord_tx_local = coord_tx.clone();
+        let workspace = env::current_dir().unwrap_or_default();
+        let _local_poller = runtime::mailbox::spawn_local_poller(
+            workspace,
+            "team-lead".to_string(),
+            runtime::HookAbortSignal::new(),
+            move |msg| {
+                let _ = coord_tx_local.send(CoordinatorEvent::PeerMessage(msg.clone()));
+            },
+        );
+    }
+
     // Coordinator loop on the current thread. All events arrive through
     // `coord_rx` — no timeout-based polling needed.
     let coord = Arc::new(Mutex::new(input_queue::TurnInputCoordinator::new()));

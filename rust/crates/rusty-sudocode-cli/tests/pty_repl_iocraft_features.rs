@@ -9,7 +9,7 @@ mod common;
 
 use common::TestEnv;
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Budget for the process to exit after `/exit`, separate from the budget a
 /// test gives the behaviour it asserts.
@@ -21,6 +21,54 @@ use std::time::Duration;
 /// hangs these tests guard against are unbounded, so a wide budget still
 /// catches them while runner speed no longer decides the verdict.
 const EXIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// The Ctrl-C confirmation hint, verbatim from `repl_ui`.
+const HINT: &str = "Press Ctrl-C again to exit";
+
+/// How long `repl_ui` shows that hint before clearing it.
+const HINT_TTL: Duration = Duration::from_secs(3);
+
+/// Index of the first rendered row containing `needle`, if any.
+///
+/// A row index, not a boolean, because "the hint is in the footer" is a claim
+/// about WHERE it rendered — below the input line rather than up in the
+/// transcript — and only a position can express that.
+fn row_containing(sess: &mut pty_expect::PtySession, needle: &str) -> Option<usize> {
+    sess.render(|s| s.contents().lines().position(|line| line.contains(needle)))
+}
+
+/// Block until `needle` occupies a row, and return that row.
+fn wait_for_row_containing(
+    sess: &mut pty_expect::PtySession,
+    needle: &str,
+    budget: Duration,
+) -> usize {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(row) = row_containing(sess, needle) {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no row showed {needle:?} within {budget:?}\nPTY:\n{}",
+            sess.render(|s| s.contents())
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Block until `needle` is gone from every row.
+fn wait_for_no_row_containing(sess: &mut pty_expect::PtySession, needle: &str, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    while row_containing(sess, needle).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "{needle:?} was still on screen after {budget:?}\nPTY:\n{}",
+            sess.render(|s| s.contents())
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 /// **P0 regression guard**: typing in the iocraft REPL must produce
 /// visible output in the terminal.
@@ -143,14 +191,24 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
         panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
     });
 
-    // Press Ctrl-C once — should show hint in footer area.
+    // Press Ctrl-C once — the hint belongs in the footer.
     sess.send("\x03").expect("send Ctrl-C");
 
-    sess.expect("Press Ctrl-C again to exit")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
-        });
+    // Read the SCREEN, not the byte stream: iocraft redraws everything on any
+    // change, so a stream match says a frame went past, not what is displayed.
+    let hint_row = wait_for_row_containing(&mut sess, HINT, Duration::from_secs(15));
+
+    // BELOW the prompt, which is what "in the footer and not scrollback" means
+    // in terms a test can check. The docstring has always claimed this; nothing
+    // asserted it, so a hint printed into the transcript would have passed.
+    let prompt_row = row_containing(&mut sess, "\u{276f}")
+        .expect("the prompt row is on screen once the REPL is up");
+    assert!(
+        hint_row > prompt_row,
+        "the Ctrl-C hint must render in the footer, below the input line, \
+         not in the scrollback above it (hint row {hint_row}, prompt row {prompt_row})\nPTY:\n{}",
+        sess.render(|s| s.contents())
+    );
 
     // Wait for Ctrl-C to have CLEARED the line, not merely for a prompt row to
     // exist. Its handler emits the footer hint and clears `input_value` in the
@@ -168,26 +226,27 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
         "Ctrl-C should clear the input line before more is typed",
     );
 
-    // Clean exit. Type and submit as two steps, waiting for the line to
-    // render in between: Enter is only a submit if the input state has
-    // caught up with the characters, and Ctrl-C just cleared that state.
-    // Sending "/exit\r" as one write makes an unrendered line and its Enter
-    // race, and the failure is silent — an empty line submits nothing, so
-    // the test learns about it 60s later as "no EOF" with no clue why.
-    sess.send("/exit").expect("type /exit");
-    common::expect_input_line(
-        &sess,
-        "/exit",
-        Duration::from_secs(15),
-        "typed /exit should render before Enter",
-    );
-    sess.send("\r").expect("send Enter");
-    sess.set_default_timeout(EXIT_BUDGET);
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("exit: {e}\nPTY:\n{screen}");
-    });
-    assert_eq!(exit, 0, "clean exit code");
+    // And it auto-dismisses. Also claimed by the docstring and never checked,
+    // which matters more than it sounds: the hint is the ONE thing standing
+    // between a second Ctrl-C and an exit, so a hint that never clears leaves
+    // the REPL one keystroke from quitting indefinitely.
+    wait_for_no_row_containing(&mut sess, HINT, HINT_TTL + Duration::from_secs(5));
+
+    // No `/exit` teardown, deliberately. `PtySession`'s `Drop` kills the child,
+    // and typing after Ctrl-C is exactly what issue #621 is about: keystrokes
+    // in that window are dropped outright, measured at 32% on macOS and
+    // reproducible on Windows. This test's subject is where the hint renders and
+    // that it clears; making it depend on a keystroke it cannot rely on tested
+    // the bug rather than the subject, and it is what turned this into the
+    // flake that blocked merges.
+    //
+    // Clean exit keeps its own guard in `iocraft_repl_auto_grow_exit_no_hang`,
+    // which exits from an untouched REPL and so is unaffected.
+    //
+    // Worth being explicit: CI loses an accidental detector for #621 here. The
+    // deliberate one is the measurement harness on
+    // `diag/ctrlc-keystroke-loss-repro`, which reports a rate instead of
+    // failing one run in seven.
 }
 
 /// TurnPhase::Thinking renders in the StatusSlot during a turn.

@@ -116,6 +116,63 @@ pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, contex
     }
 }
 
+/// What the REPL's input buffer holds: the text after the last prompt marker on
+/// the lowest screen row carrying one.
+///
+/// Distinct from [`expect_input_line`], which asks the looser question "did
+/// these characters appear on some prompt row" and is satisfied by a submitted
+/// line still sitting in the transcript. This answers "what is in the buffer
+/// NOW", which is the only way to observe the buffer being *empty*.
+///
+/// Matches the marker anywhere on the row rather than at its start: whenever the
+/// chrome rule above the input fills the terminal width exactly, the input
+/// shares that row and it reads `────…────❯ abc!`.
+#[must_use]
+pub fn input_line_of(screen: &str) -> String {
+    screen
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let marker = line.rfind(PROMPT_MARKER)?;
+            Some(line[marker + PROMPT_MARKER.len()..].trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Block until the REPL's input buffer is observably EMPTY.
+///
+/// The guard to use after anything that clears the line — Ctrl-C, Ctrl-U —
+/// before typing again. Clearing is not instantaneous with respect to the
+/// keyboard: Ctrl-C's handler emits the footer hint and clears `input_value` in
+/// the same pass, but the frame carrying the hint can reach the PTY before the
+/// cleared buffer is observable. Characters typed into that window are inserted
+/// by `TextInput` and then wiped, so they never appear at all — which reads as
+/// keystrokes vanishing rather than as a race.
+///
+/// `expect_input_line(sess, "", …)` does NOT express this: `contains("")` is
+/// always true, so it returns the moment any prompt row exists and waits for
+/// nothing.
+///
+/// # Panics
+/// When the buffer has not gone empty within `budget`; the message carries
+/// `context`, what the buffer held, and the rendered screen.
+pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
+    let deadline = Instant::now() + budget;
+    loop {
+        let line = sess.render(|screen| input_line_of(&screen.contents()));
+        if line.is_empty() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let screen = sess.render(|s| s.contents());
+            panic!(
+                "{context}: the input line still held {line:?} after {budget:?}\nPTY:\n{screen}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 pub fn scode_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scode"))
 }

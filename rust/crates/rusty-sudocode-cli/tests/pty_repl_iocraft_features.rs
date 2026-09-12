@@ -152,15 +152,20 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
             panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
         });
 
-    // After Ctrl-C + hint render, the iocraft layout may need a moment to
-    // re-render the prompt line. Wait for it before typing, otherwise the
-    // screen may not contain the ❯ marker and expect_input_line can never
-    // succeed (observed on macOS CI runners under load).
-    common::expect_input_line(
+    // Wait for Ctrl-C to have CLEARED the line, not merely for a prompt row to
+    // exist. Its handler emits the footer hint and clears `input_value` in the
+    // same pass, but the frame carrying the hint can reach the PTY before the
+    // cleared buffer is observable. Characters typed into that window get
+    // inserted by `TextInput` and then wiped, so they never show up — which is
+    // how this test failed on macOS CI: `/exit` absent for the whole budget
+    // with the prompt marker plainly on screen and the hint already expired.
+    //
+    // `expect_input_line(&sess, "", …)` cannot express this — `contains("")` is
+    // always true, so it waits for nothing.
+    common::expect_input_line_cleared(
         &sess,
-        "",
         Duration::from_secs(15),
-        "prompt should recover after Ctrl-C hint",
+        "Ctrl-C should clear the input line before more is typed",
     );
 
     // Clean exit. Type and submit as two steps, waiting for the line to

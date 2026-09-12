@@ -190,22 +190,11 @@ fn down_arrow_moves_cursor_to_end() {
 /// its expected text plainly visible in the failure dump. Whether the rule and
 /// the input share a row depends on the frame's line accounting, which is what
 /// made it intermittent, and Windows CI is where it showed up.
+/// The rule itself is [`common::input_line_of`], shared because
+/// `common::expect_input_line_cleared` needs the same one — reading whether the
+/// buffer is empty and reading what it holds are the same parse.
 fn input_line(sess: &mut PtySession) -> String {
-    sess.render(|s| input_line_of(&s.contents()))
-}
-
-/// The screen-parsing half of [`input_line`], split out so the rule it has to
-/// survive can be pinned against a real captured screen instead of waiting for
-/// CI to roll the dice again.
-fn input_line_of(screen: &str) -> String {
-    screen
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let glyph = line.rfind('\u{276f}')?;
-            Some(line[glyph + '\u{276f}'.len_utf8()..].trim().to_string())
-        })
-        .unwrap_or_default()
+    sess.render(|s| common::input_line_of(&s.contents()))
 }
 
 /// Verbatim from the Windows CI failure this parser was rewritten for: the
@@ -227,7 +216,7 @@ fn input_line_reads_the_buffer_when_chrome_shares_its_row() {
          {dashes}\n\
          \u{23f5}\u{23f5} read-only \u{b7} /help \u{b7} /exit to quit\n"
     );
-    assert_eq!(input_line_of(&screen), "abc!");
+    assert_eq!(common::input_line_of(&screen), "abc!");
 }
 
 /// The uncollided shape still parses, and a submitted line above the prompt is
@@ -238,11 +227,11 @@ fn input_line_prefers_the_lowest_prompt_row() {
     let screen = "\u{276f} submitted a turn ago\n\
                   \u{23fa} answer\n\
                   \u{276f} being typed now\n";
-    assert_eq!(input_line_of(screen), "being typed now");
+    assert_eq!(common::input_line_of(screen), "being typed now");
 
     // An empty buffer reads as empty rather than as the echo above it.
     let screen = "\u{276f} submitted a turn ago\n\u{23fa} answer\n\u{276f}\n";
-    assert_eq!(input_line_of(screen), "");
+    assert_eq!(common::input_line_of(screen), "");
 }
 
 /// Wait for the REPL's input line to contain `needle`.

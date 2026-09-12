@@ -2161,6 +2161,7 @@ pub fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String
         .map(|block| match block {
             ToolResultContentBlock::Text { text } => text.len(),
             ToolResultContentBlock::Json { value } => value.to_string().len(),
+            ToolResultContentBlock::ToolReference { .. } => 0,
         })
         .sum();
 
@@ -2168,16 +2169,21 @@ pub fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String
     let capacity = total_len + content.len().saturating_sub(1);
 
     let mut result = String::with_capacity(capacity);
-    for (i, block) in content.iter().enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
+    for block in content.iter() {
         match block {
-            ToolResultContentBlock::Text { text } => result.push_str(text),
+            ToolResultContentBlock::Text { text } => {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(text);
+            }
             ToolResultContentBlock::Json { value } => {
-                // Use write! to append without creating intermediate String
+                if !result.is_empty() {
+                    result.push('\n');
+                }
                 result.push_str(&value.to_string());
             }
+            ToolResultContentBlock::ToolReference { .. } => {}
         }
     }
     result
@@ -2668,6 +2674,7 @@ mod tests {
                     name: "weather".to_string(),
                     description: Some("Get weather".to_string()),
                     input_schema: json!({"type": "object"}),
+                    defer_loading: false,
                 }]),
                 tool_choice: Some(ToolChoice::Auto),
                 stream: false,

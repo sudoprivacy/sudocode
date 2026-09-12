@@ -138,7 +138,7 @@ impl EngineApiClient {
         let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
         let tools = self.enable_tools.then(|| {
             self.tool_registry
-                .core_definitions(self.allowed_tools.as_ref())
+                .core_definitions(self.allowed_tools.as_ref(), None)
         });
         api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
     }
@@ -435,6 +435,11 @@ impl ApiClient for EngineApiClient {
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let is_post_tool = request_ends_with_tool_result(&request);
+        let discovered = self.enable_tools.then(|| {
+            let mut d = tools::extract_discovered_tool_names(&request.messages);
+            d.extend(request.pre_compact_discovered_tools.iter().cloned());
+            d
+        });
         let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
             system_static: Some(request.system_prompt.static_text()),
             system_dynamic: Some(request.system_prompt.dynamic_text()),
@@ -447,7 +452,7 @@ impl ApiClient for EngineApiClient {
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
             tools: self.enable_tools.then(|| {
                 self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref())
+                    .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
             }),
             tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
             stream: true,

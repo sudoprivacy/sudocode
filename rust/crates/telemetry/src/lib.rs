@@ -18,6 +18,7 @@ pub const DEFAULT_APP_NAME: &str = "sudocode";
 pub const DEFAULT_RUNTIME: &str = "rust";
 pub const DEFAULT_AGENTIC_BETA: &str = "claude-code-20250219";
 pub const DEFAULT_PROMPT_CACHING_SCOPE_BETA: &str = "prompt-caching-scope-2026-01-05";
+pub const ADVANCED_TOOL_USE_BETA: &str = "advanced-tool-use-2025-11-20";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientIdentity {
@@ -73,6 +74,7 @@ impl AnthropicRequestProfile {
             betas: vec![
                 DEFAULT_AGENTIC_BETA.to_string(),
                 DEFAULT_PROMPT_CACHING_SCOPE_BETA.to_string(),
+                ADVANCED_TOOL_USE_BETA.to_string(),
             ],
             extra_body: Map::new(),
         }
@@ -1119,7 +1121,7 @@ mod tests {
                 ("user-agent".to_string(), "sudocode/1.2.3".to_string()),
                 (
                     "anthropic-beta".to_string(),
-                    "claude-code-20250219,prompt-caching-scope-2026-01-05,tools-2026-04-01"
+                    "claude-code-20250219,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,tools-2026-04-01"
                         .to_string(),
                 ),
             ]
@@ -1137,6 +1139,7 @@ mod tests {
             serde_json::json!([
                 "claude-code-20250219",
                 "prompt-caching-scope-2026-01-05",
+                "advanced-tool-use-2025-11-20",
                 "tools-2026-04-01"
             ])
         );

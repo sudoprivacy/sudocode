@@ -574,6 +574,7 @@ mod tests {
                 cost_units: Some(100),
                 cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
+            pre_compact_discovered_tools: Default::default(),
         });
         session.messages = vec![ConversationMessage {
             role: MessageRole::Assistant,

@@ -417,7 +417,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
-    // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.
+    // `tools` array. Discovery via ToolSearch, direct execution by name.
     let deferred_section = tool_registry.deferred_tools_prompt_section();
     if !deferred_section.is_empty() {
         system_prompt.dynamic_sections.push(deferred_section);

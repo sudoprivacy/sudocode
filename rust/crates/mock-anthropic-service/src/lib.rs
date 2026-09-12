@@ -180,9 +180,9 @@ enum Scenario {
     /// the transport's retry loop, and therefore the retry indicator, without
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
-    ExecuteExtraToolRoundtrip,
+    DeferredToolRoundtrip,
     UnifiedSendRoundtrip,
-    ExecuteExtraToolMcpRoundtrip,
+    DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
     /// carry a `PARITY_SCENARIO:subagent_calc_child` marker plus one
@@ -244,9 +244,9 @@ impl Scenario {
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
-            "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
+            "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
-            "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
+            "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
             _ => None,
@@ -289,9 +289,9 @@ impl Scenario {
             Self::RetryThenSucceed => "retry_then_succeed",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
-            Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
+            Self::DeferredToolRoundtrip => "deferred_tool_roundtrip",
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
-            Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
+            Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
         }
@@ -538,9 +538,10 @@ fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bo
 fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> String {
     content
         .iter()
-        .map(|block| match block {
-            api::ToolResultContentBlock::Text { text } => text.clone(),
-            api::ToolResultContentBlock::Json { value } => value.to_string(),
+        .filter_map(|block| match block {
+            api::ToolResultContentBlock::Text { text } => Some(text.clone()),
+            api::ToolResultContentBlock::Json { value } => Some(value.to_string()),
+            api::ToolResultContentBlock::ToolReference { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1024,15 +1025,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             // switches to streaming, this SSE path serves as a fallback.
             final_text_sse(CANNED_COMPACTION_SUMMARY)
         }
-        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "execute_extra_tool roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_execute_extra",
-                "ExecuteExtraTool",
-                &[r#"{"tool_name":"CronList","params":{}}"#],
-            ),
+        Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!("roundtrip complete: {tool_output}")),
+            None => tool_use_sse("toolu_deferred_cron", "CronList", &[r#"{}"#]),
         },
         Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
@@ -1046,17 +1041,15 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
-        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+        Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
-                "execute_extra_tool_mcp roundtrip complete: {}",
+                "deferred_mcp roundtrip complete: {}",
                 mcp_echo_verdict(&tool_output)
             )),
             None => tool_use_sse(
-                "toolu_execute_extra_mcp",
-                "ExecuteExtraTool",
-                &[
-                    r#"{"tool_name":"mcp__parity__echo","params":{"text":"hello from deferred mcp"}}"#,
-                ],
+                "toolu_deferred_mcp",
+                "mcp__parity__echo",
+                &[r#"{"text":"hello from deferred mcp"}"#],
             ),
         },
         Scenario::SubagentDelegationParent => {
@@ -1524,16 +1517,16 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::LlmCompactionRoundtrip => {
             text_message_response("msg_llm_compaction", CANNED_COMPACTION_SUMMARY)
         }
-        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
+        Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
-                "msg_execute_extra_final",
-                &format!("execute_extra_tool roundtrip complete: {tool_output}"),
+                "msg_deferred_final",
+                &format!("roundtrip complete: {tool_output}"),
             ),
             None => tool_message_response(
-                "msg_execute_extra",
-                "toolu_execute_extra",
-                "ExecuteExtraTool",
-                json!({"tool_name": "CronList", "params": {}}),
+                "msg_deferred_cron",
+                "toolu_deferred_cron",
+                "CronList",
+                json!({}),
             ),
         },
         Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
@@ -1548,19 +1541,19 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
             ),
         },
-        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+        Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
-                "msg_execute_extra_mcp_final",
+                "msg_deferred_mcp_final",
                 &format!(
-                    "execute_extra_tool_mcp roundtrip complete: {}",
+                    "deferred_mcp roundtrip complete: {}",
                     mcp_echo_verdict(&tool_output)
                 ),
             ),
             None => tool_message_response(
-                "msg_execute_extra_mcp",
-                "toolu_execute_extra_mcp",
-                "ExecuteExtraTool",
-                json!({"tool_name": "mcp__parity__echo", "params": {"text": "hello from deferred mcp"}}),
+                "msg_deferred_mcp",
+                "toolu_deferred_mcp",
+                "mcp__parity__echo",
+                json!({"text": "hello from deferred mcp"}),
             ),
         },
         Scenario::SubagentDelegationParent => {
@@ -1658,9 +1651,9 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
-        Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
+        Scenario::DeferredToolRoundtrip => "req_deferred_tool_roundtrip",
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
-        Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
+        Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
     }

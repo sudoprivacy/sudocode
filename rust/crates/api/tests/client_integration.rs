@@ -86,7 +86,7 @@ async fn send_message_posts_json_and_parses_response() {
     );
     assert_eq!(
         request.headers.get("anthropic-beta").map(String::as_str),
-        Some("claude-code-20250219,prompt-caching-scope-2026-01-05")
+        Some("claude-code-20250219,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20")
     );
     let body: serde_json::Value =
         serde_json::from_str(&request.body).expect("request body should be json");
@@ -186,7 +186,7 @@ async fn send_message_applies_request_profile_and_records_telemetry() {
     let request = captured.first().expect("server should capture request");
     assert_eq!(
         request.headers.get("anthropic-beta").map(String::as_str),
-        Some("claude-code-20250219,prompt-caching-scope-2026-01-05,tools-2026-04-01")
+        Some("claude-code-20250219,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,tools-2026-04-01")
     );
     assert_eq!(
         request.headers.get("user-agent").map(String::as_str),
@@ -976,6 +976,7 @@ fn sample_request(stream: bool) -> MessageRequest {
                 "properties": {"city": {"type": "string"}},
                 "required": ["city"]
             }),
+            defer_loading: false,
         }]),
         tool_choice: Some(ToolChoice::Auto),
         stream,

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,6 +76,12 @@ pub struct SessionCompaction {
     pub removed_message_count: usize,
     pub summary: String,
     pub usage: Option<TokenUsage>,
+    /// Tool names the model discovered (via ToolSearch) before compaction
+    /// removed the ToolSearch results from the message history. Carried
+    /// forward so `extract_discovered_tool_names()` can restore them as
+    /// `defer_loading: false` after compaction. Mirrors CC's
+    /// `preCompactDiscoveredTools`.
+    pub pre_compact_discovered_tools: BTreeSet<String>,
 }
 
 /// Provenance recorded when a session is forked from another session.
@@ -479,7 +485,7 @@ impl Session {
     }
 
     pub fn record_compaction(&mut self, summary: impl Into<String>, removed_message_count: usize) {
-        self.record_compaction_with_usage(summary, removed_message_count, None);
+        self.record_compaction_with_usage(summary, removed_message_count, None, BTreeSet::new());
     }
 
     pub fn record_compaction_with_usage(
@@ -487,6 +493,7 @@ impl Session {
         summary: impl Into<String>,
         removed_message_count: usize,
         usage: Option<TokenUsage>,
+        pre_compact_discovered_tools: BTreeSet<String>,
     ) {
         self.touch();
         let count = self.compaction.as_ref().map_or(1, |value| value.count + 1);
@@ -495,6 +502,7 @@ impl Session {
             removed_message_count,
             summary: summary.into(),
             usage,
+            pre_compact_discovered_tools,
         });
     }
 
@@ -1165,6 +1173,17 @@ impl SessionCompaction {
         if let Some(usage) = self.usage {
             object.insert("usage".to_string(), usage_to_json(usage));
         }
+        if !self.pre_compact_discovered_tools.is_empty() {
+            let arr: Vec<JsonValue> = self
+                .pre_compact_discovered_tools
+                .iter()
+                .map(|s| JsonValue::String(s.clone()))
+                .collect();
+            object.insert(
+                "pre_compact_discovered_tools".to_string(),
+                JsonValue::Array(arr),
+            );
+        }
         Ok(JsonValue::Object(object))
     }
 
@@ -1192,6 +1211,17 @@ impl SessionCompaction {
         if let Some(usage) = self.usage {
             object.insert("usage".to_string(), usage_to_json(usage));
         }
+        if !self.pre_compact_discovered_tools.is_empty() {
+            let arr: Vec<JsonValue> = self
+                .pre_compact_discovered_tools
+                .iter()
+                .map(|s| JsonValue::String(s.clone()))
+                .collect();
+            object.insert(
+                "pre_compact_discovered_tools".to_string(),
+                JsonValue::Array(arr),
+            );
+        }
         Ok(JsonValue::Object(object))
     }
 
@@ -1199,11 +1229,21 @@ impl SessionCompaction {
         let object = value
             .as_object()
             .ok_or_else(|| SessionError::Format("compaction must be an object".to_string()))?;
+        let pre_compact_discovered_tools = object
+            .get("pre_compact_discovered_tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             count: required_u32(object, "count")?,
             removed_message_count: required_usize(object, "removed_message_count")?,
             summary: required_string(object, "summary")?,
             usage: object.get("usage").map(usage_from_json).transpose()?,
+            pre_compact_discovered_tools,
         })
     }
 }
@@ -1559,6 +1599,7 @@ mod tests {
     };
     use crate::json::JsonValue;
     use crate::usage::{TokenUsage, UsageCostCurrency, UsageTracker};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1849,6 +1890,7 @@ mod tests {
                 cost_units: Some(43_700),
                 cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
+            BTreeSet::new(),
         );
         session.save_to_path(&path).expect("session should save");
 

@@ -170,19 +170,79 @@ fn down_arrow_moves_cursor_to_end() {
 // on a non-empty buffer, and Down's no-op.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The REPL's live input line: the last line on screen that starts with the
-/// prompt glyph. Everything above it is transcript — including the prompts of
-/// earlier turns, which is why searching the whole screen cannot tell "the
-/// buffer holds this" from "we submitted this a turn ago".
+/// The REPL's live input buffer: whatever follows the prompt glyph on the
+/// lowest screen row that carries one.
+///
+/// Bottom-most rather than anywhere, because everything above the input line is
+/// transcript — including the prompts of earlier turns, which is why searching
+/// the whole screen cannot tell "the buffer holds this" from "we submitted this
+/// a turn ago". That is also why [`common::expect_input_line`] is not a
+/// substitute here despite the similar name: it answers the looser question
+/// "did these characters ever appear on a prompt line", which a stale echo from
+/// a previous turn satisfies.
+///
+/// CONTAINS the glyph, never starts-with, and returns only the text after it.
+/// The input line shares its row with the chrome rule above it whenever that
+/// rule fills the terminal width exactly — the row then reads
+/// `────…────❯ abc!`, which does not *start* with the glyph. A starts-with
+/// probe skipped that row, walked up into the transcript, and reported an
+/// earlier turn's prompt as the current buffer; the test then timed out with
+/// its expected text plainly visible in the failure dump. Whether the rule and
+/// the input share a row depends on the frame's line accounting, which is what
+/// made it intermittent, and Windows CI is where it showed up.
 fn input_line(sess: &mut PtySession) -> String {
-    sess.render(|s| {
-        s.contents()
-            .lines()
-            .rev()
-            .find(|line| line.trim_start().starts_with('\u{276f}'))
-            .map(|line| line.trim().to_string())
-            .unwrap_or_default()
-    })
+    sess.render(|s| input_line_of(&s.contents()))
+}
+
+/// The screen-parsing half of [`input_line`], split out so the rule it has to
+/// survive can be pinned against a real captured screen instead of waiting for
+/// CI to roll the dice again.
+fn input_line_of(screen: &str) -> String {
+    screen
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let glyph = line.rfind('\u{276f}')?;
+            Some(line[glyph + '\u{276f}'.len_utf8()..].trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Verbatim from the Windows CI failure this parser was rewritten for: the
+/// chrome rule filled the row exactly, so the input line rendered as
+/// `────…────❯ abc!` and the previous turn's echo sat above it. A starts-with
+/// probe returned that echo and the test timed out with `abc!` on screen.
+///
+/// Not a PTY test on purpose: the collision depends on the frame's line
+/// accounting, so a live REPL reproduces it only by luck. The parser is a pure
+/// function of the screen, and this is the screen.
+#[test]
+fn input_line_reads_the_buffer_when_chrome_shares_its_row() {
+    let dashes = "\u{2500}".repeat(80);
+    let screen = format!(
+        "\u{276f} do not resurface me PARITY_SCENARIO:single_turn_text\n\
+         \u{23fa} The answer is 4\n\
+         [claude-sonnet-4-6] \u{b7} turn 1 \u{b7} 21 tokens\n\
+         {dashes}\u{276f} abc!\n\
+         {dashes}\n\
+         \u{23f5}\u{23f5} read-only \u{b7} /help \u{b7} /exit to quit\n"
+    );
+    assert_eq!(input_line_of(&screen), "abc!");
+}
+
+/// The uncollided shape still parses, and a submitted line above the prompt is
+/// not mistaken for the live buffer — the property that rules out matching any
+/// prompt-bearing row on screen.
+#[test]
+fn input_line_prefers_the_lowest_prompt_row() {
+    let screen = "\u{276f} submitted a turn ago\n\
+                  \u{23fa} answer\n\
+                  \u{276f} being typed now\n";
+    assert_eq!(input_line_of(screen), "being typed now");
+
+    // An empty buffer reads as empty rather than as the echo above it.
+    let screen = "\u{276f} submitted a turn ago\n\u{23fa} answer\n\u{276f}\n";
+    assert_eq!(input_line_of(screen), "");
 }
 
 /// Wait for the REPL's input line to contain `needle`.

@@ -182,6 +182,24 @@ enum Scenario {
     RetryThenSucceed,
     ExecuteExtraToolRoundtrip,
     UnifiedSendRoundtrip,
+    ExecuteExtraToolMcpRoundtrip,
+    /// Parent turn of the subagent-delegation roundtrip. The parent emits
+    /// three `Agent` tool_use blocks (run synchronously) whose prompts each
+    /// carry a `PARITY_SCENARIO:subagent_calc_child` marker plus one
+    /// addition. Each spawned child inherits the parent's `base_url` (so its
+    /// `/v1/messages` call reaches this same mock) and its first user message
+    /// is exactly that prompt — so [`detect_scenario`] routes the child call
+    /// to [`Scenario::SubagentCalcChild`]. Once all three `tool_result`s are
+    /// back the parent answers with the aggregated JSON. This is the
+    /// deterministic counterpart to the live `live_subagent_smoke_stdio`
+    /// test: it pins the subagent-over-ACP wire contract without depending on
+    /// a real model choosing to delegate.
+    SubagentDelegationParent,
+    /// A spawned child of [`Scenario::SubagentDelegationParent`]. Detected via
+    /// the marker embedded in the child's prompt; replies with only the sum of
+    /// the two addends in that prompt so the parent's tool_result carries a
+    /// clean number (203 / 403 / 603).
+    SubagentCalcChild,
 }
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
@@ -228,6 +246,9 @@ impl Scenario {
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
+            "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
+            "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
+            "subagent_calc_child" => Some(Self::SubagentCalcChild),
             _ => None,
         }
     }
@@ -270,6 +291,9 @@ impl Scenario {
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
+            Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
+            Self::SubagentDelegationParent => "subagent_delegation_parent",
+            Self::SubagentCalcChild => "subagent_calc_child",
         }
     }
 }
@@ -285,6 +309,15 @@ async fn handle_connection(
     let normalized_body = normalize_system_field(&raw_body);
     let request: MessageRequest = serde_json::from_str(&normalized_body)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    // Cache-safe compaction sends the full conversation with a compaction
+    // prompt appended. Reject it with a proper HTTP 400 so the runtime
+    // falls back to the standard compaction path.
+    if is_cache_safe_compaction(&request) {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"mock: cache-safe compaction not supported"}}"#;
+        let response = http_response("400 Bad Request", "application/json", body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     let scenario = detect_scenario(&request)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parity scenario"))?;
 
@@ -441,6 +474,24 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     None
 }
 
+fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
+    let is_standard_compaction = request
+        .system
+        .as_ref()
+        .map_or(false, |s| s.contains("summarizing conversations"));
+    if is_standard_compaction {
+        return false;
+    }
+    request.messages.last().map_or(false, |msg| {
+        msg.content.iter().any(|block| match block {
+            InputContentBlock::Text { text } => {
+                text.contains("create a detailed summary of the conversation")
+            }
+            _ => false,
+        })
+    })
+}
+
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
@@ -493,6 +544,99 @@ fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Collect the numeric results of every `Agent` `tool_result` in the request —
+/// the `Scenario::SubagentDelegationParent` follow-up carries one per spawned
+/// child. Each child answered with just a number (its addition sum), so the
+/// `tool_result` content parses directly to an integer. Non-numeric or missing
+/// results are skipped, so `len()` reflects how many children have returned a
+/// clean answer.
+fn subagent_calc_results(request: &MessageRequest) -> Vec<i64> {
+    let mut agent_tool_ids = std::collections::HashSet::new();
+    for message in &request.messages {
+        for block in &message.content {
+            if let InputContentBlock::ToolUse { id, name, .. } = block {
+                if name == "Agent" {
+                    agent_tool_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    let mut sums = Vec::new();
+    for message in &request.messages {
+        for block in &message.content {
+            if let InputContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            {
+                if !agent_tool_ids.contains(tool_use_id) {
+                    continue;
+                }
+                let text = flatten_tool_result_content(content);
+                if let Some(value) = first_integer_in(&text) {
+                    sums.push(value);
+                }
+            }
+        }
+    }
+    sums
+}
+
+/// Sum the two addends in a `SubagentCalcChild` prompt of the form
+/// "What is <a> + <b>? Reply with ONLY the number." Falls back to 0 if the
+/// expression can't be parsed (which would surface as a wrong assertion in
+/// the test rather than a panic in the mock).
+fn subagent_child_sum(request: &MessageRequest) -> i64 {
+    let prompt = request
+        .messages
+        .iter()
+        .find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                InputContentBlock::Text { text } if text.contains('+') => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+
+    // Grab the integers on either side of the first '+'.
+    if let Some(plus) = prompt.find('+') {
+        let left_val = last_integer_in(&prompt[..plus]);
+        let right_val = first_integer_in(&prompt[plus + 1..]);
+        if let (Some(a), Some(b)) = (left_val, right_val) {
+            return a + b;
+        }
+    }
+    0
+}
+
+/// First run of ASCII digits in `text`, parsed as an integer.
+fn first_integer_in(text: &str) -> Option<i64> {
+    let mut digits = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
+}
+
+/// Last run of ASCII digits in `text`, parsed as an integer.
+fn last_integer_in(text: &str) -> Option<i64> {
+    let mut digits = String::new();
+    for ch in text.chars().rev() {
+        if ch.is_ascii_digit() {
+            digits.insert(0, ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
 }
 
 /// Text every compaction continuation message starts with (see
@@ -835,7 +979,13 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_ask_user_question",
                 "AskUserQuestion",
-                &[r#"{"question":"Which colour?","options":["red","blue"]}"#],
+                // Structured `questions[]` form using `question` per item (the
+                // natural alias for `prompt`). Exercises the alias so this
+                // roundtrip regresses if the item ever stops accepting it.
+                &[
+                    r#"{"questions":[{"id":"q1","question":"Which colour?","#,
+                    r#""options":[{"label":"red","value":"red"},{"label":"blue","value":"blue"}]}]}"#,
+                ],
             ),
         },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
@@ -896,6 +1046,64 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
+        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!(
+                "execute_extra_tool_mcp roundtrip complete: {}",
+                mcp_echo_verdict(&tool_output)
+            )),
+            None => tool_use_sse(
+                "toolu_execute_extra_mcp",
+                "ExecuteExtraTool",
+                &[
+                    r#"{"tool_name":"mcp__parity__echo","params":{"text":"hello from deferred mcp"}}"#,
+                ],
+            ),
+        },
+        Scenario::SubagentDelegationParent => {
+            let agent_results = subagent_calc_results(request);
+            if agent_results.len() >= 3 {
+                let mut sums = agent_results;
+                sums.sort_unstable();
+                final_text_sse(&format!(
+                    "{{\"results\": [{}, {}, {}]}}",
+                    sums[0], sums[1], sums[2]
+                ))
+            } else {
+                tool_uses_sse(&[
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_1",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 101+102","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 101 + 102? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_2",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 201+202","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 201 + 202? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_subagent_calc_3",
+                        tool_name: "Agent",
+                        partial_json_chunks: &[
+                            r#"{"description":"add 301+302","model":"claude-sonnet","auth_mode":"api-key","run_in_background":false,"#,
+                            r#""prompt":"PARITY_SCENARIO:subagent_calc_child What is 301 + 302? "#,
+                            r#"Reply with ONLY the number."}"#,
+                        ],
+                    },
+                ])
+            }
+        }
+        Scenario::SubagentCalcChild => {
+            let sum = subagent_child_sum(request);
+            final_text_sse(&sum.to_string())
+        }
     }
 }
 
@@ -1273,7 +1481,14 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_ask_user_question_tool",
                 "toolu_ask_user_question",
                 "AskUserQuestion",
-                json!({"question": "Which colour?", "options": ["red", "blue"]}),
+                json!({"questions": [{
+                    "id": "q1",
+                    "question": "Which colour?",
+                    "options": [
+                        {"label": "red", "value": "red"},
+                        {"label": "blue", "value": "blue"}
+                    ]
+                }]}),
             ),
         },
         Scenario::SleepOverMaxRoundtrip => match latest_tool_result(request) {
@@ -1333,6 +1548,75 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
             ),
         },
+        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_execute_extra_mcp_final",
+                &format!(
+                    "execute_extra_tool_mcp roundtrip complete: {}",
+                    mcp_echo_verdict(&tool_output)
+                ),
+            ),
+            None => tool_message_response(
+                "msg_execute_extra_mcp",
+                "toolu_execute_extra_mcp",
+                "ExecuteExtraTool",
+                json!({"tool_name": "mcp__parity__echo", "params": {"text": "hello from deferred mcp"}}),
+            ),
+        },
+        Scenario::SubagentDelegationParent => {
+            let agent_results = subagent_calc_results(request);
+            if agent_results.len() >= 3 {
+                let mut sums = agent_results;
+                sums.sort_unstable();
+                text_message_response(
+                    "msg_subagent_delegation_final",
+                    &format!("{{\"results\": [{}, {}, {}]}}", sums[0], sums[1], sums[2]),
+                )
+            } else {
+                tool_message_response_many(
+                    "msg_subagent_delegation",
+                    &[
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_1",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 101+102",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
+                            }),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_2",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 201+202",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 201 + 202? Reply with ONLY the number."
+                            }),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_subagent_calc_3",
+                            tool_name: "Agent",
+                            input: json!({
+                                "description": "add 301+302",
+                                "model": "claude-sonnet",
+                                "auth_mode": "api-key",
+                                "run_in_background": false,
+                                "prompt": "PARITY_SCENARIO:subagent_calc_child What is 301 + 302? Reply with ONLY the number."
+                            }),
+                        },
+                    ],
+                )
+            }
+        }
+        Scenario::SubagentCalcChild => {
+            let sum = subagent_child_sum(request);
+            text_message_response("msg_subagent_calc_child", &sum.to_string())
+        }
     }
 }
 
@@ -1376,6 +1660,9 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
+        Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
+        Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
+        Scenario::SubagentCalcChild => "req_subagent_calc_child",
     }
 }
 

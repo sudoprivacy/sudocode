@@ -86,9 +86,13 @@ fn write_json(path: &std::path::Path, value: &Value) {
     .expect("write");
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// 1. Fresh workspace — Enter writes both files
-// ──────────────────────────────────────────────────────────────────────
+fn require_mock(env: &TestEnv, test_name: &str) -> bool {
+    if env.is_mock() {
+        return true;
+    }
+    eprintln!("SKIP {test_name}: plan-mode state transitions are validated by the mock backend");
+    false
+}
 
 /// User asks the agent to enable plan mode; EnterPlanMode must write
 /// `permissions.defaultMode = "plan"` to settings.local.json AND record
@@ -98,6 +102,12 @@ fn write_json(path: &std::path::Path, value: &Value) {
 #[test]
 fn enter_plan_mode_writes_settings_and_state_from_fresh_workspace() {
     let env = TestEnv::new("plan-mode-enter-fresh");
+    if !require_mock(
+        &env,
+        "enter_plan_mode_writes_settings_and_state_from_fresh_workspace",
+    ) {
+        return;
+    }
 
     // Sanity: neither file exists yet.
     assert!(
@@ -169,6 +179,9 @@ fn enter_plan_mode_writes_settings_and_state_from_fresh_workspace() {
 #[test]
 fn plan_mode_roundtrip_preserves_prior_default_mode() {
     let env = TestEnv::new("plan-mode-roundtrip-preserve");
+    if !require_mock(&env, "plan_mode_roundtrip_preserves_prior_default_mode") {
+        return;
+    }
 
     // Pre-seed: user already has permissions.defaultMode = "workspace-write".
     let seed = serde_json::json!({
@@ -258,6 +271,9 @@ fn plan_mode_roundtrip_preserves_prior_default_mode() {
 #[test]
 fn exit_plan_mode_without_prior_enter_is_a_noop() {
     let env = TestEnv::new("plan-mode-exit-no-prior");
+    if !require_mock(&env, "exit_plan_mode_without_prior_enter_is_a_noop") {
+        return;
+    }
 
     // Sanity: nothing exists.
     assert!(!settings_local(&env).exists());

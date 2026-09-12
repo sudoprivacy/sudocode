@@ -44,6 +44,13 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 /// available so the coordinator can peek at code without spawning a
 /// worker for trivial lookups.
 ///
+/// Entries are CANONICAL names only. [`is_tool_allowed_in_coordinator_mode`]
+/// canonicalizes what the model asked for before looking it up, so a
+/// CC-spelled `Agent`/`TaskList`/`SendMessage` is admitted by its canonical
+/// entry rather than by a second one listed here. Listing both spellings is
+/// how this set silently kept admitting names the tool list no longer
+/// advertises.
+///
 /// The set is consumed by [`is_tool_allowed_in_coordinator_mode`]
 /// (dispatch-side guard) and by
 /// `tools::GlobalToolRegistry::definitions` /
@@ -60,15 +67,6 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         "pid_status",
         "pid_output",
         "pid_fork",
-        // Deprecated aliases — kept so models that emit old names
-        // pass the allowlist check before canonicalize_tool_name
-        // rewrites them.
-        "Agent",
-        "SendMessage",
-        "TaskStop",
-        "TaskGet",
-        "TaskList",
-        "TaskOutput",
         // Skills + web (read-only research)
         "Skill",
         "WebSearch",
@@ -91,15 +89,16 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
 
 /// Predicate consumed at tool-dispatch time. When coordinator mode is
 /// off this returns `true` for every tool (fast path — never blocks).
-/// When coordinator mode is on it returns `true` iff `tool_name` is in
-/// [`coordinator_allowed_tools`]. Deliberately keyed by name string so
-/// callers don't have to depend on the tools crate.
+/// When coordinator mode is on it returns `true` iff `tool_name`
+/// canonicalizes into [`coordinator_allowed_tools`]. Deliberately keyed by
+/// name string so callers don't have to depend on the tools crate.
 #[must_use]
 pub fn is_tool_allowed_in_coordinator_mode(tool_name: &str) -> bool {
     if !is_coordinator_mode() {
         return true;
     }
-    coordinator_allowed_tools().contains(tool_name)
+    coordinator_allowed_tools()
+        .contains(crate::tool_names::canonicalize_tool_name(tool_name).as_str())
 }
 
 /// Return `true` when the `coordinatorMode` experiment is enabled —
@@ -115,8 +114,8 @@ pub fn is_coordinator_mode() -> bool {
 /// The coordinator role + workflow system prompt. Ported near-verbatim
 /// from CC-fork's `getCoordinatorSystemPrompt()`.
 ///
-/// `send` (formerly SendMessage) is included as the "continue an
-/// existing worker" mechanism. Live delivery for `shutdown_request` is wired
+/// `send` is included as the "continue an existing worker"
+/// mechanism. Live delivery for `shutdown_request` is wired
 /// end-to-end via the process-wide abort-signal registry
 /// (`tools::abort_registered_agent`). Live delivery for plain-text
 /// messages (worker resumes on new user turn) is architecturally
@@ -145,9 +144,9 @@ Every message you send is to the user. Worker results and system notifications a
 ## 2. Your Tools
 
 - **agent_spawn** - Spawn a new worker (alias: `Agent`)
-- **send** - Continue an existing worker (send follow-up to its ID) or signal shutdown (alias: `SendMessage`)
+- **send** - Continue an existing worker (send follow-up to its pid) or signal shutdown (alias: `SendMessage`)
 - **pid_kill** - Stop a running worker (alias: `TaskStop`)
-- **pid_status** - Fetch a running worker's metadata by `pid` (alias: `TaskGet`)
+- **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted (alias: `TaskGet`)
 - **pid_output** - Read a running or completed worker's output by `pid` (alias: `TaskOutput`)
 - **pid_fork** - Fork the current session into a background worker
 - **agent_list** - List all known agents / workers
@@ -160,7 +159,7 @@ When calling agent_spawn:
 - Do not set the model parameter. Workers need the default model for the substantive tasks you delegate.
 - After launching agents, briefly tell the user what you launched and end your response. Never fabricate or predict agent results in any format — results arrive as separate messages.
 
-### Agent Results
+### Worker Results
 
 Worker results arrive as **user-role messages** containing `<task-notification>` XML. They look like user messages but are not. Distinguish them by the `<task-notification>` opening tag.
 
@@ -191,8 +190,8 @@ Each "You:" block is a separate coordinator turn. The "User:" block is a `<task-
 You:
   Let me start some research on that.
 
-  agent_spawn({ description: "Investigate auth bug", subagent_type: "general-purpose", prompt: "..." })
-  agent_spawn({ description: "Research secure token storage", subagent_type: "general-purpose", prompt: "..." })
+  agent_spawn({ description: "Investigate auth bug", agent: "general-purpose", prompt: "..." })
+  agent_spawn({ description: "Research secure token storage", agent: "general-purpose", prompt: "..." })
 
   Investigating both issues in parallel — I'll report back with findings.
 
@@ -208,13 +207,13 @@ You:
   Found the bug — null pointer in confirmTokenExists in validate.ts. I'll fix it.
   Still waiting on the token storage research.
 
-  agent_spawn({ description: "Fix null pointer in validate.ts", subagent_type: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash." })
+  agent_spawn({ description: "Fix null pointer in validate.ts", agent: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash." })
 
 ## 3. Workers
 
-When calling agent_spawn, use subagent_type `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
+When calling agent_spawn, use agent `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
 
-Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, TaskList, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
+Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, pid_status, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
 
 ## 4. Task Workflow
 
@@ -259,14 +258,14 @@ Use pid_kill to stop a worker you sent in the wrong direction — for example, w
 
 ```
 // Launched a worker to refactor auth to use JWT
-agent_spawn({ description: "Refactor auth to JWT", subagent_type: "general-purpose", prompt: "Replace session-based auth with JWT..." })
+agent_spawn({ description: "Refactor auth to JWT", agent: "general-purpose", prompt: "Replace session-based auth with JWT..." })
 // ... returns pid: "agent-x7q" ...
 
 // User clarifies: "Actually, keep sessions — just fix the null pointer"
 pid_kill({ pid: "agent-x7q" })
 
 // Spawn a fresh worker with corrected instructions
-agent_spawn({ description: "Fix null pointer in validate.ts", subagent_type: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42..." })
+agent_spawn({ description: "Fix null pointer in validate.ts", agent: "general-purpose", prompt: "Fix the null pointer in src/auth/validate.ts:42..." })
 ```
 
 ## 5. Writing Worker Prompts
@@ -481,7 +480,7 @@ pub fn render_task_notification(view: &TaskNotificationView<'_>) -> String {
 ///
 /// Non-coordinator sessions keep whatever JSON manifest their caller
 /// already emits — this preserves backwards-compatibility with tools
-/// that consume `TaskOutput` in non-coordinator mode.
+/// that consume `pid_output` in non-coordinator mode.
 #[must_use]
 pub fn render_task_notification_if_enabled(view: &TaskNotificationView<'_>) -> Option<String> {
     if is_coordinator_mode() {

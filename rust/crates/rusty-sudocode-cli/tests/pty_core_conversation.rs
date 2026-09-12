@@ -195,8 +195,27 @@ fn sigint_cancels_streaming() {
         .expect("scode should exit after Ctrl+C, not hang");
 }
 
+/// Ctrl+C also cancels while the provider has not returned its first response.
+/// This guards the abort-notification race that previously left a turn waiting
+/// forever if SIGINT arrived just before the request future subscribed.
+#[test]
+fn sigint_cancels_pending_llm_request() {
+    let env = TestEnv::new("sigint-pending-llm");
+    let prompt = env.prompt("Reply after a short delay.", "delayed_text");
+
+    let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
+    sess.expect("(?i)(thinking|sonnet|auto|claude|⠋|⠙|⠹)")
+        .expect("should see request activity before cancelling");
+    sess.send_ctrl('c').expect("send Ctrl+C");
+
+    sess.set_default_timeout(Duration::from_secs(15));
+    let _exit = sess
+        .expect_eof()
+        .expect("scode should exit while the LLM request is pending");
+}
+
 // ──────────────────────────────────────────────────────────────────────
-// 6. ESC key cancels mid-execution (CC parity)
+// 7. ESC key cancels mid-execution (CC parity)
 // ──────────────────────────────────────────────────────────────────────
 
 /// ESC key during a long-running bash tool exits cleanly (CC parity).

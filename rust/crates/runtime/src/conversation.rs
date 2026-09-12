@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 use crate::compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_sync,
+    autocompact_buffer_tokens, compact_session, compact_session_cache_safe, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
     CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
     ReadFileTracker,
@@ -49,6 +49,32 @@ const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
+
+/// Preserve the bash result wire contract when cancellation wins the race with
+/// the blocking tool task. Other tools have no structured interruption shape.
+fn interrupted_tool_output(tool_name: &str) -> String {
+    if tool_name.eq_ignore_ascii_case("bash") {
+        serde_json::json!({
+            "stdout": "",
+            "stderr": "Command interrupted by user",
+            "rawOutputPath": null,
+            "interrupted": true,
+            "isImage": null,
+            "backgroundTaskId": null,
+            "backgroundedByUser": null,
+            "assistantAutoBackgrounded": null,
+            "dangerouslyDisableSandbox": null,
+            "returnCodeInterpretation": "interrupted",
+            "noOutputExpected": true,
+            "structuredContent": null,
+            "sandboxStatus": null,
+        })
+        .to_string()
+    } else {
+        INTERRUPT_MESSAGE.to_string()
+    }
+}
+
 const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
 <system-reminder>
 The previous model response was empty after a tool completed. The user requested a file deliverable, but the current turn has not produced a matching final file yet. Continue the same task now: create or execute whatever is needed to produce the requested file, then verify it exists before ending the turn.
@@ -146,6 +172,27 @@ pub trait ApiClient: Send {
     ) -> Result<String, RuntimeError> {
         Err(RuntimeError::new(
             "compaction not supported by this API client",
+        ))
+    }
+
+    /// Cache-safe compaction: sends the compaction prompt over the same
+    /// system-prompt + message prefix the previous conversation turn used,
+    /// enabling the provider's prompt cache to hit on the shared prefix.
+    ///
+    /// `request` carries the runtime's system prompt and the full session
+    /// messages (identical to the last regular turn). `compaction_prompt`
+    /// is appended as a final user message. Returns the raw summary text.
+    ///
+    /// The default implementation returns an error — providers that support
+    /// prompt caching override this.
+    async fn send_cache_safe_compaction(
+        &mut self,
+        _request: ApiRequest,
+        _compaction_prompt: &str,
+        _max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        Err(RuntimeError::new(
+            "cache-safe compaction not supported by this API client",
         ))
     }
 
@@ -1239,8 +1286,8 @@ where
         for (tool_use_id, tool_name) in pending_tool_ids {
             let _ = self.session.push_message(ConversationMessage::tool_result(
                 tool_use_id,
-                tool_name,
-                INTERRUPT_MESSAGE,
+                tool_name.clone(),
+                interrupted_tool_output(&tool_name),
                 true,
             ));
         }
@@ -1373,7 +1420,7 @@ where
             let result_message = ConversationMessage::tool_result(
                 tool_use_id.clone(),
                 tool_name.clone(),
-                INTERRUPT_MESSAGE,
+                interrupted_tool_output(tool_name),
                 true,
             );
             self.push_tool_result_message(observer, iterations, tool_results, result_message)?;
@@ -1581,6 +1628,8 @@ where
                 return Err(error);
             }
 
+            crate::compact::microcompact_messages(&mut self.session.messages);
+
             // Compact before dispatching, not after the provider rejects.
             // A turn that takes many tool-call steps grows its own history
             // while it runs; the per-turn preflight ran once, before any of
@@ -1599,16 +1648,8 @@ where
                         overflow_compaction =
                             merge_auto_compaction(overflow_compaction, Some(event));
                     }
-                    // Counted whether or not anything was removed: a pass
-                    // that shrinks nothing has still spent its round-trip,
-                    // and repeating it every iteration would burn the rest
-                    // of the turn on compactions that cannot help.
                     turn_compactions += 1;
                 } else if !recorded_compaction_budget_exhausted {
-                    // The guard wants to compact and cannot. Every request
-                    // from here on is expected to be rejected, so say so
-                    // once — otherwise the turn's failure looks like the
-                    // guard never ran.
                     self.record_compaction_budget_exhausted(CompactionTrigger::InTurnBudget);
                     recorded_compaction_budget_exhausted = true;
                 }
@@ -1990,7 +2031,7 @@ where
                             let result_message = ConversationMessage::tool_result(
                                 p.tool_use_id.clone(),
                                 p.tool_name.clone(),
-                                INTERRUPT_MESSAGE,
+                                interrupted_tool_output(&p.tool_name),
                                 true,
                             );
                             self.push_tool_result_message(
@@ -2221,8 +2262,8 @@ where
                             // "every tool_use has a tool_result" invariant.
                             let result_message = ConversationMessage::tool_result(
                                 tool_use_id,
-                                tool_name,
-                                INTERRUPT_MESSAGE,
+                                tool_name.clone(),
+                                interrupted_tool_output(&tool_name),
                                 true,
                             );
                             self.push_tool_result_message(
@@ -2376,6 +2417,24 @@ where
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+        // Try cache-safe compaction first: reuses the main conversation's
+        // system prompt + message prefix so the provider's prompt cache hits.
+        // Falls back to the stripped-message path on failure (unsupported
+        // client, PTL, transient error).
+        if let Ok(result) = compact_session_cache_safe(
+            &self.session,
+            config,
+            &mut self.api_client,
+            &model,
+            &self.system_prompt,
+            custom_instructions,
+        )
+        .await
+        {
+            return (result, CompactionMethod::LlmSummary);
+        }
+
         match compact_session(
             &self.session,
             config,
@@ -3211,18 +3270,22 @@ fn push_thinking_block(
 /// larger step. Extend cautiously (e.g. same-class writes on distinct paths)
 /// only behind a conflict check.
 fn is_concurrency_safe_tool(tool_name: &str) -> bool {
+    // Canonicalize first: the name arrives as the model spelled it, and a
+    // CC-trained model says `TaskGet` where this codebase says `pid_status`.
+    // Matching the raw name is how the `Task*` → `pid_*` rename silently
+    // dropped these from concurrent batches.
     matches!(
-        tool_name,
+        crate::tool_names::canonicalize_tool_name(tool_name).as_str(),
         // File reads
         "read_file"
             | "glob_search"
             | "grep_search"
             // Search
             | "ToolSearch"
-            // Task reads (CC marks TaskGet read-only; List/Output are symmetric)
-            | "TaskGet"
-            | "TaskList"
-            | "TaskOutput"
+            // Process-status reads (CC marks TaskGet read-only; the
+            // list/output queries are symmetric)
+            | "pid_status"
+            | "pid_output"
     )
 }
 

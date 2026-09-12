@@ -113,7 +113,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Process-global lock so concurrent SendMessage calls into the same
+/// Process-global lock so concurrent `send` calls into the same
 /// recipient's mailbox never interleave partial JSON lines. The lock
 /// covers only the "open, append, flush, close" critical section —
 /// contention is negligible in practice because most agents write to

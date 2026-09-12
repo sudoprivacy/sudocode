@@ -215,7 +215,7 @@ use runtime::{
     check_freshness,
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
-    glob_search, grep_search,
+    glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     read_file,
     summary_compression::compress_summary_text,
@@ -534,10 +534,12 @@ impl GlobalToolRegistry {
             .map(|name| (normalize_tool_name(name), name.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        for &(alias, canonical) in TOOL_ALIASES {
-            // Don't overwrite a spec-name mapping — `--allowedTools TaskList`
-            // must resolve to the spec name `"TaskList"` (not the dispatch
-            // alias `"pid_status"`) so `definitions()` can match `spec.name`.
+        for &(alias, canonical) in runtime::tool_names::tool_aliases() {
+            // Don't overwrite a spec-name mapping: a spec whose own name
+            // normalizes to an alias key (`bash`) must keep resolving to the
+            // spec name so `definitions()` can match `spec.name`. Aliases with
+            // no spec of their own (`TaskList`, `SendMessage`) fall through to
+            // the canonical tool they name.
             name_map
                 .entry(alias.to_string())
                 .or_insert_with(|| canonical.to_string());
@@ -967,7 +969,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep_search",
-            description: "Search file contents with a regex pattern.",
+            description: "Search file contents with a regex pattern. WARNING: does NOT prune build/vendor directories (e.g. `target/`, `node_modules/`, `.git/`, `dist/`, `.venv/`) and will read large binaries — walking into a Rust `target/` or similar can hang for a long time. Always scope the search: pass an explicit `path` for a specific subtree you already know, and narrow the file set with `glob` (e.g. `*.rs`) or `type` (e.g. `rust`). Do not run against the workspace root without filters; if you must, set a caller-side timeout first.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1047,45 +1049,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
-        ToolSpec {
-            name: "Agent",
-            description: "Launch a specialized agent task. By default runs in the background and returns immediately. Set run_in_background=false to run synchronously. Use TaskOutput(agent_id=..., block=true) to await a background agent.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "description": { "type": "string", "description": "A short (3-5 word) description of the task" },
-                    "prompt": { "type": "string", "description": "The full task prompt for the agent" },
-                    "subagent_type": { "type": "string", "description": "Agent type specialization: general-purpose (default), Explore (read-only research), Plan (planning), Verification (bash + read), scode-guide, statusline-setup." },
-                    "name": { "type": "string", "description": "Optional human-readable label for this agent" },
-                    "model": { "type": "string", "description": "Model ID override; defaults to the system default" },
-                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve result later with TaskOutput(agent_id=..., block=true). When false, run synchronously and return the result." },
-                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
-                    "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
-                },
-                "required": ["description", "prompt"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        // ── Unified agent_list ────────────────────────────────────────
-        // Discovery tool: list all available agent types (builtin +
-        // custom `.md` agents from ~/.nexus/sudocode/agents/ and
-        // .sudocode/agents/).
-        ToolSpec {
-            name: "agent_list",
-            description: "List all available agent types with their names, descriptions, and capabilities.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        // ── Unified agent_spawn ───────────────────────────────────────
-        // Canonical replacement for `Agent`. Adds `fresh` flag:
-        // `false` (default) = auto-resume most recent session;
-        // `true` = start a clean session. The old `Agent` name is
-        // retained as a deprecated alias via `TOOL_ALIASES`.
+        // ── agent_spawn ───────────────────────────────────────────────
+        // The one spawn tool. `fresh: false` (default) auto-resumes the
+        // agent's most recent session; `true` starts a clean one. A model
+        // trained on the CC tool set will name this `Agent` and pass
+        // `subagent_type`; `TOOL_ALIASES` + `normalize_agent_spawn_input`
+        // accept that spelling without advertising it as a second tool.
+        //
+        // This spec is STATIC — nothing here names an agent type, so it stays
+        // byte-identical whatever is installed. `agent_spawn` is a CORE tool,
+        // so its description rides in the cached tools block, and the volatile
+        // catalog belongs in the `<available-agent-types>` dynamic prompt
+        // section instead. See `runtime::agent_types` for the measurement
+        // behind that split.
         ToolSpec {
             name: "agent_spawn",
             description: concat!(
@@ -1098,15 +1074,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "agent": { "type": "string", "description": "Agent type/name to spawn (e.g. general-purpose, Explore, Plan)." },
+                    "agent": { "type": "string", "description": "Agent type specialization. The available types are listed in the <available-agent-types> section of the system prompt; defaults to general-purpose." },
                     "prompt": { "type": "string", "description": "The full task prompt for the agent." },
                     "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
                     "model": { "type": "string", "description": "Model ID override; defaults to the system default." },
-                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async. When false, run synchronously." },
-                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode override." },
-                    "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode." }
+                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve the result later with pid_output(pid, block: true). When false, run synchronously and return the result." },
+                    "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
+                    "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
@@ -1294,49 +1270,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
-            name: "TaskGet",
-            description: "Get the status and details of a background task by ID.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "TaskList",
-            description: "List all background tasks and background sub-agents with their current status. Sub-agents come from the Agent tool and appear under `background_agents` in the response. Use `backgrounded_only=true` to narrow to sub-agents whose status is `backgrounded` or `running` — the useful set when the coordinator wants to switch between live workers.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "backgrounded_only": {
-                        "type": "boolean",
-                        "description": "When true, `background_agents` includes only sub-agents whose status is `backgrounded` or `running`. Defaults to false (all statuses)."
-                    }
-                },
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "TaskStop",
-            description: "Stop a running background task by ID.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string" }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
-        },
-        ToolSpec {
             name: "TaskUpdate",
-            description: "Update a task's status, subject, or other fields. A task must exist first (created via TaskCreate); use TaskList to see available task IDs.",
+            description: "Update a task's status, subject, or other fields. The task must exist first — TaskCreate returns its id.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1362,28 +1297,15 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
-        ToolSpec {
-            name: "TaskOutput",
-            description: "Retrieve output from a background task or agent. Use task_id for TaskRegistry tasks. Use agent_id to retrieve (and optionally await) a background agent launched with Agent(run_in_background=true). Set block=true to wait until the agent finishes. A single blocking call waits at most 60000 ms (clamped); if the agent is still running it returns retrieval_status=\"timeout\" — call TaskOutput again to keep waiting.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "ID of a TaskRegistry task to retrieve output from" },
-                    "agent_id": { "type": "string", "description": "ID of a background agent launched with Agent(run_in_background=true)" },
-                    "block": { "type": "boolean", "description": "When true (default), wait until the agent finishes before returning" },
-                    "timeout_ms": { "type": "integer", "minimum": 0, "description": "Maximum milliseconds to wait when block=true (default 30000, capped at 60000). On timeout the response has retrieval_status=\"timeout\" — re-call to keep waiting." }
-                },
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        // ── Unified pid.* tools ───────────────────────────────────────
-        // Canonical replacements for TaskStop, TaskGet/TaskList, and
-        // TaskOutput. The old names are retained as deprecated aliases
-        // via TOOL_ALIASES.
+        // ── pid.* tools ───────────────────────────────────────────────
+        // The one process-control family. A CC-trained model will name
+        // these `TaskStop`/`TaskGet`/`TaskList`/`TaskOutput` and pass
+        // `task_id`/`agent_id`; `TOOL_ALIASES` + the `normalize_pid_*`
+        // helpers accept those spellings without advertising them as a
+        // second set of tools.
         ToolSpec {
             name: "pid_kill",
-            description: "Terminate a running agent by pid. Replaces TaskStop.",
+            description: "Terminate a running agent by pid.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1399,8 +1321,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             description: concat!(
                 "Query the status of one or all agent pids. ",
                 "With `pid`: returns READY/BUSY/TERMINATED for that pid. ",
-                "Without `pid`: lists all pids with their statuses (replaces TaskList). ",
-                "Also replaces TaskGet for single-pid queries."
+                "Without `pid`: returns `background_agents` (every spawned agent and its ",
+                "status) plus `tasks` (the session's task list)."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1419,9 +1341,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "pid_output",
             description: concat!(
                 "Retrieve output from a pid (background agent or task). ",
-                "Set `block: true` to wait until the agent finishes (max 60s per call). ",
-                "`merge: true` merges the agent's result into the caller's context. ",
-                "Replaces TaskOutput."
+                "Set `block: true` to wait until the agent finishes (max 60s per call); ",
+                "if it is still running the response has retrieval_status=\"timeout\" — ",
+                "call again to keep waiting. ",
+                "`merge: true` merges the agent's result into the caller's context."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1497,97 +1420,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
-        ToolSpec {
-            name: "SendMessage",
-            description: concat!(
-                "Send a message to another agent teammate via the workspace mailbox. ",
-                "Recipients receive one JSONL line at ",
-                "<workspace>/.sudocode-inbox/<recipient>.jsonl. ",
-                "Set `to` to a bare teammate name or \"*\" for broadcast. ",
-                "`message` is either a plain string (requires `summary`) or a structured object ",
-                "{type: shutdown_request|shutdown_response|plan_approval_response, ...}. ",
-                "Structured messages CANNOT be broadcast (`to: \"*\"`). ",
-                "Live delivery: `shutdown_request` calls abort() on the target subagent's ",
-                "HookAbortSignal via the process-wide agent-abort registry, so an in-process ",
-                "background subagent stops on its next tool-loop check. Plain-text messages sent ",
-                "to a running background subagent are picked up by its multi-turn loop at the end ",
-                "of its current turn and become its next user-turn prompt."
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "to": {
-                        "type": "string",
-                        "description": "Recipient: teammate name, or \"*\" for broadcast to all teammates."
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)."
-                    },
-                    "message": {
-                        "description": "Plain text (string) or a structured message object.",
-                        "oneOf": [
-                            { "type": "string" },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "type": {
-                                        "type": "string",
-                                        "enum": ["shutdown_request", "shutdown_response", "plan_approval_response"]
-                                    },
-                                    "request_id": { "type": "string" },
-                                    "approve": { "type": "boolean" },
-                                    "reason": { "type": "string" },
-                                    "feedback": { "type": "string" }
-                                },
-                                "required": ["type"]
-                            }
-                        ]
-                    },
-                    "sender": {
-                        "type": "string",
-                        "description": "Optional sender name; defaults to \"team-lead\" for the main agent."
-                    }
-                },
-                "required": ["to", "message"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "send_message",
-            description: "Send a message to another agent's mailbox. Call this ONLY \
-                          when you decide to reply to a peer; if you have nothing to \
-                          say, do NOT call it — staying silent lets the conversation \
-                          end instead of bouncing forever. Only available to agents \
-                          that have a mailbox (A2A / co-hosted).",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "to": { "type": "string", "description": "The recipient agent's id." },
-                    "body": { "type": "string", "description": "The message to send." }
-                },
-                "required": ["to", "body"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        // ── Unified send ──────────────────────────────────────────────
-        // Canonical replacement for both `SendMessage` (coordinator /
-        // sub-agent mailbox) and `send_message` (A2A / co-hosted).
-        // Both old names are retained as deprecated aliases via
-        // `TOOL_ALIASES` so existing prompts and tool calls keep working.
+        // ── send_message ──────────────────────────────────────────────
+        // ONE outbound-message tool. Where it delivers is a property of the
+        // PROCESS, not of the name the model picks: when the host wired a
+        // nexus-A2A sender, `CliToolExecutor` routes it to the peer's
+        // replicated DT_STREAM inbox; otherwise it lands in the workspace
+        // mailbox below. Two names for those two destinations is what let a
+        // cross-machine reply be written silently to local disk and reported
+        // as sent, so there is deliberately only one.
         ToolSpec {
             name: "send",
             description: concat!(
                 "Send a message to an agent by name or pid. ",
-                "Unified replacement for SendMessage and send_message. ",
-                "When `to` is an agent name the message is delivered to its ",
-                "workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
+                "Delivery is chosen by the host, not by you: on an agent-to-agent ",
+                "network the message is delivered to the peer over the network and the ",
+                "result reads `message delivered to <name>`; otherwise it lands in the ",
+                "recipient's workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
                 "When `to` is a pid it is routed to the running process. ",
-                "`to: \"*\"` broadcasts to all teammates. ",
-                "`message` accepts a plain string (requires `summary` for named agents) ",
-                "or a structured object {type: shutdown_request|shutdown_response|plan_approval_response, ...}."
+                "`to: \"*\"` broadcasts to all teammates (structured messages CANNOT be broadcast). ",
+                "`message` accepts a plain string (pass `summary` too so the UI has a preview) ",
+                "or a structured object {type: shutdown_request|shutdown_response|plan_approval_response, ...}. ",
+                "Live delivery: `shutdown_request` calls abort() on the target subagent's ",
+                "HookAbortSignal via the process-wide agent-abort registry, so an in-process ",
+                "background subagent stops on its next tool-loop check. Plain-text messages sent ",
+                "to a running background subagent are picked up by its multi-turn loop at the end ",
+                "of its current turn and become its next user-turn prompt. ",
+                "When replying to a peer, call this ONLY if you have something to say — ",
+                "staying silent lets the conversation end instead of bouncing forever."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1618,7 +1477,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)."
+                        "description": "A 5-10 word summary shown as a preview in the UI. Supply it whenever `message` is plain text."
+                    },
+                    "sender": {
+                        "type": "string",
+                        "description": "Optional sender name; defaults to \"team-lead\" for the main agent. Ignored on an agent-to-agent network, where the node stamps the authenticated sender."
                     }
                 },
                 "required": ["to", "message"],
@@ -1695,55 +1558,12 @@ pub fn execute_tool_with_abort(
     execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
 }
 
-/// PascalCase / short-name → canonical snake_case tool name.
-///
-/// SSOT: the alias pairs live here once and are consumed by both
-/// `parse_allowed_tools` (for `--allowedTools` CLI flag) and
-/// `execute_tool_with_enforcer` (for model-returned tool names).
-///
-/// Keys are the NORMALIZED (lower-cased) alias form — the CC PascalCase
-/// names (`Bash`, `Read`, …) normalize to these. Only tools whose
-/// `execute_tool` match arm is lower/snake_case appear here; PascalCase-
-/// native tools (`EnterPlanMode`, `TaskCreate`, `Skill`, `Agent`, …) are
-/// NOT aliased — [`canonicalize_tool_name`] passes them through unchanged.
-const TOOL_ALIASES: &[(&str, &str)] = &[
-    ("bash", "bash"),
-    ("read", "read_file"),
-    ("write", "write_file"),
-    ("edit", "edit_file"),
-    ("glob", "glob_search"),
-    ("grep", "grep_search"),
-    // Unified send: both old names → canonical "send"
-    ("sendmessage", "send"),  // SendMessage (normalized)
-    ("send_message", "send"), // send_message (managed-agent A2A)
-    // Unified agent_spawn: old name → canonical
-    ("agent", "agent_spawn"), // Agent (normalized)
-    // Unified pid.*: old Task* names → canonical pid.* names
-    ("taskstop", "pid_kill"),     // TaskStop (normalized)
-    ("taskget", "pid_status"),    // TaskGet (normalized)
-    ("tasklist", "pid_status"),   // TaskList (normalized) — both map to pid_status
-    ("taskoutput", "pid_output"), // TaskOutput (normalized)
-];
-
-/// Canonicalize a tool name from the model into the internal name used
-/// by the `execute_tool` match. Models may return PascalCase names
-/// (CC-style: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`) while
-/// scode registers snake_case (`bash`, `read_file`, etc.).
-///
-/// Names NOT in [`TOOL_ALIASES`] pass through UNCHANGED — critical for
-/// the PascalCase-native tools (`EnterPlanMode`, `ExitPlanMode`,
-/// `TaskCreate`, `WebFetch`, `Skill`, `Agent`, `TaskUpdate`, …) whose
-/// `execute_tool` match arms are PascalCase: lower-casing them (the prior
-/// behaviour) turned every one into `unsupported tool`.
-pub fn canonicalize_tool_name(name: &str) -> String {
-    let normalized = normalize_tool_name(name);
-    for &(alias, canonical) in TOOL_ALIASES {
-        if normalized == alias {
-            return canonical.to_string();
-        }
-    }
-    name.to_string()
-}
+/// The alias table's SSOT is [`runtime::tool_names`] — `runtime` sits below
+/// this crate and matches tool names too (the coordinator gate, the
+/// concurrency classifier), so the knowledge lives where every site can
+/// reach it. Re-exported here because `tools::canonicalize_tool_name` is the
+/// name the CLI, the engine host and the ACP server already call.
+pub use runtime::tool_names::canonicalize_tool_name;
 
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
@@ -1762,7 +1582,7 @@ fn execute_tool_with_enforcer(
     // SUDOCODE_COORDINATOR_MODE is truthy; no cost otherwise.
     if !runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name) {
         return Err(format!(
-            "tool `{name}` is not available in coordinator mode; delegate write-side work to a worker via `Agent(...)` (or use SendMessage to continue an existing worker)."
+            "tool `{name}` is not available in coordinator mode; delegate write-side work to a worker via `agent_spawn(...)` (or use `send` to continue an existing worker)."
         ));
     }
     match name {
@@ -1796,14 +1616,14 @@ fn execute_tool_with_enforcer(
         }
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            from_value::<GrepSearchInput>(input).and_then(|input| run_grep_search(input, fs))
+            from_value::<GrepSearchInput>(input)
+                .and_then(|input| run_grep_search(input, fs, abort_signal))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
-        "agent_list" => run_agent_list(),
-        // Canonical "agent_spawn" — also reached by the deprecated
-        // alias "Agent" (via TOOL_ALIASES). Normalize `agent` →
+        // agent_spawn. A CC-trained model names this `Agent`;
+        // TOOL_ALIASES folds that spelling onto this arm. Normalize `agent` →
         // `subagent_type` so the new schema's field name maps to
         // `AgentInput`. `fresh` is accepted but currently no-op
         // (session resume is future work).
@@ -1848,8 +1668,9 @@ fn execute_tool_with_enforcer(
         }
         "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
-        // Canonical pid.* — also reached by the deprecated aliases
-        // TaskStop, TaskGet, TaskList, TaskOutput (via TOOL_ALIASES).
+        // The pid.* family. A CC-trained model names these TaskStop,
+        // TaskGet, TaskList and TaskOutput; TOOL_ALIASES folds those
+        // spellings onto these arms.
         "pid_kill" => {
             let input = normalize_pid_input(input);
             from_value::<TaskIdInput>(&input).and_then(run_task_stop)
@@ -1876,13 +1697,12 @@ fn execute_tool_with_enforcer(
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
-        // Canonical "send" — also reached by the deprecated aliases
-        // "SendMessage" and "send_message" (via TOOL_ALIASES).
-        // Normalize `body` → `message` so the old `send_message` input
-        // format `{to, body}` deserializes into `SendMessageInput`.
+        // Workspace-mailbox delivery. A host that wired a nexus-A2A sender
+        // intercepts `send` before dispatch reaches here and delivers over the
+        // network instead; this arm is the local destination, not a fallback
+        // for a failed one.
         "send" => {
-            let input = normalize_send_input(input);
-            from_value::<SendMessageInput>(&input).and_then(run_send_message)
+            from_value::<SendMessageInput>(&normalize_send_input(input)).and_then(run_send_message)
         }
         _ => Err(format!("unsupported tool: {name}")),
     }
@@ -2623,22 +2443,6 @@ fn sanitize_recipient(name: &str) -> String {
     out
 }
 
-/// Normalize the input `Value` for the unified `send` tool so that
-/// the old `send_message` format `{to, body}` is accepted alongside
-/// the `SendMessage` format `{to, message, ...}`. If `message` is
-/// absent but `body` is present, copies `body` into `message`.
-fn normalize_send_input(input: &Value) -> Value {
-    let mut v = input.clone();
-    if let Some(obj) = v.as_object_mut() {
-        if !obj.contains_key("message") {
-            if let Some(body) = obj.remove("body") {
-                obj.insert("message".to_string(), body);
-            }
-        }
-    }
-    v
-}
-
 /// Normalize `pid` → `task_id` for the unified `pid_kill` and
 /// `pid_status` tools, so the new schema's field name maps to
 /// `TaskIdInput`. If `task_id` already exists, `pid` is ignored.
@@ -2648,6 +2452,31 @@ fn normalize_pid_input(input: &Value) -> Value {
         if !obj.contains_key("task_id") {
             if let Some(pid) = obj.remove("pid") {
                 obj.insert("task_id".to_string(), pid);
+            }
+        }
+    }
+    v
+}
+
+/// Normalize `body` → `message` for `send`.
+///
+/// `send` advertises one field, `message`. `body` was the field name of the
+/// A2A `send_message` tool it replaced, and it is also the field name in the
+/// [`MailboxEnvelope`](runtime::spawn_task) that carries the text on the
+/// wire — so a model that has seen either will reach for it. Accepting it is
+/// input normalization, not a second advertised name.
+///
+/// Public because the nexus-A2A intercept in `CliToolExecutor` reads the tool
+/// input before dispatch reaches the arm below, and both destinations must
+/// accept exactly the same input or the field a model chose would decide
+/// where its message went.
+#[must_use]
+pub fn normalize_send_input(input: &Value) -> Value {
+    let mut v = input.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if !obj.contains_key("message") {
+            if let Some(body) = obj.remove("body") {
+                obj.insert("message".to_string(), body);
             }
         }
     }
@@ -3485,8 +3314,12 @@ fn run_glob_search(input: GlobSearchInputValue, fs: &dyn FsBackend) -> Result<St
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_grep_search(input: GrepSearchInput, fs: &dyn FsBackend) -> Result<String, String> {
-    to_pretty_json(grep_search(fs, &input).map_err(io_to_string)?)
+fn run_grep_search(
+    input: GrepSearchInput,
+    fs: &dyn FsBackend,
+    abort_signal: Option<&HookAbortSignal>,
+) -> Result<String, String> {
+    to_pretty_json(runtime::grep_search_with_abort(fs, &input, abort_signal).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -3523,66 +3356,6 @@ fn run_web_search(input: WebSearchInput) -> Result<String, String> {
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
-}
-
-/// List all available agent types: builtins + custom `.md` agents.
-fn run_agent_list() -> Result<String, String> {
-    let builtins = vec![
-        json!({
-            "name": "general-purpose",
-            "description": "General-purpose agent for research, implementation, and multi-step tasks.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Explore",
-            "description": "Read-only research agent: read_file, glob, grep, web search.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Plan",
-            "description": "Planning agent: read-only exploration + task management.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "Verification",
-            "description": "Verification agent: bash + read-only tools for testing changes.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "scode-guide",
-            "description": "Help agent for scode usage questions.",
-            "builtin": true,
-        }),
-        json!({
-            "name": "statusline-setup",
-            "description": "Configure the status line display.",
-            "builtin": true,
-        }),
-    ];
-
-    let mut custom = Vec::new();
-    if let Ok(cwd) = current_workspace_root() {
-        for dir in runtime::custom_agents::standard_custom_agent_dirs(&cwd) {
-            for def in runtime::custom_agents::load_md_agents(&dir) {
-                // Avoid duplicating builtins that a user might shadow
-                if is_builtin_subagent(&def.name) {
-                    continue;
-                }
-                custom.push(json!({
-                    "name": def.name,
-                    "description": def.description,
-                    "builtin": false,
-                    "tools": def.tools,
-                }));
-            }
-        }
-    }
-
-    let all: Vec<_> = builtins.into_iter().chain(custom).collect();
-    to_pretty_json(json!({
-        "agents": all,
-        "count": all.len(),
-    }))
 }
 
 fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
@@ -3874,6 +3647,11 @@ struct AskUserQuestionInput {
 #[serde(rename_all = "camelCase")]
 struct AskUserQuestionItem {
     id: String,
+    // Accept `question` as an alias so an item written with the legacy
+    // top-level field name (the natural mistake, since the tool also takes a
+    // top-level `question`) deserializes instead of failing the whole call
+    // with a cryptic "missing field `prompt`".
+    #[serde(alias = "question")]
     prompt: String,
     #[serde(default)]
     kind: Option<String>,
@@ -5822,126 +5600,15 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
                 return tools.iter().cloned().collect();
             }
         }
-        return general_purpose_tools();
+        return runtime::agent_types::general_purpose_tools();
     }
-    let tools = match subagent_type {
-        "Explore" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-        ],
-        "Plan" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "StructuredOutput",
-        ],
-        "Verification" => vec![
-            "bash",
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "StructuredOutput",
-            "PowerShell",
-        ],
-        "scode-guide" => vec![
-            "read_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "ToolSearch",
-            "Skill",
-            "StructuredOutput",
-        ],
-        "statusline-setup" => vec![
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob_search",
-            "grep_search",
-            "ToolSearch",
-        ],
-        // Fork subagent — inherits the parent's exact tool pool
-        // (mirrors CC-fork's `tools: ['*']`). Sudocode doesn't thread
-        // the parent's allowed_tools into `prepare_agent_job`, so we
-        // approximate `*` as the maximal set: every tool a normal
-        // general-purpose subagent gets, PLUS Agent so the child can
-        // still spawn NON-fork sub-agents. Fork-inside-fork recursion
-        // is blocked at call time by
-        // `ToolDispatchContext::is_inside_fork_child`.
-        "fork" => vec![
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob_search",
-            "grep_search",
-            "WebFetch",
-            "WebSearch",
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "Skill",
-            "ToolSearch",
-            "Sleep",
-            "Config",
-            "StructuredOutput",
-            "PowerShell",
-            "Agent",
-            "SendMessage",
-        ],
-        _ => return general_purpose_tools(),
-    };
-    tools.into_iter().map(str::to_string).collect()
-}
-
-/// The maximal tool set a general-purpose sub-agent may invoke —
-/// SSOT for both the explicit `general-purpose` preset and the
-/// fallback path (unknown built-in name AND custom `.md` agents whose
-/// frontmatter says `tools: '*'` / omits the field).
-fn general_purpose_tools() -> BTreeSet<String> {
-    [
-        "bash",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "glob_search",
-        "grep_search",
-        "WebFetch",
-        "WebSearch",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "Skill",
-        "ToolSearch",
-        "Sleep",
-        "Config",
-        "StructuredOutput",
-        "PowerShell",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    // Built-in presets and their tool pools are data in
+    // `runtime::agent_types::BUILTIN_AGENT_TYPES` — the same registry the
+    // `<available-agent-types>` prompt section renders from, so a preset can
+    // never be advertised to the model with one tool set and then run with
+    // another. An unknown name inherits the general-purpose pool.
+    runtime::agent_types::builtin_allowed_tools(subagent_type)
+        .unwrap_or_else(runtime::agent_types::general_purpose_tools)
 }
 
 fn agent_permission_policy() -> PermissionPolicy {
@@ -7363,15 +7030,17 @@ const CORE_TOOLS: &[&str] = &[
     "WebSearch",
     "Skill",
     "agent_spawn",
-    "agent_list",
     "pid_fork",
     "ToolSearch",
     "ExecuteExtraTool",
     "AskUserQuestion",
 ];
 
-fn is_core_tool(name: &str) -> bool {
-    CORE_TOOLS.contains(&name)
+pub fn is_core_tool(name: &str) -> bool {
+    // Compatibility aliases must share their canonical tool's visibility.
+    // Otherwise `Agent` is advertised as deferred even though it dispatches to
+    // core `agent_spawn`, causing ExecuteExtraTool to reject the call.
+    CORE_TOOLS.contains(&canonicalize_tool_name(name).as_str())
 }
 
 fn deferred_tool_specs() -> Vec<ToolSpec> {
@@ -7389,10 +7058,19 @@ fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpe
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .filter_map(|wanted| {
-                let wanted = canonical_tool_token(wanted);
+                // Try the name as asked, then the canonical tool it aliases.
+                // `select:` is an exact match, so without this a CC-trained
+                // model asking for `select:SendMessage` — the spelling the
+                // alias table exists to absorb — gets an empty result and no
+                // way to learn the name it should have used.
+                let asked = canonical_tool_token(wanted);
+                let aliased = alias_token(&asked);
                 specs
                     .iter()
-                    .find(|spec| canonical_tool_token(&spec.name) == wanted)
+                    .find(|spec| {
+                        let token = canonical_tool_token(&spec.name);
+                        token == asked || token == aliased
+                    })
                     .map(|spec| spec.name.clone())
             })
             .take(max_results)
@@ -7446,6 +7124,13 @@ fn search_tool_specs(query: &str, max_results: usize, specs: &[SearchableToolSpe
                 if canonical_name == canonical_term {
                     score += 12;
                 }
+                // A CC tool name is an exact hit on the tool it aliases, and
+                // must outscore every tool that merely shares the word:
+                // `AgentTool` means CC's `Agent`, i.e. `agent_spawn`, not
+                // whatever else happens to start with `agent`.
+                if canonical_name == alias_token(&canonical_term) {
+                    score += 12;
+                }
                 if normalized_haystack.contains(&canonical_term) {
                     score += 3;
                 }
@@ -7474,6 +7159,20 @@ fn normalize_tool_search_query(query: &str) -> String {
         .map(canonical_tool_token)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Resolve a search token through the alias table and return the canonical
+/// tool's own token.
+///
+/// Search compares TOKENS (`canonical_tool_token`: alphanumerics only, a
+/// trailing `tool` stripped) while the alias table is keyed by normalized
+/// NAMES, so `AgentTool` → token `agent` has to be fed back through the table
+/// as a name to reach `agent_spawn` → token `agentspawn`. Comparing the two
+/// forms directly is why `AgentTool` scored no better against `agent_spawn`
+/// than against any other `agent`-prefixed spec, and the tie went to
+/// whichever spec came first.
+fn alias_token(token: &str) -> String {
+    canonical_tool_token(&canonicalize_tool_name(token))
 }
 
 fn canonical_tool_token(value: &str) -> String {
@@ -7623,17 +7322,12 @@ fn lookup_custom_agent(
 /// Built-in preset names that must NOT be shadowed by a custom `.md`
 /// agent — the built-in behavior wins, even if a user drops a
 /// same-named .md file under `~/.nexus/sudocode/agents/`.
+///
+/// Delegates to the one registry, so this set cannot drift from the tool pools
+/// [`allowed_tools_for_subagent`] hands out or from the catalog the model is
+/// shown in `<available-agent-types>`.
 fn is_builtin_subagent(name: &str) -> bool {
-    matches!(
-        name,
-        "general-purpose"
-            | "Explore"
-            | "Plan"
-            | "Verification"
-            | "scode-guide"
-            | "statusline-setup"
-            | "fork"
-    )
+    runtime::agent_types::is_builtin_agent_type(name)
 }
 
 /// Prefix inserted before the caller's directive text inside a fork
@@ -8075,12 +7769,6 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["autoCompactEnabled"],
-            options: None,
-        },
-        "autoMemoryEnabled" => ConfigSettingSpec {
-            scope: ConfigScope::Settings,
-            kind: ConfigKind::Boolean,
-            path: &["autoMemoryEnabled"],
             options: None,
         },
         "autoDreamEnabled" => ConfigSettingSpec {
@@ -9017,7 +8705,8 @@ mod tests {
         assert!(names.contains(&"TaskCreate"));
         assert!(names.contains(&"TaskUpdate"));
         assert!(names.contains(&"Skill"));
-        assert!(names.contains(&"Agent"));
+        assert!(names.contains(&"agent_spawn"));
+        assert!(names.contains(&"send"));
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"Sleep"));
         assert!(names.contains(&"Config"));
@@ -9025,6 +8714,43 @@ mod tests {
         assert!(names.contains(&"ExitPlanMode"));
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"PowerShell"));
+    }
+
+    /// The invariant that keeps a model from having to guess: a capability is
+    /// advertised under exactly ONE name.
+    ///
+    /// It regressed once — `SendMessage`, `send` and `send` were all
+    /// advertised at the same time, differing only in which schema field
+    /// carried the text, and a model on a cross-machine A2A session picked the
+    /// workspace-mailbox one. Its reply was written to a local file and
+    /// reported as delivered, and the peer waited ten hours for a message that
+    /// had never left the machine.
+    ///
+    /// An alias exists so a CC-trained model's spelling still dispatches. The
+    /// moment an alias key is ALSO a spec name, the model sees two entries for
+    /// one capability and the guessing is back.
+    #[test]
+    fn no_capability_is_advertised_under_two_names() {
+        let names = mvp_tool_specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        for &(alias, canonical) in runtime::tool_names::tool_aliases() {
+            if alias == canonical {
+                // A tool whose canonical name already IS the normalized key
+                // (`bash`): the entry is an identity, not a second name.
+                continue;
+            }
+            let clashing = names
+                .iter()
+                .find(|name| super::normalize_tool_name(name) == alias)
+                .copied();
+            assert_eq!(
+                clashing, None,
+                "`{alias}` is an alias for `{canonical}` AND has a spec of its own — \
+                 the model would see one capability twice and have to guess"
+            );
+        }
     }
 
     #[test]
@@ -9059,10 +8785,14 @@ mod tests {
                 "{tool} must not be mangled"
             );
         }
-        // Unified tool aliases: old names → new canonical names.
+        // Superseded tool names fold onto the canonical one. `SendMessage`
+        // and `send_message` normalize to DIFFERENT keys, so both must be
+        // listed in the table — losing either sends a model to the wrong
+        // destination or refuses it outright.
         assert_eq!(canonicalize_tool_name("Agent"), "agent_spawn");
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
+        assert_eq!(canonicalize_tool_name("send"), "send");
         assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
         assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
         assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
@@ -9177,32 +8907,31 @@ mod tests {
     fn allowed_tools_resolves_deprecated_names_to_spec_names() {
         let registry = GlobalToolRegistry::builtin();
 
-        // Old names (TaskList, SendMessage, Agent, etc.) still have
-        // specs in mvp_tool_specs(). --allowedTools with these names
-        // must resolve to the SPEC name (not the dispatch alias) so
-        // that definitions() can filter by spec.name.
-        for (old_name, spec_name) in [
-            ("TaskList", "TaskList"),
-            ("TaskGet", "TaskGet"),
-            ("TaskStop", "TaskStop"),
-            ("TaskOutput", "TaskOutput"),
-            ("SendMessage", "SendMessage"),
-            ("Agent", "Agent"),
-            // New canonical names resolve to themselves
+        // A CC tool name has no spec of its own, so --allowedTools with one
+        // must resolve to the canonical tool it names — otherwise the flag
+        // would admit a name `definitions()` can never match against
+        // `spec.name`, silently allow-listing nothing.
+        for (requested, spec_name) in [
+            ("TaskList", "pid_status"),
+            ("TaskGet", "pid_status"),
+            ("TaskStop", "pid_kill"),
+            ("TaskOutput", "pid_output"),
+            ("SendMessage", "send"),
+            ("Agent", "agent_spawn"),
+            // Canonical names resolve to themselves.
             ("pid_status", "pid_status"),
             ("pid_kill", "pid_kill"),
             ("pid_output", "pid_output"),
             ("agent_spawn", "agent_spawn"),
             ("send", "send"),
-            ("agent_list", "agent_list"),
         ] {
             let allowed = registry
-                .normalize_allowed_tools(&[old_name.to_string()])
-                .unwrap_or_else(|e| panic!("--allowedTools {old_name} should succeed: {e}"))
+                .normalize_allowed_tools(&[requested.to_string()])
+                .unwrap_or_else(|e| panic!("--allowedTools {requested} should succeed: {e}"))
                 .expect("should produce a non-empty set");
             assert!(
                 allowed.contains(spec_name),
-                "--allowedTools {old_name} must resolve to spec name \"{spec_name}\", got: {allowed:?}"
+                "--allowedTools {requested} must resolve to spec name \"{spec_name}\", got: {allowed:?}"
             );
         }
     }
@@ -9990,26 +9719,39 @@ mod tests {
         let matches = keyword_output["matches"].as_array().expect("matches");
         assert!(matches.iter().any(|value| value == "WebSearch"));
 
-        let selected = execute_tool("ToolSearch", &json!({"query": "select:Agent,Skill"}))
+        let selected = execute_tool("ToolSearch", &json!({"query": "select:agent_spawn,Skill"}))
             .expect("ToolSearch should succeed");
         let selected_output: serde_json::Value =
             serde_json::from_str(&selected).expect("valid json");
-        assert_eq!(selected_output["matches"][0], "Agent");
+        assert_eq!(selected_output["matches"][0], "agent_spawn");
         assert_eq!(selected_output["matches"][1], "Skill");
 
         let aliased = execute_tool("ToolSearch", &json!({"query": "AgentTool"}))
             .expect("ToolSearch should support tool aliases");
         let aliased_output: serde_json::Value = serde_json::from_str(&aliased).expect("valid json");
-        assert_eq!(aliased_output["matches"][0], "Agent");
+        assert_eq!(aliased_output["matches"][0], "agent_spawn");
         assert_eq!(aliased_output["normalized_query"], "agent");
 
-        let selected_with_alias =
-            execute_tool("ToolSearch", &json!({"query": "select:AgentTool,Skill"}))
+        // `select:` is exact, so a CC-trained model asking under CC's own
+        // spelling must still land on the canonical tool — that is the whole
+        // job of the alias table, and an empty result would leave the model
+        // with no way to discover the name it should have used.
+        for (cc_name, canonical) in [
+            ("select:Agent", "agent_spawn"),
+            ("select:SendMessage", "send"),
+            ("select:TaskStop", "pid_kill"),
+            ("select:TaskOutput", "pid_output"),
+            ("select:AgentTool", "agent_spawn"),
+        ] {
+            let out = execute_tool("ToolSearch", &json!({ "query": cc_name }))
                 .expect("ToolSearch alias select should succeed");
-        let selected_with_alias_output: serde_json::Value =
-            serde_json::from_str(&selected_with_alias).expect("valid json");
-        assert_eq!(selected_with_alias_output["matches"][0], "Agent");
-        assert_eq!(selected_with_alias_output["matches"][1], "Skill");
+            let out: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+            assert_eq!(
+                out["matches"][0], canonical,
+                "`{cc_name}` must resolve to `{canonical}`, got {:?}",
+                out["matches"]
+            );
+        }
     }
 
     #[test]
@@ -10849,6 +10591,39 @@ mod tests {
         assert!(verification.contains("bash"));
         assert!(verification.contains("PowerShell"));
         assert!(!verification.contains("write_file"));
+    }
+
+    /// `agent_spawn`'s spec must never enumerate agent types.
+    ///
+    /// It is a CORE tool, so its description and schema ride in the cached
+    /// tools block. Enumerating types there means installing a `.md` agent
+    /// rewrites the description and busts that cache — the cost Claude Code
+    /// measured at ~10.2% of fleet `cache_creation` tokens. The catalog belongs
+    /// in the `<available-agent-types>` dynamic prompt section instead (see
+    /// `runtime::agent_types`).
+    ///
+    /// A failure here is the cache property breaking, not a stale assertion:
+    /// move the text into the prompt section rather than relaxing this test.
+    #[test]
+    fn agent_spawn_spec_enumerates_no_agent_type() {
+        let spec = mvp_tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "agent_spawn")
+            .expect("agent_spawn must be a tool");
+        let rendered = format!("{} {}", spec.description, spec.input_schema);
+        for agent in runtime::agent_types::BUILTIN_AGENT_TYPES {
+            // Naming the DEFAULT is a stable part of the call contract, not a
+            // catalog entry — it does not change when an agent is installed.
+            if agent.name == "general-purpose" {
+                continue;
+            }
+            assert!(
+                !rendered.contains(agent.name),
+                "agent_spawn's spec names the agent type `{}`; the catalog belongs in \
+                 <available-agent-types>, not in the cached tools block",
+                agent.name
+            );
+        }
     }
 
     #[derive(Debug)]

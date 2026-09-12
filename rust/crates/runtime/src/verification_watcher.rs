@@ -43,7 +43,7 @@ pub const DEFAULT_VERIFICATION_STREAK_THRESHOLD: usize = 3;
 /// tag so the model treats it as a systemic hint rather than a user
 /// message — mirrors the CC-fork convention.
 pub const VERIFICATION_NUDGE_TEXT: &str = "<system-reminder>\n\
-3 or more tasks have been closed without a Verification pass. Spawn `Agent(subagent_type=\"Verification\", …)` to prove the changes actually work — running the code, exercising edge cases, checking failures — before continuing. Rubber-stamping is worse than nothing.\n\
+3 or more tasks have been closed without a Verification pass. Spawn `agent_spawn(agent=\"Verification\", …)` to prove the changes actually work — running the code, exercising edge cases, checking failures — before continuing. Rubber-stamping is worse than nothing.\n\
 </system-reminder>";
 
 /// Process-global counter. Starts at 0. Simple atomic — no locking
@@ -257,7 +257,7 @@ mod tests {
         // The message the model sees MUST be actionable — name the
         // exact tool call, and tag it as a system-reminder so the
         // model distinguishes it from user input.
-        assert!(VERIFICATION_NUDGE_TEXT.contains("Agent(subagent_type=\"Verification\""));
+        assert!(VERIFICATION_NUDGE_TEXT.contains("agent_spawn(agent=\"Verification\""));
         assert!(VERIFICATION_NUDGE_TEXT.starts_with("<system-reminder>"));
         assert!(VERIFICATION_NUDGE_TEXT.ends_with("</system-reminder>"));
     }

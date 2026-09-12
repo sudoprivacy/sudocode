@@ -29,8 +29,8 @@ fn agent_tool_spec_schema() -> serde_json::Value {
     let specs = mvp_tool_specs();
     let agent = specs
         .into_iter()
-        .find(|s| s.name == "Agent")
-        .expect("Agent tool exists");
+        .find(|s| s.name == "agent_spawn")
+        .expect("agent_spawn tool exists");
     agent.input_schema.clone()
 }
 

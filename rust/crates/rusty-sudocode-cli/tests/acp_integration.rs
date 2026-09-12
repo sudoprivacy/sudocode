@@ -560,7 +560,13 @@ async fn scenario_initialize(client: &mut AcpTestClient) {
     // clients (apeiron, sudowork) that `session/new` / `session/load` honour
     // `_meta.sudocode.systemPrompt` / `appendSystemPrompt` — see
     // `acp_session_new_system_prompt_override_and_append_reach_model`.
-    for flag in ["systemPromptOverride", "systemPromptAppend"] {
+    // `sessionMemory` tells them `_meta.sudocode.memory` is honoured — see
+    // `acp_session_memory_toggle_is_per_session`.
+    for flag in [
+        "systemPromptOverride",
+        "systemPromptAppend",
+        "sessionMemory",
+    ] {
         assert_eq!(
             result["_meta"]["sudocode"][flag].as_bool(),
             Some(true),
@@ -3045,6 +3051,105 @@ async fn acp_session_cancel_survives_model_switch() {
     workspace.cleanup();
 }
 
+/// Deterministic subagent-over-ACP coverage. This is the mock-backed
+/// counterpart to the live `live_subagent_smoke_stdio` test: it pins the
+/// exact ACP wire contract for a parent that delegates to sub-agents without
+/// depending on a real model choosing to delegate.
+///
+/// The parent turn (`SubagentDelegationParent`) emits three synchronous
+/// `Agent` `tool_use` blocks whose prompts each carry a
+/// `PARITY_SCENARIO:subagent_calc_child` marker. Each spawned child inherits
+/// the parent's `base_url` (so its `/v1/messages` call reaches the same mock)
+/// and its first user message is exactly that prompt, so the mock routes the
+/// child call to `SubagentCalcChild`, which answers with the addition sum.
+/// Once all three `tool_result`s are back the parent emits the aggregated JSON.
+#[tokio::test]
+async fn acp_subagent_delegation_deterministic() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("subagent-delegation");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    // Agent tool requires DangerFullAccess to spawn without a permission
+    // prompt — matches the live test's `danger-full-access` client.
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{
+                    "type": "text",
+                    "text": format!("{SCENARIO_PREFIX}subagent_delegation_parent")
+                }]
+            }),
+        )
+        .await;
+
+    assert!(
+        !notifs.is_empty(),
+        "subagent delegation prompt should produce notifications"
+    );
+
+    // Exactly three Agent tool_call starts — the wire contract the live test
+    // asserts, now deterministic.
+    let agent_starts: Vec<_> = notifs
+        .iter()
+        .filter(|n| {
+            let update = &n["params"]["update"];
+            update["sessionUpdate"] == "tool_call"
+                && update["title"] == "Agent"
+                && update["status"] == "in_progress"
+        })
+        .collect();
+    assert_eq!(
+        agent_starts.len(),
+        3,
+        "expected exactly 3 Agent tool_call starts, got {}",
+        agent_starts.len()
+    );
+
+    // Each subagent's result surfaces via a completed tool_call_update's
+    // rawOutput.result — collect them and confirm the three sums.
+    let mut agent_results: Vec<String> = notifs
+        .iter()
+        .filter(|n| {
+            let update = &n["params"]["update"];
+            update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed"
+        })
+        .filter_map(|n| {
+            n["params"]["update"]["rawOutput"]["result"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    agent_results.sort();
+    assert!(
+        agent_results.iter().any(|r| r.contains("203"))
+            && agent_results.iter().any(|r| r.contains("403"))
+            && agent_results.iter().any(|r| r.contains("603")),
+        "expected subagent results to contain 203, 403, 603 but got: {agent_results:?}"
+    );
+
+    let result = &resp["result"];
+    assert_eq!(
+        result["stopReason"], "end_turn",
+        "subagent delegation stopReason should be end_turn"
+    );
+    assert!(
+        result.get("usage").is_some(),
+        "subagent delegation response should include usage"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// `session/new.mcp_servers` is injected: the stdio dummy is spawned during
 /// runtime build (proof written) and its `echo` tool round-trips through the
 /// model (mcp_echo_verdict yields `echo:hello from mcp parity`, not MISSING).
@@ -3488,6 +3593,218 @@ async fn acp_session_new_system_prompt_override_and_append_reach_model() {
 
     // Validation: empty / non-string values are invalid_params for either key.
     assert_bad_prompt_meta_rejected(&mut client, &root, OVERRIDE).await;
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// `_meta.sudocode.memory` — the per-session memory switch
+// ---------------------------------------------------------------------------
+
+/// A distinctive line inside the seeded memory entry. It can only reach the
+/// model through the auto-memory block, so finding it in a request body is
+/// proof the session read memory.
+const MEMORY_ENTRY_MARKER: &str = "deploys run at marker-7ac3f1";
+
+/// Seed `dir` with one valid memory entry plus its index and return the
+/// directory's contents as a sorted `(file name, contents)` snapshot.
+fn seed_memory_dir(dir: &std::path::Path) -> Vec<(String, String)> {
+    fs::create_dir_all(dir).expect("memory dir");
+    fs::write(
+        dir.join("release-window.md"),
+        format!(
+            "---\nname: release-window\ndescription: when releases go out\n\
+             metadata:\n  type: project\n---\n\n{MEMORY_ENTRY_MARKER}\n"
+        ),
+    )
+    .expect("write memory entry");
+    fs::write(
+        dir.join("MEMORY.md"),
+        "- [Release window](release-window.md) — when releases go out\n",
+    )
+    .expect("write memory index");
+    memory_dir_snapshot(dir)
+}
+
+/// Every file directly under `dir`, as sorted `(name, contents)` pairs — the
+/// shape the "a disabled session adds nothing and changes nothing" assertion
+/// compares.
+fn memory_dir_snapshot(dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = fs::read_dir(dir)
+        .expect("read memory dir")
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                fs::read_to_string(e.path()).expect("read memory file"),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// `_meta.sudocode.memory` on `session/new`, checked on the wire body the
+/// model receives:
+///  - absent → memory as today (regression guard: the default is unchanged),
+///  - `"disabled"` → no auto-memory block, no entry text,
+///  - `"enabled"` → same as absent,
+///  - the modes are per-session: one process, one memory directory, sessions
+///    on both sides of the switch at the same time,
+///  - a disabled session survives `session/setModel` (the rebuild re-applies
+///    the mode) and adds/changes nothing under the memory directory,
+///  - a later session that omits the key still reads the seeded entry, so
+///    disabling only stood memory down — it deleted nothing,
+///  - unknown / non-string values → `invalid_params`.
+#[tokio::test]
+async fn acp_session_memory_toggle_is_per_session() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("memory-toggle");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let memory_dir = workspace.root.join("memory");
+    let seeded = seed_memory_dir(&memory_dir);
+
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[("SUDOCODE_MEMORY_DIR", &memory_dir.to_string_lossy())],
+    );
+    scenario_initialize(&mut client).await;
+    let root = workspace.root.clone();
+
+    // No key: memory works exactly as it does today.
+    let default_session = scenario_session_new(&mut client, &root).await;
+    let body =
+        last_model_request_after_prompt(&mut client, &server, &default_session, "mem-default")
+            .await;
+    assert!(
+        body.contains(MEMORY_HEADING) && body.contains(MEMORY_ENTRY_MARKER),
+        "no _meta.sudocode.memory → memory reaches the model as before; body: {body}"
+    );
+
+    // "disabled": neither the auto-memory instructions nor the entry.
+    let resp = session_new_with_meta(&mut client, &root, json!({"memory": "disabled"})).await;
+    let disabled = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &disabled, "mem-off").await;
+    assert!(
+        !body.contains(MEMORY_HEADING) && !body.contains(MEMORY_ENTRY_MARKER),
+        "a disabled session must carry no memory block; body: {body}"
+    );
+
+    // "enabled": the explicit spelling of the default.
+    let resp = session_new_with_meta(&mut client, &root, json!({"memory": "enabled"})).await;
+    let enabled = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &enabled, "mem-on").await;
+    assert!(
+        body.contains(MEMORY_HEADING) && body.contains(MEMORY_ENTRY_MARKER),
+        "an explicitly enabled session reads memory; body: {body}"
+    );
+
+    // Per-session, not per-process: the sessions opened before the disabled
+    // one still read memory after it ran a turn.
+    let body =
+        last_model_request_after_prompt(&mut client, &server, &default_session, "mem-default-2")
+            .await;
+    assert!(
+        body.contains(MEMORY_ENTRY_MARKER),
+        "one session's disabled memory must not reach another session; body: {body}"
+    );
+
+    // A runtime rebuild must re-apply the mode, not fall back to the default.
+    let (_, set_resp) = client
+        .send_request(
+            "session/set_model",
+            json!({"sessionId": disabled, "modelId": "haiku"}),
+        )
+        .await;
+    assert!(
+        set_resp.get("error").is_none(),
+        "session/setModel should succeed; got: {set_resp}"
+    );
+    let body = last_model_request_after_prompt(&mut client, &server, &disabled, "mem-off-2").await;
+    assert!(
+        !body.contains(MEMORY_HEADING) && !body.contains(MEMORY_ENTRY_MARKER),
+        "disabled memory must survive a model switch; body: {body}"
+    );
+
+    // Disabling only stands memory down: nothing was added, changed or removed.
+    assert_eq!(
+        memory_dir_snapshot(&memory_dir),
+        seeded,
+        "a disabled session must leave the memory directory byte-identical"
+    );
+
+    // And a fresh session that omits the key finds the same entry — proof the
+    // data was never touched.
+    let after = scenario_session_new(&mut client, &root).await;
+    let body = last_model_request_after_prompt(&mut client, &server, &after, "mem-after").await;
+    assert!(
+        body.contains(MEMORY_ENTRY_MARKER),
+        "memory must still be readable after a disabled session ran; body: {body}"
+    );
+
+    // Validation: an unknown or mistyped value is rejected, never treated as
+    // "on" — a client that means to disable memory must not be told nothing.
+    for bad in [
+        json!({"memory": "off"}),
+        json!({"memory": "Disabled"}),
+        json!({"memory": ""}),
+        json!({"memory": false}),
+        json!({"memory": ["disabled"]}),
+    ] {
+        let resp = session_new_with_meta(&mut client, &root, bad.clone()).await;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32602),
+            "bad _meta.sudocode {bad} must be rejected with invalid_params; got: {resp}"
+        );
+    }
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// A disabled session does not create the memory directory either. The
+/// enabled path calls `ensure_memory_dir_exists` on every prompt build, so
+/// this is the check that memory-off touches the filesystem not at all — it
+/// needs a process where no *other* session could have created the directory
+/// first, hence its own test.
+#[tokio::test]
+async fn acp_session_memory_disabled_never_creates_the_memory_directory() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("memory-off-untouched");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let memory_dir = workspace.root.join("never-created");
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[("SUDOCODE_MEMORY_DIR", &memory_dir.to_string_lossy())],
+    );
+    scenario_initialize(&mut client).await;
+
+    let resp =
+        session_new_with_meta(&mut client, &workspace.root, json!({"memory": "disabled"})).await;
+    let disabled = session_id_of(&resp);
+    let body = last_model_request_after_prompt(&mut client, &server, &disabled, "mem-fs").await;
+    assert!(
+        !body.contains(MEMORY_HEADING),
+        "a disabled session must carry no memory block; body: {body}"
+    );
+    assert!(
+        !memory_dir.exists(),
+        "a disabled session must not create {}",
+        memory_dir.display()
+    );
 
     client.shutdown().await;
     workspace.cleanup();

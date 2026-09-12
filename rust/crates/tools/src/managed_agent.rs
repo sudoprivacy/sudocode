@@ -25,7 +25,9 @@ use runtime::{
     ToolExecutor,
 };
 
-use crate::{execute_tool_with_backend, ProviderRuntimeClient};
+use crate::{
+    canonicalize_tool_name, execute_tool_with_backend, normalize_send_input, ProviderRuntimeClient,
+};
 
 /// Label key where `ManagedAgentService` stores the model id in the
 /// `AgentDescriptor.labels` map.
@@ -67,13 +69,10 @@ where
 
     // -- ApiClient: provider chain from model id --
     // The co-hosted agent is A2A-capable, so its tool set includes
-    // `send_message` (its ONLY, deliberate reply path — see the ping-pong fix).
+    // `send` (its ONLY, deliberate reply path — see the ping-pong fix).
     // The full tool set (file ops, etc.) is gated behind the agent-profile work;
-    // the duet needs only send_message.
-    let allowed_tools: BTreeSet<String> = ["send_message", "send"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // the duet needs only `send`.
+    let allowed_tools: BTreeSet<String> = ["send"].iter().map(|s| s.to_string()).collect();
     let api_client = ProviderRuntimeClient::new(model, allowed_tools)
         .expect("failed to construct API client from model label");
 
@@ -100,15 +99,15 @@ where
         desc.zone_id.clone(),
     );
 
-    // -- ToolExecutor: file tools in-process via the VFS backend; `send_message`
+    // -- ToolExecutor: file tools in-process via the VFS backend; `send`
     // routes through the mailbox sender. --
     let tool_executor = ManagedToolExecutor { fs, send };
 
     // -- SystemPrompt: base managed-agent prompt + the A2A reply contract, so
     // the co-hosted model addresses its reply to the message's `<sender>` via
-    // `send_message` instead of guessing a recipient from the message text. The
+    // `send` instead of guessing a recipient from the message text. The
     // contract text lives in `spawn_task` next to the `[message from …]` framing
-    // and the `send_message` reply path it describes. --
+    // and the `send` reply path it describes. --
     let system_prompt = SystemPromptBuilder::new()
         .append_section(cohost_a2a_prompt_section(&desc.name))
         .build();
@@ -138,7 +137,7 @@ where
 /// in-process against the kernel trie.
 struct ManagedToolExecutor {
     fs: Arc<dyn FsBackend>,
-    /// The co-hosted agent's outbound-message capability. `send_message` is the
+    /// The co-hosted agent's outbound-message capability. `send` is the
     /// ONLY way this agent replies to a peer — the poll loop no longer
     /// auto-forwards turn output (the ping-pong fix), so a reply happens ONLY
     /// when the agent deliberately calls the tool.
@@ -150,13 +149,16 @@ impl ToolExecutor for ManagedToolExecutor {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
 
-        // `send_message` is the deliberate-reply path — an in-process mailbox
+        // `send` is the deliberate-reply path — an in-process mailbox
         // write bound to THIS agent's identity, not a file op. Routed through
         // the SHARED handler the standalone CLI executor also uses; only the
         // sender differs (this is the in-process kernel sender, standalone is
-        // the gRPC sender).
-        if tool_name == "send_message" || tool_name == "send" {
-            return handle_send_message(&self.send, input).map_err(ToolError::new);
+        // the gRPC sender). Matched on the canonical name so a model reaching
+        // for CC's `SendMessage` lands on the mailbox rather than falling
+        // through to the file-tool dispatcher.
+        if canonicalize_tool_name(tool_name) == "send" {
+            return handle_send_message(&self.send, &normalize_send_input(&input_value))
+                .map_err(ToolError::new);
         }
 
         // Offload the blocking in-process syscall to the blocking pool so a

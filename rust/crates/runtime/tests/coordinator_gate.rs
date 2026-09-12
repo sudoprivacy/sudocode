@@ -56,16 +56,39 @@ impl Drop for EnvGuard {
 fn allowlist_contains_delegation_surface() {
     let allowed = coordinator_allowed_tools();
     for name in [
+        "agent_spawn",
+        "send",
+        "pid_kill",
+        "pid_status",
+        "pid_output",
+        "pid_fork",
+    ] {
+        assert!(
+            allowed.contains(name),
+            "coordinator allowlist MUST include delegation-surface tool `{name}`"
+        );
+    }
+}
+
+/// The set holds canonical names ONLY. A CC spelling is admitted because the
+/// predicate canonicalizes, not because the set lists it twice — listing both
+/// is how the set kept silently admitting names the tool list had stopped
+/// advertising, long after they were unreachable.
+#[test]
+fn allowlist_holds_canonical_names_only() {
+    let allowed = coordinator_allowed_tools();
+    for cc_name in [
         "Agent",
         "SendMessage",
         "TaskStop",
         "TaskGet",
         "TaskList",
         "TaskOutput",
+        "send_message",
     ] {
         assert!(
-            allowed.contains(name),
-            "coordinator allowlist MUST include delegation-surface tool `{name}`"
+            !allowed.contains(cc_name),
+            "`{cc_name}` is not a canonical tool name and MUST NOT be a second entry"
         );
     }
 }

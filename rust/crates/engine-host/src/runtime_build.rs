@@ -12,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use commands::render_skills_prompt_section;
+use commands::cwd_prompt_sections;
 use engine_core::{AuthMode, EngineApiClient};
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use runtime::{ConfigLoader, ConversationRuntime, PermissionMode, Session, SystemPrompt};
@@ -47,6 +47,11 @@ pub struct RuntimeConfig {
     pub permission_mode: PermissionMode,
     pub auth_mode: AuthMode,
     pub sudocode_config: engine_core::SudoCodeConfig,
+    /// Whether this session uses memory at all. Set from
+    /// `_meta.sudocode.memory` on an ACP session; `MemoryMode::Enabled`
+    /// (the default) everywhere else. It reaches the permission policy here;
+    /// the prompt side is applied by the caller's `system_prompt`.
+    pub memory: runtime::memory::MemoryMode,
 }
 
 pub struct BuiltRuntime {
@@ -370,30 +375,46 @@ pub(crate) fn build_runtime_with_plugin_state(
     }
     // nexus A2A: when configured, keep the peer-reply tool available even under
     // an explicit --allowedTools restriction (absent a restriction it is
-    // already advertised). Its handler is the CliToolExecutor intercept wired
-    // below; the co-host advertises the same tool the same way.
+    // already advertised). Its network handler is the CliToolExecutor intercept
+    // wired below; the co-host advertises the same tool the same way. The tool
+    // exists either way — absent A2A it delivers to the workspace mailbox — so
+    // this line controls reachability under a restriction, nothing more.
     if a2a.is_some() {
         if let Some(allowed) = config.allowed_tools.as_mut() {
-            allowed.extend(["send_message".to_string()]);
+            allowed.extend(["send".to_string()]);
         }
     }
-    let policy =
-        match permission_policy(config.permission_mode, &feature_config, &tool_registry, cwd) {
-            Ok(policy) => policy,
-            Err(error) => {
-                shutdown_mcp_state_best_effort(&mcp_state);
-                return Err(Box::new(std::io::Error::other(error)));
-            }
-        };
+    let policy = match permission_policy(
+        config.permission_mode,
+        &feature_config,
+        &tool_registry,
+        cwd,
+        config.memory,
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            shutdown_mcp_state_best_effort(&mcp_state);
+            return Err(Box::new(std::io::Error::other(error)));
+        }
+    };
     let mut system_prompt = config.system_prompt.clone();
-    // Skills are listed so the model can name and load one without the user
-    // having to know it exists. Plugin-provided skill roots are included via
-    // `plugin_load_outcome`, so a plugin can inject skills that the prompt then
-    // advertises. This runs for the REPL, `--print`, and ACP sessions alike:
-    // they all land in this function via `build_runtime_for_cwd`.
-    if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
-        system_prompt.dynamic_sections.push(section);
-    }
+    // The cwd-derived sections — the skills listing (so the model can name and
+    // load a skill without the user knowing it exists, plugin-provided roots
+    // included via `plugin_load_outcome`) and the `<available-agent-types>`
+    // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
+    // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
+    // so the two cannot drift.
+    //
+    // The catalog lives here and NOT in `agent_spawn`'s description because
+    // that description sits in the cached tools block while this list changes
+    // whenever a `.md` agent is added — see `runtime::agent_types` for the
+    // cache measurement behind the split.
+    //
+    // This runs for the REPL, `--print`, and ACP sessions alike: they all land
+    // in this function via `build_runtime_for_cwd`.
+    system_prompt
+        .dynamic_sections
+        .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
     // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.
@@ -402,7 +423,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         system_prompt.dynamic_sections.push(deferred_section);
     }
     // nexus A2A: teach the model its A2A identity + how to reach peers, so the
-    // standalone loop knows it can `send_message` to a named peer.
+    // standalone loop knows it can `send` to a named peer.
     if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
@@ -437,9 +458,11 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
-    // nexus A2A: give the CLI executor the send half so `send_message` routes
-    // to the peer's replicated DT_STREAM inbox (the shared handler the co-host
-    // uses). Set only when configured; absent it the tool is never advertised.
+    // nexus A2A: give the CLI executor the send half so `send` routes to the
+    // peer's replicated DT_STREAM inbox (the shared handler the co-host uses)
+    // instead of the workspace mailbox. Set only when configured — this sender
+    // IS the difference between the two destinations, which is why the model is
+    // offered one tool and never asked to pick a transport.
     if let Some(session) = a2a {
         runtime
             .tool_executor_mut()

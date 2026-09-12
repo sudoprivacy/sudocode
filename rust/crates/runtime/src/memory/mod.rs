@@ -35,7 +35,9 @@ pub use loader::{
     agent_memory_dir_for, default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV,
     MEMORY_INDEX_FILE,
 };
-pub use provider::{FileMemoryProvider, MemoryContext, MemoryProvider};
+pub use provider::{
+    DisabledMemoryProvider, FileMemoryProvider, MemoryContext, MemoryMode, MemoryProvider,
+};
 
 use crate::prompt::SystemPromptBuilder;
 

@@ -207,10 +207,7 @@ where
         // The co-host agent's mailbox is its persistent, cross-machine A2A
         // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
         // host addresses it by name; raft replicates the reply back.
-        let mailbox = Mailbox::A2aInbox {
-            base: runtime::mailbox::A2A_INBOX_BASE.to_string(),
-            self_name: desc.name.clone(),
-        };
+        let mailbox = Mailbox::a2a_inbox(desc.name.clone());
         let handle = spawn_managed_agent(kernel, desc, mailbox, move |state, reason| {
             state_observer(state, reason)
         });

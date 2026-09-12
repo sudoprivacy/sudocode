@@ -48,6 +48,7 @@ pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
 pub use crate::agent_mailbox::MailboxEnvelope;
+use crate::mailbox::InboxConvention;
 pub use crate::mailbox::CHAT_WITH_ME_SUFFIX;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
@@ -74,59 +75,69 @@ use crate::session::Session;
 /// the lost-wakeup gap between the old separate `sys_read` and `sys_watch`.
 const READ_BLOCK_MS: u64 = 500;
 
-/// Where the co-hosted agent's chat mailbox lives — determines the path the
-/// loop reads for inbound messages and where each reply is written.
+/// Where the co-hosted agent's chat mailbox lives — the path the loop reads for
+/// inbound messages and where each reply is written.
+///
+/// Both are derived from one [`InboxConvention`], the shared definition of
+/// mailbox path shapes. This type used to be a second enum with its own path
+/// builder for overlapping shapes, which is how the `/chat-with-me` leaf came
+/// to be spelled four different ways.
 #[derive(Debug, Clone)]
-pub enum Mailbox {
-    /// Node-local single stream (the managed-agent `/proc/{pid}/chat-with-me`
-    /// model): the loop reads AND replies on the SAME path; both parties
-    /// filter `from != self`. NOT raft-replicated — same-node only.
-    LocalStream { path: String, self_id: String },
-    /// A2A per-recipient inboxes under `base` (e.g. `/agents`): the loop
-    /// reads its OWN inbox `{base}/{self_name}/chat-with-me` and writes each
-    /// reply to the SENDER's inbox `{base}/{sender}/chat-with-me`. These
-    /// paths are raft-replicated, so two co-hosted agents on different nodes
-    /// converse over A2A with no bridge/relay.
-    A2aInbox { base: String, self_name: String },
+pub struct Mailbox {
+    self_id: String,
+    convention: InboxConvention,
 }
 
 impl Mailbox {
-    /// Path the loop blocking-reads for inbound messages.
-    fn inbox_path(&self) -> String {
-        match self {
-            Mailbox::LocalStream { path, .. } => path.clone(),
-            Mailbox::A2aInbox { base, self_name } => {
-                format!(
-                    "{}/{}{CHAT_WITH_ME_SUFFIX}",
-                    base.trim_end_matches('/'),
-                    self_name
-                )
-            }
+    /// Node-local single stream (the managed-agent `/proc/{pid}/chat-with-me`
+    /// model): the loop reads AND replies on the SAME path; both parties filter
+    /// `from != self`. NOT raft-replicated — same-node only.
+    #[must_use]
+    pub fn local_stream(path: impl Into<String>, self_id: impl Into<String>) -> Self {
+        Self {
+            self_id: self_id.into(),
+            convention: InboxConvention::SharedStream { path: path.into() },
         }
+    }
+
+    /// A2A per-recipient inboxes: the loop reads its OWN
+    /// `/agents/{self_name}/chat-with-me` and writes each reply to the SENDER's
+    /// inbox. Those paths are raft-replicated, so two co-hosted agents on
+    /// different nodes converse with no bridge or relay.
+    ///
+    /// The base is not a parameter. It was, and every caller passed the same
+    /// constant — a knob nobody turned, with a trailing-slash trim behind it to
+    /// tolerate spellings nobody used. It is [`crate::mailbox::A2A_INBOX_BASE`].
+    #[must_use]
+    pub fn a2a_inbox(self_name: impl Into<String>) -> Self {
+        Self {
+            self_id: self_name.into(),
+            convention: InboxConvention::NexusA2a,
+        }
+    }
+
+    /// Path the loop blocking-reads for inbound messages.
+    #[inline]
+    fn inbox_path(&self) -> String {
+        self.convention.inbox_path(&self.self_id)
     }
 
     /// This agent's own id — filters its own writes out of the inbox and is
     /// stamped as `from` on replies + as the operation actor.
+    #[inline]
     fn self_id(&self) -> &str {
-        match self {
-            Mailbox::LocalStream { self_id, .. } => self_id,
-            Mailbox::A2aInbox { self_name, .. } => self_name,
-        }
+        &self.self_id
     }
 
-    /// Where a reply addressed to `sender` is written. LocalStream replies on
-    /// the shared stream; A2aInbox writes to the sender's own inbox.
+    /// Where a reply addressed to `sender` is written.
+    ///
+    /// The same call as [`Self::inbox_path`] with a different name, because that
+    /// is all a reply path is: a shared stream resolves every name to itself, a
+    /// per-recipient convention resolves the sender's name to the sender's
+    /// inbox.
+    #[inline]
     fn reply_path(&self, sender: &str) -> String {
-        match self {
-            Mailbox::LocalStream { path, .. } => path.clone(),
-            Mailbox::A2aInbox { base, .. } => {
-                format!(
-                    "{}/{}{CHAT_WITH_ME_SUFFIX}",
-                    base.trim_end_matches('/'),
-                    sender
-                )
-            }
-        }
+        self.convention.inbox_path(sender)
     }
 }
 
@@ -483,10 +494,7 @@ mod tests {
 
     #[test]
     fn a2a_inbox_reads_self_replies_to_sender() {
-        let mb = Mailbox::A2aInbox {
-            base: "/agents".into(),
-            self_name: "win-ai".into(),
-        };
+        let mb = Mailbox::a2a_inbox("win-ai");
         // Reads its OWN inbox …
         assert_eq!(mb.inbox_path(), "/agents/win-ai/chat-with-me");
         assert_eq!(mb.self_id(), "win-ai");
@@ -494,19 +502,13 @@ mod tests {
         // node sees it), NOT its own.
         assert_eq!(mb.reply_path("mac-ai"), "/agents/mac-ai/chat-with-me");
         // A trailing slash on the base is tolerated.
-        let mb2 = Mailbox::A2aInbox {
-            base: "/agents/".into(),
-            self_name: "a".into(),
-        };
+        let mb2 = Mailbox::a2a_inbox("a");
         assert_eq!(mb2.inbox_path(), "/agents/a/chat-with-me");
     }
 
     #[test]
     fn local_stream_reads_and_replies_on_the_same_path() {
-        let mb = Mailbox::LocalStream {
-            path: "/proc/7/chat-with-me".into(),
-            self_id: "scode".into(),
-        };
+        let mb = Mailbox::local_stream("/proc/7/chat-with-me", "scode");
         assert_eq!(mb.inbox_path(), "/proc/7/chat-with-me");
         assert_eq!(mb.self_id(), "scode");
         // LocalStream replies on the shared stream regardless of sender.

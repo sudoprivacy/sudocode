@@ -40,12 +40,27 @@ pub const A2A_INBOX_BASE: &str = "/agents";
 pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
 
 /// How agent names map to inbox paths.
+///
+/// The one place a mailbox path shape is defined. There were two such enums —
+/// this and a `Mailbox` in `spawn_task` for the co-host loop — each with its
+/// own path builder for shapes that overlapped, which is how the
+/// `/chat-with-me` leaf ended up spelled four different ways.
 #[derive(Debug, Clone)]
 pub enum InboxConvention {
     /// Local JSONL: `{root}/.sudocode-inbox/{name}.jsonl`.
     LocalJsonl { root: String },
-    /// Nexus A2A DT_STREAM: `/agents/{name}/chat-with-me`.
+    /// Nexus A2A DT_STREAM, one inbox per recipient:
+    /// `/agents/{name}/chat-with-me`. Raft-replicated, so two agents on
+    /// different nodes converse with no bridge or relay between them.
     NexusA2a,
+    /// One stream both parties read AND write, each filtering out its own
+    /// writes — the managed-agent `/proc/{pid}/chat-with-me` model.
+    ///
+    /// Node-local by construction: the path is not keyed by recipient, so
+    /// there is no per-agent inbox for a reply to be replicated to. Every name
+    /// resolves to the same path, which is what makes "where do I reply to
+    /// this sender" answer itself.
+    SharedStream { path: String },
 }
 
 impl InboxConvention {
@@ -64,6 +79,9 @@ impl InboxConvention {
             InboxConvention::NexusA2a => {
                 format!("{A2A_INBOX_BASE}/{name}{CHAT_WITH_ME_SUFFIX}")
             }
+            // Every name resolves to the one stream — so replying to a sender
+            // and reading your own inbox are the same path, by design.
+            InboxConvention::SharedStream { path } => path.clone(),
         }
     }
 }
@@ -214,7 +232,7 @@ impl Mailbox {
             // A non-stream path under a stream convention means the inbox was
             // never provisioned. Say so rather than writing a line into a
             // location nothing tails.
-            InboxConvention::NexusA2a => Err(format!(
+            InboxConvention::NexusA2a | InboxConvention::SharedStream { .. } => Err(format!(
                 "mailbox send to {path}: not an append stream — inbox not provisioned"
             )),
         }
@@ -337,15 +355,22 @@ impl Mailbox {
         }
     }
 
-    /// List all recipients that have an inbox. Only meaningful for the
-    /// local JSONL convention (DT_STREAM inboxes are discovered via the
-    /// agent registry, not directory listing).
+    /// List the recipients that have an inbox under this convention.
+    ///
+    /// Only the local JSONL convention can answer from the paths alone, because
+    /// only there is a recipient a directory entry. `NexusA2a` inboxes are
+    /// discovered through the agent registry rather than by listing `/agents`,
+    /// and a `SharedStream` has no per-recipient path to enumerate at all — one
+    /// stream, every name resolving to it.
+    ///
+    /// Empty is therefore "this convention does not enumerate", not "no
+    /// recipients". A caller that needs agent discovery wants the registry.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         match &self.convention {
             InboxConvention::LocalJsonl { root } => {
                 crate::agent_mailbox::list_recipients(std::path::Path::new(root))
             }
-            InboxConvention::NexusA2a => Ok(vec![]),
+            InboxConvention::NexusA2a | InboxConvention::SharedStream { .. } => Ok(vec![]),
         }
     }
 

@@ -6,6 +6,7 @@
 
 pub mod agent_color;
 pub mod agent_mailbox;
+pub mod agent_types;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;

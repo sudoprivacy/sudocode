@@ -12,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use commands::render_skills_prompt_section;
+use commands::cwd_prompt_sections;
 use engine_core::{AuthMode, EngineApiClient};
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
 use runtime::{ConfigLoader, ConversationRuntime, PermissionMode, Session, SystemPrompt};
@@ -398,14 +398,23 @@ pub(crate) fn build_runtime_with_plugin_state(
         }
     };
     let mut system_prompt = config.system_prompt.clone();
-    // Skills are listed so the model can name and load one without the user
-    // having to know it exists. Plugin-provided skill roots are included via
-    // `plugin_load_outcome`, so a plugin can inject skills that the prompt then
-    // advertises. This runs for the REPL, `--print`, and ACP sessions alike:
-    // they all land in this function via `build_runtime_for_cwd`.
-    if let Some(section) = render_skills_prompt_section(cwd, Some(&plugin_load_outcome)) {
-        system_prompt.dynamic_sections.push(section);
-    }
+    // The cwd-derived sections — the skills listing (so the model can name and
+    // load a skill without the user knowing it exists, plugin-provided roots
+    // included via `plugin_load_outcome`) and the `<available-agent-types>`
+    // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
+    // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
+    // so the two cannot drift.
+    //
+    // The catalog lives here and NOT in `agent_spawn`'s description because
+    // that description sits in the cached tools block while this list changes
+    // whenever a `.md` agent is added — see `runtime::agent_types` for the
+    // cache measurement behind the split.
+    //
+    // This runs for the REPL, `--print`, and ACP sessions alike: they all land
+    // in this function via `build_runtime_for_cwd`.
+    system_prompt
+        .dynamic_sections
+        .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
     // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.

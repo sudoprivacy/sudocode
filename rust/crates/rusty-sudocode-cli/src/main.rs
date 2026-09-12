@@ -91,15 +91,16 @@ use cli::status::{
     StatusUsage,
 };
 use commands::{
-    acp_slash_commands, classify_skills_slash_command, format_acp_unsupported_slash_command,
-    handle_agents_slash_command, handle_agents_slash_command_json,
-    handle_mcp_slash_command_json_with_plugins, handle_mcp_slash_command_with_plugins,
-    handle_plugins_slash_command, handle_skills_slash_command, handle_skills_slash_command_json,
+    acp_slash_commands, classify_skills_slash_command, cwd_prompt_sections,
+    format_acp_unsupported_slash_command, handle_agents_slash_command,
+    handle_agents_slash_command_json, handle_mcp_slash_command_json_with_plugins,
+    handle_mcp_slash_command_with_plugins, handle_plugins_slash_command,
+    handle_skills_slash_command, handle_skills_slash_command_json,
     handle_skills_slash_command_json_with_plugins, handle_skills_slash_command_with_plugins,
-    render_acp_slash_command_help, render_skills_prompt_section, render_slash_command_help,
-    render_slash_command_help_filtered, resolve_skill_invocation,
-    resolve_skill_invocation_with_plugins, resume_supported_slash_commands, slash_command_specs,
-    validate_slash_command_input, SkillSlashDispatch, SlashCommand,
+    render_acp_slash_command_help, render_slash_command_help, render_slash_command_help_filtered,
+    resolve_skill_invocation, resolve_skill_invocation_with_plugins,
+    resume_supported_slash_commands, slash_command_specs, validate_slash_command_input,
+    SkillSlashDispatch, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use dialoguer::{FuzzySelect, Select};
@@ -1216,16 +1217,21 @@ fn print_system_prompt(
     runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
     // Same order as a live session (`build_system_prompt_for` →
     // `build_runtime_with_plugin_state`): CLI prompt flags first, then the
-    // available-skills listing.
+    // cwd-derived sections.
     apply_cli_prompt_overrides(&mut prompt);
-    // Mirror what build_runtime_with_plugin_state does for live sessions.
+    // `commands::cwd_prompt_sections` is the SAME list the live runtime
+    // extends, so this preview cannot claim a prompt a session does not send.
+    // It is a subset by design: the deferred-tool listing needs a tool registry
+    // and the A2A identity needs a dialed session, neither of which a preview
+    // has.
+    //
     // Load failures captured inside PluginLoadOutcome are excluded naturally;
     // Result errors propagate, so a broken plugin install fails this preview
     // exactly as it fails a live session.
     let outcome = plugin_load_outcome_for_cwd(&cwd)?;
-    if let Some(section) = render_skills_prompt_section(&cwd, Some(&outcome)) {
-        prompt.dynamic_sections.push(section);
-    }
+    prompt
+        .dynamic_sections
+        .extend(cwd_prompt_sections(&cwd, Some(&outcome)));
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),

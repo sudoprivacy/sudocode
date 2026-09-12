@@ -60,6 +60,72 @@ fn install_and_enable_plugin(config_home: &Path, plugin_name: &str, description:
     .expect("settings.json write");
 }
 
+/// The agent-type catalog must reach the model through the prompt, because
+/// `agent_spawn`'s description no longer names a single type — if this section
+/// goes missing the model has nothing to pass as `agent`.
+///
+/// Runs the real binary so the whole chain is covered: `print_system_prompt` →
+/// `commands::cwd_prompt_sections` → `runtime::agent_types`. That shared helper
+/// is also what the live runtime extends, which is what keeps this preview
+/// honest about what a session sends.
+#[test]
+fn system_prompt_carries_the_agent_type_catalog() {
+    let root = unique_temp_dir("sp-agent-types");
+    let config_home = root.join("config-home");
+    fs::create_dir_all(&config_home).expect("config home");
+    let agents_dir = root.join(".sudocode").join("agents");
+    fs::create_dir_all(&agents_dir).expect("agents dir");
+    fs::write(
+        agents_dir.join("repo-scout.md"),
+        "---\nname: repo-scout\ndescription: Maps an unfamiliar repository.\ntools: [read_file, grep_search]\n---\nBe brief.\n",
+    )
+    .expect("custom agent write");
+
+    let env = [("SUDO_CODE_CONFIG_HOME", config_home.to_str().expect("utf8"))];
+    let output = run_system_prompt(&root, &env, &[]);
+    assert!(
+        output.status.success(),
+        "system-prompt should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    assert!(
+        text.contains("<available-agent-types>") && text.contains("</available-agent-types>"),
+        "prompt must carry the agent-type section;\nfull output:\n{text}"
+    );
+    // Built-ins, in CC's `- <type>: <whenToUse> (Tools: …)` line format.
+    for needle in [
+        "- general-purpose: ",
+        "- Explore: ",
+        "- Plan: ",
+        "- Verification: ",
+        "- scode-guide: ",
+        "- statusline-setup: ",
+        "(Tools: *)",
+    ] {
+        assert!(
+            text.contains(needle),
+            "prompt must carry {needle:?};\nfull output:\n{text}"
+        );
+    }
+    // A project-local `.md` agent joins the same catalog, tools column and all.
+    assert!(
+        text.contains(
+            "- repo-scout: Maps an unfamiliar repository. (Tools: grep_search, read_file)"
+        ),
+        "prompt must list the project's custom agent;\nfull output:\n{text}"
+    );
+    // `fork` is a spawn mode, not a type to choose between — registered, but
+    // never offered in the catalog.
+    assert!(
+        !text.contains("- fork: "),
+        "`fork` must not be listed as an agent type;\nfull output:\n{text}"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn system_prompt_carries_no_plugin_section_and_no_manifest_metadata() {
     // The anonymised `# Available SudoCode plugins` inventory was removed: every

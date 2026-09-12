@@ -48,5 +48,30 @@
     "updated_at": 1789014337,
     "messages": [],
     "output": ""
+  },
+  {
+    "task_id": "task_6aa52201_5",
+    "subject": "Write parser",
+    "prompt": "Write parser",
+    "description": "Build the AST parser module",
+    "activeForm": "Writing parser",
+    "task_packet": null,
+    "status": "pending",
+    "created_at": 1789207041,
+    "updated_at": 1789207041,
+    "messages": [],
+    "output": ""
+  },
+  {
+    "task_id": "task_6aa52203_6",
+    "subject": "Run tests",
+    "prompt": "Run tests",
+    "description": "Execute test suite",
+    "task_packet": null,
+    "status": "completed",
+    "created_at": 1789207043,
+    "updated_at": 1789207043,
+    "messages": [],
+    "output": ""
   }
 ]

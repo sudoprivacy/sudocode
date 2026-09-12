@@ -156,6 +156,52 @@ pub trait FsBackend: Send + Sync + 'static {
     fn join_path(&self, dir: &str, name: &str) -> String {
         format!("{}/{}", dir.trim_end_matches(['/', '\\']), name)
     }
+
+    /// Blocking tail read from an append-only log at `cursor`.
+    ///
+    /// Returns `(data, next_cursor, eof)`:
+    /// - `data` — new bytes appended since `cursor` (empty when no new data
+    ///   arrived before the deadline).
+    /// - `next_cursor` — position to pass on the next call.
+    /// - `eof` — `true` when the deadline expired with no new data.
+    ///
+    /// `block_ms = 0` is a non-blocking drain (return immediately).
+    ///
+    /// The default polls file size at 100ms intervals (cross-platform).
+    /// `KernelFsBackend` overrides with the kernel's blocking `sys_read`.
+    /// `NexusVfsFsBackend` overrides with `stream_read_at` (gRPC blocking
+    /// tail).
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(block_ms);
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let len = match self.stat(path) {
+                Ok(meta) => meta.len,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e),
+            };
+            if len > cursor {
+                let mut f = std::fs::File::open(path)?;
+                f.seek(SeekFrom::Start(cursor))?;
+                let mut buf = vec![0u8; (len - cursor) as usize];
+                f.read_exact(&mut buf)?;
+                return Ok((buf, len, false));
+            }
+            if block_ms == 0 || Instant::now() >= deadline {
+                return Ok((vec![], cursor, true));
+            }
+            std::thread::sleep(poll_interval.min(deadline - Instant::now()));
+        }
+    }
 }
 
 /// Resolve `path` against `root` without touching any filesystem.
@@ -249,6 +295,14 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn join_path(&self, dir: &str, name: &str) -> String {
         (**self).join_path(dir, name)
+    }
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        (**self).tail_read(path, cursor, block_ms)
     }
 }
 
@@ -574,6 +628,28 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         Ok(self.is_stream_entry(path))
     }
 
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        let result = self
+            .kernel
+            .sys_read(path, &self.ctx, block_ms, cursor)
+            .map_err(kernel_err)?;
+        match result.data {
+            Some(payload) if !payload.is_empty() => {
+                let next = result
+                    .stream_next_offset
+                    .map(|n| n as u64)
+                    .unwrap_or(cursor);
+                Ok((payload, next, false))
+            }
+            _ => Ok((vec![], cursor, true)),
+        }
+    }
+
     fn managed_sessions_root(&self) -> Option<String> {
         // nexus keeps sessions as a flat, session-id-keyed byte-SSOT at the
         // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
@@ -750,12 +826,22 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 /// Wraps a [`nexus_vfs_client::NexusVfsClient`] + auth token to implement
 /// [`FsBackend`]. Used by the standalone CLI when `NEXUS_VFS_SOCK` is set.
 pub struct NexusVfsFsBackend {
-    client: nexus_vfs_client::NexusVfsClient,
+    client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
     auth_token: String,
 }
 
 impl NexusVfsFsBackend {
     pub fn new(client: nexus_vfs_client::NexusVfsClient, auth_token: String) -> Self {
+        Self {
+            client: std::sync::Arc::new(client),
+            auth_token,
+        }
+    }
+
+    pub fn from_arc(
+        client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
+        auth_token: String,
+    ) -> Self {
         Self { client, auth_token }
     }
 }
@@ -770,9 +856,25 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let mut existing = self.client.read(path, &self.auth_token).unwrap_or_default();
-        existing.extend_from_slice(data);
-        self.client.write(path, existing, &self.auth_token)
+        if path.ends_with("/chat-with-me") {
+            self.client
+                .stream_write(path, data.to_vec(), &self.auth_token)
+                .map(|_offset| ())
+        } else {
+            let mut existing = self.client.read(path, &self.auth_token).unwrap_or_default();
+            existing.extend_from_slice(data);
+            self.client.write(path, existing, &self.auth_token)
+        }
+    }
+
+    fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        self.client
+            .ensure_stream(path, "wal,memory", retention, &self.auth_token)
+            .map(|_| ())
+    }
+
+    fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        Ok(path.ends_with("/chat-with-me"))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
@@ -827,6 +929,16 @@ impl FsBackend for NexusVfsFsBackend {
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
         // VFS has no symlinks — delegate to regular stat.
         self.stat(path)
+    }
+
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        self.client
+            .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
     }
 }
 

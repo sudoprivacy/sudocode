@@ -47,11 +47,8 @@ pub use kernel::core::agents::registry::{AgentDescriptor, AgentState};
 pub use kernel::kernel::syscall::KernelSyscall;
 use kernel::kernel::OperationContext;
 
-// The A2A mailbox message contract is owned by the `a2a` substrate (it stamps
-// `from` + owns the path suffix). Re-export its SSOT types so this loop and the
-// downstream `tools` crate consume the one definition instead of hand-rolling
-// `{from,to,body}` JSON or the `chat-with-me` suffix.
-pub use a2a::{MailboxEnvelope, CHAT_WITH_ME_SUFFIX};
+pub use crate::agent_mailbox::MailboxEnvelope;
+pub use a2a::CHAT_WITH_ME_SUFFIX;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
 use crate::hooks::HookAbortSignal;
@@ -189,6 +186,11 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
             from: self_name.clone(),
             to: to.to_string(),
             body: body.to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
         };
         let ctx = OperationContext::new(&owner_id, &zone_id, false, Some(&self_name), true);
         kernel

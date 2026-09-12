@@ -59,6 +59,7 @@ pub mod testing {
             name: None,
             model: None,
             run_in_background: Some(true),
+            fresh: None,
             auth_mode: None,
             permission_mode: None,
         };
@@ -2068,7 +2069,26 @@ fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
     if let Some(agent_id) = &input.agent_id {
-        return await_agent_output(agent_id, input.block, input.timeout_ms);
+        let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
+        if input.merge {
+            if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
+                if let Some(obj) = parsed.as_object_mut() {
+                    obj.insert("merge".to_string(), json!(true));
+                    let store = agent_store_dir().ok();
+                    if let Some(store) = store {
+                        let session_path = agent_session_path(&store, agent_id.trim());
+                        if session_path.exists() {
+                            obj.insert(
+                                "session_path".to_string(),
+                                json!(session_path.display().to_string()),
+                            );
+                        }
+                    }
+                }
+                result = serde_json::to_string_pretty(&parsed).unwrap_or(result);
+            }
+        }
+        return Ok(result);
     }
     let task_id = input
         .task_id
@@ -2559,7 +2579,7 @@ fn write_envelope(
     let envelope = MailboxEnvelope {
         from: from.to_string(),
         to: recipient.to_string(),
-        text: text.to_string(),
+        body: text.to_string(),
         summary: summary.map(str::to_string),
         timestamp: 0, // filled in by append_envelope
         color: None,
@@ -3530,6 +3550,10 @@ struct AgentInput {
     model: Option<String>,
     #[serde(default)]
     run_in_background: Option<bool>,
+    /// When true, start a clean session. When false (default), resume
+    /// the most recent session for this agent name if one exists.
+    #[serde(default)]
+    fresh: Option<bool>,
     /// Explicit auth mode: `"api-key"`, `"proxy"`, or `"subscription"`.
     /// When set, overrides the config's auto-detect priority.
     auth_mode: Option<String>,
@@ -3769,6 +3793,11 @@ struct TaskOutputInput {
     block: bool,
     #[serde(default = "default_agent_await_timeout_ms")]
     timeout_ms: u64,
+    /// When true, the agent's session context should be merged back
+    /// into the caller's conversation. Surfaced in the output JSON
+    /// as `"merge": true` so the framework layer can act on it.
+    #[serde(default)]
+    merge: bool,
 }
 
 const fn default_block_true() -> bool {
@@ -4729,6 +4758,9 @@ fn prepare_agent_job(
             .expect("fork ctx presence checked above");
         let messages = build_forked_messages(&input.prompt, parent_assistant);
         (build_fork_child_message(&input.prompt), messages)
+    } else if !input.fresh.unwrap_or(false) {
+        let resumed = find_resumable_session(&agent_name);
+        (input.prompt.clone(), resumed.unwrap_or_default())
     } else {
         (input.prompt.clone(), Vec::new())
     };
@@ -5101,6 +5133,8 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         },
     )?;
 
+    persist_agent_session(&job.manifest, conv_runtime.session());
+
     // Fold telemetry into the on-disk manifest BEFORE any downstream
     // step (summarizer, persist) reads it, so the terminal-state
     // write picks up the counts. Best-effort: an IO error here just
@@ -5427,7 +5461,7 @@ fn run_single_turn(
 /// Multiple envelopes are concatenated with a blank line so the
 /// model treats them as distinct messages. Order preserves the
 /// mailbox write order (JSONL is append-only).
-fn compose_next_turn_from_envelopes(
+pub fn compose_next_turn_from_envelopes(
     envelopes: &[runtime::agent_mailbox::MailboxEnvelope],
 ) -> String {
     let mut blocks = Vec::with_capacity(envelopes.len());
@@ -5443,7 +5477,7 @@ fn compose_next_turn_from_envelopes(
             header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
         }
         header.push('>');
-        blocks.push(format!("{header}\n{}\n</{tag}>", env.text));
+        blocks.push(format!("{header}\n{}\n</{tag}>", env.body));
     }
     blocks.join("\n\n")
 }
@@ -7169,6 +7203,58 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     Ok(cwd.join(".sudocode-agents"))
 }
 
+fn agent_session_path(store_dir: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
+    store_dir.join(format!("{agent_id}.session.jsonl"))
+}
+
+/// Persist the agent's conversation session to disk so a future
+/// `agent_spawn(fresh: false)` with the same name can resume it.
+fn persist_agent_session(manifest: &AgentOutput, session: &Session) {
+    let Ok(store) = agent_store_dir() else {
+        return;
+    };
+    let path = agent_session_path(&store, &manifest.agent_id);
+    if let Err(e) = session.save_to_path(&path) {
+        eprintln!("sudocode: failed to persist agent session: {e}");
+    }
+}
+
+/// Find the most recent completed agent with the given slugified name
+/// and return its persisted session messages. Returns `None` when no
+/// resumable session exists.
+fn find_resumable_session(agent_name: &str) -> Option<Vec<ConversationMessage>> {
+    let store = agent_store_dir().ok()?;
+    if !store.exists() {
+        return None;
+    }
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let entries = std::fs::read_dir(&store).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
+            continue;
+        };
+        if manifest.status != "completed" {
+            continue;
+        }
+        if slugify_agent_name(&manifest.name) != agent_name {
+            continue;
+        }
+        candidates.push((manifest.agent_id, manifest.created_at));
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    let best_id = &candidates.first()?.0;
+    let session_path = agent_session_path(&store, best_id);
+    let session = Session::load_from_path(&session_path).ok()?;
+    Some(session.messages.clone())
+}
+
 fn make_agent_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -8370,10 +8456,11 @@ mod tests {
         classify_lane_failure, derive_agent_state, execute_agent_inline_with_work,
         execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
         global_cron_registry, lookup_custom_agent, maybe_commit_provenance, mvp_tool_specs,
-        normalize_subagent_type, permission_mode_from_plugin, persist_agent_terminal_state,
-        push_output_block, run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput,
-        AgentJob, AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption,
-        GlobalToolRegistry, LaneEventName, LaneFailureClass, SubagentToolExecutor,
+        normalize_pid_input, normalize_send_input, normalize_subagent_type,
+        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
+        run_ask_user_question_v2, sweep_orphaned_tmp_files, AgentInput, AgentJob,
+        AskUserQuestionInput, AskUserQuestionItem, AskUserQuestionOption, GlobalToolRegistry,
+        LaneEventName, LaneFailureClass, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::{
@@ -9806,6 +9893,7 @@ mod tests {
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -9896,6 +9984,7 @@ mod tests {
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -9956,6 +10045,7 @@ mod tests {
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10006,6 +10096,7 @@ mod tests {
                 name: Some("summary-floor".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10054,6 +10145,7 @@ mod tests {
                 name: Some("recovery-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10105,6 +10197,7 @@ mod tests {
                 name: Some("review-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10148,6 +10241,7 @@ mod tests {
                 name: Some("backlog-scan".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10197,6 +10291,7 @@ mod tests {
                 name: Some("artifact-lane".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10270,6 +10365,7 @@ mod tests {
                 name: Some("cron-closeout".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10314,6 +10410,7 @@ mod tests {
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10648,6 +10745,7 @@ mod tests {
                 name: Some("calc-task".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10694,6 +10792,7 @@ mod tests {
                 name: Some("fail-calc".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10737,6 +10836,7 @@ mod tests {
                 name: Some("slow-calc".to_string()),
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10784,6 +10884,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10815,6 +10916,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10882,6 +10984,7 @@ mod tests {
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,
+            fresh: None,
         }
     }
 
@@ -11284,6 +11387,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11346,6 +11450,7 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
+                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -12378,5 +12483,92 @@ printf 'pwsh:%s' "$1"
             )
             .into_bytes()
         }
+    }
+
+    // ── Unified send alias routing ────────────────────────────────────
+
+    #[test]
+    fn canonicalize_send_message_pascal_case_to_send() {
+        assert_eq!(canonicalize_tool_name("SendMessage"), "send");
+    }
+
+    #[test]
+    fn canonicalize_send_message_snake_case_to_send() {
+        assert_eq!(canonicalize_tool_name("send_message"), "send");
+    }
+
+    #[test]
+    fn canonicalize_send_stays_send() {
+        assert_eq!(canonicalize_tool_name("send"), "send");
+    }
+
+    #[test]
+    fn canonicalize_preserves_unknown_tool_name() {
+        assert_eq!(canonicalize_tool_name("bash"), "bash");
+        assert_eq!(canonicalize_tool_name("EnterPlanMode"), "EnterPlanMode");
+    }
+
+    #[test]
+    fn normalize_send_input_bridges_body_to_message() {
+        let input = json!({"to": "worker", "body": "hello"});
+        let out = normalize_send_input(&input);
+        assert_eq!(out["message"], "hello");
+        assert!(out.get("body").is_none(), "body should be removed");
+        assert_eq!(out["to"], "worker");
+    }
+
+    #[test]
+    fn normalize_send_input_preserves_message_when_present() {
+        let input = json!({"to": "worker", "message": "hello", "body": "ignored"});
+        let out = normalize_send_input(&input);
+        assert_eq!(out["message"], "hello");
+        assert_eq!(out["body"], "ignored", "body kept when message exists");
+    }
+
+    #[test]
+    fn normalize_send_input_no_body_no_message() {
+        let input = json!({"to": "worker"});
+        let out = normalize_send_input(&input);
+        assert!(out.get("message").is_none());
+        assert!(out.get("body").is_none());
+    }
+
+    // ── Unified pid alias routing ─────────────────────────────────────
+
+    #[test]
+    fn canonicalize_task_stop_to_pid_kill() {
+        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
+    }
+
+    #[test]
+    fn canonicalize_task_get_and_list_to_pid_status() {
+        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
+        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
+    }
+
+    #[test]
+    fn canonicalize_task_output_to_pid_output() {
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+    }
+
+    #[test]
+    fn canonicalize_agent_to_agent_spawn() {
+        assert_eq!(canonicalize_tool_name("Agent"), "agent_spawn");
+    }
+
+    #[test]
+    fn normalize_pid_input_bridges_pid_to_task_id() {
+        let input = json!({"pid": "abc-123"});
+        let out = normalize_pid_input(&input);
+        assert_eq!(out["task_id"], "abc-123");
+        assert!(out.get("pid").is_none());
+    }
+
+    #[test]
+    fn normalize_pid_input_preserves_task_id_when_present() {
+        let input = json!({"task_id": "existing", "pid": "ignored"});
+        let out = normalize_pid_input(&input);
+        assert_eq!(out["task_id"], "existing");
+        assert_eq!(out["pid"], "ignored", "pid kept when task_id exists");
     }
 }

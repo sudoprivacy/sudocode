@@ -181,6 +181,7 @@ enum Scenario {
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
     ExecuteExtraToolRoundtrip,
+    UnifiedSendRoundtrip,
     ExecuteExtraToolMcpRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -244,6 +245,7 @@ impl Scenario {
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
+            "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -288,6 +290,7 @@ impl Scenario {
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
+            Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
             Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -1031,6 +1034,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"tool_name":"CronList","params":{}}"#],
             ),
         },
+        Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+            }
+            None => tool_use_sse(
+                "toolu_unified_send",
+                "send",
+                &[
+                    r#"{"to":"test-peer","message":"hello from unified send","summary":"greeting test"}"#,
+                ],
+            ),
+        },
         Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "execute_extra_tool_mcp roundtrip complete: {}",
@@ -1045,11 +1060,6 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
         },
         Scenario::SubagentDelegationParent => {
-            // Count how many Agent tool_results have come back so far. The
-            // parent emits three synchronous `Agent` tool_use blocks in its
-            // FIRST turn; the runtime runs each subagent and feeds one
-            // tool_result per Agent call back on the follow-up request. Once
-            // all three are present the parent emits the aggregated JSON.
             let agent_results = subagent_calc_results(request);
             if agent_results.len() >= 3 {
                 let mut sums = agent_results;
@@ -1059,10 +1069,6 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                     sums[0], sums[1], sums[2]
                 ))
             } else {
-                // Three Agent tool_use blocks, run synchronously so each
-                // returns a tool_result to this session. Each prompt carries
-                // the child marker so the spawned subagent's own /v1/messages
-                // call routes to `SubagentCalcChild`.
                 tool_uses_sse(&[
                     ToolUseSse {
                         tool_id: "toolu_subagent_calc_1",
@@ -1095,9 +1101,6 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
         }
         Scenario::SubagentCalcChild => {
-            // A spawned child. Its only user message is the parent-supplied
-            // prompt ("What is <a> + <b>? Reply with ONLY the number."). Sum
-            // the two addends and reply with just the number.
             let sum = subagent_child_sum(request);
             final_text_sse(&sum.to_string())
         }
@@ -1533,6 +1536,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"tool_name": "CronList", "params": {}}),
             ),
         },
+        Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_unified_send_final",
+                &format!("unified send roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_unified_send_tool",
+                "toolu_unified_send",
+                "send",
+                json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
+            ),
+        },
         Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_execute_extra_mcp_final",
@@ -1644,6 +1659,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
+        Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
         Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",

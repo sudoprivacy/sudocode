@@ -59,13 +59,14 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 #[must_use]
 pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
     [
-        // Delegation surface
+        // Canonical delegation surface
         "agent_spawn",
+        "agent_list",
+        "send",
         "pid_kill",
         "pid_status",
         "pid_output",
         "pid_fork",
-        "send",
         // Skills + web (read-only research)
         "Skill",
         "WebSearch",
@@ -142,11 +143,13 @@ Every message you send is to the user. Worker results and system notifications a
 
 ## 2. Your Tools
 
-- **agent_spawn** - Spawn a new worker
-- **send_message** - Continue an existing worker (send follow-up to its pid) or signal shutdown
-- **pid_kill** - Stop a running worker
-- **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted
-- **pid_output** - Read a running or completed worker's output by `pid`
+- **agent_spawn** - Spawn a new worker (alias: `Agent`)
+- **send** - Continue an existing worker (send follow-up to its pid) or signal shutdown (alias: `SendMessage`)
+- **pid_kill** - Stop a running worker (alias: `TaskStop`)
+- **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted (alias: `TaskGet`)
+- **pid_output** - Read a running or completed worker's output by `pid` (alias: `TaskOutput`)
+- **pid_fork** - Fork the current session into a background worker
+- **agent_list** - List all known agents / workers
 
 Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 
@@ -256,7 +259,7 @@ Use pid_kill to stop a worker you sent in the wrong direction — for example, w
 ```
 // Launched a worker to refactor auth to use JWT
 agent_spawn({ description: "Refactor auth to JWT", agent: "general-purpose", prompt: "Replace session-based auth with JWT..." })
-// ... returns task_id: "agent-x7q" ...
+// ... returns pid: "agent-x7q" ...
 
 // User clarifies: "Actually, keep sessions — just fix the null pointer"
 pid_kill({ pid: "agent-x7q" })

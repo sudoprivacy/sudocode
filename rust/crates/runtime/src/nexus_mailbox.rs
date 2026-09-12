@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
-use a2a::MailboxEnvelope;
 use nexus_vfs_client::NexusVfsClient;
+
+use crate::agent_mailbox::MailboxEnvelope;
 
 use crate::spawn_task::MailboxSender;
 
@@ -212,6 +213,11 @@ pub fn send(
         from: from.to_string(),
         to: to.to_string(),
         body: body.to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: String::new(),
+        request_id: None,
     };
     let path = inbox_path(to);
     client
@@ -255,13 +261,6 @@ pub fn ensure_inbox(client: &NexusVfsClient, agent: &str, auth_token: &str) -> R
         .map_err(|e| format!("ensure A2A inbox {path}: {e}"))
 }
 
-/// One inbound A2A message (self-writes and empty bodies already filtered).
-#[derive(Debug, Clone)]
-pub struct Inbound {
-    pub from: String,
-    pub body: String,
-}
-
 /// Wait for and drain new frames in `self_agent`'s inbox from `cursor` forward.
 ///
 /// `block_ms == 0` is a pure non-blocking drain (seek-to-tail / one-shot
@@ -293,7 +292,7 @@ pub fn poll_new(
     mut cursor: u64,
     auth_token: &str,
     block_ms: u64,
-) -> Result<(Vec<Inbound>, u64), String> {
+) -> Result<(Vec<MailboxEnvelope>, u64), String> {
     let path = inbox_path(self_agent);
     let mut out = Vec::new();
     let mut first = true;
@@ -317,10 +316,7 @@ pub fn poll_new(
         }
         if let Some(env) = MailboxEnvelope::from_bytes(&data) {
             if !env.from.is_empty() && env.from != self_agent && !env.body.is_empty() {
-                out.push(Inbound {
-                    from: env.from,
-                    body: env.body,
-                });
+                out.push(env);
             }
         }
         if next <= cursor {
@@ -429,18 +425,39 @@ mod tests {
     }
 
     #[test]
-    fn envelope_round_trips_via_the_a2a_ssot_type() {
-        // We reuse the a2a-crate envelope (the SSOT the co-host writes), so a
-        // round-trip through the same to_bytes/from_bytes the co-host uses
-        // must recover from/body — this is what makes standalone ⇄ co-host
-        // interop byte-identical by construction.
+    fn envelope_round_trips_via_unified_type() {
         let env = MailboxEnvelope {
             from: "operator".into(),
             to: "win-ai".into(),
             body: "hi".into(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
         };
-        let back = MailboxEnvelope::from_bytes(&env.to_bytes()).expect("a2a envelope round-trip");
+        let back = MailboxEnvelope::from_bytes(&env.to_bytes()).expect("envelope round-trip");
         assert_eq!(back.from, "operator");
         assert_eq!(back.body, "hi");
+    }
+
+    #[test]
+    fn unified_envelope_interops_with_a2a_3field_wire() {
+        // A 3-field JSON written by an old a2a::MailboxEnvelope writer
+        // must deserialise into the unified type with extras defaulted.
+        let wire = br#"{"from":"agent-a","to":"agent-b","body":"hello"}"#;
+        let env = MailboxEnvelope::from_bytes(wire).expect("3-field wire compat");
+        assert_eq!(env.from, "agent-a");
+        assert_eq!(env.body, "hello");
+        assert!(env.kind.is_empty());
+        assert_eq!(env.timestamp, 0);
+    }
+
+    #[test]
+    fn unified_envelope_reads_legacy_text_field() {
+        // Old local JSONL used "text" instead of "body".
+        let wire = br#"{"from":"a","to":"b","text":"legacy","kind":"message"}"#;
+        let env = MailboxEnvelope::from_bytes(wire).expect("text alias compat");
+        assert_eq!(env.body, "legacy");
     }
 }

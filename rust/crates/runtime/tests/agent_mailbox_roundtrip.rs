@@ -27,7 +27,7 @@ fn make_envelope(from: &str, to: &str, text: &str, kind: &str) -> MailboxEnvelop
     MailboxEnvelope {
         from: from.to_string(),
         to: to.to_string(),
-        text: text.to_string(),
+        body: text.to_string(),
         summary: None,
         timestamp: 0,
         color: None,
@@ -103,9 +103,9 @@ fn read_all_returns_envelopes_in_append_order() {
 
     let envelopes = agent_mailbox::read_all(&ws, "worker").expect("read_all should succeed");
     assert_eq!(envelopes.len(), 3);
-    assert_eq!(envelopes[0].text, "first");
-    assert_eq!(envelopes[1].text, "second");
-    assert_eq!(envelopes[2].text, "third");
+    assert_eq!(envelopes[0].body, "first");
+    assert_eq!(envelopes[1].body, "second");
+    assert_eq!(envelopes[2].body, "third");
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn read_all_skips_malformed_lines() {
         2,
         "malformed line must be skipped, not counted"
     );
-    assert_eq!(envelopes[0].text, "good1");
-    assert_eq!(envelopes[1].text, "good2");
+    assert_eq!(envelopes[0].body, "good1");
+    assert_eq!(envelopes[1].body, "good2");
 }
 
 // ── list_recipients ───────────────────────────────────────────────
@@ -216,7 +216,7 @@ fn structured_shutdown_envelope_survives_roundtrip() {
     let envelope = MailboxEnvelope {
         from: "team-lead".to_string(),
         to: "worker".to_string(),
-        text: body,
+        body,
         summary: None,
         timestamp: 0,
         color: None,
@@ -229,8 +229,8 @@ fn structured_shutdown_envelope_survives_roundtrip() {
     assert_eq!(round.len(), 1);
     assert_eq!(round[0].kind, kinds::SHUTDOWN_REQUEST);
     assert_eq!(round[0].request_id.as_deref(), Some("req_abc"));
-    // Body is JSON-in-JSON — parse the outer `text` field again.
-    let inner: serde_json::Value = serde_json::from_str(&round[0].text).expect("parse inner body");
+    // Body is JSON-in-JSON — parse the outer `body` field again.
+    let inner: serde_json::Value = serde_json::from_str(&round[0].body).expect("parse inner body");
     assert_eq!(
         inner.get("request_id").and_then(|v| v.as_str()),
         Some("req_abc")

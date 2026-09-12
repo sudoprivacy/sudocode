@@ -152,6 +152,17 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
             panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
         });
 
+    // After Ctrl-C + hint render, the iocraft layout may need a moment to
+    // re-render the prompt line. Wait for it before typing, otherwise the
+    // screen may not contain the ❯ marker and expect_input_line can never
+    // succeed (observed on macOS CI runners under load).
+    common::expect_input_line(
+        &sess,
+        "",
+        Duration::from_secs(15),
+        "prompt should recover after Ctrl-C hint",
+    );
+
     // Clean exit. Type and submit as two steps, waiting for the line to
     // render in between: Enter is only a submit if the input state has
     // caught up with the characters, and Ctrl-C just cleared that state.
@@ -162,7 +173,7 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
     common::expect_input_line(
         &sess,
         "/exit",
-        Duration::from_secs(10),
+        Duration::from_secs(15),
         "typed /exit should render before Enter",
     );
     sess.send("\r").expect("send Enter");

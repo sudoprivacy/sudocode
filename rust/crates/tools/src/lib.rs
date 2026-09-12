@@ -11209,6 +11209,7 @@ mod tests {
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,
+            fresh: None,
         }
     }
 

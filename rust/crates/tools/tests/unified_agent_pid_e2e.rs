@@ -111,7 +111,6 @@ fn canonicalize_preserves_canonical_names() {
     assert_eq!(tools::canonicalize_tool_name("pid_status"), "pid_status");
     assert_eq!(tools::canonicalize_tool_name("pid_output"), "pid_output");
     assert_eq!(tools::canonicalize_tool_name("pid_fork"), "pid_fork");
-    assert_eq!(tools::canonicalize_tool_name("agent_list"), "agent_list");
 }
 
 #[test]
@@ -611,12 +610,84 @@ fn envelope_serializes_body_not_text() {
 fn coordinator_allowed_tools_includes_canonical_names() {
     let allowed = runtime::coordinator_mode::coordinator_allowed_tools();
     assert!(allowed.contains("agent_spawn"));
-    assert!(allowed.contains("agent_list"));
     assert!(allowed.contains("send"));
     assert!(allowed.contains("pid_kill"));
     assert!(allowed.contains("pid_status"));
     assert!(allowed.contains("pid_output"));
     assert!(allowed.contains("pid_fork"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 8b. THE COORDINATOR ONLY NAMES TOOLS THAT EXIST
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Canonical names of every tool this build actually ships.
+fn real_tool_names() -> std::collections::BTreeSet<String> {
+    tools::mvp_tool_specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect()
+}
+
+/// The tool names the coordinator prompt advertises under `## 2. Your Tools`,
+/// whose entries read `- **name** - description`.
+///
+/// Scoped to that section so a bolded word anywhere else in the prompt is not
+/// mistaken for a tool.
+fn tools_advertised_in_prompt() -> Vec<String> {
+    runtime::coordinator_mode::coordinator_system_prompt()
+        .lines()
+        .skip_while(|line| !line.starts_with("## 2. Your Tools"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("##"))
+        .filter_map(|line| line.trim().strip_prefix("- **"))
+        .filter_map(|rest| rest.split("**").next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every name in the coordinator allowlist must be a tool that exists.
+///
+/// The allowlist lives in `runtime` and the tool specs live in `tools`, so only
+/// a test spanning both crates can catch a name that outlived its tool. Not
+/// hypothetical: `agent_list` stayed in this allowlist, and in the prompt,
+/// after the tool was removed — two branches each resolved half of it.
+#[test]
+fn coordinator_allowlist_names_only_real_tools() {
+    let real = real_tool_names();
+    for name in runtime::coordinator_mode::coordinator_allowed_tools() {
+        assert!(
+            real.contains(name),
+            "the coordinator allowlist names `{name}`, which is not a tool this build ships"
+        );
+    }
+}
+
+/// Every tool the coordinator prompt advertises must exist and be allowed.
+///
+/// This is the assertion that bites. The prompt is what the model reads, so a
+/// stale line there does not merely go unused — it makes the coordinator call
+/// something that cannot answer.
+#[test]
+fn coordinator_prompt_advertises_only_real_allowed_tools() {
+    let real = real_tool_names();
+    let allowed = runtime::coordinator_mode::coordinator_allowed_tools();
+    let advertised = tools_advertised_in_prompt();
+
+    assert!(
+        advertised.len() >= 6,
+        "the prompt's tool list should have parsed; got {advertised:?}"
+    );
+    for name in &advertised {
+        assert!(
+            real.contains(name),
+            "the coordinator prompt advertises `{name}`, which is not a tool this build ships"
+        );
+        assert!(
+            allowed.contains(name.as_str()),
+            "the coordinator prompt advertises `{name}`, which its own allowlist forbids"
+        );
+    }
 }
 
 #[test]

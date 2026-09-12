@@ -2,7 +2,7 @@
 # Deterministic Docker E2E for the standalone nexus-A2A client (X).
 #
 # Brings up a real `nexusd-cluster` founder in a container and drives the
-# ignored `runtime` integration tests (`nexus_mailbox_live`) against it — the
+# ignored `runtime` integration tests (`mailbox_nexus_live`) against it — the
 # one thing unit tests can't cover: that `ensure_stream` + `stream_write` +
 # `stream_read_at` actually move an envelope through a real gRPC server and a
 # real DT_STREAM. No LLM, no secrets — always safe to run.
@@ -21,7 +21,7 @@ cd "$(dirname "$0")"
 PORT="${NEXUS_A2A_HOST_PORT:-2126}"
 ENDPOINT="127.0.0.1:${PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
-CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test nexus_mailbox_live)
+CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
 cleanup() { docker compose down -v >/dev/null 2>&1 || true; }
 trap cleanup EXIT

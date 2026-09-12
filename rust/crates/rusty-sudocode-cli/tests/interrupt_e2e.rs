@@ -38,6 +38,16 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
     fs::create_dir_all(&home).expect("home should exist");
     write_config(&config_home, &base_url);
 
+    // Arm the interrupt BEFORE `scode` exists. The window it has to land in is
+    // the tool's `sleep 30`, which opens the moment the model returns its bash
+    // call — so anything expensive done after the spawn is done inside that
+    // window. On Windows arming compiles a P/Invoke shim, which on a loaded
+    // runner outlasts 30s: the sleep finished, the turn completed, and the
+    // interrupt had nothing left to interrupt. Paying the whole cost up front
+    // is what makes that impossible rather than unlikely. See `ArmedInterrupt`.
+    let interrupt = ArmedInterrupt::arm(&workspace);
+    interrupt.wait_until_armed(Duration::from_secs(120));
+
     let prompt = format!("{SCENARIO_PREFIX}bash_interrupt_long_running");
     let mut command = Command::new(env!("CARGO_BIN_EXE_scode"));
     command
@@ -79,22 +89,14 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
 
     let mut child = ChildGuard(child);
 
-    // Arm the interrupt *now*, before the window it has to land in opens.
-    // The window is the tool's `sleep 30`; on Windows arming means compiling
-    // a P/Invoke shim, which on a cold runner can take longer than the whole
-    // window. Paying that cost up front is what keeps the interrupt inside
-    // it. See `ArmedInterrupt`.
-    let interrupt = ArmedInterrupt::arm(child.id(), &workspace);
-
     // Generous: this is a liveness wait, not the assertion. Under a parallel
     // `cargo test --workspace` the machine is running many other `scode`
     // children, and 10s was not always enough for this one to start and reach
     // the mock server.
     wait_for_message_request(&runtime, &server, 1, Duration::from_secs(60));
-    interrupt.wait_until_armed(Duration::from_secs(120));
     thread::sleep(Duration::from_millis(1500));
     assert_running(&mut child, "before the interrupt is fired");
-    interrupt.fire();
+    interrupt.fire(child.id());
 
     let status = wait_for_exit(&mut child, Duration::from_secs(60))
         .expect("scode should exit after the interrupt");
@@ -253,7 +255,6 @@ fn assert_running(child: &mut ChildGuard, when: &str) {
 /// what the assertion is about. `arm` runs before the turn, `wait_until_armed`
 /// confirms it finished, and only then does `fire` deliver.
 struct ArmedInterrupt {
-    pid: u32,
     #[cfg(windows)]
     helper: std::process::Child,
     #[cfg(windows)]
@@ -266,16 +267,16 @@ struct ArmedInterrupt {
 /// Nothing to prepare, so arming is bookkeeping and the wait returns at once.
 #[cfg(unix)]
 impl ArmedInterrupt {
-    fn arm(pid: u32, _workspace: &std::path::Path) -> Self {
-        Self { pid }
+    fn arm(_workspace: &std::path::Path) -> Self {
+        Self {}
     }
 
     fn wait_until_armed(&self, _timeout: Duration) {}
 
-    fn fire(self) {
+    fn fire(self, pid: u32) {
         let status = Command::new("kill")
             .arg("-INT")
-            .arg(self.pid.to_string())
+            .arg(pid.to_string())
             .status()
             .expect("kill should launch");
         assert!(status.success(), "kill -INT should succeed");
@@ -304,7 +305,14 @@ impl ArmedInterrupt {
     /// `FreeConsole` before it can attach to the target's console, and
     /// nothing that depends on the helper's console can be relied on across
     /// that call.
-    fn arm(pid: u32, workspace: &std::path::Path) -> Self {
+    ///
+    /// The target pid arrives in the go-ahead file rather than being baked
+    /// into the script, which is what lets the whole compile happen before
+    /// `scode` is even spawned. Baked in, arming could only start once the
+    /// child had a pid — so the compile ran while the window it had to land
+    /// in was already open, and on a loaded runner the `sleep 30` finished
+    /// first and the turn completed with nothing to interrupt.
+    fn arm(workspace: &std::path::Path) -> Self {
         const CTRL_BREAK_EVENT: u32 = 1;
         let ready_path = workspace.join("interrupt-helper-ready");
         let go_path = workspace.join("interrupt-helper-go");
@@ -317,10 +325,17 @@ $signature = @'
 '@
 $kernel32 = Add-Type -MemberDefinition $signature -Name 'Kernel32' -Namespace 'Interrupt' -PassThru
 New-Item -ItemType File -Path '{ready}' -Force | Out-Null
-while (-not (Test-Path -LiteralPath '{go}')) {{ Start-Sleep -Milliseconds 20 }}
+$targetPid = 0
+while ($targetPid -eq 0) {{
+  if (Test-Path -LiteralPath '{go}') {{
+    $raw = (Get-Content -LiteralPath '{go}' -Raw -ErrorAction SilentlyContinue)
+    if ($raw) {{ $parsed = 0; if ([uint32]::TryParse($raw.Trim(), [ref]$parsed)) {{ $targetPid = $parsed }} }}
+  }}
+  if ($targetPid -eq 0) {{ Start-Sleep -Milliseconds 20 }}
+}}
 [void]$kernel32::FreeConsole()
-if (-not $kernel32::AttachConsole({pid})) {{ exit 2 }}
-if (-not $kernel32::GenerateConsoleCtrlEvent({CTRL_BREAK_EVENT}, {pid})) {{ exit 3 }}
+if (-not $kernel32::AttachConsole($targetPid)) {{ exit 2 }}
+if (-not $kernel32::GenerateConsoleCtrlEvent({CTRL_BREAK_EVENT}, $targetPid)) {{ exit 3 }}
 exit 0
 "#,
             ready = ready_path.display(),
@@ -333,7 +348,6 @@ exit 0
             .spawn()
             .expect("powershell should launch");
         Self {
-            pid,
             helper,
             ready_path,
             go_path,
@@ -352,14 +366,13 @@ exit 0
     }
 
     /// Release the helper and wait for it to report what the Win32 calls did.
-    fn fire(self) {
+    fn fire(self, pid: u32) {
         let Self {
-            pid,
-            helper,
-            go_path,
-            ..
+            helper, go_path, ..
         } = self;
-        fs::write(&go_path, b"").expect("go marker should be written");
+        // The pid IS the go-ahead: the helper spins until this parses, so an
+        // empty or half-written file simply keeps it waiting.
+        fs::write(&go_path, pid.to_string().as_bytes()).expect("go marker should be written");
         let output = helper
             .wait_with_output()
             .expect("console-interrupt helper should exit");

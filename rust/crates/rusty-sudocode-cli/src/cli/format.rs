@@ -1676,6 +1676,70 @@ pub(crate) struct TurnStatus<'a> {
     pub account: Option<&'a str>,
 }
 
+/// Render the KV-cache efficiency segment for the turn status line, or `None`
+/// when the turn had no prompt tokens to speak of (e.g. a trivial/empty turn).
+///
+/// The prompt side of a turn splits into three disjoint buckets whose sum is
+/// the total prompt sent this turn:
+/// - `cache_read_input_tokens` — served from the KV cache (a hit; cheap).
+/// - `cache_creation_input_tokens` — written into the cache this turn (a miss
+///   being cached; billed at a premium — a spike here means the prefix changed
+///   and a large span was re-cached, i.e. a cache "break").
+/// - `input_tokens` — fresh, uncached prompt tokens.
+///
+/// Both percentages are taken over the prompt total (output tokens are a
+/// generation-side concern, unrelated to cache reuse, so they are excluded).
+/// Showing hit% and write% together lets a reader reconstruct all three buckets
+/// (fresh% = 100 - hit% - write%) from two compact numbers:
+/// - `⚡NN%` — hit rate (higher is better), colored by tier so a broken-cache
+///   turn stands out: green ≥80, warning 40–79, red <40.
+/// - `✎NN%` — write rate (lower is steadier); turns red on a spike (≥25%).
+///
+/// The values are fixed for the whole turn (the provider reports cache counts
+/// at message_start; only output tokens grow while streaming), so this renders
+/// once at turn end and never needs in-turn refresh.
+fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<String> {
+    let read = u64::from(usage.cache_read_input_tokens);
+    let creation = u64::from(usage.cache_creation_input_tokens);
+    let fresh = u64::from(usage.input_tokens);
+    let prompt_total = read + creation + fresh;
+    // Below this the percentages are noise (e.g. a turn with almost no prompt).
+    if prompt_total < 1000 {
+        return None;
+    }
+
+    // Round to nearest percent.
+    let hit_pct = (read * 100 + prompt_total / 2) / prompt_total;
+    let write_pct = (creation * 100 + prompt_total / 2) / prompt_total;
+
+    let theme = crate::render::theme();
+    let hit_color = if hit_pct >= 80 {
+        theme.success
+    } else if hit_pct >= 40 {
+        theme.warning
+    } else {
+        theme.error
+    };
+    let hit = format!(
+        "{}\u{26a1}{hit_pct}%{}{DIM}",
+        crate::render::ansi_fg(hit_color),
+        RESET,
+    );
+
+    // Write rate: dim normally, red on a spike (a cache break).
+    let write = if write_pct >= 25 {
+        format!(
+            "{}\u{270e}{write_pct}%{}{DIM}",
+            crate::render::ansi_fg(theme.error),
+            RESET,
+        )
+    } else {
+        format!("\u{270e}{write_pct}%")
+    };
+
+    Some(format!("{hit} {write}"))
+}
+
 /// Render the dim per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
@@ -1728,6 +1792,10 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
         if let Some(segment) = format_context_usage_segment(used, window) {
             segments.push(segment);
         }
+    }
+    // KV-cache efficiency: hit rate + write rate over the prompt total.
+    if let Some(segment) = format_cache_efficiency_segment(usage) {
+        segments.push(segment);
     }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
         segments.push(branch.to_string());
@@ -2181,6 +2249,65 @@ mod tests {
     #[test]
     fn context_usage_segment_absent_for_zero_window() {
         assert!(format_context_usage_segment(1234, 0).is_none());
+    }
+
+    #[test]
+    fn cache_efficiency_segment_reports_hit_and_write_over_prompt() {
+        // read 8000 / (8000 + 1000 + 1000) = 80% hit; creation 1000 = 10% write.
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            cache_creation_input_tokens: 1000,
+            cache_read_input_tokens: 8000,
+            ..TokenUsage::default()
+        };
+        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        assert_eq!(seg, "\u{26a1}80% \u{270e}10%", "{seg}");
+    }
+
+    #[test]
+    fn cache_efficiency_segment_excludes_output_tokens() {
+        // Output tokens must not dilute the denominator: read 9000 of a 10k
+        // prompt is 90% regardless of how much was generated.
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            cache_read_input_tokens: 9000,
+            output_tokens: 50_000,
+            ..TokenUsage::default()
+        };
+        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        assert_eq!(seg, "\u{26a1}90% \u{270e}0%", "{seg}");
+    }
+
+    #[test]
+    fn cache_efficiency_segment_absent_for_trivial_prompt() {
+        // A turn with almost no prompt would make the percentages noise.
+        let usage = TokenUsage {
+            input_tokens: 42,
+            ..TokenUsage::default()
+        };
+        assert!(format_cache_efficiency_segment(&usage).is_none());
+    }
+
+    #[test]
+    fn turn_status_line_renders_cache_segment() {
+        let usage = TokenUsage {
+            input_tokens: 2000,
+            cache_read_input_tokens: 8000,
+            ..TokenUsage::default()
+        };
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-sonnet-4-6",
+            turn: 3,
+            usage: &usage,
+            context_tokens: Some(10_000),
+            context_window: Some(1_000_000),
+            elapsed: Duration::from_secs_f64(0.5),
+            branch: None,
+            account: None,
+        });
+        let plain = strip_ansi(&rendered);
+        // 8000 / 10000 = 80% hit, 0% write.
+        assert!(plain.contains("\u{26a1}80% \u{270e}0%"), "{plain}");
     }
 
     #[test]

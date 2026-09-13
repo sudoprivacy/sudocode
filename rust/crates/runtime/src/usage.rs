@@ -312,6 +312,7 @@ pub struct UsageTracker {
     // what the whole turn spent. This accumulator is what the status line bills.
     current_turn_total: TokenUsage,
     current_turn_cost: UsageCostAggregation,
+    context_tokens: Option<u32>,
     cumulative: TokenUsage,
     cumulative_cost: UsageCostAggregation,
     turns: u32,
@@ -334,6 +335,9 @@ impl UsageTracker {
                 tracker.record(usage);
             }
         }
+        if session.compaction.is_some() {
+            tracker.clear_context_usage();
+        }
         tracker
     }
 
@@ -351,16 +355,28 @@ impl UsageTracker {
         self.current_turn_cost.push(usage);
         self.current_turn_cost
             .apply_to(&mut self.current_turn_total);
+        self.context_tokens = Some(usage.context_tokens());
         self.cumulative.add_assign_token_counts(usage);
         self.cumulative_cost.push(usage);
         self.cumulative_cost.apply_to(&mut self.cumulative);
         self.turns = self.turns.saturating_add(1);
     }
 
-    /// The latest single request's usage. This is the current context-window
-    /// occupancy (what the provider processed for the most recent response) —
-    /// the metric auto-compaction compares against the window. NOT the turn
-    /// total; see [`current_turn_total_usage`](Self::current_turn_total_usage).
+    /// A changed history invalidates only the last request's context anchor;
+    /// cumulative billing and completed-turn usage remain untouched.
+    pub fn clear_context_usage(&mut self) {
+        self.context_tokens = None;
+    }
+
+    /// Latest provider context that still describes the active history.
+    #[must_use]
+    pub fn current_context_tokens(&self) -> u32 {
+        self.context_tokens.unwrap_or(0)
+    }
+
+    /// Latest request's billing usage, retained even after compaction. For
+    /// valid context occupancy use `current_context_tokens`; for the whole
+    /// turn's billing use `current_turn_total_usage`.
     #[must_use]
     pub fn current_turn_usage(&self) -> TokenUsage {
         self.latest_turn

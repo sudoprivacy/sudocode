@@ -521,15 +521,18 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
             _ => None,
         })
     });
+    // Keep the deliberate cancellation delay; otherwise a checkpoint request
+    // must not replay a task scenario from the history it is summarizing.
+    if from_marker != Some(Scenario::DelayedText)
+        && request
+            .system
+            .as_ref()
+            .is_some_and(|system| system.contains("summarizing conversations"))
+    {
+        return Some(Scenario::LlmCompactionRoundtrip);
+    }
     if from_marker.is_some() {
         return from_marker;
-    }
-
-    // Fallback: detect LLM compaction requests by their system prompt.
-    if let Some(system) = &request.system {
-        if system.contains("summarizing conversations") {
-            return Some(Scenario::LlmCompactionRoundtrip);
-        }
     }
 
     None
@@ -543,10 +546,10 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     if is_standard_compaction {
         return false;
     }
-    request.messages.last().map_or(false, |msg| {
+    request.messages.last().is_some_and(|msg| {
         msg.content.iter().any(|block| match block {
             InputContentBlock::Text { text } => {
-                text.contains("create a detailed summary of the conversation")
+                text.contains("Create a concise checkpoint for continuing this coding task")
             }
             _ => false,
         })

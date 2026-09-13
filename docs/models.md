@@ -27,6 +27,21 @@ For the canonical live alias list, run `scode --help`.
 > GLM, Kimi, MiniMax, and more. Use any catalog model by its full name,
 > e.g. `scode --model gemini-3.5-flash`.
 
+## Config IDs, display names, and deployment IDs
+
+These fields have different jobs:
+
+- The model registry key and `alias` select a model configuration.
+- `name` is a display label.
+- `providers.<auth-mode>.model` is the exact model/deployment ID sent to the
+  selected provider. Internal deployment IDs can include `/`.
+
+Compaction uses the active provider's wire model ID for both requests and
+capability lookups, including the output-token ceiling and automatic pressure
+threshold. It must not size a request using a display name, a config alias, or
+an older model recorded in a resumed transcript. Configured token limits match
+full deployment IDs before trying the provider-prefix basename fallback.
+
 ## Provider-specific handling
 
 Translating Claude-style messages to OpenAI-compatible chat completion

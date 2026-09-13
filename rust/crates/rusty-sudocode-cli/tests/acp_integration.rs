@@ -1065,7 +1065,12 @@ async fn scenario_slash_compact(
 ) {
     let session_id = scenario_session_new(client, &workspace.root).await;
     for marker in ["ACP_COMPACT_ONE", "ACP_COMPACT_TWO", "ACP_COMPACT_THREE"] {
-        run_marked_turn(client, &session_id, marker).await;
+        run_marked_turn(
+            client,
+            &session_id,
+            &format!("{marker} {}", "migration design context. ".repeat(100)),
+        )
+        .await;
     }
     let before = read_session_transcript(&workspace.root, &session_id);
     assert!(
@@ -1707,7 +1712,7 @@ async fn acp_stdio_context_limit_rejection_is_compacted_and_retried() {
     let workspace = TestWorkspace::new("stdio-context-limit");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
-    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 3).await;
+    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 32).await;
 
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
@@ -1824,7 +1829,7 @@ async fn acp_stdio_tool_loop_compacts_before_next_request() {
         "tool loop fixture line\n",
     )
     .expect("fixture should be written");
-    let (session_id, _transcript_path) = seed_filler_history(&server, &workspace, 2).await;
+    let (session_id, _transcript_path) = seed_filler_history(&server, &workspace, 32).await;
 
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
@@ -4139,25 +4144,17 @@ async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
     fs::write(workspace.root.join("fixture.txt"), "alpha parity line\n")
         .expect("fixture.txt should be written");
 
-    // A one-token threshold makes the runtime's post-turn auto-compaction
-    // fire after every turn, which is the only way to drive the LLM
-    // compaction path over ACP.
-    let mut client = spawn_stdio_client_with_args_and_env(
-        &workspace,
-        &[],
-        &[("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1")],
-    );
+    let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
     let session = scenario_session_new(&mut client, &workspace.root).await;
 
-    // One parallel-tool turn followed by two plain text turns. Compaction
-    // preserves the last four messages and never splits a tool_use /
-    // tool_result exchange, so the first two compactions only remove the
-    // leading user prompt (or nothing); the compaction after the third turn
-    // is the one whose input spans the parallel tool_use / tool_result
-    // exchange.
+    // Keep enough substantive history that the checkpoint shrinks it and the
+    // parallel exchange falls outside the token-budgeted recent suffix.
     for scenario in [
         "multi_tool_turn_roundtrip",
+        "streaming_text",
+        "streaming_text",
+        "streaming_text",
         "streaming_text",
         "streaming_text",
     ] {
@@ -4168,7 +4165,7 @@ async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
                     "sessionId": session,
                     "prompt": [{
                         "type": "text",
-                        "text": format!("{SCENARIO_PREFIX}{scenario}")
+                        "text": format!("{SCENARIO_PREFIX}{scenario} {}", "migration design context. ".repeat(100))
                     }]
                 }),
             )
@@ -4179,9 +4176,11 @@ async fn acp_stdio_llm_compaction_keeps_parallel_tool_results_paired() {
         );
     }
 
+    run_slash_command(&mut client, &session, "/compact").await;
+
     // Compaction requests are identified by their system prompt rather than
     // the mock's scenario tag: the transcript being summarised still carries
-    // the PARITY_SCENARIO marker, which wins the mock's scenario detection.
+    // the PARITY_SCENARIO marker of earlier task requests.
     let compaction_bodies = server
         .captured_requests()
         .await

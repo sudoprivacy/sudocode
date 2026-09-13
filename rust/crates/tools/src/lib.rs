@@ -205,9 +205,8 @@ use command_group::CommandGroup;
 
 use api::{
     max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
-    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
+    StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
@@ -6625,6 +6624,10 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
 
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    fn wire_model_id(&self) -> Option<&str> {
+        self.chain.first().map(|entry| entry.model.as_str())
+    }
+
     /// The runtime's default cannot see the tool definitions attached to
     /// every request, and this client attaches the subagent's whole allowed
     /// set. Left to the default the budget would be too generous by exactly
@@ -6657,6 +6660,27 @@ impl ApiClient for ProviderRuntimeClient {
             ) as usize,
             buffer_tokens: runtime::autocompact_buffer_tokens(request_model) as usize,
         }
+    }
+
+    async fn complete_text(
+        &mut self,
+        request: ApiRequest,
+        options: runtime::TextCompletionOptions,
+    ) -> Result<runtime::TextCompletion, RuntimeError> {
+        let entry = self
+            .chain
+            .first()
+            .ok_or_else(|| RuntimeError::new("no completion provider"))?;
+        let tools = options.include_tools.then(|| {
+            tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+                .into_iter()
+                .map(ToolDefinition::from)
+                .collect()
+        });
+        entry
+            .client
+            .complete_text(&entry.model, request, options, tools)
+            .await
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
@@ -6894,104 +6918,7 @@ pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeS
 /// requires every `tool_use` to have its matching `tool_result` in the same next
 /// user message). Shared by the subagent provider client and the engine's
 /// `EngineApiClient` — the one message-shaping mapping, identical for both.
-pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
-    for message in messages {
-        let role = match message.role {
-            MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-            MessageRole::Assistant => "assistant",
-        };
-        let content = message
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
-                ContentBlock::Thinking { .. } => None,
-                ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    thought_signature,
-                } => Some(InputContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: serde_json::from_str(input)
-                        .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                    thought_signature: thought_signature.clone(),
-                }),
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    tool_name: _,
-                    output,
-                    is_error,
-                } => {
-                    // A tool result is its text, ToolSearch's included.
-                    //
-                    // This used to append one `tool_reference` block per match
-                    // beside that text, which made every request that followed a
-                    // ToolSearch fail: `400 invalid_request_error — Tool
-                    // definitions/code execution functions cannot be mixed with
-                    // other content`. A content array carrying tool definitions
-                    // may carry nothing else, so the text and the references
-                    // could not both be there, and deferred tools were
-                    // unreachable in practice — the model searched, and the turn
-                    // after the search died.
-                    //
-                    // Dropping the references costs nothing, because they were
-                    // the second of two mechanisms doing one job.
-                    // `extract_discovered_tool_names` reads the same `matches`
-                    // out of this text and `core_definitions` clears
-                    // `defer_loading` for those names, so the next request
-                    // carries their full schemas and the model can call them.
-                    // That is the path the deferred-tools prompt section
-                    // describes, and keeping the text is what lets the model see
-                    // what a keyword search actually matched.
-                    let content: Vec<ToolResultContentBlock> = vec![ToolResultContentBlock::Text {
-                        text: output.clone(),
-                    }];
-                    Some(InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content,
-                        is_error: *is_error,
-                    })
-                }
-                ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
-                    source: api::ImageSource {
-                        source_type: "base64".to_string(),
-                        media_type: mime_type.clone(),
-                        data: data.clone(),
-                    },
-                }),
-            })
-            .collect::<Vec<_>>();
-        if content.is_empty() {
-            continue;
-        }
-
-        // Merge consecutive Tool-role messages into the previous user-role
-        // InputMessage. Anthropic requires every `tool_use` in an assistant
-        // turn to have its matching `tool_result` in the SAME next user
-        // message; emitting one user message per tool_result breaks this.
-        if matches!(message.role, MessageRole::Tool) {
-            if let Some(last) = result.last_mut() {
-                if last.role == "user"
-                    && last
-                        .content
-                        .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
-                {
-                    last.content.extend(content);
-                    continue;
-                }
-            }
-        }
-        result.push(InputMessage {
-            role: role.to_string(),
-            content,
-        });
-    }
-    result
-}
+pub use api::convert_messages;
 
 fn push_output_block(
     block: OutputContentBlock,

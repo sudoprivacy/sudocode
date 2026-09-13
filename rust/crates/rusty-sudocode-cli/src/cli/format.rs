@@ -1765,11 +1765,19 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
     } else {
         total.to_string()
     };
-    let cost = usage.estimate_cost_usd().total_cost_usd();
-    let cost_display = if cost > 0.0 {
-        Some(format!("${cost:.2}"))
+    // Cost: prefer the real amount the billing backend charged; fall back to a
+    // per-model local estimate (marked with a leading `~`) when it did not
+    // report one. The estimate uses the actual model's pricing, not a fixed
+    // default tier.
+    let cost_display = if let Some(real) = usage.real_cost_usd() {
+        (real > 0.0).then(|| format!("${real:.2}"))
     } else {
-        None
+        let pricing = runtime::pricing_for_model(model)
+            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
+        let est = usage
+            .estimate_cost_usd_with_pricing(pricing)
+            .total_cost_usd();
+        (est > 0.0).then(|| format!("~${est:.2}"))
     };
     let secs = elapsed.as_secs_f64();
 
@@ -2192,6 +2200,60 @@ mod tests {
         });
         let plain = strip_ansi(&rendered);
         assert!(!plain.contains("$"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_prefers_real_cost_over_estimate() {
+        // 385_000 sudo_point / 500_000 units-per-USD = $0.77, shown as-is (no ~).
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cost_units: Some(385_000),
+            cost_currency: Some(runtime::UsageCostCurrency::SudoPoint),
+            ..TokenUsage::default()
+        };
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-8",
+            turn: 3,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_secs_f64(1.2),
+            branch: None,
+            account: None,
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("$0.77"), "{plain}");
+        assert!(
+            !plain.contains("~$"),
+            "real cost must not be marked estimated: {plain}"
+        );
+    }
+
+    #[test]
+    fn turn_status_line_marks_estimate_and_uses_model_pricing() {
+        // No cost_units => estimate. Opus pricing (input $15/M, output $75/M):
+        // 1M input + 1M output = $15 + $75 = $90.00, marked with a leading ~.
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-8",
+            turn: 3,
+            usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Duration::from_secs_f64(1.2),
+            branch: None,
+            account: None,
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(
+            plain.contains("~$90.00"),
+            "estimate should be model-priced and marked: {plain}"
+        );
     }
 
     #[test]

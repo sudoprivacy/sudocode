@@ -77,12 +77,12 @@ fn allowlist_contains_delegation_surface() {
 #[test]
 fn allowlist_holds_canonical_names_only() {
     let allowed = coordinator_allowed_tools();
+    // TaskGet and TaskList are NOT listed here — they are now their own
+    // canonical tools (to-do registry), no longer aliases for pid_status.
     for cc_name in [
         "Agent",
         "SendMessage",
         "TaskStop",
-        "TaskGet",
-        "TaskList",
         "TaskOutput",
         "send_message",
     ] {

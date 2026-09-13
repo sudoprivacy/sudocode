@@ -112,13 +112,13 @@ fn canonicalize_maps_taskstop_to_pid_kill() {
 }
 
 #[test]
-fn canonicalize_maps_taskget_to_pid_status() {
-    assert_eq!(tools::canonicalize_tool_name("TaskGet"), "pid_status");
+fn canonicalize_keeps_taskget_separate_from_pid_status() {
+    assert_eq!(tools::canonicalize_tool_name("TaskGet"), "TaskGet");
 }
 
 #[test]
-fn canonicalize_maps_tasklist_to_pid_status() {
-    assert_eq!(tools::canonicalize_tool_name("TaskList"), "pid_status");
+fn canonicalize_keeps_tasklist_separate_from_pid_status() {
+    assert_eq!(tools::canonicalize_tool_name("TaskList"), "TaskList");
 }
 
 #[test]

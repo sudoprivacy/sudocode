@@ -1,11 +1,9 @@
-//! Integration tests for `TaskList` reporting live sub-agents.
+//! Integration tests for `pid_status` reporting live sub-agents.
 //!
-//! Plan §4.6 Commit 15: instead of a ratatui-based Background Agent
-//! Selector (forbidden by memory `no_alternate_screen_tui_sudocode`),
-//! we downgrade to exposing the same data via the existing
-//! `TaskList` LLM tool. Coordinators can then enumerate live
-//! background sub-agents via `TaskList(backgrounded_only=true)` and
-//! pick one to continue via SendMessage / TaskOutput.
+//! `pid_status` queries the agent store (`.sudocode-agents/*.json`),
+//! NOT the to-do task registry (`TaskCreate`/`TaskUpdate`). These two
+//! registries were once conflated under `TaskList` — this test suite
+//! locks in the separation.
 //!
 //! ## What this locks in (long-workflow, data-flow chained)
 //!
@@ -17,9 +15,9 @@
 //!
 //! Then verifies:
 //!
-//! 1. `TaskList()` (no filter) returns ALL 3 under `background_agents`
-//!    plus a `background_agent_count == 3`.
-//! 2. `TaskList(backgrounded_only=true)` returns exactly
+//! 1. `pid_status()` (no filter) returns ALL 3 under `agents`
+//!    plus a `count == 3`.
+//! 2. `pid_status(backgrounded_only=true)` returns exactly
 //!    `agent-alpha` and `agent-beta` — the running + backgrounded
 //!    pair — and drops the completed one.
 //! 3. Each snapshot carries `agent_id`, `status`, `color`,
@@ -69,7 +67,7 @@ fn seed_manifest(dir: &std::path::Path, agent_id: &str, status: &str, created_at
 }
 
 #[test]
-fn tasklist_no_filter_returns_every_backgrounded_agent() {
+fn pid_status_no_filter_returns_every_agent() {
     let _g = env_lock();
     let store = unique_store("no-filter");
     seed_manifest(&store, "agent-alpha", "running", "3000");
@@ -77,11 +75,11 @@ fn tasklist_no_filter_returns_every_backgrounded_agent() {
     seed_manifest(&store, "agent-gamma", "completed", "1000");
     std::env::set_var("SUDOCODE_AGENT_STORE", &store);
 
-    let out = tools::execute_tool("TaskList", &serde_json::json!({})).expect("TaskList Ok");
+    let out = tools::execute_tool("pid_status", &serde_json::json!({})).expect("pid_status Ok");
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
 
-    let agents = json["background_agents"].as_array().expect("array");
-    assert_eq!(json["background_agent_count"].as_u64(), Some(3));
+    let agents = json["agents"].as_array().expect("array");
+    assert_eq!(json["count"].as_u64(), Some(3));
     let ids: Vec<&str> = agents
         .iter()
         .map(|a| a["agent_id"].as_str().unwrap())
@@ -95,7 +93,7 @@ fn tasklist_no_filter_returns_every_backgrounded_agent() {
 }
 
 #[test]
-fn tasklist_backgrounded_only_narrows_to_running_and_backgrounded() {
+fn pid_status_backgrounded_only_narrows_to_running_and_backgrounded() {
     let _g = env_lock();
     let store = unique_store("bg-only");
     seed_manifest(&store, "agent-alpha", "running", "3000");
@@ -105,15 +103,15 @@ fn tasklist_backgrounded_only_narrows_to_running_and_backgrounded() {
     std::env::set_var("SUDOCODE_AGENT_STORE", &store);
 
     let out = tools::execute_tool(
-        "TaskList",
+        "pid_status",
         &serde_json::json!({ "backgrounded_only": true }),
     )
-    .expect("TaskList Ok");
+    .expect("pid_status Ok");
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-    let agents = json["background_agents"].as_array().expect("array");
+    let agents = json["agents"].as_array().expect("array");
 
     assert_eq!(
-        json["background_agent_count"].as_u64(),
+        json["count"].as_u64(),
         Some(2),
         "backgrounded_only must drop completed+failed"
     );
@@ -138,37 +136,32 @@ fn tasklist_backgrounded_only_narrows_to_running_and_backgrounded() {
 }
 
 #[test]
-fn tasklist_survives_missing_store_directory() {
-    // Fresh session that hasn't spawned an agent yet -> store dir
-    // may not exist. TaskList must still Ok with an empty list, not
-    // error out.
+fn pid_status_survives_missing_store_directory() {
     let _g = env_lock();
     let store = unique_store("empty");
-    // Deliberately do NOT create the directory.
     std::env::set_var("SUDOCODE_AGENT_STORE", &store);
 
-    let out = tools::execute_tool("TaskList", &serde_json::json!({})).expect("TaskList Ok");
+    let out = tools::execute_tool("pid_status", &serde_json::json!({})).expect("pid_status Ok");
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["background_agent_count"].as_u64(), Some(0));
-    let agents = json["background_agents"].as_array().expect("array");
+    assert_eq!(json["count"].as_u64(), Some(0));
+    let agents = json["agents"].as_array().expect("array");
     assert!(agents.is_empty());
 
     std::env::remove_var("SUDOCODE_AGENT_STORE");
 }
 
 #[test]
-fn tasklist_survives_corrupt_manifest_file() {
+fn pid_status_survives_corrupt_manifest_file() {
     let _g = env_lock();
     let store = unique_store("corrupt");
     seed_manifest(&store, "agent-good", "running", "3000");
-    // A corrupt file next to a good one MUST NOT wipe the good list.
     std::fs::write(store.join("agent-broken.json"), "this is not JSON at all")
         .expect("seed corrupt");
     std::env::set_var("SUDOCODE_AGENT_STORE", &store);
 
-    let out = tools::execute_tool("TaskList", &serde_json::json!({})).expect("TaskList Ok");
+    let out = tools::execute_tool("pid_status", &serde_json::json!({})).expect("pid_status Ok");
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
-    let agents = json["background_agents"].as_array().expect("array");
+    let agents = json["agents"].as_array().expect("array");
     let ids: Vec<&str> = agents
         .iter()
         .map(|a| a["agent_id"].as_str().unwrap())
@@ -180,12 +173,34 @@ fn tasklist_survives_corrupt_manifest_file() {
 }
 
 #[test]
-fn tasklist_schema_advertises_backgrounded_only_field() {
+fn pid_status_schema_advertises_backgrounded_only_field() {
     let specs = tools::mvp_tool_specs();
-    let task_list = specs
+    let pid_status = specs
         .into_iter()
         .find(|s| s.name == "pid_status")
         .expect("pid_status exists");
-    let bg = &task_list.input_schema["properties"]["backgrounded_only"];
+    let bg = &pid_status.input_schema["properties"]["backgrounded_only"];
     assert_eq!(bg["type"].as_str(), Some("boolean"));
+}
+
+#[test]
+fn pid_status_response_has_no_tasks_field() {
+    let _g = env_lock();
+    let store = unique_store("no-tasks");
+    seed_manifest(&store, "agent-x", "running", "1000");
+    std::env::set_var("SUDOCODE_AGENT_STORE", &store);
+
+    let out = tools::execute_tool("pid_status", &serde_json::json!({})).expect("pid_status Ok");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
+    assert!(
+        json.get("tasks").is_none(),
+        "pid_status must NOT return to-do tasks — those belong to TaskList"
+    );
+    assert!(
+        json.get("background_agents").is_none(),
+        "pid_status uses 'agents', not 'background_agents'"
+    );
+
+    std::env::remove_var("SUDOCODE_AGENT_STORE");
+    let _ = std::fs::remove_dir_all(&store);
 }

@@ -48,8 +48,6 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     ("send_message", "send"),     // the A2A tool this replaced
     ("agent", "agent_spawn"),     // CC: Agent
     ("taskstop", "pid_kill"),     // CC: TaskStop
-    ("taskget", "pid_status"),    // CC: TaskGet
-    ("tasklist", "pid_status"),   // CC: TaskList — both map to pid_status
     ("taskoutput", "pid_output"), // CC: TaskOutput
 ];
 

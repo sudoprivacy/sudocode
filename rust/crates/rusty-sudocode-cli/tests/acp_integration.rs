@@ -1113,6 +1113,76 @@ async fn scenario_slash_compact(
     );
 }
 
+/// Chat and both compaction triggers must send the configured provider model,
+/// even when the session stores a different display alias. A backend that
+/// serves only the provider model rejects an unresolved alias during compact.
+#[tokio::test]
+async fn acp_stdio_compaction_uses_resolved_provider_model() {
+    const WIRE_MODEL: &str = "intranet-deployment-7264";
+    for auto_compact in [false, true] {
+        let server = MockAnthropicService::spawn()
+            .await
+            .expect("mock service should start");
+        let workspace = TestWorkspace::new("stdio-compaction-provider-model");
+        workspace.create();
+        let config = json!({
+            "auth_modes": { "api-key": { "anthropic": {
+                "baseUrl": server.base_url(), "apiKey": "test-acp-key"
+            }}},
+            "models": { "sonnet": {
+                "alias": "sonnet", "name": "Session model alias", "input": ["text"],
+                "providers": { "api-key": {
+                    "provider": "anthropic", "model": WIRE_MODEL
+                }}
+            }}
+        });
+        fs::write(
+            workspace.config_home.join("sudocode.json"),
+            config.to_string(),
+        )
+        .expect("write alias-to-provider model mapping");
+        let env = if auto_compact {
+            vec![("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS", "1")]
+        } else {
+            Vec::new()
+        };
+        let mut client = spawn_stdio_client_with_args_and_env(&workspace, &[], &env);
+        scenario_initialize(&mut client).await;
+        let session = scenario_session_new(&mut client, &workspace.root).await;
+        for marker in [
+            "MODEL_MAPPING_ONE",
+            "MODEL_MAPPING_TWO",
+            "MODEL_MAPPING_THREE",
+        ] {
+            run_marked_turn(&mut client, &session, marker).await;
+        }
+        if !auto_compact {
+            run_slash_command(&mut client, &session, "/compact").await;
+        }
+
+        let bodies = server
+            .captured_requests()
+            .await
+            .iter()
+            .filter(|request| !request.path.contains("count_tokens"))
+            .map(|request| serde_json::from_str::<Value>(&request.raw_body).expect("request JSON"))
+            .collect::<Vec<_>>();
+        assert!(bodies.iter().any(|body| body["stream"] == true));
+        assert!(
+            bodies.iter().any(|body| body["stream"] != true),
+            "the scenario must exercise LLM compaction (auto={auto_compact})"
+        );
+        for body in bodies {
+            assert_eq!(
+                body["model"], WIRE_MODEL,
+                "chat and compaction must use the same provider model (auto={auto_compact})"
+            );
+        }
+        client.shutdown().await;
+        workspace.cleanup();
+    }
+}
+
 /// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
 /// neither the in-memory nor the on-disk transcript is touched.
 ///

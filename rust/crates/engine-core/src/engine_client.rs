@@ -333,13 +333,16 @@ impl ApiClient for EngineApiClient {
 
     async fn send_compaction(
         &mut self,
-        model: &str,
+        _model: &str,
         system_prompt: &str,
         messages: Vec<ConversationMessage>,
         max_tokens: u32,
     ) -> Result<String, RuntimeError> {
         let request = MessageRequest {
-            model: model.to_string(),
+            // The runtime may pass a session alias (or a model from before
+            // resume). Use this client's resolved provider model, as chat and
+            // cache-safe compaction do, so the model matches the connection.
+            model: self.model.clone(),
             max_tokens,
             messages: tools::convert_messages(&messages),
             system: Some(system_prompt.to_string()),

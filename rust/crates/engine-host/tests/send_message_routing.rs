@@ -1,38 +1,115 @@
-//! `send` must reach the peer no matter how the model spells the call.
+//! `send` must reach the same destination no matter how the model spells it.
 //!
-//! This is the regression guard for a live failure. Three tools were
-//! advertised at once — `SendMessage`, `send`, `send` — differing only
-//! in which schema field carried the text, and only the literal name
-//! `send` was intercepted for nexus A2A. A model on a cross-machine
-//! session picked `send`, its reply was written to a local
-//! `.sudocode-inbox/` file, the tool answered "Message sent to <peer>'s
-//! inbox", and the peer on the other machine waited ten hours for a message
-//! that had never left the host.
+//! This is the regression guard for a live failure. Three tools were advertised
+//! at once — `SendMessage`, `send_message`, `send` — differing only in which
+//! schema field carried the text, and only the literal name `send` was
+//! intercepted for nexus A2A. A model on a cross-machine session picked
+//! `send_message`, its reply was written to a local `.sudocode-inbox/` file, the
+//! tool answered "Message sent to <peer>'s inbox", and the peer on the other
+//! machine waited ten hours for a message that had never left the host.
 //!
-//! The fake sender stands in for the gRPC one. The routing decision is made
-//! entirely by `HostToolExecutor` before any transport is touched, so a daemon
-//! would only slow the test down without testing more of the decision.
+//! ## What these assert, and why it changed
+//!
+//! They used to assert that a hook had been called: the host wired an A2A
+//! `MailboxSender`, the dispatcher branched on its presence, and the test
+//! watched the sink. That branch is gone — it chose the destination from PROCESS
+//! state while the recipient went unread, so a session with A2A on addressed a
+//! local sub-agent over the network, at a stream no ephemeral agent has.
+//!
+//! So these assert the PATH the envelope took, which is the thing that was wrong
+//! in the first place. A recording backend stands in for the transport: the
+//! destination is decided by the convention before any transport is touched, so
+//! a daemon would only slow the test down without testing more of the decision.
 
+use std::io;
 use std::sync::{Arc, Mutex};
 
 use engine_host::tool_executor::CliToolExecutor;
+use runtime::fs_backend::{FsBackend, FsDirEntry, FsMetadata};
+use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{ToolDispatchContext, ToolExecutor};
 use tools::GlobalToolRegistry;
 
-/// Records what the A2A transport was asked to deliver.
-type Delivered = Arc<Mutex<Vec<(String, String)>>>;
+/// Every append this backend was asked to make, as `(path, bytes)`.
+type Appends = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-fn executor_with_a2a() -> (CliToolExecutor, Delivered) {
-    let delivered: Delivered = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&delivered);
-    let mut executor = CliToolExecutor::new(None, GlobalToolRegistry::builtin(), None);
-    executor.set_mailbox_sender(Arc::new(move |to: &str, body: &str| {
-        sink.lock()
-            .expect("sender sink poisoned")
-            .push((to.to_string(), body.to_string()));
+/// A backend that records appends and refuses everything else.
+///
+/// Only `append` and `is_append_stream` are reachable from a send. The rest
+/// panic rather than return plausible defaults: a send that starts reading or
+/// renaming is doing something these tests do not describe, and a silent default
+/// would hide it.
+struct RecordingBackend {
+    appends: Appends,
+}
+
+impl FsBackend for RecordingBackend {
+    fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.appends
+            .lock()
+            .expect("appends poisoned")
+            .push((path.to_string(), data.to_vec()));
         Ok(())
-    }));
-    (executor, delivered)
+    }
+
+    /// Mirrors `NexusVfsFsBackend`: the A2A leaf marks a framed stream, so an
+    /// envelope crosses as one record rather than a JSONL line.
+    fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        Ok(path.ends_with(runtime::mailbox::CHAT_WITH_ME_SUFFIX))
+    }
+
+    fn read(&self, _: &str) -> io::Result<Vec<u8>> {
+        unreachable!("a send does not read")
+    }
+    fn write(&self, _: &str, _: &[u8]) -> io::Result<()> {
+        unreachable!("a send appends, it does not overwrite")
+    }
+    fn delete(&self, _: &str) -> io::Result<()> {
+        unreachable!("a send does not delete")
+    }
+    fn stat(&self, _: &str) -> io::Result<FsMetadata> {
+        unreachable!("a send does not stat")
+    }
+    fn readdir(&self, _: &str) -> io::Result<Vec<FsDirEntry>> {
+        unreachable!("a send does not list directories")
+    }
+    fn exists(&self, _: &str) -> io::Result<bool> {
+        unreachable!("a send does not probe existence")
+    }
+    fn create_dir_all(&self, _: &str) -> io::Result<()> {
+        unreachable!("a stream inbox has no directory to create")
+    }
+    fn rename(&self, _: &str, _: &str) -> io::Result<()> {
+        unreachable!("a send does not rename")
+    }
+    fn canonicalize(&self, _: &str) -> io::Result<String> {
+        unreachable!("a send does not canonicalize")
+    }
+    fn symlink_metadata(&self, _: &str) -> io::Result<FsMetadata> {
+        unreachable!("a send does not read link metadata")
+    }
+}
+
+fn executor() -> CliToolExecutor {
+    CliToolExecutor::new(None, GlobalToolRegistry::builtin(), None)
+}
+
+/// An executor on a nexus-convention mailbox that records every write.
+///
+/// Given to the dispatcher exactly as the host gives it the A2A session's
+/// mailbox, so the test exercises the real handover. Per-executor rather than
+/// per-process, so each test gets its own and they need not run in any order.
+fn nexus_executor() -> (CliToolExecutor, Appends) {
+    let appends: Appends = Arc::new(Mutex::new(Vec::new()));
+    let mut executor = executor();
+    executor.set_mailbox(Arc::new(Mailbox::new(
+        Arc::new(RecordingBackend {
+            appends: Arc::clone(&appends),
+        }),
+        "win-ai".to_string(),
+        InboxConvention::NexusA2a,
+    )));
+    (executor, appends)
 }
 
 /// Run one tool call to completion on a throwaway runtime.
@@ -49,67 +126,166 @@ fn call(executor: &CliToolExecutor, tool: &str, input: &str) -> Result<String, S
         })
 }
 
-/// Every way a model can spell the call reaches the peer.
+/// Every way a model can spell the call reaches the same inbox.
 ///
-/// `SendMessage` is CC's spelling and `send_message` the A2A tool this
-/// replaced — a model reaches for either by habit. `body` is the field the old
-/// A2A schema used, and the field the wire envelope still uses, so a model
-/// that has seen either will reach for it too.
+/// `SendMessage` is CC's spelling and `send_message` the A2A tool this replaced —
+/// a model reaches for either by habit. `body` is the field the old A2A schema
+/// used, and the one the wire envelope still uses, so a model that has seen
+/// either will reach for it too.
 ///
-/// Not one of these may quietly become a local file write: the name and the
-/// field are things a model picks, and neither is allowed to decide whether a
-/// message crosses the machine.
+/// None of them may quietly become a local file write: the name and the field
+/// are things a model picks, and neither is allowed to decide where a message
+/// goes.
 #[test]
-fn every_spelling_and_shape_reaches_the_peer() {
+fn every_spelling_and_shape_reaches_the_same_inbox() {
     for (tool, input) in [
-        ("send", r#"{"to":"mac-ai","message":"canonical name"}"#),
-        ("SendMessage", r#"{"to":"mac-ai","message":"CC spelling"}"#),
+        (
+            "send",
+            r#"{"to":"mac-ai","message":"canonical name","summary":"s"}"#,
+        ),
+        (
+            "SendMessage",
+            r#"{"to":"mac-ai","message":"CC spelling","summary":"s"}"#,
+        ),
         (
             "send_message",
-            r#"{"to":"mac-ai","message":"superseded A2A name"}"#,
+            r#"{"to":"mac-ai","message":"superseded A2A name","summary":"s"}"#,
         ),
         // The old A2A input shape, field and all.
-        ("send_message", r#"{"to":"mac-ai","body":"body field"}"#),
-        ("send", r#"{"to":"mac-ai","body":"body field, new name"}"#),
+        (
+            "send_message",
+            r#"{"to":"mac-ai","body":"body field","summary":"s"}"#,
+        ),
+        (
+            "send",
+            r#"{"to":"mac-ai","body":"body field, new name","summary":"s"}"#,
+        ),
     ] {
-        let (executor, delivered) = executor_with_a2a();
+        let (executor, appends) = nexus_executor();
         let result =
             call(&executor, tool, input).unwrap_or_else(|e| panic!("`{tool}` must not fail: {e}"));
 
-        let sent = delivered.lock().expect("sink poisoned").clone();
+        let wrote = appends.lock().expect("appends poisoned").clone();
         assert_eq!(
-            sent.len(),
+            wrote.len(),
             1,
-            "`{tool}` must hand exactly one message to the A2A transport, got {sent:?}"
+            "`{tool}` must write exactly one envelope, got {wrote:?}"
         );
-        assert_eq!(sent[0].0, "mac-ai", "`{tool}` addressed the wrong peer");
+        assert_eq!(
+            wrote[0].0, "/agents/mac-ai/chat-with-me",
+            "`{tool}` addressed the wrong path"
+        );
 
-        // The result string is what a human reads to decide whether a message
-        // crossed the machine. "delivered to" is the network path; anything
-        // mentioning an inbox file means it did not leave the host.
+        // `mailbox_path` is what a human reads to decide whether a message left
+        // the host, so it has to be the path the convention resolved.
         assert!(
-            result.contains("message delivered to mac-ai"),
-            "`{tool}` must report network delivery, got: {result}"
+            result.contains("/agents/mac-ai/chat-with-me"),
+            "`{tool}` must report the path it wrote, got: {result}"
         );
         assert!(
-            !result.contains("inbox"),
-            "`{tool}` reported a workspace-mailbox write while A2A was configured: {result}"
+            !result.contains(".sudocode-inbox"),
+            "`{tool}` reported a workspace write while the session is on nexus: {result}"
         );
     }
 }
 
-/// Without an A2A sender the same tool delivers locally. This is the contract,
-/// not a fallback: one tool, and the host chooses the destination. If this
-/// starts erroring, a plain workspace session has lost its mailbox.
+/// A plain-text send with no summary is refused, over nexus as locally.
+///
+/// This is the one place unification made a cross-machine send stricter, so it is
+/// worth pinning. The old A2A path was a two-string pipe with summary hardcoded
+/// away: it accepted `{to, body}` and delivered an envelope whose summary field
+/// was a placeholder the recipient then displayed. The registry tool has always
+/// required one for plain text, and routing every send through it means the
+/// requirement now reaches the wire — an error the model can act on, rather than
+/// a delivery that arrives unlabelled.
+///
+/// Nothing may be written while it is refused: a half-envelope on the peer's
+/// stream cannot be taken back.
 #[test]
-fn without_a2a_the_same_tool_delivers_to_the_workspace_mailbox() {
+fn a_plain_text_send_without_a_summary_is_refused_and_writes_nothing() {
+    let (executor, appends) = nexus_executor();
+    let error = call(
+        &executor,
+        "send",
+        r#"{"to":"mac-ai","message":"unlabelled"}"#,
+    )
+    .expect_err("a plain-text send with no summary must be refused");
+
+    assert!(
+        error.contains("summary"),
+        "the error must name the missing field, got: {error}"
+    );
+    assert!(
+        appends.lock().expect("appends poisoned").is_empty(),
+        "a refused send must not reach the peer's stream"
+    );
+}
+
+/// A local-looking recipient resolves through the same convention as any other.
+///
+/// This is the case the old dispatcher got wrong in the other direction: with
+/// A2A configured it shipped a local sub-agent's message over the network, to a
+/// stream no ephemeral agent has, while the sub-agent read a workspace file and
+/// heard nothing. There is one namespace now, so what matters is that the path
+/// is DERIVED from the name rather than branched on.
+#[test]
+fn a_local_looking_recipient_resolves_through_the_same_convention() {
+    let (executor, appends) = nexus_executor();
+    call(
+        &executor,
+        "send",
+        r#"{"to":"sub-agent-1","message":"to a sub-agent","summary":"hand-off"}"#,
+    )
+    .expect("send must succeed");
+
+    let wrote = appends.lock().expect("appends poisoned").clone();
+    assert_eq!(wrote.len(), 1, "expected one envelope, got {wrote:?}");
+    assert_eq!(
+        wrote[0].0, "/agents/sub-agent-1/chat-with-me",
+        "a recipient's name resolves through the session's convention like any other"
+    );
+}
+
+/// The envelope keeps the fields the tool accepted.
+///
+/// The A2A path used to be a two-string pipe — `to` and `message`, with summary
+/// and kind hardcoded away — so a cross-machine send silently dropped everything
+/// the local one carried. One send means one envelope shape.
+#[test]
+fn the_envelope_carries_its_summary_over_nexus() {
+    let (executor, appends) = nexus_executor();
+    call(
+        &executor,
+        "send",
+        r#"{"to":"mac-ai","message":"the body","summary":"the summary"}"#,
+    )
+    .expect("send must succeed");
+
+    let wrote = appends.lock().expect("appends poisoned").clone();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&wrote[0].1).expect("the record is a JSON envelope");
+    assert_eq!(envelope["body"], "the body");
+    assert_eq!(
+        envelope["summary"], "the summary",
+        "a summary the tool accepted must survive the crossing: {envelope}"
+    );
+    assert_eq!(envelope["to"], "mac-ai");
+}
+
+/// With no mailbox given to the executor, the same tool writes the workspace.
+///
+/// The contract, not a fallback: one tool, and the session chooses the
+/// destination. A plain `scode` with no nexus configured has always written
+/// `.sudocode-inbox/`, and it still does — through the same call, resolved one
+/// level down.
+#[test]
+fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    let executor = CliToolExecutor::new(None, GlobalToolRegistry::builtin(), None);
     let previous = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(workspace.path()).expect("chdir into workspace");
 
     let result = call(
-        &executor,
+        &executor(),
         "send",
         r#"{"to":"worker","message":"local hand-off","summary":"local hand-off"}"#,
     );
@@ -117,7 +293,22 @@ fn without_a2a_the_same_tool_delivers_to_the_workspace_mailbox() {
     std::env::set_current_dir(previous).expect("restore cwd");
     let result = result.expect("workspace delivery must succeed");
     assert!(
-        result.contains("inbox"),
-        "without A2A the tool must report a workspace-mailbox write, got: {result}"
+        result.contains(runtime::mailbox::LOCAL_INBOX_DIR),
+        "with no session mailbox the tool must write the workspace, got: {result}"
+    );
+    // Assert the envelope landed in THIS workspace, not just that the answer
+    // named the convention. The reverse of this test is what the broken state
+    // looked like: the three nexus cases above, run without the mailbox reaching
+    // the dispatch thread, resolved to the ambient workspace and wrote real
+    // envelopes into the crate directory while reporting success. A string check
+    // alone is satisfied by that.
+    let delivered = workspace
+        .path()
+        .join(runtime::mailbox::LOCAL_INBOX_DIR)
+        .join("worker.jsonl");
+    assert!(
+        delivered.is_file(),
+        "the envelope must be in the workspace that was current, expected {}",
+        delivered.display()
     );
 }

@@ -357,22 +357,7 @@ impl ApiClient for EngineApiClient {
             .await
             .map_err(|error| RuntimeError::new(format!("compaction API error: {error}")))?;
 
-        let text = response
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                OutputContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-
-        if text.is_empty() {
-            return Err(RuntimeError::new(
-                "compaction response contained no text content",
-            ));
-        }
-        Ok(text)
+        response.compaction_text().map_err(RuntimeError::new)
     }
 
     async fn send_cache_safe_compaction(
@@ -395,12 +380,20 @@ impl ApiClient for EngineApiClient {
             }],
         });
 
+        let discovered = self.enable_tools.then(|| {
+            let mut discovered = tools::extract_discovered_tool_names(&request.messages);
+            discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
+            discovered
+        });
         let message_request = MessageRequest {
             model: self.model.clone(),
             max_tokens,
             messages,
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: None,
+            tools: self.enable_tools.then(|| {
+                self.tool_registry
+                    .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
+            }),
             tool_choice: None,
             stream: false,
             reasoning_effort: None,
@@ -415,22 +408,7 @@ impl ApiClient for EngineApiClient {
             .await
             .map_err(|error| RuntimeError::new(format!("cache-safe compaction error: {error}")))?;
 
-        let text = response
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                OutputContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-
-        if text.is_empty() {
-            return Err(RuntimeError::new(
-                "cache-safe compaction response contained no text content",
-            ));
-        }
-        Ok(text)
+        response.compaction_text().map_err(RuntimeError::new)
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {

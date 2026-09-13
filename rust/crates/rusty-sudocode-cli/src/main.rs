@@ -1454,7 +1454,12 @@ fn run_resume(
                 std::process::exit(2);
             }
         };
-        match run_resume_command(&resolved_path, &session, &command) {
+        let outcome = if matches!(command, SlashCommand::Compact) {
+            run_resumed_compaction(&resolved_path, &model, permission_mode, auth_mode)
+        } else {
+            run_resume_command(&resolved_path, &session, &command)
+        };
+        match outcome {
             Ok(ResumeCommandOutcome {
                 session: next_session,
                 message,
@@ -1501,6 +1506,34 @@ struct ResumeCommandOutcome {
     json: Option<serde_json::Value>,
 }
 
+/// Resumed /compact uses the same model-backed lifecycle as the REPL.
+fn run_resumed_compaction(
+    path: &Path,
+    model: &str,
+    permission_mode: PermissionMode,
+    auth_mode: Option<AuthMode>,
+) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let cli = LiveCli::new(
+        resolve_repl_model(model.to_string()),
+        true,
+        None,
+        permission_mode,
+        None,
+        auth_mode,
+    )?;
+    cli.lifecycle.resume_session(&path.display().to_string())?;
+    let (removed, kept, skipped, source) = cli.lifecycle.run_compaction()?;
+    Ok(ResumeCommandOutcome {
+        session: cli.lifecycle.session_snapshot(),
+        message: Some(format_compact_report(removed, kept, skipped, &source)),
+        json: Some(serde_json::json!({
+            "kind": "compact", "skipped": skipped,
+            "removed_messages": removed, "kept_messages": kept,
+            "summary_source": source.to_string(),
+        })),
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_resume_command(
     session_path: &Path,
@@ -1514,32 +1547,7 @@ fn run_resume_command(
             json: Some(serde_json::json!({ "kind": "help", "text": render_repl_help() })),
         }),
         SlashCommand::Compact => {
-            let result = runtime::compact_session_sync(
-                session,
-                CompactionConfig {
-                    max_estimated_tokens: 0,
-                    ..CompactionConfig::default()
-                },
-            );
-            let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            let skipped = removed == 0;
-            result.compacted_session.save_to_path(session_path)?;
-            Ok(ResumeCommandOutcome {
-                session: result.compacted_session,
-                message: Some(format_compact_report(
-                    removed,
-                    kept,
-                    skipped,
-                    &result.summary_source,
-                )),
-                json: Some(serde_json::json!({
-                    "kind": "compact",
-                    "skipped": skipped,
-                    "removed_messages": removed,
-                    "kept_messages": kept,
-                })),
-            })
+            Err("Compaction requires a model-backed session; history preserved".into())
         }
         SlashCommand::Clear { confirm } => {
             if !confirm {

@@ -6659,6 +6659,70 @@ impl ApiClient for ProviderRuntimeClient {
         }
     }
 
+    async fn send_compaction(
+        &mut self,
+        _model: &str,
+        system_prompt: &str,
+        messages: Vec<ConversationMessage>,
+        max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        let entry = self
+            .chain
+            .first()
+            .ok_or_else(|| RuntimeError::new("no compaction provider"))?;
+        let request = MessageRequest {
+            model: entry.model.clone(),
+            max_tokens,
+            messages: convert_messages(&messages),
+            system: Some(system_prompt.into()),
+            stream: false,
+            thinking_enabled: false,
+            ..Default::default()
+        };
+        entry
+            .client
+            .send_message(&request, None)
+            .await
+            .map_err(|error| runtime_error_from_api(&error))?
+            .compaction_text()
+            .map_err(RuntimeError::new)
+    }
+
+    async fn send_cache_safe_compaction(
+        &mut self,
+        request: ApiRequest,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        let entry = self
+            .chain
+            .first()
+            .ok_or_else(|| RuntimeError::new("no compaction provider"))?;
+        let mut history = request.messages;
+        history.push(ConversationMessage::user_text(prompt));
+        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+            .into_iter()
+            .map(ToolDefinition::from)
+            .collect::<Vec<_>>();
+        let request = MessageRequest {
+            model: entry.model.clone(),
+            max_tokens,
+            messages: convert_messages(&history),
+            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
+            tools: (!tools.is_empty()).then_some(tools),
+            stream: false,
+            thinking_enabled: false,
+            ..Default::default()
+        };
+        entry
+            .client
+            .send_message(&request, None)
+            .await
+            .map_err(|error| runtime_error_from_api(&error))?
+            .compaction_text()
+            .map_err(RuntimeError::new)
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()

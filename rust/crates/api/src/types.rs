@@ -238,6 +238,35 @@ pub struct MessageResponse {
 }
 
 impl MessageResponse {
+    /// A checkpoint must be complete text; partial output must never replace history.
+    pub fn compaction_text(&self) -> Result<String, String> {
+        if matches!(
+            self.stop_reason.as_deref(),
+            Some("max_tokens" | "length" | "incomplete")
+        ) {
+            return Err("compaction summary was truncated at the output limit".into());
+        }
+        if self
+            .content
+            .iter()
+            .any(|block| matches!(block, OutputContentBlock::ToolUse { .. }))
+        {
+            return Err("compaction returned tool calls instead of a complete checkpoint".into());
+        }
+        let text = self
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                OutputContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        if text.trim().is_empty() {
+            return Err("compaction returned no summary text".into());
+        }
+        Ok(text)
+    }
+
     #[must_use]
     pub fn total_tokens(&self) -> u32 {
         self.usage.total_tokens()

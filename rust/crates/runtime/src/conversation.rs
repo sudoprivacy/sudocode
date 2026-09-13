@@ -10,9 +10,8 @@ use telemetry::SessionTracer;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session, compact_session_cache_safe, compact_session_sync,
-    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
+    estimate_block_tokens, estimate_session_tokens, prune_tool_results, unchanged_compaction,
     CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
-    ReadFileTracker,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{
@@ -253,6 +252,9 @@ pub trait ApiClient: Send {
 /// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
 /// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
+    /// Non-fatal runtime maintenance notices, forwarded through the engine seam.
+    fn on_notice(&mut self, _text: &str) {}
+
     fn on_thinking_delta(&mut self, _delta: &str) {}
 
     fn on_text_delta(&mut self, _delta: &str) {}
@@ -793,8 +795,6 @@ pub struct ConversationRuntime<C, T> {
     session_tracer: Option<SessionTracer>,
     /// File operation tracker for the current turn.
     file_tracker: crate::file_tracker::TurnFileTracker,
-    /// Tracks recently-read files for post-compact restoration (CC parity).
-    read_file_tracker: ReadFileTracker,
     /// Current turn ID for file tracking.
     current_turn_id: Option<String>,
     /// User request intent for the current turn.
@@ -859,7 +859,6 @@ where
             hook_progress_reporter: None,
             session_tracer: None,
             file_tracker: crate::file_tracker::TurnFileTracker::new(workspace_root),
-            read_file_tracker: ReadFileTracker::default(),
             current_turn_id: None,
             user_request_intent: None,
             trace_id: None,
@@ -1204,8 +1203,7 @@ where
     async fn run_session_health_probe(&mut self) -> Result<(), String> {
         // Check if we have basic session integrity
         if self.session.messages.is_empty() && self.session.compaction.is_some() {
-            // Freshly compacted with no messages - this is normal
-            return Ok(());
+            return Err("compacted session has no active history; restore a pre-compaction transcript before continuing".into());
         }
 
         // Verify tool executor is responsive with a non-destructive probe
@@ -1319,55 +1317,12 @@ where
         result_message: ConversationMessage,
     ) -> Result<(), RuntimeError> {
         notify_tool_result(runtime_observer_mut(observer), &result_message);
-        // Track read_file results for post-compact restoration.
-        self.track_read_file_if_applicable(&result_message);
         self.session
             .push_message(result_message.clone())
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         self.record_tool_finished(iterations, &result_message);
         tool_results.push(result_message);
         Ok(())
-    }
-
-    /// If this tool result is a successful `read_file` / `Read`, record the
-    /// file path in `read_file_tracker` for post-compact restoration.
-    fn track_read_file_if_applicable(&mut self, result_message: &ConversationMessage) {
-        for block in &result_message.blocks {
-            if let ContentBlock::ToolResult {
-                tool_name,
-                tool_use_id,
-                is_error,
-                ..
-            } = block
-            {
-                if *is_error {
-                    continue;
-                }
-                if tool_name != "read_file" && tool_name != "Read" {
-                    continue;
-                }
-                // Find the matching ToolUse in the session to extract file_path
-                if let Some(path) = self.find_tool_use_file_path(tool_use_id) {
-                    self.read_file_tracker.record(path);
-                }
-            }
-        }
-    }
-
-    /// Search session messages for a ToolUse block with the given id and
-    /// extract its `file_path` parameter.
-    fn find_tool_use_file_path(&self, tool_use_id: &str) -> Option<std::path::PathBuf> {
-        for msg in self.session.messages.iter().rev() {
-            for block in &msg.blocks {
-                if let ContentBlock::ToolUse { id, input, .. } = block {
-                    if id == tool_use_id {
-                        return crate::compact::extract_file_path_from_tool_input(input)
-                            .map(|s| std::path::PathBuf::from(&s));
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// If a tool output exceeds the offload threshold, spill the full bytes to
@@ -1507,6 +1462,9 @@ where
         let summary = self
             .run_turn_with_blocks_inner(blocks, prompter, observer)
             .await;
+        if summary.is_err() {
+            self.finish_current_turn_tracking();
+        }
         if installs_hook_reporter {
             self.hook_progress_reporter = None;
         }
@@ -1641,7 +1599,7 @@ where
             // those steps existed. Without this the first the runtime hears
             // of the overflow is a rejection, and the single salvage below
             // is all a long turn ever gets.
-            if self.next_request_exceeds_budget() {
+            while self.next_request_exceeds_budget() {
                 if turn_compactions < MAX_TURN_COMPACTIONS {
                     if let Some(event) = self
                         .compact_in_place(
@@ -1649,15 +1607,31 @@ where
                             CompactionTrigger::InTurnBudget,
                         )
                         .await
+                        .map_err(|error| RuntimeError::new(error.to_string()))?
                     {
                         overflow_compaction =
                             merge_auto_compaction(overflow_compaction, Some(event));
+                    } else {
+                        return Err(RuntimeError::context_window_blocked(
+                            "Context cannot be compacted safely; history preserved. No model request sent."));
                     }
                     turn_compactions += 1;
                 } else if !recorded_compaction_budget_exhausted {
                     self.record_compaction_budget_exhausted(CompactionTrigger::InTurnBudget);
                     recorded_compaction_budget_exhausted = true;
                 }
+                if turn_compactions >= MAX_TURN_COMPACTIONS && self.next_request_exceeds_budget() {
+                    return Err(RuntimeError::context_window_blocked(
+                        "Compaction retry budget exhausted; history preserved. No model request sent."));
+                }
+            }
+
+            let budget = self
+                .api_client
+                .context_budget(&self.compaction_model(), &self.system_prompt);
+            if !budget.fits(estimate_session_tokens(&self.session)) {
+                return Err(RuntimeError::context_window_blocked(
+                    "Context remains too large after compaction; history preserved. No model request sent."));
             }
 
             let request = ApiRequest {
@@ -1712,6 +1686,7 @@ where
                                 CompactionTrigger::ProviderRejection,
                             )
                             .await
+                            .map_err(|error| RuntimeError::new(error.to_string()))?
                         {
                             turn_compactions += 1;
                             overflow_compaction =
@@ -1831,7 +1806,8 @@ where
                         }
                         let auto_compaction = merge_auto_compaction(
                             overflow_compaction,
-                            self.maybe_auto_compact().await,
+                            self.maybe_auto_compact(runtime_observer_mut(&mut observer))
+                                .await,
                         );
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
@@ -2379,8 +2355,11 @@ where
             }
         }
 
-        let auto_compaction =
-            merge_auto_compaction(overflow_compaction, self.maybe_auto_compact().await);
+        let auto_compaction = merge_auto_compaction(
+            overflow_compaction,
+            self.maybe_auto_compact(runtime_observer_mut(&mut observer))
+                .await,
+        );
 
         self.finish_current_turn_tracking();
 
@@ -2402,39 +2381,66 @@ where
         Ok(summary)
     }
 
-    /// Compact using the LLM path. Falls back to sync if the API client
-    /// doesn't support `send_compaction` or the LLM call fails; the result's
-    /// `summary_source` records the fallback reason so the caller can
-    /// surface the lossier summary.
+    /// Build a validated replacement without mutating the live history.
     pub async fn compact(
         &mut self,
         config: CompactionConfig,
         custom_instructions: Option<&str>,
-    ) -> CompactionResult {
+    ) -> Result<CompactionResult, CompactionError> {
         self.compact_with_method(config, custom_instructions)
             .await
-            .0
+            .map(|(result, _)| result)
     }
 
-    /// [`Self::compact`] that also reports which path produced the result,
-    /// for callers that surface the outcome to the user (ACP `/compact`).
+    /// Manual compaction bypasses automatic pressure thresholds. Failure is
+    /// explicit and leaves the original session available for retry.
     pub async fn compact_with_method(
         &mut self,
+        mut config: CompactionConfig,
+        custom_instructions: Option<&str>,
+    ) -> Result<(CompactionResult, CompactionMethod), CompactionError> {
+        config.max_estimated_tokens = 0;
+        let source = self.session.clone();
+        let config = self.compaction_retention(&source, config);
+        let result = self
+            .summarize_history(&source, config, custom_instructions)
+            .await?;
+        Ok((result, CompactionMethod::LlmSummary))
+    }
+
+    /// Install a replacement that the owning engine has already persisted.
+    pub fn install_compacted_session(&mut self, session: Session) {
+        self.session = session;
+        self.usage_tracker.clear_context_usage();
+    }
+
+    fn compaction_retention(&self, source: &Session, config: CompactionConfig) -> CompactionConfig {
+        let budget = self
+            .api_client
+            .context_budget(&self.compaction_model(), &self.system_prompt);
+        // Budget recent history by size, not message count. Cap retention at
+        // one fifth of the current history so explicit compact is useful even
+        // below pressure; the message floor and tool pairing still win.
+        let tokens = (budget.context_limit * 16 / 100)
+            .min(budget.history_budget() / 2)
+            .min(estimate_session_tokens(source) / 5);
+        config.with_token_retention(source, tokens)
+    }
+
+    async fn summarize_history(
+        &mut self,
+        source: &Session,
         config: CompactionConfig,
         custom_instructions: Option<&str>,
-    ) -> (CompactionResult, CompactionMethod) {
-        let model = self
-            .session
-            .model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-
-        // Try cache-safe compaction first: reuses the main conversation's
-        // system prompt + message prefix so the provider's prompt cache hits.
-        // Falls back to the stripped-message path on failure (unsupported
-        // client, PTL, transient error).
+    ) -> Result<CompactionResult, CompactionError> {
+        let model = self.compaction_model();
+        if source.messages.len() <= config.preserve_recent_messages
+            || estimate_session_tokens(source) < config.max_estimated_tokens
+        {
+            return Ok(unchanged_compaction(source));
+        }
         if let Ok(result) = compact_session_cache_safe(
-            &self.session,
+            source,
             config,
             &mut self.api_client,
             &model,
@@ -2443,11 +2449,10 @@ where
         )
         .await
         {
-            return (result, CompactionMethod::LlmSummary);
+            return Ok(result);
         }
-
         match compact_session(
-            &self.session,
+            source,
             config,
             &mut self.api_client,
             &model,
@@ -2455,17 +2460,9 @@ where
         )
         .await
         {
-            Ok(result) => (result, CompactionMethod::LlmSummary),
-            Err(CompactionError::NothingToCompact) => (
-                compact_session_sync(&self.session, config),
-                CompactionMethod::LocalHeuristic,
-            ),
-            // LLM compaction failed (not supported or API error) — fall back
-            // to the local heuristic but keep the reason in `summary_source`.
-            Err(error) => (
-                compact_session_sync_after_llm_failure(&self.session, config, &error),
-                CompactionMethod::LocalHeuristic,
-            ),
+            Ok(result) => Ok(result),
+            Err(CompactionError::NothingToCompact) => Ok(unchanged_compaction(source)),
+            Err(error) => Err(error),
         }
     }
 
@@ -2629,7 +2626,7 @@ where
     /// point; between iterations of a tool loop it is what notices growth
     /// the local estimate undercounts.
     fn projected_context_tokens(&self) -> u32 {
-        let reported = self.usage_tracker.current_turn_usage().context_tokens();
+        let reported = self.usage_tracker.current_context_tokens();
         let unreported: usize = self
             .session
             .messages
@@ -2642,7 +2639,10 @@ where
         reported.saturating_add(u32::try_from(unreported).unwrap_or(u32::MAX))
     }
 
-    async fn maybe_auto_compact(&mut self) -> Option<AutoCompactionEvent> {
+    async fn maybe_auto_compact(
+        &mut self,
+        observer: Option<&mut dyn RuntimeObserver>,
+    ) -> Option<AutoCompactionEvent> {
         let running = self.running_model();
         let model = if running.is_empty() {
             DEFAULT_COMPACTION_MODEL
@@ -2657,7 +2657,7 @@ where
         // hundred tokens per turn and never reaches the threshold; without
         // caching it grows quadratically, never decreases, and re-compacts
         // after every turn once crossed.
-        if self.usage_tracker.current_turn_usage().context_tokens() < threshold {
+        if self.usage_tracker.current_context_tokens() < threshold {
             return None;
         }
 
@@ -2672,6 +2672,17 @@ where
         let event = self
             .compact_in_place(forced_compaction_config(), CompactionTrigger::PostTurnUsage)
             .await;
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                // The response has already completed. Report maintenance failure
+                // without replacing history or turning success into a failed task.
+                if let Some(observer) = observer {
+                    observer.on_notice(&format!("Automatic compaction failed: {error}"));
+                }
+                return None;
+            }
+        };
         if event.is_some() {
             // Success → reset the noop counter so the breaker only trips on
             // SUSTAINED inability to shrink, not on transient threshold dance.
@@ -2683,85 +2694,74 @@ where
         event
     }
 
-    /// Compact the live session and install the result.
-    ///
-    /// Tries LLM compaction first and falls back to the local structural
-    /// summary when the API client does not support it or the call fails.
-    /// Re-injects recently read files after the summary, replaces the
-    /// in-memory session, and rewrites the persisted transcript so a later
-    /// resume does not reload the pre-compaction history. Returns `None`
-    /// when nothing could be removed (session too small, or the tail
-    /// protection kept everything).
+    /// Stage pruning and summarization on a clone. Only install a useful,
+    /// durably saved replacement; errors never erase the original transcript.
     pub async fn compact_in_place(
         &mut self,
         config: CompactionConfig,
         trigger: CompactionTrigger,
-    ) -> Option<AutoCompactionEvent> {
-        let estimated_before = estimate_session_tokens(&self.session);
-        let model = self.compaction_model();
-
-        let result = match compact_session(
-            &self.session,
-            config,
-            &mut self.api_client,
-            &model,
-            None,
-        )
-        .await
+    ) -> Result<Option<AutoCompactionEvent>, CompactionError> {
+        let before = estimate_session_tokens(&self.session);
+        let mut candidate = self.session.clone();
+        let pruned = prune_tool_results(&mut candidate);
+        let budget = self
+            .api_client
+            .context_budget(&self.compaction_model(), &self.system_prompt);
+        let (candidate, removed, source) = if pruned > 0
+            && estimate_session_tokens(&candidate) <= budget.history_budget()
         {
-            Ok(result) => result,
-            // Nothing to shrink is not a failure; `maybe_auto_compact` counts
-            // the no-op toward its circuit-breaker from the `None` return.
-            Err(CompactionError::NothingToCompact) => return None,
-            Err(error) => {
-                // LLM compaction failed (not supported or API error) — fall
-                // back to the synchronous local heuristic, keeping the
-                // reason in `summary_source`.
-                compact_session_sync_after_llm_failure(&self.session, config, &error)
-            }
+            (candidate, 0, CompactionSummarySource::ToolPruning)
+        } else {
+            let config = self.compaction_retention(&candidate, config);
+            let abort = self.hook_abort_signal.clone();
+            let attempt = tokio::select! {
+                biased;
+                () = abort.cancelled() => Err(CompactionError::ApiError("cancelled".into())),
+                result = self.summarize_history(&candidate, config, None) => result,
+            };
+            let result = match attempt {
+                Ok(result) => result,
+                Err(error) => {
+                    if let Some(tracer) = &self.session_tracer {
+                        let mut attributes = Map::new();
+                        attributes.insert("trigger".into(), Value::String(trigger.as_str().into()));
+                        attributes.insert("error".into(), Value::String(error.to_string()));
+                        tracer.record("session_compaction_failed", attributes);
+                    }
+                    return Err(error);
+                }
+            };
+            (
+                result.compacted_session,
+                result.removed_message_count,
+                result.summary_source,
+            )
         };
-
-        if result.removed_message_count == 0 {
-            self.record_compaction(trigger, 0, estimated_before, estimated_before, None);
-            return None;
+        let after = estimate_session_tokens(&candidate);
+        if candidate.messages == self.session.messages {
+            return Ok(None);
         }
-        let summary_source = result.summary_source.clone();
-
-        // Post-compact file restore: re-inject recently-read file content
-        // so the model doesn't lose knowledge of files it just worked with.
-        // Messages are inserted after the summary but before preserved tail.
-        let preserved = &result.compacted_session.messages[1..];
-        let file_messages = self
-            .read_file_tracker
-            .build_post_compact_file_messages(preserved);
-        self.read_file_tracker.clear();
-
-        let mut session = result.compacted_session;
-        if !file_messages.is_empty() {
-            let insert_at = 1; // After summary, before preserved
-            for (i, msg) in file_messages.into_iter().enumerate() {
-                session.messages.insert(insert_at + i, msg);
-            }
+        if after >= before {
+            return Err(CompactionError::InvalidSummary(
+                "replacement does not reduce context".into(),
+            ));
         }
-        self.session = session;
-        // `push_message` appends to the transcript incrementally; the file
-        // still holds the removed messages until it is rewritten.
-        if let Err(error) = self.session.rewrite_persisted() {
-            self.record_session_persist_error("compaction", &error.to_string());
+        if self.hook_abort_signal.is_aborted() {
+            return Err(CompactionError::ApiError("cancelled".into()));
         }
-
-        let estimated_after = estimate_session_tokens(&self.session);
-        self.record_compaction(
-            trigger,
-            result.removed_message_count,
-            estimated_before,
-            estimated_after,
-            Some(&summary_source),
-        );
-
-        Some(AutoCompactionEvent {
-            removed_message_count: result.removed_message_count,
-        })
+        if let Some(path) = self.session.persistence_path() {
+            candidate
+                .save_compacted_to_path(&self.session, path)
+                .map_err(|error| CompactionError::Persistence(error.to_string()))?;
+        }
+        self.session = candidate;
+        // Provider usage describes the OLD prefix. Do not trigger another
+        // compaction from it before a response has priced the replacement.
+        self.usage_tracker.clear_context_usage();
+        self.record_compaction(trigger, removed, before, after, Some(&source));
+        Ok(Some(AutoCompactionEvent {
+            removed_message_count: removed,
+        }))
     }
 
     /// Drop the trailing user message of a turn that produced no assistant
@@ -5199,7 +5199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_compacts_when_context_threshold_is_crossed() {
+    async fn failed_post_turn_compaction_keeps_history_and_completed_answer() {
         let _g = env_guard();
         // Env-var override sets threshold to 100 — test-only, independent of SSOT.
         // Mock reports a 200-token context on the latest response → crosses
@@ -5253,13 +5253,9 @@ mod tests {
 
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
 
-        assert_eq!(
-            summary.auto_compaction,
-            Some(AutoCompactionEvent {
-                removed_message_count: 2,
-            })
-        );
-        assert_eq!(runtime.session().messages[0].role, MessageRole::System);
+        assert_eq!(summary.auto_compaction, None);
+        assert_eq!(runtime.session().messages.len(), 6);
+        assert_eq!(runtime.session().messages[0].role, MessageRole::User);
     }
 
     #[tokio::test]
@@ -5400,7 +5396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compaction_health_probe_skips_empty_compacted_session() {
+    async fn compaction_health_probe_rejects_empty_compacted_session() {
         struct SimpleApi;
         #[async_trait]
         impl ApiClient for SimpleApi {
@@ -5431,12 +5427,12 @@ mod tests {
             SystemPrompt::default(),
         );
 
-        let summary = runtime
+        let error = runtime
             .run_turn("trigger", None, None)
             .await
-            .expect("empty compacted session should not fail health probe");
-        assert_eq!(summary.auto_compaction, None);
-        assert_eq!(runtime.session().messages.len(), 2);
+            .expect_err("empty compacted session must not continue");
+        assert!(error.to_string().contains("no active history"));
+        assert!(runtime.session().messages.is_empty());
     }
 
     #[tokio::test]

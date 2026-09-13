@@ -17,7 +17,28 @@ pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";
 /// Exported because a test that reads the inbox this scenario writes to has
 /// to name the same agent, and two copies of that name drift into a test that
 /// passes while watching the wrong stream.
-pub const UNIFIED_SEND_RECIPIENT: &str = "test-peer";
+pub const UNIFIED_SEND_RECIPIENT: &str = "team-lead";
+
+/// The body that scenario sends.
+///
+/// It carries a scenario marker of its own because a `scode` receiving this
+/// envelope turns it into a prompt: the REPL surfaces a peer message and runs
+/// a turn on it. Without a marker the receiving side would ask its mock to
+/// answer an unrecognised prompt, and the mock refuses those — so a two-agent
+/// test would be asserting a screen while the receiver showed an API error.
+///
+/// Exported for the same reason as the recipient: the test that reads this
+/// body must not carry a second copy of it.
+/// The name a local sender gives itself.
+///
+/// Without nexus there is exactly one mailbox identity — the coordinator the
+/// REPL polls as — and `Mailbox::poll` skips envelopes whose `from` is its own
+/// id, so that a shared read/write stream does not echo. A local peer must
+/// therefore say who it is via the `sender` field, which is what that field is
+/// for. Over nexus the session identity answers instead and this is unused.
+pub const LOCAL_PEER_SENDER: &str = "peer-bot";
+
+pub const UNIFIED_SEND_BODY: &str = "hello from unified send PARITY_SCENARIO:single_turn_text";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Canned compaction summary returned by the `LlmCompactionRoundtrip`
@@ -189,6 +210,7 @@ enum Scenario {
     RetryThenSucceed,
     DeferredToolRoundtrip,
     UnifiedSendRoundtrip,
+    UnifiedSendFromNamedPeer,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -253,6 +275,7 @@ impl Scenario {
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
             "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
+            "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -298,6 +321,7 @@ impl Scenario {
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::DeferredToolRoundtrip => "deferred_tool_roundtrip",
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
+            Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -1087,7 +1111,20 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 "toolu_unified_send",
                 "send",
                 &[&format!(
-                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"hello from unified send","summary":"greeting test"}}"#
+                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test"}}"#
+                )],
+            ),
+        },
+        Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+            }
+            // `sender` supplied, which is how a local peer gets a name of its own.
+            None => tool_use_sse(
+                "toolu_unified_send_named",
+                "send",
+                &[&format!(
+                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test","sender":"{LOCAL_PEER_SENDER}"}}"#
                 )],
             ),
         },
@@ -1588,7 +1625,19 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_unified_send_tool",
                 "toolu_unified_send",
                 "send",
-                json!({"to": UNIFIED_SEND_RECIPIENT, "message": "hello from unified send", "summary": "greeting test"}),
+                json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
+            ),
+        },
+        Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_unified_send_named_final",
+                &format!("unified send roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_unified_send_named_tool",
+                "toolu_unified_send_named",
+                "send",
+                json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test", "sender": LOCAL_PEER_SENDER}),
             ),
         },
         Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
@@ -1703,6 +1752,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::DeferredToolRoundtrip => "req_deferred_tool_roundtrip",
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
+        Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",

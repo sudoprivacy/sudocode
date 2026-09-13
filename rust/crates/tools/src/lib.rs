@@ -656,8 +656,14 @@ impl GlobalToolRegistry {
     /// and previously-discovered tools have `defer_loading: false` (always
     /// active); other deferred tools have `defer_loading: true` (the API
     /// knows their schemas but doesn't count them against context until
-    /// the model discovers them via ToolSearch + `tool_reference`).
+    /// the model discovers them through ToolSearch).
     /// Requires the `advanced-tool-use` beta header.
+    ///
+    /// `discovered_tools` comes from [`extract_discovered_tool_names`], which
+    /// reads the names out of past ToolSearch results. That is the whole reveal
+    /// mechanism: the flag flipping here is what puts a searched-for tool's
+    /// schema on the wire. See [`convert_messages`] for why it is not also done
+    /// with in-band `tool_reference` blocks.
     #[must_use]
     pub fn core_definitions(
         &self,
@@ -6902,28 +6908,34 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                 }),
                 ContentBlock::ToolResult {
                     tool_use_id,
-                    tool_name,
+                    tool_name: _,
                     output,
                     is_error,
                 } => {
-                    let mut content: Vec<ToolResultContentBlock> =
-                        vec![ToolResultContentBlock::Text {
-                            text: output.clone(),
-                        }];
-                    if tool_name == "ToolSearch" {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
-                            if let Some(matches) = parsed.get("matches").and_then(|m| m.as_array())
-                            {
-                                for m in matches {
-                                    if let Some(name) = m.as_str() {
-                                        content.push(ToolResultContentBlock::ToolReference {
-                                            tool_name: name.to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // A tool result is its text, ToolSearch's included.
+                    //
+                    // This used to append one `tool_reference` block per match
+                    // beside that text, which made every request that followed a
+                    // ToolSearch fail: `400 invalid_request_error — Tool
+                    // definitions/code execution functions cannot be mixed with
+                    // other content`. A content array carrying tool definitions
+                    // may carry nothing else, so the text and the references
+                    // could not both be there, and deferred tools were
+                    // unreachable in practice — the model searched, and the turn
+                    // after the search died.
+                    //
+                    // Dropping the references costs nothing, because they were
+                    // the second of two mechanisms doing one job.
+                    // `extract_discovered_tool_names` reads the same `matches`
+                    // out of this text and `core_definitions` clears
+                    // `defer_loading` for those names, so the next request
+                    // carries their full schemas and the model can call them.
+                    // That is the path the deferred-tools prompt section
+                    // describes, and keeping the text is what lets the model see
+                    // what a keyword search actually matched.
+                    let content: Vec<ToolResultContentBlock> = vec![ToolResultContentBlock::Text {
+                        text: output.clone(),
+                    }];
                     Some(InputContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content,
@@ -7070,8 +7082,9 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 /// Tools always visible in the API `tools` array — the LLM sees their
 /// full schema on every turn. Everything else is "deferred": listed by
 /// name in `<available-deferred-tools>` and discovered via `ToolSearch`.
-/// Once discovered (via `tool_reference` blocks), the API expands their
-/// schemas and the model calls them directly.
+/// Once discovered, [`GlobalToolRegistry::core_definitions`] clears their
+/// `defer_loading` so the next request carries the full schema and the model
+/// calls them directly.
 const CORE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
@@ -10032,8 +10045,22 @@ mod tests {
         }
     }
 
+    /// A ToolSearch result crosses as text alone — no tool definitions beside it.
+    ///
+    /// The inverse of this test shipped and was green: it asserted
+    /// `text + 2 tool_references`, the exact shape the API refuses with
+    /// `400 invalid_request_error — Tool definitions/code execution functions
+    /// cannot be mixed with other content`. Nothing local could see it, because
+    /// the constraint is the server's and the mock does not enforce it, so every
+    /// turn that followed a ToolSearch died in production while this passed.
+    ///
+    /// Discovery does not need the references: `extract_discovered_tool_names`
+    /// reads `matches` out of this same text and `core_definitions` clears
+    /// `defer_loading` for those names, so the next request carries their full
+    /// schemas. One mechanism, and the text survives for the model to read.
     #[test]
-    fn convert_messages_injects_tool_references_for_tool_search() {
+    fn a_tool_search_result_carries_text_and_no_tool_definitions() {
+        use super::extract_discovered_tool_names;
         use runtime::{ContentBlock, ConversationMessage, MessageRole};
         let output = serde_json::json!({
             "matches": ["CronCreate", "CronList"],
@@ -10059,19 +10086,30 @@ mod tests {
             api::InputContentBlock::ToolResult { content, .. } => content,
             _ => panic!("expected ToolResult"),
         };
-        assert!(content.len() >= 3, "text + 2 tool_references");
-        assert!(matches!(
-            &content[0],
-            api::ToolResultContentBlock::Text { .. }
-        ));
-        assert!(matches!(
-            &content[1],
-            api::ToolResultContentBlock::ToolReference { tool_name } if tool_name == "CronCreate"
-        ));
-        assert!(matches!(
-            &content[2],
-            api::ToolResultContentBlock::ToolReference { tool_name } if tool_name == "CronList"
-        ));
+        assert_eq!(
+            content.len(),
+            1,
+            "a tool result is one text block; anything else mixes content the API refuses: {content:?}"
+        );
+        match &content[0] {
+            api::ToolResultContentBlock::Text { text } => {
+                // The names have to survive in the text, because that text is
+                // what discovery reads.
+                assert!(
+                    text.contains("CronCreate") && text.contains("CronList"),
+                    "the matches must reach the model, and `extract_discovered_tool_names`, as text: {text}"
+                );
+            }
+            other => panic!("expected a text block, got {other:?}"),
+        }
+
+        // And the round trip that replaces the references: these names are what
+        // clears `defer_loading` on the next request.
+        let discovered = extract_discovered_tool_names(&messages);
+        assert!(
+            discovered.contains("CronCreate") && discovered.contains("CronList"),
+            "discovery must pick both names out of the result: {discovered:?}"
+        );
     }
 
     #[test]

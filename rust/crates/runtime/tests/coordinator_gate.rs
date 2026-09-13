@@ -187,14 +187,7 @@ fn predicate_allows_delegation_tools_when_env_on() {
     let _guard = env_mutex();
     let _env = EnvGuard::set(COORDINATOR_ENV_VAR, "1");
 
-    for name in [
-        "Agent",
-        "SendMessage",
-        "TaskStop",
-        "TaskGet",
-        "TaskOutput",
-        "read_file",
-    ] {
+    for name in ["Agent", "SendMessage", "TaskGet", "TaskList", "read_file"] {
         assert!(
             is_tool_allowed_in_coordinator_mode(name),
             "coordinator mode MUST allow delegation/read-only tool `{name}`"

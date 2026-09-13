@@ -1322,11 +1322,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         // ── pid.* tools ───────────────────────────────────────────────
-        // Agent process control. A CC-trained model may spell these as
-        // `TaskStop`/`TaskOutput` and pass `task_id`; `TOOL_ALIASES` +
-        // `normalize_pid_input` accept those without advertising a
-        // second set. (`TaskGet`/`TaskList` are separate canonical tools
-        // for the to-do registry, NOT aliases for pid_status.)
+        // Agent process control. `normalize_pid_input` accepts `task_id`
+        // as a field alias for `pid` so older prompts still work.
+        // (`TaskGet`/`TaskList` are separate canonical tools for the
+        // to-do registry, NOT aliases for pid_status.)
         ToolSpec {
             name: "pid_kill",
             description: "Terminate a running agent by pid.",
@@ -1688,9 +1687,7 @@ fn execute_tool_with_enforcer(
             from_value::<TaskIdInput>(&input).and_then(run_task_get)
         }
         "TaskList" => run_task_list(input),
-        // The pid.* family. A CC-trained model names these TaskStop
-        // and TaskOutput; TOOL_ALIASES folds those spellings onto
-        // these arms.
+        // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
             from_value::<TaskIdInput>(&input).and_then(run_task_stop)
@@ -2145,8 +2142,8 @@ fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
-// Cap a single blocking TaskOutput call so ACP/upper-layer transports don't
-// drop the connection while we wait. Callers can re-issue TaskOutput to keep
+// Cap a single blocking pid_output call so ACP/upper-layer transports don't
+// drop the connection while we wait. Callers can re-issue pid_output to keep
 // polling — see retrieval_status="timeout" in the returned JSON.
 const MAX_AGENT_AWAIT_TIMEOUT_MS: u64 = 60_000;
 
@@ -8953,10 +8950,10 @@ mod tests {
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
         assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
         assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]
@@ -9074,8 +9071,6 @@ mod tests {
         for (requested, spec_name) in [
             ("TaskList", "TaskList"),
             ("TaskGet", "TaskGet"),
-            ("TaskStop", "pid_kill"),
-            ("TaskOutput", "pid_output"),
             ("SendMessage", "send"),
             ("Agent", "agent_spawn"),
             // Canonical names resolve to themselves.
@@ -9899,8 +9894,6 @@ mod tests {
         for (cc_name, canonical) in [
             ("select:Agent", "agent_spawn"),
             ("select:SendMessage", "send"),
-            ("select:TaskStop", "pid_kill"),
-            ("select:TaskOutput", "pid_output"),
             ("select:AgentTool", "agent_spawn"),
         ] {
             let out = execute_tool("ToolSearch", &json!({ "query": cc_name }))
@@ -12894,19 +12887,11 @@ printf 'pwsh:%s' "$1"
     // ── Unified pid alias routing ─────────────────────────────────────
 
     #[test]
-    fn canonicalize_task_stop_to_pid_kill() {
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
-    }
-
-    #[test]
-    fn canonicalize_task_get_and_list_stay_separate() {
+    fn canonicalize_task_tools_pass_through_unchanged() {
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
         assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
         assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-    }
-
-    #[test]
-    fn canonicalize_task_output_to_pid_output() {
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]

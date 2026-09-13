@@ -107,8 +107,8 @@ fn canonicalize_maps_agent_to_agent_spawn() {
 }
 
 #[test]
-fn canonicalize_maps_taskstop_to_pid_kill() {
-    assert_eq!(tools::canonicalize_tool_name("TaskStop"), "pid_kill");
+fn canonicalize_taskstop_passes_through() {
+    assert_eq!(tools::canonicalize_tool_name("TaskStop"), "TaskStop");
 }
 
 #[test]
@@ -122,8 +122,8 @@ fn canonicalize_keeps_tasklist_separate_from_pid_status() {
 }
 
 #[test]
-fn canonicalize_maps_taskoutput_to_pid_output() {
-    assert_eq!(tools::canonicalize_tool_name("TaskOutput"), "pid_output");
+fn canonicalize_taskoutput_passes_through() {
+    assert_eq!(tools::canonicalize_tool_name("TaskOutput"), "TaskOutput");
 }
 
 #[test]
@@ -723,17 +723,10 @@ fn coordinator_prompt_advertises_only_real_allowed_tools() {
 fn coordinator_predicate_admits_deprecated_aliases_via_canonicalization() {
     use runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode;
     std::env::set_var("SUDOCODE_COORDINATOR_MODE", "1");
-    for alias in [
-        "Agent",
-        "SendMessage",
-        "TaskStop",
-        "TaskGet",
-        "TaskList",
-        "TaskOutput",
-    ] {
+    for alias in ["Agent", "SendMessage", "TaskGet", "TaskList"] {
         assert!(
             is_tool_allowed_in_coordinator_mode(alias),
-            "deprecated alias `{alias}` should be admitted via canonicalization"
+            "`{alias}` should be admitted (canonical or via alias canonicalization)"
         );
     }
     std::env::remove_var("SUDOCODE_COORDINATOR_MODE");

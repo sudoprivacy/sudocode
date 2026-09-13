@@ -146,9 +146,9 @@ Every message you send is to the user. Worker results and system notifications a
 
 - **agent_spawn** - Spawn a new worker (alias: `Agent`)
 - **send** - Continue an existing worker (send follow-up to its pid) or signal shutdown (alias: `SendMessage`)
-- **pid_kill** - Stop a running worker (alias: `TaskStop`)
+- **pid_kill** - Stop a running worker by `pid`
 - **pid_status** - Fetch a running worker's status by `pid`, or list every spawned agent when `pid` is omitted
-- **pid_output** - Read a running or completed worker's output by `pid` (alias: `TaskOutput`)
+- **pid_output** - Read a running or completed worker's output by `pid`
 - **pid_fork** - Fork the current session into a background worker
 
 Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.

@@ -537,14 +537,16 @@ pub const FORK_BOILERPLATE_TAG: &str = "fork-boilerplate";
 /// 2. Detect fork-inside-fork recursion via the boilerplate tag left
 ///    in the child's own inherited user message.
 ///
-/// Every non-fork tool call receives this context but ignores it —
-/// [`ToolExecutor`]'s default `execute_with_context` forwards to
+/// Ordinary subagent spawns also inherit the current model from this
+/// context. [`ToolExecutor`]'s default `execute_with_context` forwards to
 /// `execute` without reading `ctx`.
 #[derive(Debug, Clone, Default)]
 pub struct ToolDispatchContext {
     /// The parent's assistant message that emitted the currently-
     /// executing tool_use. `None` when the caller isn't inside a
     /// parent's tool loop (test harnesses, direct executor invocations).
+    /// Its model is stamped from the current runtime, not a prior response;
+    /// subagents inherit this model unless their invocation overrides it.
     pub parent_assistant_message: Option<ConversationMessage>,
     /// The parent session's full message history at dispatch time,
     /// including the assistant message that just emitted this tool_use.
@@ -753,11 +755,6 @@ impl CompactionMethod {
 /// instead of an unbounded compaction loop. Worst case per turn is eight
 /// extra round-trips.
 const MAX_TURN_COMPACTIONS: usize = 8;
-
-/// Model assumed when a session has not recorded one. Capability lookups and
-/// compaction both need a name; using different fallbacks in different places
-/// would budget against one model and compact against another.
-const DEFAULT_COMPACTION_MODEL: &str = "claude-sonnet-4-6";
 
 /// The config every guard in this file compacts with.
 ///
@@ -2645,12 +2642,14 @@ where
 
     /// Use the active provider route for capability lookups. Session metadata
     /// can contain a config alias or the model used before a resume/switch.
+    /// An unknown model uses generic capability limits, never another model's
+    /// identity. Compaction requests reuse the current API client's route.
     fn compaction_model(&self) -> String {
         self.api_client
             .wire_model_id()
             .filter(|model| !model.is_empty())
             .or_else(|| Some(self.running_model()).filter(|model| !model.is_empty()))
-            .unwrap_or(DEFAULT_COMPACTION_MODEL)
+            .unwrap_or_default()
             .to_owned()
     }
 

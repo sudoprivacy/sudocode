@@ -1,0 +1,36 @@
+# Point the co-host's agents at this repo's mock model instead of a funded key.
+#
+# The base compose file writes a proxy-shaped `sudocode.json` at boot from
+# SUDOROUTER_BASE_URL, and sudocode resolves `proxy` to the OpenAI-compatible
+# provider — so the agent speaks `/v1/chat/completions`. The mock answers
+# Anthropic's `/v1/messages`, and the mismatch surfaces as a connection the
+# agent retries eight times and gives up on:
+#
+#   ⟳ retry 1/8 — http error: error sending request for url
+#                 (http://host.docker.internal:18080/v1/chat/completions)
+#
+# So the config has to select the ANTHROPIC provider, which means the shape the
+# PTY harness already uses: the sample config with its Anthropic base URL
+# pointed at the mock. `run-cohost.sh` builds it from
+# `rust/crates/runtime/src/sudocode.sample.json` — the same file
+# `SAMPLE_SUDOCODE_JSON` includes, so there is no second copy of the shape — and
+# passes it in as SCODE_MOCK_CONFIG.
+#
+# An override rather than an edit to the base file: the posture a test wants is
+# the test's business, and the nexus repo's compose keeps describing the real
+# deployment.
+services:
+  cohost:
+    environment:
+      # Required by the base file's `:?` guard, and unused: the mock does not
+      # check credentials. Kept so one `docker compose` invocation is enough.
+      SUDOROUTER_API_KEY: "sk-mock-unused"
+      SCODE_MOCK_CONFIG: "${SCODE_MOCK_CONFIG:?run-cohost.sh generates this from sudocode.sample.json}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /config
+        printf '%s' "$${SCODE_MOCK_CONFIG}" > /config/sudocode.json
+        exec nexusd-cluster --bind-addr 0.0.0.0:2126 --data-dir /app/data --no-tls --insecure-no-auth

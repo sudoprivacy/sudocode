@@ -68,11 +68,11 @@ Install both prerequisites before running it; missing dependencies fail an expli
 The test is marked ignored in the ordinary workspace suite because these are
 optional external dependencies, not part of a scode installation.
 
-The current sudohand repository is private. The standard sudocode CI has no
-cross-repository credentials and does not fetch or install it. A developer or
-CI environment with suh and Chrome installed can run the explicit test above.
-Sudocode's Cargo dependencies and release artifacts do not include sudohand;
-users install and upgrade their own compatible suh version.
+CI installs a standalone suh binary from the public repository at revision
+`c62b244a43d53bb87e1f14e97c5858ce41480745` plus Chrome, then explicitly runs the
+integration test on Linux, macOS and Windows. This pin is only a CI fixture;
+sudocode's Cargo dependencies and release artifacts do not include sudohand.
+Users install and upgrade their own compatible suh version.
 
 A local DeepSeek v4 Pro run on 2026-09-14 independently resolved the installed
 suh, used current refs to complete the form, and saved DOM JSON plus a screenshot

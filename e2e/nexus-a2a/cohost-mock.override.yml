@@ -26,6 +26,14 @@ services:
       # check credentials. Kept so one `docker compose` invocation is enough.
       SUDOROUTER_API_KEY: "sk-mock-unused"
       SCODE_MOCK_CONFIG: "${SCODE_MOCK_CONFIG:?run-cohost.sh generates this from sudocode.sample.json}"
+    # Force an IPv4 host entry. Docker's own `host.docker.internal` resolves to
+    # an IPv6 address inside the container (`fdc4:...::254`), and the mock binds
+    # IPv4 — so the agent's HTTP client connects to an address nothing is
+    # listening on. `curl` hid this by falling back to IPv4 after
+    # `Network unreachable`; the agent does not, and the failure looks like a
+    # co-host that never ran a turn.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     entrypoint:
       - /bin/sh
       - -c

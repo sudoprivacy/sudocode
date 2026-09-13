@@ -17,7 +17,17 @@
 # five merges.
 #
 # The mock binds on all interfaces because the agent dials it from inside the
-# container, through `host.docker.internal`.
+# container, through `host.docker.internal` — which the override pins to the
+# IPv4 gateway, because Docker's own entry for that name resolves to an IPv6
+# address the mock is not listening on.
+#
+# ## Building the image behind a TUN VPN
+#
+# `docker build` needs DNS, and a Clash-style TUN adapter leaves containers
+# unable to resolve anything (`Temporary failure resolving …`) while the host's
+# HTTP proxy keeps working. Hand the build the proxy instead of fighting DNS:
+#
+#   docker build --build-arg http_proxy=http://host.docker.internal:7897 #     --build-arg https_proxy=http://host.docker.internal:7897 #     --secret id=ghtoken,src=<token file> #     -f dockerfiles/Dockerfile.nexusd-cohost -t nexusd-cluster-cohost:<tag> .
 #
 # ## What it needs
 #

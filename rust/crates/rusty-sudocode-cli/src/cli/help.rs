@@ -684,6 +684,10 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  scode dump-manifests [--manifests-dir PATH]")?;
     writeln!(out, "  scode bootstrap-plan")?;
     writeln!(out, "  scode agents")?;
+    writeln!(
+        out,
+        "  scode browser <command> [flags]  (browser automation; see --help)"
+    )?;
     writeln!(out, "  scode mcp")?;
     writeln!(out, "  scode skills")?;
     writeln!(

@@ -853,22 +853,16 @@ fn assert_token_cost_reporting(_: &HarnessWorkspace, run: &ScenarioRun) {
 }
 
 fn parse_json_output(stdout: &str) -> Value {
-    if let Some(index) = stdout.rfind("{\"auto_compaction\"") {
-        return serde_json::from_str(&stdout[index..]).unwrap_or_else(|error| {
-            panic!("failed to parse JSON response from stdout: {error}\n{stdout}")
-        });
-    }
-
     stdout
         .lines()
         .rev()
         .find_map(|line| {
             let trimmed = line.trim();
-            if trimmed.starts_with('{') && trimmed.ends_with('}') {
-                serde_json::from_str(trimmed).ok()
-            } else {
-                None
-            }
+            // A permission prompt can share the final JSON line. JSON object
+            // field order is not a protocol guarantee (Cargo features can change it).
+            trimmed
+                .find('{')
+                .and_then(|start| serde_json::from_str(&trimmed[start..]).ok())
         })
         .unwrap_or_else(|| panic!("no JSON response line found in stdout:\n{stdout}"))
 }

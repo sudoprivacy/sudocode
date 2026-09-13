@@ -91,10 +91,17 @@ fn version_renders_json() {
     let mut sess =
         spawn_scode(&["version", "--output-format", "json"]).expect("spawn scode version");
 
-    sess.expect("build_date")
-        .expect("version should contain build date");
-    sess.expect("git_sha")
-        .expect("version should contain git sha");
+    let output = sess
+        .expect(r"(?s)\{.*\r?\n\}")
+        .expect("complete version JSON");
+    let response: serde_json::Value =
+        serde_json::from_str(output.trim()).expect("valid version JSON");
+    assert!(response["build_date"]
+        .as_str()
+        .is_some_and(|date| !date.is_empty()));
+    assert!(response["git_sha"]
+        .as_str()
+        .is_some_and(|sha| !sha.is_empty()));
 
     let exit = sess.expect_eof().expect("scode version should exit");
     assert_eq!(exit, 0, "scode version should exit 0; got {exit}");

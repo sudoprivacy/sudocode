@@ -160,11 +160,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: Install Chrome for browser CLI PTY coverage
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-dependencies: true
       - name: Run workspace tests
         # Keep panic diagnostics visible if a Windows PTY aborts before libtest
         # can print its captured failure output.
         env:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
+          AI_DEV_BROWSER_CHROME: ${{ steps.chrome.outputs.chrome-path }}
         run: cargo test --workspace
 
   a2a-live:

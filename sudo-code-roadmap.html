@@ -533,7 +533,7 @@ coverage starts fresh and is tracked here as the single source.</p>
   <tbody>
     <tr><td><code>WebSearch</code></td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Need to verify if CC's web search has an externally usable API or if we need our own provider.</td></tr>
     <tr><td><code>WebFetch</code> (URL → extract)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. Related to Browser (below) — WebFetch is headless fetch, Browser is full Chromium.</td></tr>
-    <tr><td>Browser (ai-dev-browser)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td>LLM tool. CC parity with "Claude in Chrome". <code>ai-dev-browser</code> already integrated in sudowork; when sudocode integrates, remove duplicate from sudowork per <a href="#feature-parity">feature-parity rule</a>.</td></tr>
+    <tr><td>Browser CLI (sudohand)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap</td><td>—</td><td><code>scode browser</code> embeds pinned sudohand browser commands, invoked through existing Bash. <code>pty_browser_cli</code> exercises real Chrome with scripted model replies: discover, type, click, screenshot, stop. Local DeepSeek v4 Pro end-to-end verification passed on 2026-09-14, including DOM JSON and screenshot inspection. Automated live-mode PTY coverage on main remains a gap. See <a href="docs/browser-cli.md">browser CLI documentation</a>.</td></tr>
   </tbody>
 </table>
 

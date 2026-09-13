@@ -12,6 +12,7 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod browser_cli;
 mod cancel;
 mod cli;
 mod init;
@@ -604,6 +605,15 @@ fn run_config_account(
 }
 
 fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "browser")
+    {
+        let args = std::iter::once(std::ffi::OsString::from("scode browser"))
+            .chain(std::env::args_os().skip(2));
+        std::process::exit(browser_cli::run(args));
+    }
+
     // Must run before any output so early raw ANSI escapes render correctly on
     // the Windows console (see `enable_windows_ansi_support`).
     enable_windows_ansi_support();

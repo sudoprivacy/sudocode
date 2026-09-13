@@ -366,3 +366,9 @@ Released under the MIT License. See the per-crate license fields in
 Sudo Code is maintained by the Sudo Privacy community as the agent
 unit underneath the [Sudowork](https://sudowork.sudoprivacy.com)
 collaboration platform.
+
+### Browser automation
+
+Use `scode browser --help` for built-in Chrome/Chromium/Edge automation via
+Bash, without installing a separate `suh` CLI. See [browser CLI usage](docs/browser-cli.md)
+for setup, element refs, screenshots, and browser cleanup.

@@ -435,6 +435,46 @@ async fn scenario_session_prompt(client: &mut AcpTestClient, session_id: &str) {
     );
 }
 
+/// Wait for one background subagent to finish and return what it produced.
+///
+/// Polls because there is no notification to wait on: the turn that spawned the
+/// agent has already ended, and the agent writes its terminal state from its own
+/// thread. The manifest reaching a terminal `status` IS the completion signal —
+/// the same file `pid_output` reads — so this observes the runtime rather than
+/// guessing a duration.
+///
+/// Returns a description either way. A timeout or an unreadable manifest is left
+/// to the caller's assertion to report, together with the other two agents, so
+/// one slow agent does not hide what the others did.
+async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last = String::from("manifest never became readable");
+    while tokio::time::Instant::now() < deadline {
+        match fs::read_to_string(manifest_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        {
+            Some(manifest) => {
+                let status = manifest["status"].as_str().unwrap_or("").to_string();
+                // `completed_at` is set in the same write as the terminal status,
+                // so either marks the end of the run.
+                if status == "completed" || status == "failed" {
+                    return format!(
+                        "{status}: {}",
+                        manifest["result"]
+                            .as_str()
+                            .unwrap_or("<no result recorded>")
+                    );
+                }
+                last = format!("still {status}");
+            }
+            None => last = String::from("manifest unreadable"),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    format!("timed out after {budget:?} ({last})")
+}
+
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
     let (notifs, resp) = client
         .send_request(
@@ -486,16 +526,21 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    // Extract subagent results from rawOutput.result (TaskOutput results).
-    let mut agent_results: Vec<String> = completed_updates
+    // The manifest each spawn created.
+    //
+    // `agent_spawn` is a BACKGROUND spawn: it answers with a pid and
+    // `status: "running"`, never with the subagent's reply, so the reply is not
+    // in this notification and cannot be. The manifest is where the runtime
+    // records it when the subagent finishes — see `persist_agent_terminal_state`
+    // in the tools crate, which sets `status`, `completed_at` and `result`.
+    let spawn_manifests: Vec<String> = completed_updates
         .iter()
         .filter_map(|n| {
-            n["params"]["update"]["rawOutput"]["result"]
+            n["params"]["update"]["rawOutput"]["manifestFile"]
                 .as_str()
                 .map(String::from)
         })
         .collect();
-    agent_results.sort();
 
     // Count failed tool_call_update notifications for diagnostics.
     let failed_updates: Vec<_> = notifs
@@ -513,7 +558,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         agent_starts.len(),
         completed_updates.len(),
         failed_updates.len(),
-        agent_results,
+        spawn_manifests,
     );
     for (i, n) in notifs.iter().enumerate() {
         let update = &n["params"]["update"];
@@ -568,22 +613,61 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
             "expected exactly 3 Agent tool_call starts, got {}",
             agent_starts.len()
         );
-        assert!(
-            agent_results.contains(&"203".to_string())
-                && agent_results.contains(&"403".to_string())
-                && agent_results.contains(&"603".to_string()),
-            "expected agent results to contain 203, 403, 603 but got: {agent_results:?}"
+        assert_eq!(
+            spawn_manifests.len(),
+            3,
+            "each spawn must report the manifest that will carry its result, got {spawn_manifests:?}"
         );
+
+        // Read the answers off the manifests the runtime wrote, not out of the
+        // orchestrator's reply.
+        //
+        // This used to assert `rawOutput.result` on a completed tool_call_update,
+        // which is only ever populated by a `pid_output` call — so it asserted
+        // that the MODEL chose to collect. It stopped choosing to once
+        // `pid_output` became a deferred tool: it spawns the three agents, finds
+        // `pid_output` through ToolSearch, then satisfies the prompt's
+        // "output the JSON" by doing the arithmetic itself (101 + 102 is not a
+        // calculation a model needs an agent for). Identical counts on five
+        // consecutive main runs — a deterministic shortcut, not a flake.
+        //
+        // What this test exists to prove is that the subagent pipeline runs over
+        // ACP: three agents really started, really executed, and really produced
+        // their answers. The manifests are that fact, and they hold it however
+        // the orchestrator decides to narrate the turn.
+        // Concurrently, on one shared budget: the three agents run in parallel,
+        // so waiting for them in series would bill their latencies end to end.
+        let results = futures_util::future::join_all(
+            spawn_manifests
+                .iter()
+                .map(|m| await_agent_result(m, Duration::from_secs(90))),
+        )
+        .await;
+        let joined = results.join(" | ");
+        for expected in ["203", "403", "603"] {
+            assert!(
+                joined.contains(expected),
+                "no subagent produced {expected}; manifests said: {joined}"
+            );
+        }
     }
 
+    // Print the whole response, not just the field: a JSON-RPC error carries no
+    // `result` at all, so `result["stopReason"]` reads Null for "the turn ended
+    // some other way" and for "the turn failed and told us why" alike. The first
+    // time this assertion ever ran it reported `left: Null`, which narrowed
+    // nothing.
     let result = &resp["result"];
     assert_eq!(
-        result["stopReason"], "end_turn",
-        "subagent prompt stopReason should be end_turn"
+        result["stopReason"],
+        "end_turn",
+        "subagent prompt stopReason should be end_turn; full response: {}",
+        serde_json::to_string(&resp).unwrap_or_default()
     );
     assert!(
         result.get("usage").is_some(),
-        "subagent prompt response should include usage"
+        "subagent prompt response should include usage; full response: {}",
+        serde_json::to_string(&resp).unwrap_or_default()
     );
 }
 

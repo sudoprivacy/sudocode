@@ -309,6 +309,23 @@ async fn handle_connection(
     let normalized_body = normalize_system_field(&raw_body);
     let request: MessageRequest = serde_json::from_str(&normalized_body)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    // Refuse a tool result that mixes tool definitions with other content,
+    // exactly as the real API does.
+    //
+    // Without this the mock is more permissive than production in the one way
+    // that mattered: scode appended a `tool_reference` block beside a
+    // ToolSearch result's text, every request after a search 400'd live, and
+    // both `pty_deferred_tools` and a unit test asserting that very shape
+    // stayed green. A mock that accepts what the server rejects turns its
+    // suites into evidence of nothing.
+    if let Some(offending) = tool_result_mixing_definitions(&request) {
+        let body = format!(
+            r#"{{"type":"error","error":{{"type":"invalid_request_error","message":"Tool definitions/code execution functions cannot be mixed with other content (tool_use_id {offending})"}}}}"#
+        );
+        let response = http_response("400 Bad Request", "application/json", &body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     // Cache-safe compaction sends the full conversation with a compaction
     // prompt appended. Reject it with a proper HTTP 400 so the runtime
     // falls back to the standard compaction path.
@@ -533,6 +550,32 @@ fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bo
         }
     }
     results
+}
+
+/// The `tool_use_id` of the first tool result that puts a `tool_reference`
+/// block in the same content array as anything else, if any.
+///
+/// A content array may carry tool definitions or other content, never both —
+/// see [`api::ToolResultContentBlock::ToolReference`].
+fn tool_result_mixing_definitions(request: &MessageRequest) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|block| match block {
+            InputContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                let definitions = content
+                    .iter()
+                    .filter(|b| matches!(b, api::ToolResultContentBlock::ToolReference { .. }))
+                    .count();
+                (definitions > 0 && definitions != content.len()).then(|| tool_use_id.clone())
+            }
+            _ => None,
+        })
 }
 
 fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> String {

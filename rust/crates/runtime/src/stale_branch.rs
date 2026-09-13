@@ -174,14 +174,31 @@ fn missing_fix_subjects(a: &str, b: &str, repo_path: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// A directory no other test in this binary can be handed.
+    ///
+    /// Six tests here call this and cargo runs them in parallel, so uniqueness
+    /// has to come from a counter rather than from the clock. Naming the
+    /// directory after `SystemTime::now().as_nanos()` read as unique and was
+    /// not: the value carries only as much resolution as the platform clock
+    /// has, and on macOS that is coarse enough for two threads entering at the
+    /// same moment to be handed the same path. They then ran `git init`,
+    /// `checkout -b` and `commit` against one repo, and the loser failed with a
+    /// bare `exited with exit status: 128` — which is how this sat red on the
+    /// macOS runner while passing everywhere else.
     fn temp_dir() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("runtime-stale-branch-{nanos}"))
+        std::env::temp_dir().join(format!(
+            "runtime-stale-branch-{}-{nanos}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     fn init_repo(path: &Path) {
@@ -194,16 +211,25 @@ mod tests {
         run(path, &["commit", "-m", "initial commit", "--quiet"]);
     }
 
+    /// Run a git command, and say what git said when it refuses.
+    ///
+    /// Reporting only the exit status is what made the collision above a
+    /// guessing game: `exited with exit status: 128` names neither the reason
+    /// nor the repository it happened in.
     fn run(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let output = Command::new("git")
             .args(args)
             .current_dir(cwd)
-            .status()
+            .output()
             .unwrap_or_else(|e| panic!("git {} failed to execute: {e}", args.join(" ")));
         assert!(
-            status.success(),
-            "git {} exited with {status}",
-            args.join(" ")
+            output.status.success(),
+            "git {} in {} exited with {}: {}{}",
+            args.join(" "),
+            cwd.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
         );
     }
 

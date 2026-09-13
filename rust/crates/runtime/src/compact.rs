@@ -253,6 +253,30 @@ pub fn prune_tool_results(session: &mut Session) -> usize {
     pruned
 }
 
+/// Completion validity belongs to the checkpoint policy, not the transport.
+pub(crate) fn validate_completion(
+    response: crate::conversation::TextCompletion,
+) -> Result<String, crate::conversation::RuntimeError> {
+    use crate::conversation::RuntimeError;
+    if matches!(
+        response.stop_reason.as_deref(),
+        Some("max_tokens" | "length" | "incomplete")
+    ) {
+        return Err(RuntimeError::new(
+            "compaction summary was truncated at the output limit",
+        ));
+    }
+    if response.has_tool_calls {
+        return Err(RuntimeError::new(
+            "compaction returned tool calls instead of a complete checkpoint",
+        ));
+    }
+    if response.text.trim().is_empty() {
+        return Err(RuntimeError::new("compaction returned no summary text"));
+    }
+    Ok(response.text)
+}
+
 /// Validate the actual framed replacement, not just the raw model response.
 fn validate_summary(summary: &str, removed: &[ConversationMessage]) -> Result<(), CompactionError> {
     let text = format_compact_summary(summary);

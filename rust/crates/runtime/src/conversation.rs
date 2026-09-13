@@ -115,6 +115,24 @@ pub struct ApiRequest {
     pub pre_compact_discovered_tools: std::collections::BTreeSet<String>,
 }
 
+/// Controls a non-streaming, text-only model completion. Tool schemas can be
+/// retained as context without enabling a tool execution loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextCompletionOptions {
+    pub max_tokens: u32,
+    pub include_tools: bool,
+    pub cache_prefix: bool,
+}
+
+/// Provider-neutral completion data; consumers decide whether the finish
+/// reason and content are acceptable for their task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextCompletion {
+    pub text: String,
+    pub stop_reason: Option<String>,
+    pub has_tool_calls: bool,
+}
+
 /// Streamed events emitted while processing a single assistant turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
@@ -162,41 +180,68 @@ pub type AssistantEventStream =
 pub trait ApiClient: Send {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
 
-    /// Send a non-streaming compaction request and return the raw summary text.
-    ///
-    /// The default implementation returns an error — providers that support
-    /// LLM-based compaction override this (see `AnthropicRuntimeClient`).
-    async fn send_compaction(
+    /// Complete a text request using this client's configured model route.
+    /// Request conversion and transport live in the shared API layer.
+    async fn complete_text(
         &mut self,
-        _model: &str,
-        _system_prompt: &str,
-        _messages: Vec<ConversationMessage>,
-        _max_tokens: u32,
-    ) -> Result<String, RuntimeError> {
+        _request: ApiRequest,
+        _options: TextCompletionOptions,
+    ) -> Result<TextCompletion, RuntimeError> {
         Err(RuntimeError::new(
-            "compaction not supported by this API client",
+            "text completion not supported by this API client",
         ))
     }
 
-    /// Cache-safe compaction: sends the compaction prompt over the same
-    /// system-prompt + message prefix the previous conversation turn used,
-    /// enabling the provider's prompt cache to hit on the shared prefix.
-    ///
-    /// `request` carries the runtime's system prompt and the full session
-    /// messages (identical to the last regular turn). `compaction_prompt`
-    /// is appended as a final user message. Returns the raw summary text.
-    ///
-    /// The default implementation returns an error — providers that support
-    /// prompt caching override this.
+    /// Shared standard-compaction adapter. Clients implement `complete_text`,
+    /// not separate compaction transports. Retained for existing API consumers.
+    async fn send_compaction(
+        &mut self,
+        _model: &str,
+        system_prompt: &str,
+        messages: Vec<ConversationMessage>,
+        max_tokens: u32,
+    ) -> Result<String, RuntimeError> {
+        let mut prompt = SystemPrompt::default();
+        prompt.append_static_section(system_prompt);
+        let response = self
+            .complete_text(
+                ApiRequest {
+                    system_prompt: prompt,
+                    messages,
+                    trace_id: None,
+                    pre_compact_discovered_tools: std::collections::BTreeSet::default(),
+                },
+                TextCompletionOptions {
+                    max_tokens,
+                    include_tools: false,
+                    cache_prefix: false,
+                },
+            )
+            .await?;
+        crate::compact::validate_completion(response)
+    }
+
+    /// Shared cache-preserving adapter over the older message prefix.
     async fn send_cache_safe_compaction(
         &mut self,
-        _request: ApiRequest,
-        _compaction_prompt: &str,
-        _max_tokens: u32,
+        mut request: ApiRequest,
+        compaction_prompt: &str,
+        max_tokens: u32,
     ) -> Result<String, RuntimeError> {
-        Err(RuntimeError::new(
-            "cache-safe compaction not supported by this API client",
-        ))
+        request
+            .messages
+            .push(ConversationMessage::user_text(compaction_prompt));
+        let response = self
+            .complete_text(
+                request,
+                TextCompletionOptions {
+                    max_tokens,
+                    include_tools: true,
+                    cache_prefix: true,
+                },
+            )
+            .await?;
+        crate::compact::validate_completion(response)
     }
 
     /// Install (or clear) the sink the transport reports retries to.

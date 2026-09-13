@@ -24,8 +24,8 @@ use api::{
 };
 use async_trait::async_trait;
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ConversationMessage, MessageRole,
-    PromptCacheEvent, RuntimeError,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, MessageRole, PromptCacheEvent,
+    RuntimeError,
 };
 use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
@@ -331,84 +331,20 @@ impl ApiClient for EngineApiClient {
         }
     }
 
-    async fn send_compaction(
-        &mut self,
-        model: &str,
-        system_prompt: &str,
-        messages: Vec<ConversationMessage>,
-        max_tokens: u32,
-    ) -> Result<String, RuntimeError> {
-        let request = MessageRequest {
-            model: model.to_string(),
-            max_tokens,
-            messages: tools::convert_messages(&messages),
-            system: Some(system_prompt.to_string()),
-            tools: None,
-            tool_choice: None,
-            stream: false,
-            reasoning_effort: None,
-            cache_hints: None,
-            ..Default::default()
-        };
-
-        let response = self
-            .client
-            .send_message(&request, None)
-            .await
-            .map_err(|error| RuntimeError::new(format!("compaction API error: {error}")))?;
-
-        response.compaction_text().map_err(RuntimeError::new)
-    }
-
-    async fn send_cache_safe_compaction(
+    async fn complete_text(
         &mut self,
         request: ApiRequest,
-        compaction_prompt: &str,
-        max_tokens: u32,
-    ) -> Result<String, RuntimeError> {
-        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
-            system_static: Some(request.system_prompt.static_text()),
-            system_dynamic: Some(request.system_prompt.dynamic_text()),
-            breakpoint_last_message: true,
-        });
-
-        let mut messages = tools::convert_messages(&request.messages);
-        messages.push(InputMessage {
-            role: "user".to_string(),
-            content: vec![api::InputContentBlock::Text {
-                text: compaction_prompt.to_string(),
-            }],
-        });
-
-        let discovered = self.enable_tools.then(|| {
+        options: runtime::TextCompletionOptions,
+    ) -> Result<runtime::TextCompletion, RuntimeError> {
+        let tools = (options.include_tools && self.enable_tools).then(|| {
             let mut discovered = tools::extract_discovered_tool_names(&request.messages);
             discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
-            discovered
+            self.tool_registry
+                .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
         });
-        let message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens,
-            messages,
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: self.enable_tools.then(|| {
-                self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
-            }),
-            tool_choice: None,
-            stream: false,
-            reasoning_effort: None,
-            cache_hints,
-            thinking_enabled: false,
-            ..Default::default()
-        };
-
-        let response = self
-            .client
-            .send_message(&message_request, None)
+        self.client
+            .complete_text(&self.model, request, options, tools)
             .await
-            .map_err(|error| RuntimeError::new(format!("cache-safe compaction error: {error}")))?;
-
-        response.compaction_text().map_err(RuntimeError::new)
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {

@@ -70,6 +70,17 @@ fn serve(
     captured: &Mutex<Vec<Value>>,
     read_only_dir: Option<&std::path::Path>,
 ) {
+    // Back to blocking first, then the timeout.
+    //
+    // The listener is non-blocking so the accept loop can poll `stopped`, and on
+    // WINDOWS an accepted socket inherits that mode — POSIX explicitly does not,
+    // which is why this only bites one platform. Inherited, `set_read_timeout`
+    // buys nothing: every read with no byte already buffered returns
+    // `WouldBlock` (WSAEWOULDBLOCK, os error 10035) immediately, the `unwrap`s
+    // below kill this thread, and the test fails 30s later as
+    // `timeout waiting for pattern: history preserved` — a server that died
+    // looks exactly like a client that never asked.
+    socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

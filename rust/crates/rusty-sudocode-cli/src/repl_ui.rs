@@ -1410,8 +1410,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                     h.push(trimmed.to_string());
                                                 }
                                             }
-                                            let indented = display.replace('\n', "\n  ");
-                                            stdout_for_events.println(format!("{}\u{276f}{} {indented}", crate::render::BOLD, crate::render::RESET));
+                                            let mut lines = display.split('\n');
+                                            if let Some(first) = lines.next() {
+                                                stdout_for_events.println(format!("{}\u{276f}{} {first}", crate::render::BOLD, crate::render::RESET));
+                                                for line in lines {
+                                                    stdout_for_events.println(format!("  {line}"));
+                                                }
+                                            }
                                             let _ = input_tx_for_events.send(InputEvent::Submit(expanded));
                                         }
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}

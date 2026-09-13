@@ -652,14 +652,22 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         }
     }
 
+    // Print the whole response, not just the field: a JSON-RPC error carries no
+    // `result` at all, so `result["stopReason"]` reads Null for "the turn ended
+    // some other way" and for "the turn failed and told us why" alike. The first
+    // time this assertion ever ran it reported `left: Null`, which narrowed
+    // nothing.
     let result = &resp["result"];
     assert_eq!(
-        result["stopReason"], "end_turn",
-        "subagent prompt stopReason should be end_turn"
+        result["stopReason"],
+        "end_turn",
+        "subagent prompt stopReason should be end_turn; full response: {}",
+        serde_json::to_string(&resp).unwrap_or_default()
     );
     assert!(
         result.get("usage").is_some(),
-        "subagent prompt response should include usage"
+        "subagent prompt response should include usage; full response: {}",
+        serde_json::to_string(&resp).unwrap_or_default()
     );
 }
 

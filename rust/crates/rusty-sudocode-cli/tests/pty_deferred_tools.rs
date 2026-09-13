@@ -1,12 +1,11 @@
 //! PTY tests for the deferred tools mechanism (CC parity).
 //!
-//! Verifies the `ExecuteExtraTool` → deferred tool dispatch roundtrip:
-//! the mock LLM emits an `ExecuteExtraTool` call with `tool_name: "CronList"`,
-//! scode dispatches it, and the model sees the CronList result.
+//! Verifies direct deferred tool dispatch: the mock LLM calls `CronList`
+//! directly (via `defer_loading` + `tool_reference` expansion), scode
+//! dispatches it through the GlobalToolRegistry, and the model sees the result.
 //!
-//! The second test verifies that `ExecuteExtraTool` can dispatch to an MCP
-//! tool: the mock LLM targets `mcp__parity__echo` through `ExecuteExtraTool`,
-//! and the MCP echo response round-trips back.
+//! The second test verifies MCP tool dispatch: the mock LLM calls
+//! `mcp__parity__echo` directly, and the MCP echo response round-trips back.
 //!
 //! ```bash
 //! cargo test --test pty_deferred_tools                          # mock (CI)
@@ -19,16 +18,13 @@ use std::path::Path;
 use common::TestEnv;
 
 #[test]
-fn execute_extra_tool_roundtrip() {
-    let env = TestEnv::new("execute-extra-tool");
+fn deferred_tool_roundtrip() {
+    let env = TestEnv::new("deferred-tool");
     if env.is_live() {
         eprintln!("SKIP: deferred-tool dispatch is validated against the mock backend");
         return;
     }
-    let prompt = env.prompt(
-        "List all scheduled cron tasks using ExecuteExtraTool.",
-        "execute_extra_tool_roundtrip",
-    );
+    let prompt = env.prompt("List all scheduled cron tasks.", "deferred_tool_roundtrip");
 
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
 
@@ -36,14 +32,11 @@ fn execute_extra_tool_roundtrip() {
         .expect("should see roundtrip completion message");
 
     let exit = sess.expect_eof().expect("scode should exit");
-    assert_eq!(
-        exit, 0,
-        "execute_extra_tool roundtrip should exit 0; got {exit}"
-    );
+    assert_eq!(exit, 0, "deferred tool roundtrip should exit 0; got {exit}");
 }
 
 /// Minimal NDJSON MCP server — same as `pty_mcp_tool` but reused here to
-/// verify the unified dispatch path through `ExecuteExtraTool`.
+/// verify deferred MCP tool dispatch.
 const MCP_SERVER_SCRIPT: &str = r#"import json, sys
 
 def read_message():
@@ -130,18 +123,17 @@ fn configure_mcp_server(workspace_root: &Path) {
     .expect("project settings.json should write");
 }
 
-/// ExecuteExtraTool dispatches to an MCP tool through the unified path:
-/// model emits `ExecuteExtraTool { tool_name: "mcp__parity__echo", ... }`,
-/// the `CliToolExecutor` intercept routes to `execute_runtime_tool`, and
-/// the MCP echo response round-trips back.
+/// Deferred MCP tool dispatch: the mock LLM calls `mcp__parity__echo`
+/// directly, scode routes it to the MCP server, and the echo response
+/// round-trips back.
 #[test]
-fn execute_extra_tool_dispatches_mcp_tool() {
-    let env = TestEnv::new("execute-extra-tool-mcp");
+fn deferred_mcp_tool_roundtrip() {
+    let env = TestEnv::new("deferred-mcp-tool");
     configure_mcp_server(env.workspace_root());
 
     let prompt = env.prompt(
-        "Use ExecuteExtraTool to call the parity echo MCP tool with text 'hello from deferred mcp'.",
-        "execute_extra_tool_mcp_roundtrip",
+        "Call the parity echo MCP tool with text 'hello from deferred mcp'.",
+        "deferred_mcp_tool_roundtrip",
     );
 
     let mut sess = env.spawn_with_env(
@@ -150,11 +142,11 @@ fn execute_extra_tool_dispatches_mcp_tool() {
     );
 
     sess.expect("echo:hello from deferred mcp")
-        .expect("MCP echo response should round-trip through ExecuteExtraTool");
+        .expect("MCP echo response should round-trip through deferred dispatch");
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(
         exit, 0,
-        "ExecuteExtraTool → MCP roundtrip should exit 0; got {exit}"
+        "deferred MCP tool roundtrip should exit 0; got {exit}"
     );
 }

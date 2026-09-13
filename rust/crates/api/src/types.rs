@@ -176,8 +176,29 @@ pub struct ImageSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultContentBlock {
-    Text { text: String },
-    Json { value: Value },
+    Text {
+        text: String,
+    },
+    Json {
+        value: Value,
+    },
+    /// Loads a deferred tool's definition in-band, naming it from a tool result.
+    ///
+    /// **It must be the only thing in the content array.** The API refuses a
+    /// content array that carries tool definitions alongside anything else:
+    /// `400 invalid_request_error — Tool definitions/code execution functions
+    /// cannot be mixed with other content`. Appending one of these beside a
+    /// tool result's text killed every turn that followed a `ToolSearch`, and
+    /// nothing local caught it because the constraint is the server's.
+    ///
+    /// Nothing constructs it today. `tools::convert_messages` sends the text
+    /// alone and the reveal happens through `defer_loading` instead — the
+    /// searched-for names clear that flag on the next request, which needs no
+    /// in-band block. Reach for this only to replace a tool result's content
+    /// entirely, never to add to it.
+    ToolReference {
+        tool_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +207,8 @@ pub struct ToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

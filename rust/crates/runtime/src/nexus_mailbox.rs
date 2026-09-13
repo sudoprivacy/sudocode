@@ -17,10 +17,6 @@ use std::sync::Arc;
 
 use nexus_vfs_client::NexusVfsClient;
 
-use crate::agent_mailbox::MailboxEnvelope;
-
-use crate::spawn_task::MailboxSender;
-
 /// gRPC target of the nexus daemon this `scode` dials (`host:port`).
 /// Its presence is the sole enable switch for standalone A2A.
 pub const ENDPOINT_ENV: &str = "NEXUS_A2A_ENDPOINT";
@@ -188,156 +184,14 @@ fn non_empty_env(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// VFS path of an agent's replicated A2A inbox.
-#[must_use]
-pub fn inbox_path(agent: &str) -> String {
-    format!("/agents/{agent}/chat-with-me")
-}
-
-/// Append a message to `to`'s inbox and return the offset it landed at.
-///
-/// The `from` we write is advisory: under auth-on the daemon's
-/// `MailboxStampingHook` overwrites it with the authenticated caller's
-/// identity (so it cannot be forged); under auth-off it is used as-is.
-///
-/// # Errors
-/// Returns a `String` error if the `stream_write` RPC fails.
-pub fn send(
-    client: &NexusVfsClient,
-    from: &str,
-    to: &str,
-    body: &str,
-    auth_token: &str,
-) -> Result<u64, String> {
-    let env = MailboxEnvelope {
-        from: from.to_string(),
-        to: to.to_string(),
-        body: body.to_string(),
-        summary: None,
-        timestamp: 0,
-        color: None,
-        kind: String::new(),
-        request_id: None,
-    };
-    let path = inbox_path(to);
-    client
-        .stream_write(&path, env.to_bytes(), auth_token)
-        .map_err(|e| format!("A2A stream_write to {path}: {e}"))
-}
-
-/// Build a [`MailboxSender`] backed by a gRPC [`NexusVfsClient`] — the
-/// standalone counterpart to [`crate::spawn_task::mailbox_sender`] (which is
-/// backed by the in-process kernel). Both feed the SAME shared
-/// [`crate::spawn_task::handle_send_message`], so co-host and standalone
-/// `send` share every line except this transport closure.
-///
-/// `from` is the standalone agent's own name (advisory — the node stamps the
-/// authenticated identity under auth-on). `client` is shared (constructed
-/// once at startup, held by the CLI executor).
-#[must_use]
-pub fn grpc_sender(client: Arc<NexusVfsClient>, from: String, auth_token: String) -> MailboxSender {
-    Arc::new(move |to: &str, body: &str| send(&client, &from, to, body, &auth_token).map(|_| ()))
-}
-
-/// Provision this agent's own A2A inbox (idempotent) — the standalone analog
-/// of the co-host's in-process [`a2a::ensure_mailbox_stream`]. A terminal
-/// `scode` is not a managed agent, so nothing registers its inbox for it; it
-/// must ensure its own `/agents/<self>/chat-with-me` DT_STREAM exists before
-/// the poller can read it. Uses the a2a SSOT io_profile + capacity so a
-/// standalone-created inbox is byte-identical to a co-host-created one.
-///
-/// # Errors
-/// Returns a `String` error if the `setattr(DT_STREAM)` RPC fails.
-pub fn ensure_inbox(client: &NexusVfsClient, agent: &str, auth_token: &str) -> Result<(), String> {
-    let path = inbox_path(agent);
-    client
-        .ensure_stream(
-            &path,
-            a2a::MAILBOX_IO_PROFILE,
-            a2a::mailbox_stamping_policy::MAILBOX_STREAM_CAPACITY as u64,
-            auth_token,
-        )
-        .map(|_created| ())
-        .map_err(|e| format!("ensure A2A inbox {path}: {e}"))
-}
-
-/// Wait for and drain new frames in `self_agent`'s inbox from `cursor` forward.
-///
-/// `block_ms == 0` is a pure non-blocking drain (seek-to-tail / one-shot
-/// collect). `block_ms > 0` makes the FIRST read a blocking tail read: the
-/// server parks up to `block_ms` on the DT_STREAM's per-path condvar and wakes
-/// sub-millisecond on the next write (node-local or a replicated peer), so an
-/// idle receiver costs one parked RPC rather than a busy `sleep` loop. Once the
-/// first frame arrives the remaining buffered frames are drained non-blocking,
-/// so a burst surfaces in one call.
-///
-/// Why blocking `read_at_blocking` and not `sys_watch`/`Watch`: for the WAL
-/// mailbox both wake (the apply observer signals the file-watch AND the stream
-/// condvar), but a blocking read is ONE RPC that returns the next frame AT the
-/// cursor, whereas `sys_watch` returns only a "something changed" event and
-/// still needs a follow-up read — two round-trips and no cursor precision. The
-/// blocking read is the cursor-aware tail primitive the A2A mailbox is built
-/// on; `sys_watch` is the generic inotify-style path-change notifier.
-///
-/// Returns the new inbound messages and the advanced cursor to persist for the
-/// next poll. Skips our OWN writes (`from == self_agent`) so a shared
-/// read/write stream never echoes to us, and skips senderless / empty-body
-/// frames — the same filter the co-host loop applies in `parse_inbound`.
-///
-/// # Errors
-/// Returns a `String` error if a `stream_read_at` RPC fails.
-pub fn poll_new(
-    client: &NexusVfsClient,
-    self_agent: &str,
-    mut cursor: u64,
-    auth_token: &str,
-    block_ms: u64,
-) -> Result<(Vec<MailboxEnvelope>, u64), String> {
-    let path = inbox_path(self_agent);
-    let mut out = Vec::new();
-    let mut first = true;
-    loop {
-        // Block only on the first read (park on the tail); every subsequent
-        // read in this call is a non-blocking drain of the already-buffered
-        // burst so the loop terminates at `eof`.
-        let blocking = first && block_ms > 0;
-        first = false;
-        let (data, next, eof) = client
-            .stream_read_at(
-                &path,
-                cursor,
-                blocking,
-                if blocking { block_ms } else { 0 },
-                auth_token,
-            )
-            .map_err(|e| format!("A2A stream_read_at {path}@{cursor}: {e}"))?;
-        if eof {
-            break;
-        }
-        if let Some(env) = MailboxEnvelope::from_bytes(&data) {
-            if !env.from.is_empty() && env.from != self_agent && !env.body.is_empty() {
-                out.push(env);
-            }
-        }
-        if next <= cursor {
-            // No forward progress — guard against an infinite loop on a
-            // stream that returns the same offset (a buggy server must not
-            // wedge the poller).
-            break;
-        }
-        cursor = next;
-    }
-    Ok((out, cursor))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn inbox_path_is_the_a2a_mailbox() {
-        assert_eq!(inbox_path("win-ai"), "/agents/win-ai/chat-with-me");
-    }
+    // Test-only: the module's own code no longer touches envelopes — the
+    // transport that did moved to `crate::mailbox`. These tests stay because
+    // they pin the WIRE FORMAT, which both transports share.
+    use crate::agent_mailbox::MailboxEnvelope;
 
     #[test]
     fn from_env_off_partial_and_full() {

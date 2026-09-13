@@ -2,55 +2,37 @@
 //!
 //! Holds the one daemon connection an interactive `scode` process makes,
 //! lazily dialed from [`runtime::nexus_mailbox::Config::from_env`]. The send
-//! half feeds [`crate::tool_executor::CliToolExecutor`] via the shared
-//! [`MailboxSender`]; the receive half is a background poller that surfaces
-//! peer messages into the REPL as they arrive.
+//! half is the session's [`Mailbox`], handed to
+//! [`crate::tool_executor::CliToolExecutor`] so `send` resolves recipients
+//! through it; the receive half is a background poller that surfaces peer
+//! messages into the REPL as they arrive.
 //!
 //! Transport is the unified [`runtime::mailbox::Mailbox`] backed by
 //! [`NexusVfsFsBackend`] — the same abstraction the local JSONL path uses
 //! (with [`StdFsBackend`]), so standalone A2A and coordinator sub-agents
 //! share every line except the backend construction.
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::NexusVfsFsBackend;
-use runtime::mailbox::{InboxConvention, Mailbox};
+use runtime::mailbox::{InboxConvention, InboxCursor, Mailbox};
 use runtime::nexus_mailbox::Config;
-use runtime::spawn_task::MailboxSender;
 use runtime::HookAbortSignal;
 
 /// Blocking-tail wait per receive iteration.
 const INBOX_WAIT_MS: u64 = 500;
 
-fn cursor_path_for(agent: &str) -> PathBuf {
-    let safe: String = agent
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    runtime::config::default_config_home().join(format!("a2a-cursor-{safe}"))
-}
-
-fn load_cursor(agent: &str) -> Option<u64> {
-    std::fs::read_to_string(cursor_path_for(agent))
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-}
-
-fn save_cursor(agent: &str, offset: u64) {
-    let path = cursor_path_for(agent);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, offset.to_string());
+/// Where this agent's A2A read position lives.
+///
+/// The config home rather than the workspace: an A2A identity outlives any one
+/// checkout, and the same agent reached from two directories is still one
+/// receiver of one inbox.
+fn cursor_store_for(agent: &str) -> InboxCursor {
+    InboxCursor::at(
+        runtime::config::default_config_home().join(InboxCursor::file_name("a2a-cursor-", agent)),
+    )
 }
 
 /// The resolved, connected standalone A2A session.
@@ -60,9 +42,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// Build a [`MailboxSender`] for the CLI tool executor.
-    pub fn sender(&self) -> MailboxSender {
-        self.mailbox.sender()
+    /// The session's mailbox — handed to the tool dispatcher so everything that
+    /// sends resolves the same namespace.
+    #[must_use]
+    pub fn mailbox(&self) -> Arc<Mailbox> {
+        Arc::clone(&self.mailbox)
     }
 
     /// The peer-awareness system-prompt section.
@@ -97,47 +81,22 @@ pub fn session() -> Result<Option<&'static Session>, String> {
         .map_err(Clone::clone)
 }
 
-/// Spawn the background inbox receiver.
+/// Spawn the background A2A inbox receiver.
+///
+/// The loop itself is [`runtime::mailbox::spawn_inbox_poller`], shared with the
+/// local JSONL inbox. All that is A2A-specific is the mailbox (already built on
+/// the session's nexus-vfs backend) and where the cursor lives.
 pub fn spawn_poller(
     session: &'static Session,
     abort: HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
 ) -> JoinHandle<()> {
-    let mailbox = Arc::clone(&session.mailbox);
-    let agent = session.config.agent.clone();
-    std::thread::Builder::new()
-        .name("nexus-a2a-receiver".into())
-        .spawn(move || {
-            let mut cursor = match load_cursor(&agent) {
-                Some(saved) => saved,
-                None => match mailbox.poll(0, 0) {
-                    Ok((_history, tail)) => {
-                        save_cursor(&agent, tail);
-                        tail
-                    }
-                    Err(e) => {
-                        eprintln!("[nexus-a2a] initial inbox seek failed: {e}");
-                        0
-                    }
-                },
-            };
-            while !abort.is_aborted() {
-                match mailbox.poll(cursor, INBOX_WAIT_MS) {
-                    Ok((msgs, next)) => {
-                        for m in &msgs {
-                            sink(m);
-                        }
-                        if next > cursor {
-                            cursor = next;
-                            save_cursor(&agent, cursor);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[nexus-a2a] inbox poll failed: {e}");
-                        std::thread::sleep(std::time::Duration::from_millis(INBOX_WAIT_MS));
-                    }
-                }
-            }
-        })
-        .expect("spawn nexus-a2a receiver thread")
+    runtime::mailbox::spawn_inbox_poller(
+        Arc::clone(&session.mailbox),
+        cursor_store_for(&session.config.agent),
+        INBOX_WAIT_MS,
+        "nexus-a2a",
+        abort,
+        sink,
+    )
 }

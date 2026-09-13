@@ -18,7 +18,37 @@
 use std::sync::Arc;
 
 use nexus_vfs_client::NexusVfsClient;
-use runtime::nexus_mailbox::{ensure_inbox, send};
+use runtime::agent_mailbox::MailboxEnvelope;
+
+/// The unified mailbox for `agent` — the same transport a running agent uses.
+///
+/// These call sites used to reach a second implementation that lived beside
+/// `Mailbox` and duplicated it. Production had already moved, so exercising the
+/// copy proved nothing about what ships.
+fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
+    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+}
+
+fn send_to(
+    client: &Arc<NexusVfsClient>,
+    from_agent: &str,
+    to_agent: &str,
+    body: &str,
+    auth: &str,
+) -> Result<(), String> {
+    mailbox(client, from_agent, auth).send(MailboxEnvelope {
+        from: from_agent.to_string(),
+        to: to_agent.to_string(),
+        body: body.to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: String::new(),
+        request_id: None,
+    })
+}
+
+use runtime::mailbox::Mailbox;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -43,7 +73,9 @@ fn main() {
     );
 
     // Idempotent, and the sender's own inbox has to exist for a reply to land.
-    ensure_inbox(&client, from, "").unwrap_or_else(|e| panic!("ensure {from} inbox: {e}"));
-    send(&client, from, to, body, "").unwrap_or_else(|e| panic!("send to {to}: {e}"));
+    mailbox(&client, from, "")
+        .ensure_inbox()
+        .unwrap_or_else(|e| panic!("ensure {from} inbox: {e}"));
+    send_to(&client, from, to, body, "").unwrap_or_else(|e| panic!("send to {to}: {e}"));
     println!("sent as {from} -> {to}: {body}");
 }

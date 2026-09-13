@@ -501,8 +501,35 @@ impl FuzzySelectState {
         if end < self.filtered.len() {
             lines.push(format!("  … {} more", self.filtered.len() - end));
         }
+        if self.question.allow_custom_input && !self.filter.is_empty() && self.filtered.is_empty() {
+            let hint = self
+                .question
+                .custom_input_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
+                .unwrap_or("no match — press Enter to use what you typed");
+            lines.push(format!(
+                "{}  {hint}{}",
+                crate::render::DIM,
+                crate::render::RESET
+            ));
+        }
         lines.join("\n")
     }
+}
+
+/// A tool call shown as a running (yellow) card in the staging overlay,
+/// keyed by `tool_use_id`. Only in-flight calls live here: on completion the
+/// card is removed and the finished (green/red) card is written to scrollback
+/// by the render engine on the ordered `output` channel — the staging overlay
+/// never commits permanent content. Keyed by id (not FIFO) because a denied
+/// tool can finish without ever having a running phase, and lookups by id stay
+/// correct under missing/out-of-order events.
+#[derive(Clone, Debug)]
+pub struct ToolCard {
+    pub id: String,
+    pub name: String,
+    pub input: String,
 }
 
 #[derive(Clone, Debug)]
@@ -513,6 +540,20 @@ pub enum UiCommand {
     ShowInputHint(String),
     /// Update the ContextSlot's task panel with the current task list.
     UpdateContext(Vec<runtime::Task>),
+    /// A tool call started — add a running (yellow) card to the staging
+    /// overlay.
+    ToolStarted {
+        id: String,
+        name: String,
+        input: String,
+    },
+    /// A tool call finished — remove the matching running card from the
+    /// overlay. The finished card's permanent content is written to scrollback
+    /// by the render engine (ordered `output` channel), NOT here: this only
+    /// clears the transient overlay entry.
+    ToolFinished {
+        id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -539,6 +580,18 @@ impl UiCommandSender {
 
     pub fn update_context(&self, tasks: Vec<runtime::Task>) {
         let _ = self.tx.send(UiCommand::UpdateContext(tasks));
+    }
+
+    pub fn tool_started(&self, id: &str, name: &str, input: &str) {
+        let _ = self.tx.send(UiCommand::ToolStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.to_string(),
+        });
+    }
+
+    pub fn tool_finished(&self, id: &str) {
+        let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
     }
 }
 
@@ -719,13 +772,26 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
         ));
     }
     let max_digit = question.options.len().min(9);
+    if question.allow_custom_input {
+        let hint = question
+            .custom_input_hint
+            .as_deref()
+            .filter(|hint| !hint.is_empty())
+            .unwrap_or("type your own answer");
+        lines.push(format!("  [+] {hint}"));
+    }
     let arrow_hint = if question.back_value.is_some() {
         "\u{2190}\u{2192} back/open \u{00b7} "
     } else {
         ""
     };
+    let custom_hint = if question.allow_custom_input {
+        " \u{00b7} type to enter your own"
+    } else {
+        ""
+    };
     lines.push(format!(
-        "{}  {arrow_hint}\u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select \u{00b7} Enter confirm{}",
+        "{}  {arrow_hint}\u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select{custom_hint} \u{00b7} Enter confirm{}",
         crate::render::DIM,
         crate::render::RESET,
     ));
@@ -802,6 +868,29 @@ fn split_for_iocraft(text: &str, terminated: bool, mut issue: impl FnMut(OutputO
             ));
         }
     }
+}
+
+/// Default lifetime of the "Press Ctrl-C again to exit" footer hint.
+const CTRLC_HINT_TTL: Duration = Duration::from_secs(3);
+
+/// How long that hint stays in the footer.
+///
+/// Overridable through `SUDOCODE_CTRLC_HINT_TTL_MS` because the hint is a
+/// short-lived transient and a PTY test can only observe it by polling the
+/// rendered screen. At three seconds a loaded machine can stall a 50ms poll
+/// past the deadline, and the hint is then gone for good — the test spins out
+/// its whole budget and fails, having tested the scheduler rather than the
+/// footer. Handing the test a TTL makes both directions deterministic: a long
+/// one to assert *where* the hint renders, a short one to assert that it
+/// clears.
+///
+/// Read per use rather than cached: tests set it per-process before the REPL
+/// starts, and a `OnceLock` would freeze whichever value happened to be first.
+fn ctrlc_hint_ttl() -> Duration {
+    std::env::var("SUDOCODE_CTRLC_HINT_TTL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map_or(CTRLC_HINT_TTL, Duration::from_millis)
 }
 
 /// Channel-backed output handle for routing text from the runner thread
@@ -940,6 +1029,54 @@ fn strip_ansi(input: &str) -> String {
 /// - Each visible task: icon + subject (completed = strikethrough+dim, in_progress = bold)
 /// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
 /// - Priority order: in_progress > pending > completed; hidden summary
+/// Render the staging overlay: the in-flight tool calls as running (yellow)
+/// L-frame cards, joined into one multi-line string, capped to a height budget
+/// so many concurrent cards can't flood the screen or make every frame redraw
+/// hundreds of lines. Overflow collapses to a `… +N more running` line.
+///
+/// A pure projection of `cards` — it renders only running calls and never
+/// commits to scrollback (the render engine does that on the ordered output
+/// channel). Height budget mirrors the task panel: `min(10, max(3, rows-14))`,
+/// hidden entirely on a very short terminal.
+fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
+    if cards.is_empty() {
+        return String::new();
+    }
+    // Same budget family as render_task_panel; hide on a very short terminal
+    // rather than crowding out the prompt.
+    if term_rows <= 10 {
+        return String::new();
+    }
+    let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut shown_cards = 0usize;
+    for card in cards {
+        let rendered = crate::cli::format::format_tool_call_start(&card.name, &card.input);
+        let card_lines: Vec<&str> = rendered.lines().collect();
+        // Keep whole cards: stop before a card that would breach the budget,
+        // unless nothing has been shown yet (always show at least one card,
+        // truncated, so the user sees *something* running).
+        if !lines.is_empty() && lines.len() + card_lines.len() > max_lines {
+            break;
+        }
+        for l in &card_lines {
+            if lines.len() >= max_lines {
+                break;
+            }
+            lines.push((*l).to_string());
+        }
+        shown_cards += 1;
+    }
+
+    let hidden = cards.len() - shown_cards;
+    if hidden > 0 {
+        use crate::render::{DIM, RESET};
+        lines.push(format!("{DIM}… +{hidden} more running{RESET}"));
+    }
+    lines.join("\n")
+}
+
 fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
@@ -1087,6 +1224,10 @@ struct ReplContext {
     /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
     /// instead of a `use_state` hook to avoid shifting hook indices.
     context_tasks: Arc<Mutex<Vec<runtime::Task>>>,
+    /// Running tool cards for the StagingSlot overlay, in insertion order.
+    /// `ToolStarted` appends; `ToolFinished` removes by id. Same `Arc<Mutex>`
+    /// rationale as `context_tasks` — avoids shifting hook indices.
+    staging_cards: Arc<Mutex<Vec<ToolCard>>>,
 }
 
 #[component]
@@ -1101,6 +1242,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
     let context_tasks = Arc::clone(&ctx.context_tasks);
     let context_tasks_for_future = Arc::clone(&ctx.context_tasks);
+    let staging_cards = Arc::clone(&ctx.staging_cards);
+    let staging_cards_for_future = Arc::clone(&ctx.staging_cards);
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -1124,6 +1267,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
     let mut dialpad_cursor = hooks.use_state(|| 0usize);
+    // When the user starts typing a free-form answer to a DialPad question
+    // (only when the question set `allow_custom_input`), the active question is
+    // captured here so TextInput's Enter routes the typed text back as the
+    // answer instead of submitting it as a new prompt. Cleared on submit/cancel.
+    let mut custom_answer_question = hooks.use_state(|| None::<QuestionPromptView>);
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
@@ -1244,6 +1392,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 }
                             }
                         }
+                        Ok(UiCommand::ToolStarted { id, name, input }) => {
+                            if let Ok(mut cards) = staging_cards_for_future.lock() {
+                                cards.push(ToolCard { id, name, input });
+                            }
+                        }
+                        Ok(UiCommand::ToolFinished { id }) => {
+                            // Only clear the transient overlay entry. The
+                            // finished card's permanent content is written to
+                            // scrollback by the render engine on the ordered
+                            // `output` channel — never from here — so the
+                            // overlay stays a pure, order-free projection.
+                            if let Ok(mut cards) = staging_cards_for_future.lock() {
+                                cards.retain(|c| c.id != id);
+                            }
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
@@ -1329,10 +1492,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 input_slot.set(InputSlot::TextInput);
                             }
                             InputSlot::FuzzySelect(_) => {
+                                // Prefer the highlighted option. If nothing
+                                // matches the filter but the question allows
+                                // custom input, submit the raw filter text as a
+                                // free-form answer (e.g. a model name not in the
+                                // list) instead of silently doing nothing.
                                 let answer = {
                                     let slot = input_slot.read();
                                     if let InputSlot::FuzzySelect(fs) = &*slot {
-                                        fs.selected_value()
+                                        fs.selected_value().or_else(|| {
+                                            let custom = fs.filter.trim();
+                                            if fs.question.allow_custom_input && !custom.is_empty() {
+                                                Some(custom.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
                                     } else {
                                         None
                                     }
@@ -1346,6 +1521,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::TextInput => {
                                 let val = input_value.read().clone();
+                                // If we're typing a free-form answer to a
+                                // DialPad question (allow_custom_input), route
+                                // the text back as the answer, not a new prompt.
+                                if custom_answer_question.read().is_some() {
+                                    let trimmed = val.trim();
+                                    if !trimmed.is_empty() {
+                                        if !*has_submitted.read() {
+                                            has_submitted.set(true);
+                                        }
+                                        let _ = input_tx_for_events
+                                            .send(InputEvent::QuestionAnswer(trimmed.to_string()));
+                                        input_value.set(String::new());
+                                        custom_answer_question.set(None);
+                                    }
+                                    return;
+                                }
                                 if let Some(event) = enter_key_event_for_value(None, 0, &val) {
                                     if !*has_submitted.read() { has_submitted.set(true); }
                                     match event {
@@ -1547,6 +1738,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                     }
+                    // ── Typing a free-form answer — DialPad with allow_custom_input ──
+                    // A printable character (that is not a digit quick-select)
+                    // switches to TextInput seeded with that char; the active
+                    // question is captured so Enter routes the text back as the
+                    // answer. Only when the question opted in via
+                    // `allow_custom_input`.
+                    KeyCode::Char(ch)
+                        if matches!(current_slot, InputSlot::DialPad(ref q) if q.allow_custom_input)
+                            && !modifiers.contains(KeyModifiers::CONTROL)
+                            && !modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        if let InputSlot::DialPad(ref question) = current_slot {
+                            custom_answer_question.set(Some(question.clone()));
+                            input_slot.set(InputSlot::TextInput);
+                            input_value.set(ch.to_string());
+                        }
+                    }
                     // ── Typing in FuzzySelect updates filter ──────────
                     KeyCode::Char(ch)
                         if matches!(current_slot, InputSlot::FuzzySelect(_))
@@ -1587,12 +1795,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             last_ctrlc.set(Some(now));
                             let _ = input_tx_for_events.send(InputEvent::Abort);
                             let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
-                            footer_hint.set(Some((hint_msg, Instant::now() + Duration::from_secs(3))));
+                            footer_hint.set(Some((hint_msg, Instant::now() + ctrlc_hint_ttl())));
                             input_value.set(String::new());
                         }
                     }
                     KeyCode::Esc => {
                         // In FuzzySelect/DialPad/Hint, ESC cancels.
+                        // Also drop any in-progress custom answer.
+                        custom_answer_question.set(None);
                         if !matches!(current_slot, InputSlot::TextInput | InputSlot::Hint(_)) {
                             input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
@@ -1723,8 +1933,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         format!("{task_line}\n{sep}")
     };
 
+    // StagingSlot: running tool cards (yellow), rendered via the same SSOT as
+    // completed cards (`format_tool_call_start` == the Running L-frame). Built
+    // as one multi-line string so the element tree keeps a fixed shape (empty
+    // string when no cards) — same hook-index rationale as the task panel. This
+    // is a pure overlay: it shows only in-flight calls and never commits to
+    // scrollback (the render engine does that on the ordered output channel).
+    let staging_text = staging_cards
+        .lock()
+        .ok()
+        .map(|cards| render_staging_overlay(&cards, term_height as usize))
+        .unwrap_or_default();
+
     element! {
         View(flex_direction: FlexDirection::Column) {
+            // StagingSlot: in-flight tool cards (yellow). Empty string renders
+            // nothing; the element is always present to keep hook order.
+            Text(content: staging_text)
             // StatusSlot
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
@@ -1841,6 +2066,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
         context_tasks: Arc::new(Mutex::new(tools::global_task_list())),
+        staging_cards: Arc::new(Mutex::new(Vec::new())),
     };
 
     let banner = startup_banner.to_string();
@@ -1887,6 +2113,70 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_card(id: &str, name: &str) -> ToolCard {
+        ToolCard {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: "{}".to_string(),
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for n in chars.by_ref() {
+                        if n.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn staging_overlay_empty_when_no_cards() {
+        assert_eq!(render_staging_overlay(&[], 40), "");
+    }
+
+    #[test]
+    fn staging_overlay_hidden_on_short_terminal() {
+        // ≤10 rows: hide entirely rather than crowd out the prompt.
+        assert_eq!(render_staging_overlay(&[tool_card("1", "bash")], 8), "");
+    }
+
+    #[test]
+    fn staging_overlay_renders_one_card_per_running_call() {
+        let cards = vec![tool_card("1", "bash"), tool_card("2", "read_file")];
+        let plain = strip_ansi(&render_staging_overlay(&cards, 40));
+        // Each running call is a Running L-frame card (╭─ header … ╰─).
+        assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
+        assert!(plain.contains("bash"), "{plain}");
+        assert!(plain.contains("read_file"), "{plain}");
+    }
+
+    #[test]
+    fn staging_overlay_collapses_overflow_beyond_height_budget() {
+        // rows=24 → budget min(10,max(3,10)) = 10 lines. Each card is 3 lines
+        // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
+        // fit and the rest collapse into a "+N more running" line.
+        let cards: Vec<ToolCard> = (0..8).map(|i| tool_card(&i.to_string(), "bash")).collect();
+        let plain = strip_ansi(&render_staging_overlay(&cards, 24));
+        assert!(
+            plain.contains("more running"),
+            "expected overflow summary: {plain}"
+        );
+        let shown = plain.matches("╭─").count();
+        assert!(shown >= 1 && shown < 8, "shown={shown}: {plain}");
+    }
 
     fn question_with_options() -> QuestionPromptView {
         QuestionPromptView {

@@ -68,8 +68,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Live-mode timeout — real API calls can take a few seconds.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Locate the compiled `scode` binary for the current test run.
-#[must_use]
 /// The REPL's input-line marker. The footer and banner never carry it, so a
 /// line containing it is the line the user types on.
 const PROMPT_MARKER: &str = "\u{276f}";
@@ -139,6 +137,29 @@ pub fn input_line_of(screen: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The model live mode grades its assertions against.
+///
+/// See the `Backend::Live` arm of [`TestEnv::spawn_with_env`] for why it is
+/// pinned and why the pin is overridable.
+fn live_model() -> String {
+    std::env::var("SCODE_LIVE_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "sonnet".to_string())
+}
+
+/// The last `chars` characters of the rendered screen, for a panic message.
+///
+/// Taken from the end because a PTY failure is almost always explained by what
+/// was on screen last, and the full buffer buries it. Counted in `chars` rather
+/// than bytes so a box-drawing glyph cannot be split mid-codepoint.
+#[must_use]
+pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
+    let screen = sess.render(|s| s.contents());
+    let tail: String = screen.chars().rev().take(chars).collect();
+    tail.chars().rev().collect()
+}
+
 /// Block until the REPL's input buffer is observably EMPTY.
 ///
 /// The guard to use after anything that clears the line — Ctrl-C, Ctrl-U —
@@ -173,6 +194,8 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
     }
 }
 
+/// Locate the compiled `scode` binary for the current test run.
+#[must_use]
 pub fn scode_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_scode"))
 }
@@ -358,15 +381,21 @@ impl TestEnv {
                 DEFAULT_TIMEOUT,
                 env_vars,
             ),
-            // `--model sonnet`, not `--model auto`: `auto` resolves through the
-            // copied settings.json to whatever model the developer happens to
-            // have selected, so the same assertions would be graded against a
+            // `--model`, not `--model auto`: `auto` resolves through the copied
+            // settings.json to whatever model the developer happens to have
+            // selected, so the same assertions would be graded against a
             // different model on every machine. Mock mode pins `sonnet`; live
-            // pins it too, and the two stay comparable.
+            // pins the same name by default and the two stay comparable.
+            //
+            // `SCODE_LIVE_MODEL` overrides it because the pin is only worth
+            // having while the gateway can serve it. A routing group that has no
+            // channel for the pinned model answers `500 … 可用渠道不存在` on
+            // every attempt, which fails every live test in the suite for a
+            // reason that is nothing to do with the code under test.
             Backend::Live { workspace } => spawn_with_workspace(
                 workspace,
                 None,
-                &["--auth", "proxy", "--model", "sonnet"],
+                &["--auth", "proxy", "--model", &live_model()],
                 extra_args,
                 LIVE_TIMEOUT,
                 env_vars,
@@ -675,6 +704,11 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "ETIMEDOUT",
         "ECONNREFUSED",
         "connection refused",
+        // The proxy gateway has no channel for this model in the routing group
+        // the request landed in. Arrives as a 500 rather than a 404, and repeats
+        // on every retry until the routing config changes, so it is a statement
+        // about the account's routing and not about the code under test.
+        "可用渠道不存在",
     ];
     let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
     MARKERS.iter().any(|marker| {

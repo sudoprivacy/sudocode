@@ -14,7 +14,12 @@
 use std::sync::Arc;
 
 use nexus_vfs_client::NexusVfsClient;
-use runtime::nexus_mailbox::poll_new;
+use runtime::mailbox::Mailbox;
+
+/// The unified mailbox for `agent` — the same transport a running agent uses.
+fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
+    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -39,7 +44,9 @@ fn main() {
     );
 
     // From the head, non-blocking: everything the inbox holds, right now.
-    let (msgs, next) = poll_new(&client, agent, 0, "", 0).unwrap_or_else(|e| panic!("read: {e}"));
+    let (msgs, next) = mailbox(&client, agent, "")
+        .poll(0, 0)
+        .unwrap_or_else(|e| panic!("read: {e}"));
     println!(
         "{agent} inbox: {} message(s), next offset {next}",
         msgs.len()

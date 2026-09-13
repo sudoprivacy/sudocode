@@ -352,9 +352,10 @@ fn flush_text(buf: &mut String, role: &str, input: &mut Vec<Value>) {
 fn flatten_tool_result(content: &[ToolResultContentBlock]) -> String {
     content
         .iter()
-        .map(|c| match c {
-            ToolResultContentBlock::Text { text } => text.clone(),
-            ToolResultContentBlock::Json { value } => value.to_string(),
+        .filter_map(|c| match c {
+            ToolResultContentBlock::Text { text } => Some(text.clone()),
+            ToolResultContentBlock::Json { value } => Some(value.to_string()),
+            ToolResultContentBlock::ToolReference { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -894,6 +895,7 @@ mod tests {
                     "type": "object",
                     "properties": {"city": {"type": "string"}}
                 }),
+                defer_loading: false,
             }]),
             tool_choice: None,
             stream: true,

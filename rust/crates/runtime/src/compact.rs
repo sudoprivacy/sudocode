@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -775,6 +775,8 @@ pub async fn compact_session<C: ApiClient>(
         return Err(CompactionError::ApiError(last_error));
     };
 
+    let discovered = extract_pre_compact_discovered_tools(session);
+
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
@@ -789,7 +791,12 @@ pub async fn compact_session<C: ApiClient>(
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     Ok(CompactionResult {
         summary,
@@ -850,12 +857,15 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
         system_prompt: system_prompt.clone(),
         messages: session.messages.clone(),
         trace_id: None,
+        pre_compact_discovered_tools: Default::default(),
     };
 
     let llm_summary = api_client
         .send_cache_safe_compaction(request, &prompt, max_tokens)
         .await
         .map_err(|error| CompactionError::ApiError(error.to_string()))?;
+
+    let discovered = extract_pre_compact_discovered_tools(session);
 
     let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
     let formatted_summary = format_compact_summary(&summary);
@@ -871,7 +881,12 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     Ok(CompactionResult {
         summary,
@@ -931,6 +946,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
     let removed = &session.messages[compacted_prefix_len..keep_from];
     let preserved = session.messages[keep_from..].to_vec();
     let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
+    let discovered = extract_pre_compact_discovered_tools(session);
     let summary = merge_compact_summaries(
         existing_summary.as_deref(),
         &summarize_messages_local(removed),
@@ -948,7 +964,12 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
 
     let mut compacted_session = session.clone();
     compacted_session.messages = compacted_messages;
-    compacted_session.record_compaction_with_usage(summary.clone(), removed.len(), compacted_usage);
+    compacted_session.record_compaction_with_usage(
+        summary.clone(),
+        removed.len(),
+        compacted_usage,
+        discovered,
+    );
 
     CompactionResult {
         summary,
@@ -1205,102 +1226,6 @@ fn extract_existing_compacted_summary(message: &ConversationMessage) -> Option<S
     Some(summary.trim().to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Microcompact (CC parity: time-based tool result clearing)
-// ---------------------------------------------------------------------------
-
-/// Tool names whose results are safe to content-clear after they age out.
-/// Matches CC's `COMPACTABLE_TOOLS` list.
-const COMPACTABLE_TOOLS: &[&str] = &[
-    "read_file",
-    "Read",
-    "bash",
-    "Bash",
-    "grep_search",
-    "Grep",
-    "glob_search",
-    "Glob",
-    "WebFetch",
-    "WebSearch",
-    "edit_file",
-    "Edit",
-    "write_file",
-    "Write",
-    "read_tool_output",
-];
-
-const CLEARED_TOOL_RESULT_PLACEHOLDER: &str = "[Old tool result content cleared]";
-
-/// How many recent tool results to keep per tool name.
-/// Older results from compactable tools are content-cleared.
-const MICROCOMPACT_KEEP_RECENT: usize = 2;
-
-/// Content-clear old compactable tool results in `messages` to reduce
-/// token count before sending an API request. Returns the number of
-/// tool results that were cleared.
-///
-/// Only clears `ToolResult` blocks from compactable tools. Keeps the
-/// most recent `MICROCOMPACT_KEEP_RECENT` results per tool name.
-/// Already-cleared results (matching the placeholder) are not counted.
-///
-/// Matches CC's time-based microcompact path.
-pub fn microcompact_messages(messages: &mut [ConversationMessage]) -> usize {
-    // Collect indices of all compactable tool results, newest first.
-    let mut tool_result_indices: Vec<(usize, usize, String)> = Vec::new();
-    for (msg_idx, msg) in messages.iter().enumerate().rev() {
-        for (block_idx, block) in msg.blocks.iter().enumerate() {
-            if let ContentBlock::ToolResult {
-                tool_name, output, ..
-            } = block
-            {
-                if is_compactable_tool(tool_name) && output != CLEARED_TOOL_RESULT_PLACEHOLDER {
-                    tool_result_indices.push((msg_idx, block_idx, tool_name.clone()));
-                }
-            }
-        }
-    }
-
-    // Count per tool name, keeping the most recent MICROCOMPACT_KEEP_RECENT.
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut to_clear: Vec<(usize, usize)> = Vec::new();
-    for (msg_idx, block_idx, tool_name) in &tool_result_indices {
-        let canonical = canonicalize_compactable_tool(tool_name);
-        let count = counts.entry(canonical).or_insert(0);
-        *count += 1;
-        if *count > MICROCOMPACT_KEEP_RECENT {
-            to_clear.push((*msg_idx, *block_idx));
-        }
-    }
-
-    // Apply the clearing.
-    let cleared_count = to_clear.len();
-    for (msg_idx, block_idx) in to_clear {
-        if let Some(ContentBlock::ToolResult { output, .. }) =
-            messages[msg_idx].blocks.get_mut(block_idx)
-        {
-            *output = CLEARED_TOOL_RESULT_PLACEHOLDER.to_string();
-        }
-    }
-
-    cleared_count
-}
-
-fn is_compactable_tool(name: &str) -> bool {
-    COMPACTABLE_TOOLS.contains(&name)
-}
-
-fn canonicalize_compactable_tool(name: &str) -> String {
-    match name {
-        "Read" | "read_file" => "read_file".to_string(),
-        "Bash" | "bash" => "bash".to_string(),
-        "Grep" | "grep_search" => "grep_search".to_string(),
-        "Glob" | "glob_search" => "glob_search".to_string(),
-        "Edit" | "edit_file" => "edit_file".to_string(),
-        "Write" | "write_file" => "write_file".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn first_text_block(message: &ConversationMessage) -> Option<&str> {
     message.blocks.iter().find_map(|block| match block {
         ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
@@ -1354,6 +1279,39 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
     }
 
     lines
+}
+
+/// Extract tool names previously discovered via ToolSearch from the
+/// session's messages. Scans ToolSearch result blocks for the `matches`
+/// array and collects the tool names. Also merges any names carried
+/// forward from prior compactions (`pre_compact_discovered_tools`).
+fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
+    let mut discovered: BTreeSet<String> = session
+        .compaction
+        .as_ref()
+        .map(|c| c.pre_compact_discovered_tools.clone())
+        .unwrap_or_default();
+    for message in &session.messages {
+        for block in &message.blocks {
+            if let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            {
+                if tool_name == "ToolSearch" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) {
+                        if let Some(matches) = parsed.get("matches").and_then(|m| m.as_array()) {
+                            for m in matches {
+                                if let Some(name) = m.as_str() {
+                                    discovered.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    discovered
 }
 
 #[cfg(test)]
@@ -2711,140 +2669,6 @@ mod tests {
             ConversationMessage::user_text("two"),
         ];
         assert!(super::truncate_head_for_ptl(&messages).is_none());
-    }
-
-    #[test]
-    fn microcompact_clears_old_tool_results() {
-        let mut messages = vec![
-            ConversationMessage::user_text("hello"),
-            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "read_file".to_string(),
-                input: r#"{"path":"a.txt"}"#.to_string(),
-                thought_signature: None,
-            }]),
-            ConversationMessage {
-                role: MessageRole::Tool,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_string(),
-                    tool_name: "read_file".to_string(),
-                    output: "content of a.txt".to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-            },
-            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: "t2".to_string(),
-                name: "read_file".to_string(),
-                input: r#"{"path":"b.txt"}"#.to_string(),
-                thought_signature: None,
-            }]),
-            ConversationMessage {
-                role: MessageRole::Tool,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t2".to_string(),
-                    tool_name: "read_file".to_string(),
-                    output: "content of b.txt".to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-            },
-            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: "t3".to_string(),
-                name: "read_file".to_string(),
-                input: r#"{"path":"c.txt"}"#.to_string(),
-                thought_signature: None,
-            }]),
-            ConversationMessage {
-                role: MessageRole::Tool,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t3".to_string(),
-                    tool_name: "read_file".to_string(),
-                    output: "content of c.txt".to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-            },
-        ];
-
-        let cleared = super::microcompact_messages(&mut messages);
-
-        // 3 read_file results, keep 2 most recent → 1 cleared
-        assert_eq!(cleared, 1);
-
-        // Oldest result (a.txt) should be cleared
-        if let ContentBlock::ToolResult { output, .. } = &messages[2].blocks[0] {
-            assert_eq!(output, super::CLEARED_TOOL_RESULT_PLACEHOLDER);
-        } else {
-            panic!("expected ToolResult");
-        }
-
-        // b.txt and c.txt should be preserved
-        if let ContentBlock::ToolResult { output, .. } = &messages[4].blocks[0] {
-            assert_eq!(output, "content of b.txt");
-        }
-        if let ContentBlock::ToolResult { output, .. } = &messages[6].blocks[0] {
-            assert_eq!(output, "content of c.txt");
-        }
-    }
-
-    #[test]
-    fn microcompact_skips_non_compactable_tools() {
-        let mut messages = vec![
-            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "CronList".to_string(),
-                input: "{}".to_string(),
-                thought_signature: None,
-            }]),
-            ConversationMessage {
-                role: MessageRole::Tool,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_string(),
-                    tool_name: "CronList".to_string(),
-                    output: "no crons".to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-            },
-        ];
-
-        let cleared = super::microcompact_messages(&mut messages);
-        assert_eq!(cleared, 0);
-
-        if let ContentBlock::ToolResult { output, .. } = &messages[1].blocks[0] {
-            assert_eq!(output, "no crons");
-        }
-    }
-
-    #[test]
-    fn microcompact_idempotent_on_already_cleared() {
-        let mut messages = vec![
-            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "bash".to_string(),
-                input: r#"{"command":"ls"}"#.to_string(),
-                thought_signature: None,
-            }]),
-            ConversationMessage {
-                role: MessageRole::Tool,
-                blocks: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_string(),
-                    tool_name: "bash".to_string(),
-                    output: super::CLEARED_TOOL_RESULT_PLACEHOLDER.to_string(),
-                    is_error: false,
-                }],
-                usage: None,
-                model: None,
-            },
-        ];
-
-        let cleared = super::microcompact_messages(&mut messages);
-        assert_eq!(cleared, 0);
     }
 
     #[tokio::test]

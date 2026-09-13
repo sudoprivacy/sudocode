@@ -449,10 +449,7 @@ fn local_stream_round_trip_drives_real_run_loop() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-ls", "scode"),
-        Mailbox::LocalStream {
-            path: path.to_string(),
-            self_id: "scode".to_string(),
-        },
+        Mailbox::local_stream(path.to_string(), "scode".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -477,10 +474,7 @@ fn a2a_reads_own_inbox_and_replies_to_senders_inbox() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -527,10 +521,7 @@ fn loop_exits_on_abort_signal() {
     let handle = spawn_real(
         Arc::clone(&kernel),
         make_desc("pid-abort", "scode"),
-        Mailbox::LocalStream {
-            path: path.to_string(),
-            self_id: "scode".to_string(),
-        },
+        Mailbox::local_stream(path.to_string(), "scode".to_string()),
     );
     // No message sent — the loop is parked on the blocking `sys_read` tail.
     // abort() must let it exit on the next `while !abort` check (≤ one read
@@ -563,10 +554,7 @@ fn skips_own_writes_no_reply_storm() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-filter", "scode"),
-        Mailbox::LocalStream {
-            path: path.to_string(),
-            self_id: "scode".to_string(),
-        },
+        Mailbox::local_stream(path.to_string(), "scode".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -601,10 +589,7 @@ fn a2a_inbox_survives_read_before_it_exists() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -654,10 +639,7 @@ fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
     let handle = spawn_real(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
     );
 
     let ctx = user_ctx();
@@ -748,10 +730,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     let h1 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-1", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -785,10 +764,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     let h2 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-2", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -814,10 +790,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     let h3 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-3", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -867,10 +840,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h1 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-1", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -902,10 +872,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h2 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-2", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -932,10 +899,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h3 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-3", "win-ai"),
-        Mailbox::A2aInbox {
-            base: "/agents".to_string(),
-            self_name: "win-ai".to_string(),
-        },
+        Mailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );

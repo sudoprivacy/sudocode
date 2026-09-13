@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Deterministic Docker E2E for the standalone nexus-A2A client (X).
+# Deterministic E2E for the standalone nexus-A2A client (X).
 #
 # Brings up a real `nexusd-cluster` founder in a container and drives the
-# ignored `runtime` integration tests (`nexus_mailbox_live`) against it — the
+# ignored `runtime` integration tests (`mailbox_nexus_live`) against it — the
 # one thing unit tests can't cover: that `ensure_stream` + `stream_write` +
 # `stream_read_at` actually move an envelope through a real gRPC server and a
 # real DT_STREAM. No LLM, no secrets — always safe to run.
@@ -13,7 +13,8 @@
 #
 # Usage:
 #   e2e/nexus-a2a/run.sh
-#   NEXUS_DAEMON_IMAGE=nexusd-cluster:latest e2e/nexus-a2a/run.sh
+#   NEXUS_DAEMON_IMAGE=nexusd-cluster:latest e2e/nexus-a2a/run.sh   # force Docker
+#   NEXUSD_BIN=/path/to/nexusd-cluster e2e/nexus-a2a/run.sh          # force a binary
 #   SUDOROUTER_API_KEY=sk-... SCODE_BIN=/path/to/scode e2e/nexus-a2a/run.sh   # + duet
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -21,13 +22,62 @@ cd "$(dirname "$0")"
 PORT="${NEXUS_A2A_HOST_PORT:-2126}"
 ENDPOINT="127.0.0.1:${PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
-CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test nexus_mailbox_live)
+CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
-cleanup() { docker compose down -v >/dev/null 2>&1 || true; }
+# Two ways to get a daemon, and the default is the one CI can do.
+#
+# A downloaded binary needs no image built by hand, which is what kept this
+# harness off CI: building `nexusd-cluster` is a nexus-repo job and wants a
+# GitHub token. `fetch-daemon.sh` resolves the version from this checkout's
+# nexus-vfs pin, so the daemon MATCHES the client library rather than being
+# whatever `latest` is.
+#
+# Docker stays the path for the co-host duet: the LLM-replying agent runs
+# INSIDE the daemon, and that runtime ships in the co-host image rather than in
+# the released cluster binary. `NEXUS_DAEMON_IMAGE` selects it explicitly.
+MODE=binary
+if [ -n "${NEXUS_DAEMON_IMAGE:-}" ]; then
+  MODE=docker
+elif [ -z "${NEXUSD_BIN:-}" ]; then
+  # Through `bash`, not `./`: a repo cloned from a Windows checkout can
+  # arrive without the exec bit, and the failure then reads as a missing
+  # file rather than a permissions one.
+  NEXUSD_BIN="$(bash ./fetch-daemon.sh)" || exit 1
+fi
+
+DAEMON_PID=
+DATA_DIR=
+cleanup() {
+  if [ "$MODE" = docker ]; then
+    docker compose down -v >/dev/null 2>&1 || true
+  else
+    [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+    [ -n "$DATA_DIR" ] && rm -rf "$DATA_DIR" 2>/dev/null || true
+  fi
+}
 trap cleanup EXIT
 
-echo "== starting nexusd-cluster (${NEXUS_DAEMON_IMAGE:-nexusd-cluster-cohost:latest}) on :${PORT} =="
-docker compose up -d
+if [ "$MODE" = docker ]; then
+  echo "== starting nexusd-cluster (${NEXUS_DAEMON_IMAGE}) on :${PORT} =="
+  docker compose up -d
+else
+  # Fresh data AND identity dir per run. A data-only wipe is not a fresh node:
+  # `identity.json` carries the peer address book and per-zone membership by
+  # design, so reusing it leaves the daemon rejoining an old cluster with a
+  # stale identity and no quorum.
+  DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-nexusd.XXXXXX")"
+  echo "== starting nexusd-cluster (binary) on :${PORT} =="
+  "$NEXUSD_BIN"     --bind-addr "0.0.0.0:${PORT}"     --data-dir "$DATA_DIR/data"     --identity-dir "$DATA_DIR/identity"     --no-tls     --insecure-no-auth     >"$DATA_DIR/daemon.log" 2>&1 &
+  DAEMON_PID=$!
+fi
+
+daemon_logs() {
+  if [ "$MODE" = docker ]; then
+    docker compose logs --tail 40 || true
+  else
+    tail -40 "$DATA_DIR/daemon.log" 2>/dev/null || true
+  fi
+}
 
 echo "== waiting for a writable single-voter leader =="
 ready=
@@ -41,12 +91,25 @@ for i in $(seq 1 30); do
 done
 if [ -z "$ready" ]; then
   echo "!! daemon never became writable" >&2
-  docker compose logs --tail 40 || true
+  daemon_logs
   exit 1
 fi
 
 echo "== [deterministic] standalone A2A client round-trip =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored --nocapture
+
+# The seam the round-trip above leaves out. That one drives `Mailbox` directly,
+# so it proves the transport while saying nothing about whether the tool reaches
+# it, nor whether a receiver surfaces what arrives — and a `send` that wrote a
+# local file while reporting success is the failure this whole path exists
+# because of. This runs two real binaries: one calls the tool, the other's REPL
+# is parked on its inbox. It also covers the workspace-file transport, which
+# needs no daemon at all. Mock model, so no key is needed; set
+# SCODE_TEST_BACKEND=live to have a real model choose the call instead.
+echo "== [deterministic] two scode processes, one daemon =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test pty_agent_duet -- --nocapture
 
 # ---- Optional: real 2-LLM co-host duet (gated) --------------------------------
 if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
@@ -61,7 +124,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   sleep 8
   NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_AGENT="${DUET_SELF:-operator}" NEXUS_A2A_PEER="$R" \
     "$SCODE_BIN" --auth proxy --model "$MODEL" --permission-mode danger-full-access \
-    --print "Call send_message once: to=$R body='reply with exactly one word: PONG'. Then stop."
+    --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop."
   echo "   polling ${DUET_SELF:-operator}'s inbox for the co-host reply..."
   got=
   for i in $(seq 1 30); do
@@ -72,7 +135,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
     fi
     sleep 3
   done
-  [ -n "$got" ] || { echo "!! co-host never replied (see daemon logs)" >&2; docker compose logs --tail 40 nexusd || true; exit 1; }
+  [ -n "$got" ] || { echo "!! co-host never replied (see daemon logs)" >&2; daemon_logs; exit 1; }
 else
   echo "== [skip] LLM duet — set SUDOROUTER_API_KEY + SCODE_BIN to enable =="
 fi

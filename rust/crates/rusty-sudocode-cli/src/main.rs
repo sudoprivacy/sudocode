@@ -2272,8 +2272,41 @@ struct SlashSelectionHandler(
 /// `TurnComplete`.
 enum CoordinatorEvent {
     Human(repl_ui::InputEvent),
-    PeerMessage(runtime::agent_mailbox::MailboxEnvelope),
+    /// A peer's message, plus the acknowledgement its receiver waits on.
+    ///
+    /// The receiver must not advance its durable cursor past a message that is
+    /// only sitting in this channel: a crash then loses it silently, with the
+    /// sender already told "delivered". So it blocks on this ack until the
+    /// coordinator loop has taken the message, which makes the channel
+    /// back-pressured rather than a place messages accumulate behind the
+    /// cursor. Dropping the sender is a refusal and re-delivers.
+    PeerMessage(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>),
     TurnComplete,
+}
+
+/// Hand a peer's message to the coordinator loop and block until it is taken.
+///
+/// The return value is what the inbox receiver uses to decide whether to
+/// advance its durable cursor, so "handed over" is not good enough — a message
+/// queued behind a long turn with the cursor already past it is lost on a crash,
+/// silently, after its sender was told it was delivered. Blocking the receive
+/// thread here is the point: it is the back-pressure that keeps the cursor and
+/// the consumer in step.
+///
+/// `false` when the coordinator loop is gone (shutting down) or dropped the ack
+/// without handling the message; either way the receiver re-delivers.
+fn ack_after_coordinator_takes(
+    tx: &mpsc::Sender<CoordinatorEvent>,
+    msg: &runtime::agent_mailbox::MailboxEnvelope,
+) -> bool {
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if tx
+        .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
+        .is_err()
+    {
+        return false;
+    }
+    ack_rx.recv().is_ok()
 }
 
 /// Show an interactive selection question via iocraft's InputSlot and
@@ -2776,9 +2809,7 @@ fn run_repl_iocraft_dispatch(
         let _poller = engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             runtime::HookAbortSignal::new(),
-            move |msg| {
-                let _ = coord_tx_a2a.send(CoordinatorEvent::PeerMessage(msg.clone()));
-            },
+            move |msg| ack_after_coordinator_takes(&coord_tx_a2a, msg),
         );
     }
 
@@ -2793,9 +2824,7 @@ fn run_repl_iocraft_dispatch(
             workspace,
             "team-lead".to_string(),
             runtime::HookAbortSignal::new(),
-            move |msg| {
-                let _ = coord_tx_local.send(CoordinatorEvent::PeerMessage(msg.clone()));
-            },
+            move |msg| ack_after_coordinator_takes(&coord_tx_local, msg),
         );
     }
 
@@ -2846,7 +2875,7 @@ fn run_repl_iocraft_dispatch(
                 }
                 continue;
             }
-            CoordinatorEvent::PeerMessage(msg) => {
+            CoordinatorEvent::PeerMessage(msg, ack) => {
                 repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
                 let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
                 if !turn_active {
@@ -2866,6 +2895,11 @@ fn run_repl_iocraft_dispatch(
                         .unwrap()
                         .submit_during_turn(prompt, input_queue::QueueMode::Queue);
                 }
+                // Taken: the message is this process's responsibility now, so
+                // the receiver may advance its cursor. What remains — the
+                // turn-input queue, an in-flight turn — are the same windows
+                // human input has, and a human can retype.
+                let _ = ack.send(());
                 continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {
@@ -3631,7 +3665,19 @@ impl LiveCli {
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
         // (Done / permission / question) straight from the event kinds.
-        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        // With an iocraft `ui` present, in-flight tool calls show as running
+        // cards in the staging overlay, so the renderer must not also append
+        // the command header (it would appear twice). The finished result card
+        // still appends through the renderer — the single ordered scrollback
+        // sink. Off the overlay (one-shot / `--print`) the header appends.
+        let mut renderer = render.then(|| {
+            let r = EngineEventRenderer::new(spinner_ref, output.cloned());
+            if ui.is_some() {
+                r.with_staging_overlay()
+            } else {
+                r
+            }
+        });
         let blocks = vec![runtime::ContentBlock::Text {
             text: input.to_string(),
         }];
@@ -3655,6 +3701,13 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
+                    // Staging overlay (iocraft REPL only): show a running
+                    // yellow card for this in-flight call. Pure overlay — the
+                    // finished card is committed to scrollback by the renderer
+                    // on the ordered output channel, not from here.
+                    if let Some(ui) = ui {
+                        ui.tool_started(id, name, input);
+                    }
                     // Parity: `--output-format json` emits the tool input as the
                     // raw argument STRING exactly as the model produced it — the
                     // pre-seam `collect_tool_uses` serialized `ToolUse.input`
@@ -3690,6 +3743,12 @@ impl LiveCli {
                         {
                             ui.update_context(tools::global_task_list());
                         }
+                        // Staging overlay: this call is done — clear its running
+                        // yellow card. The finished (green/red) card is written
+                        // to scrollback by the renderer below, on the ordered
+                        // output channel; the overlay only drops the transient
+                        // entry, so the two never race across channels.
+                        ui.tool_finished(id);
                     }
                     outcome.tool_results.push(serde_json::json!({
                         "tool_use_id": id,
@@ -5856,12 +5915,14 @@ mod wait_notice_tests {
     /// A turn that keeps running must keep saying so, and must name what it is
     /// waiting on — "still running" without a target leaves the reader exactly
     /// as stuck as silence does.
+    ///
+    /// Uses channel-based synchronization instead of sleep to avoid flaky
+    /// timing on loaded CI runners.
     #[test]
     fn keeps_reporting_while_the_turn_runs_then_stops_on_drop() {
-        let lines = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
         let calls = Arc::new(Mutex::new(0usize));
         {
-            let sink = Arc::clone(&lines);
             let counter = Arc::clone(&calls);
             let _notice = WaitNotice::start_lazily(
                 move || {
@@ -5870,22 +5931,29 @@ mod wait_notice_tests {
                 },
                 Duration::from_millis(20),
                 Duration::from_millis(20),
-                move |line| sink.lock().expect("sink").push(line),
+                move |line| {
+                    tx.send(line).ok();
+                },
             );
-            thread::sleep(Duration::from_millis(300));
+
+            // Wait for at least 2 lines deterministically via channel recv.
+            let line1 = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("should receive first notice line");
+            let line2 = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("should receive second notice line");
+
+            assert!(
+                line1.contains("example.test"),
+                "should name the target, got: {line1}",
+            );
+            assert!(
+                line2.contains("example.test"),
+                "should name the target, got: {line2}",
+            );
         }
         // The guard's Drop joins the thread, so nothing can arrive after this.
-        let captured = lines.lock().expect("sink").clone();
-        assert!(
-            captured.len() >= 2,
-            "should keep reporting, got {} line(s): {captured:?}",
-            captured.len()
-        );
-        assert!(
-            captured[0].contains("example.test"),
-            "should name the target, got: {}",
-            captured[0]
-        );
 
         assert_eq!(
             *calls.lock().expect("counter"),
@@ -5893,10 +5961,10 @@ mod wait_notice_tests {
             "the upstream should be described once and reused, not re-resolved per line"
         );
 
-        thread::sleep(Duration::from_millis(60));
-        assert_eq!(
-            lines.lock().expect("sink").len(),
-            captured.len(),
+        // After drop, the sender is gone and the thread is joined.
+        // Verify no more lines arrive.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
             "dropping the guard must stop the thread, not just detach it"
         );
     }

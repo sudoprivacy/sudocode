@@ -11,6 +11,34 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";
+
+/// The recipient the `unified_send_roundtrip` scenario addresses.
+///
+/// Exported because a test that reads the inbox this scenario writes to has
+/// to name the same agent, and two copies of that name drift into a test that
+/// passes while watching the wrong stream.
+pub const UNIFIED_SEND_RECIPIENT: &str = "team-lead";
+
+/// The body that scenario sends.
+///
+/// It carries a scenario marker of its own because a `scode` receiving this
+/// envelope turns it into a prompt: the REPL surfaces a peer message and runs
+/// a turn on it. Without a marker the receiving side would ask its mock to
+/// answer an unrecognised prompt, and the mock refuses those — so a two-agent
+/// test would be asserting a screen while the receiver showed an API error.
+///
+/// Exported for the same reason as the recipient: the test that reads this
+/// body must not carry a second copy of it.
+/// The name a local sender gives itself.
+///
+/// Without nexus there is exactly one mailbox identity — the coordinator the
+/// REPL polls as — and `Mailbox::poll` skips envelopes whose `from` is its own
+/// id, so that a shared read/write stream does not echo. A local peer must
+/// therefore say who it is via the `sender` field, which is what that field is
+/// for. Over nexus the session identity answers instead and this is unused.
+pub const LOCAL_PEER_SENDER: &str = "peer-bot";
+
+pub const UNIFIED_SEND_BODY: &str = "hello from unified send PARITY_SCENARIO:single_turn_text";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Canned compaction summary returned by the `LlmCompactionRoundtrip`
@@ -180,9 +208,10 @@ enum Scenario {
     /// the transport's retry loop, and therefore the retry indicator, without
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
-    ExecuteExtraToolRoundtrip,
+    DeferredToolRoundtrip,
     UnifiedSendRoundtrip,
-    ExecuteExtraToolMcpRoundtrip,
+    UnifiedSendFromNamedPeer,
+    DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
     /// carry a `PARITY_SCENARIO:subagent_calc_child` marker plus one
@@ -244,9 +273,10 @@ impl Scenario {
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
-            "execute_extra_tool_roundtrip" => Some(Self::ExecuteExtraToolRoundtrip),
+            "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
-            "execute_extra_tool_mcp_roundtrip" => Some(Self::ExecuteExtraToolMcpRoundtrip),
+            "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
+            "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
             _ => None,
@@ -289,9 +319,10 @@ impl Scenario {
             Self::RetryThenSucceed => "retry_then_succeed",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
-            Self::ExecuteExtraToolRoundtrip => "execute_extra_tool_roundtrip",
+            Self::DeferredToolRoundtrip => "deferred_tool_roundtrip",
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
-            Self::ExecuteExtraToolMcpRoundtrip => "execute_extra_tool_mcp_roundtrip",
+            Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
+            Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
         }
@@ -309,6 +340,23 @@ async fn handle_connection(
     let normalized_body = normalize_system_field(&raw_body);
     let request: MessageRequest = serde_json::from_str(&normalized_body)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    // Refuse a tool result that mixes tool definitions with other content,
+    // exactly as the real API does.
+    //
+    // Without this the mock is more permissive than production in the one way
+    // that mattered: scode appended a `tool_reference` block beside a
+    // ToolSearch result's text, every request after a search 400'd live, and
+    // both `pty_deferred_tools` and a unit test asserting that very shape
+    // stayed green. A mock that accepts what the server rejects turns its
+    // suites into evidence of nothing.
+    if let Some(offending) = tool_result_mixing_definitions(&request) {
+        let body = format!(
+            r#"{{"type":"error","error":{{"type":"invalid_request_error","message":"Tool definitions/code execution functions cannot be mixed with other content (tool_use_id {offending})"}}}}"#
+        );
+        let response = http_response("400 Bad Request", "application/json", &body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     // Cache-safe compaction sends the full conversation with a compaction
     // prompt appended. Reject it with a proper HTTP 400 so the runtime
     // falls back to the standard compaction path.
@@ -535,12 +583,39 @@ fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bo
     results
 }
 
+/// The `tool_use_id` of the first tool result that puts a `tool_reference`
+/// block in the same content array as anything else, if any.
+///
+/// A content array may carry tool definitions or other content, never both —
+/// see [`api::ToolResultContentBlock::ToolReference`].
+fn tool_result_mixing_definitions(request: &MessageRequest) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|block| match block {
+            InputContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                let definitions = content
+                    .iter()
+                    .filter(|b| matches!(b, api::ToolResultContentBlock::ToolReference { .. }))
+                    .count();
+                (definitions > 0 && definitions != content.len()).then(|| tool_use_id.clone())
+            }
+            _ => None,
+        })
+}
+
 fn flatten_tool_result_content(content: &[api::ToolResultContentBlock]) -> String {
     content
         .iter()
-        .map(|block| match block {
-            api::ToolResultContentBlock::Text { text } => text.clone(),
-            api::ToolResultContentBlock::Json { value } => value.to_string(),
+        .filter_map(|block| match block {
+            api::ToolResultContentBlock::Text { text } => Some(text.clone()),
+            api::ToolResultContentBlock::Json { value } => Some(value.to_string()),
+            api::ToolResultContentBlock::ToolReference { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1024,15 +1099,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             // switches to streaming, this SSE path serves as a fallback.
             final_text_sse(CANNED_COMPACTION_SUMMARY)
         }
-        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "execute_extra_tool roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse(
-                "toolu_execute_extra",
-                "ExecuteExtraTool",
-                &[r#"{"tool_name":"CronList","params":{}}"#],
-            ),
+        Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!("roundtrip complete: {tool_output}")),
+            None => tool_use_sse("toolu_deferred_cron", "CronList", &[r#"{}"#]),
         },
         Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
@@ -1041,22 +1110,33 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_unified_send",
                 "send",
-                &[
-                    r#"{"to":"test-peer","message":"hello from unified send","summary":"greeting test"}"#,
-                ],
+                &[&format!(
+                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test"}}"#
+                )],
             ),
         },
-        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+        Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
+            Some((tool_output, _)) => {
+                final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
+            }
+            // `sender` supplied, which is how a local peer gets a name of its own.
+            None => tool_use_sse(
+                "toolu_unified_send_named",
+                "send",
+                &[&format!(
+                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"{UNIFIED_SEND_BODY}","summary":"greeting test","sender":"{LOCAL_PEER_SENDER}"}}"#
+                )],
+            ),
+        },
+        Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
-                "execute_extra_tool_mcp roundtrip complete: {}",
+                "deferred_mcp roundtrip complete: {}",
                 mcp_echo_verdict(&tool_output)
             )),
             None => tool_use_sse(
-                "toolu_execute_extra_mcp",
-                "ExecuteExtraTool",
-                &[
-                    r#"{"tool_name":"mcp__parity__echo","params":{"text":"hello from deferred mcp"}}"#,
-                ],
+                "toolu_deferred_mcp",
+                "mcp__parity__echo",
+                &[r#"{"text":"hello from deferred mcp"}"#],
             ),
         },
         Scenario::SubagentDelegationParent => {
@@ -1524,16 +1604,16 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::LlmCompactionRoundtrip => {
             text_message_response("msg_llm_compaction", CANNED_COMPACTION_SUMMARY)
         }
-        Scenario::ExecuteExtraToolRoundtrip => match latest_tool_result(request) {
+        Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
-                "msg_execute_extra_final",
-                &format!("execute_extra_tool roundtrip complete: {tool_output}"),
+                "msg_deferred_final",
+                &format!("roundtrip complete: {tool_output}"),
             ),
             None => tool_message_response(
-                "msg_execute_extra",
-                "toolu_execute_extra",
-                "ExecuteExtraTool",
-                json!({"tool_name": "CronList", "params": {}}),
+                "msg_deferred_cron",
+                "toolu_deferred_cron",
+                "CronList",
+                json!({}),
             ),
         },
         Scenario::UnifiedSendRoundtrip => match latest_tool_result(request) {
@@ -1545,22 +1625,34 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_unified_send_tool",
                 "toolu_unified_send",
                 "send",
-                json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
+                json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
             ),
         },
-        Scenario::ExecuteExtraToolMcpRoundtrip => match latest_tool_result(request) {
+        Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
-                "msg_execute_extra_mcp_final",
+                "msg_unified_send_named_final",
+                &format!("unified send roundtrip complete: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_unified_send_named_tool",
+                "toolu_unified_send_named",
+                "send",
+                json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test", "sender": LOCAL_PEER_SENDER}),
+            ),
+        },
+        Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_deferred_mcp_final",
                 &format!(
-                    "execute_extra_tool_mcp roundtrip complete: {}",
+                    "deferred_mcp roundtrip complete: {}",
                     mcp_echo_verdict(&tool_output)
                 ),
             ),
             None => tool_message_response(
-                "msg_execute_extra_mcp",
-                "toolu_execute_extra_mcp",
-                "ExecuteExtraTool",
-                json!({"tool_name": "mcp__parity__echo", "params": {"text": "hello from deferred mcp"}}),
+                "msg_deferred_mcp",
+                "toolu_deferred_mcp",
+                "mcp__parity__echo",
+                json!({"text": "hello from deferred mcp"}),
             ),
         },
         Scenario::SubagentDelegationParent => {
@@ -1658,9 +1750,10 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
-        Scenario::ExecuteExtraToolRoundtrip => "req_execute_extra_tool_roundtrip",
+        Scenario::DeferredToolRoundtrip => "req_deferred_tool_roundtrip",
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
-        Scenario::ExecuteExtraToolMcpRoundtrip => "req_execute_extra_tool_mcp_roundtrip",
+        Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
+        Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
     }

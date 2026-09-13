@@ -87,6 +87,23 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - name: Every committed shell script must be executable
+        shell: bash
+        # `core.filemode=false` on a Windows checkout means a new script is
+        # committed 100644 and nobody notices until a runner reports
+        # `Permission denied` with exit 126 — which reads as a missing file.
+        # It has cost two rounds now, so the mode is asserted rather than
+        # remembered.
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
+          if [ -n "$bad" ]; then
+            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all committed shell scripts are executable"
+
       - name: Renderer crates must not name engine-internal streaming types
         # The engine<->renderer seam is enforced by the dependency graph: a
         # renderer crate that dropped its runtime/api dep literally cannot name
@@ -142,6 +159,55 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+  a2a-live:
+    name: nexus-A2A live (real daemon)
+    runs-on: ubuntu-latest
+    # The workflow default is `rust`; the harness lives at the repo root.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      # The one thing unit tests structurally cannot reach: an envelope moving
+      # through a real gRPC server and a real DT_STREAM, and a blocking tail
+      # woken by a real write. `ensure_inbox` shipped broken for exactly that
+      # reason — the shape was right, the code ran, and only a daemon has an
+      # opinion about whether the stream exists.
+      #
+      # `run.sh` downloads the daemon the lockfile pins (see fetch-daemon.sh),
+      # boots it auth-off on loopback, waits for a writable single-voter leader,
+      # and runs the deterministic live tests. No secrets: the LLM duet inside
+      # the same script gates on SUDOROUTER_API_KEY, which this job has not got.
+      #
+      # One OS on purpose. What this catches is the client/daemon contract,
+      # which does not vary by host — platform-specific daemon behaviour is
+      # nexus-vfs's own CI. Adding runners would multiply the daemon-boot flake
+      # surface for signal already covered.
+      - name: A2A round-trip against the pinned daemon
+        run: e2e/nexus-a2a/run.sh
+
+      # One daemon can only show that a client and a server agree. What A2A
+      # actually rests on is a mechanism that does not exist until there are
+      # two: a receiver parks a blocking tail against its OWN node, a peer
+      # writes to ANOTHER, and the envelope arrives because each node's apply
+      # observer wakes its own waiters. Two nodes on this runner is the
+      # cross-machine topology minus the network, which is the part nexus-vfs's
+      # federation CI already owns.
+      - name: Cross-node A2A against two nodes
+        run: e2e/nexus-a2a/run-cross-node.sh
+
+      # Both scripts above boot `--insecure-no-auth`, where the stamp hook is
+      # fail-open and the authored `from` is preserved by design. That proves
+      # delivery and says nothing about identity — and `from` is an address, so
+      # a forgeable one sends a peer's reply wherever the sender chose. Only an
+      # auth-on node decides who a message is from.
+      - name: Auth-on A2A — the node decides who a message is from
+        run: e2e/nexus-a2a/run-auth-on.sh
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -178,7 +244,16 @@ jobs:
 
   live-api-smoke:
     name: Live API smoke test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Also runnable on demand against any branch. Restricting it to pushes on
+    # main meant a break in this job could only ever be discovered *after* a
+    # merge, and a fix for one could not be verified before merging it — which
+    # is how `live_subagent_smoke_stdio` stayed red across three merges.
+    # `workflow_dispatch` is safe here in a way that `pull_request` is not: it
+    # can only be started by someone with write access, so the token secret is
+    # never exposed to a fork's code.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

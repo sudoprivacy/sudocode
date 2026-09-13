@@ -32,7 +32,37 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nexus_vfs_client::NexusVfsClient;
-use runtime::nexus_mailbox::{ensure_inbox, send};
+use runtime::agent_mailbox::MailboxEnvelope;
+
+/// The unified mailbox for `agent` — the same transport a running agent uses.
+///
+/// These call sites used to reach a second implementation that lived beside
+/// `Mailbox` and duplicated it. Production had already moved, so exercising the
+/// copy proved nothing about what ships.
+fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
+    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+}
+
+fn send_to(
+    client: &Arc<NexusVfsClient>,
+    from_agent: &str,
+    to_agent: &str,
+    body: &str,
+    auth: &str,
+) -> Result<(), String> {
+    mailbox(client, from_agent, auth).send(MailboxEnvelope {
+        from: from_agent.to_string(),
+        to: to_agent.to_string(),
+        body: body.to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: String::new(),
+        request_id: None,
+    })
+}
+
+use runtime::mailbox::Mailbox;
 use serde_json::{json, Value};
 
 /// The agent this `scode acp` answers to, and the peer that writes to it.
@@ -191,8 +221,12 @@ fn a2a_peer_message_reaches_an_acp_client() {
     // but the peer's has to be there for a reply to have somewhere to go, and
     // provisioning after the receiver seeks to tail would race it.
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
-    ensure_inbox(&client, SELF_AGENT, "").expect("provision the agent inbox");
-    ensure_inbox(&client, PEER_AGENT, "").expect("provision the peer inbox");
+    mailbox(&client, SELF_AGENT, "")
+        .ensure_inbox()
+        .expect("provision the agent inbox");
+    mailbox(&client, PEER_AGENT, "")
+        .ensure_inbox()
+        .expect("provision the peer inbox");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
     let config_home = tempfile::tempdir().expect("temp config home");
@@ -217,7 +251,7 @@ fn a2a_peer_message_reaches_an_acp_client() {
 
     // The peer writes. Nothing is in flight: no prompt, no turn.
     let body = "ping from the peer over a real dt_stream";
-    send(&client, PEER_AGENT, SELF_AGENT, body, "").expect("peer writes to the agent inbox");
+    send_to(&client, PEER_AGENT, SELF_AGENT, body, "").expect("peer writes to the agent inbox");
 
     let notification = acp.await_notification(|msg| {
         msg["method"] == "session/update"
@@ -265,8 +299,12 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
     let peer = format!("{agent}-peer");
 
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
-    ensure_inbox(&client, &agent, "").expect("provision the agent inbox");
-    ensure_inbox(&client, &peer, "").expect("provision the peer inbox");
+    mailbox(&client, &agent, "")
+        .ensure_inbox()
+        .expect("provision the agent inbox");
+    mailbox(&client, &peer, "")
+        .ensure_inbox()
+        .expect("provision the peer inbox");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
     let config_home = tempfile::tempdir().expect("temp config home");
@@ -301,7 +339,7 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
 
     // The peer writes into a mailbox nobody is watching.
     let body = "sent while the receiver was down";
-    send(&client, &peer, &agent, body, "").expect("peer writes while nothing listens");
+    send_to(&client, &peer, &agent, body, "").expect("peer writes while nothing listens");
 
     // Second run: must pick up where the first left off.
     let mut acp = spawn_acp(&endpoint, &agent, &peer, &workspace, &config_home);
@@ -341,11 +379,15 @@ fn a_first_time_receiver_does_not_replay_history() {
     let peer = format!("{agent}-peer");
 
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
-    ensure_inbox(&client, &agent, "").expect("provision the agent inbox");
-    ensure_inbox(&client, &peer, "").expect("provision the peer inbox");
+    mailbox(&client, &agent, "")
+        .ensure_inbox()
+        .expect("provision the agent inbox");
+    mailbox(&client, &peer, "")
+        .ensure_inbox()
+        .expect("provision the peer inbox");
 
     // History accumulates before this client has ever existed.
-    send(&client, &peer, &agent, "ancient history", "").expect("write history");
+    send_to(&client, &peer, &agent, "ancient history", "").expect("write history");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
     let config_home = tempfile::tempdir().expect("temp config home");
@@ -364,7 +406,7 @@ fn a_first_time_receiver_does_not_replay_history() {
     // race with a slow delivery.
     let live = "sent after the receiver came up";
     std::thread::sleep(Duration::from_millis(500));
-    send(&client, &peer, &agent, live, "").expect("write a live message");
+    send_to(&client, &peer, &agent, live, "").expect("write a live message");
     let notification = acp.await_notification(|msg| {
         msg["method"] == "session/update"
             && msg["params"]["update"]["sessionUpdate"] == "user_message_chunk"

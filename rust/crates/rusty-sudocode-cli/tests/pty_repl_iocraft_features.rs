@@ -9,7 +9,7 @@ mod common;
 
 use common::TestEnv;
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Budget for the process to exit after `/exit`, separate from the budget a
 /// test gives the behaviour it asserts.
@@ -21,6 +21,51 @@ use std::time::Duration;
 /// hangs these tests guard against are unbounded, so a wide budget still
 /// catches them while runner speed no longer decides the verdict.
 const EXIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// The Ctrl-C confirmation hint, verbatim from `repl_ui`.
+const HINT: &str = "Press Ctrl-C again to exit";
+
+/// Index of the first rendered row containing `needle`, if any.
+///
+/// A row index, not a boolean, because "the hint is in the footer" is a claim
+/// about WHERE it rendered — below the input line rather than up in the
+/// transcript — and only a position can express that.
+fn row_containing(sess: &mut pty_expect::PtySession, needle: &str) -> Option<usize> {
+    sess.render(|s| s.contents().lines().position(|line| line.contains(needle)))
+}
+
+/// Block until `needle` occupies a row, and return that row.
+fn wait_for_row_containing(
+    sess: &mut pty_expect::PtySession,
+    needle: &str,
+    budget: Duration,
+) -> usize {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(row) = row_containing(sess, needle) {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no row showed {needle:?} within {budget:?}\nPTY:\n{}",
+            sess.render(|s| s.contents())
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Block until `needle` is gone from every row.
+fn wait_for_no_row_containing(sess: &mut pty_expect::PtySession, needle: &str, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    while row_containing(sess, needle).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "{needle:?} was still on screen after {budget:?}\nPTY:\n{}",
+            sess.render(|s| s.contents())
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 /// **P0 regression guard**: typing in the iocraft REPL must produce
 /// visible output in the terminal.
@@ -108,86 +153,121 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     assert_eq!(exit, 0, "clean exit code");
 }
 
-/// Ctrl-C hint appears in the FooterSlot (not scrollback) and
-/// auto-dismisses. Pressing Ctrl-C once while idle should show
-/// "Press Ctrl-C again to exit" in the footer area, and a subsequent
-/// keypress should dismiss it. The hint must NOT appear in scrollback.
+/// Ctrl-C hint renders in the FooterSlot, below the input line, not in
+/// scrollback.
+///
+/// Split from the auto-dismiss check below, and run with a TTL long enough
+/// that the hint cannot expire mid-test. The two claims need opposite timing
+/// to observe — one needs the hint present, the other needs it gone — and
+/// asserting both against one 3-second transient is what made this the flake
+/// that blocked merges: a polling loop on a loaded runner can miss the window
+/// entirely, after which the hint is gone for good and the test spins out its
+/// budget having measured the scheduler rather than the footer.
 #[test]
-fn iocraft_repl_ctrlc_hint_in_footer() {
+fn iocraft_repl_ctrlc_hint_renders_in_the_footer() {
     let env = TestEnv::new("iocraft-ctrlc-hint");
     let root = env.workspace_root().to_path_buf();
     std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            // Effectively never expires for the life of this test.
+            ("SUDOCODE_CTRLC_HINT_TTL_MS", "600000"),
+        ],
     );
     sess.set_default_timeout(Duration::from_secs(10));
 
-    sess.expect("❯").unwrap_or_else(|e| {
+    sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
     // Readiness, not a guess. Until iocraft has taken the terminal out of
     // canonical mode, ^C is still a terminal signal and would kill the child
-    // outright instead of arriving as a key event. The prompt can be on
-    // screen before that happens, so the prompt alone is not the signal —
-    // a keystroke that renders is: it proves iocraft owns the keyboard and
-    // is distributing key events. (A fixed sleep here was the old guard;
-    // any duration is either too short on a loaded runner or wasted.)
-    // Ctrl-C clears the input line, so the probe leaves nothing behind.
+    // outright instead of arriving as a key event. The prompt can be on screen
+    // before that happens, so the prompt alone is not the signal — a keystroke
+    // that renders is: it proves iocraft owns the keyboard and is distributing
+    // key events. Ctrl-C clears the input line, so the probe leaves nothing.
     sess.send("~probe~").expect("type readiness probe");
     sess.expect("~probe~").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
     });
 
-    // Press Ctrl-C once — should show hint in footer area.
     sess.send("\x03").expect("send Ctrl-C");
 
-    sess.expect("Press Ctrl-C again to exit")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("Ctrl-C hint should appear in footer: {e}\nPTY:\n{screen}");
-        });
+    // Read the SCREEN, not the byte stream: iocraft redraws everything on any
+    // change, so a stream match says a frame went past, not what is displayed.
+    let hint_row = wait_for_row_containing(&mut sess, HINT, Duration::from_secs(30));
 
-    // Wait for Ctrl-C to have CLEARED the line, not merely for a prompt row to
-    // exist. Its handler emits the footer hint and clears `input_value` in the
-    // same pass, but the frame carrying the hint can reach the PTY before the
-    // cleared buffer is observable. Characters typed into that window get
-    // inserted by `TextInput` and then wiped, so they never show up — which is
-    // how this test failed on macOS CI: `/exit` absent for the whole budget
-    // with the prompt marker plainly on screen and the hint already expired.
-    //
-    // `expect_input_line(&sess, "", …)` cannot express this — `contains("")` is
-    // always true, so it waits for nothing.
+    // BELOW the prompt, which is what "in the footer and not scrollback" means
+    // in terms a test can check.
+    let prompt_row = row_containing(&mut sess, "\u{276f}")
+        .expect("the prompt row is on screen once the REPL is up");
+    assert!(
+        hint_row > prompt_row,
+        "the Ctrl-C hint must render in the footer, below the input line, \
+         not in the scrollback above it (hint row {hint_row}, prompt row {prompt_row})\nPTY:\n{}",
+        sess.render(|s| s.contents())
+    );
+
+    // Ctrl-C also clears the input line. Asserted here rather than by typing
+    // afterwards: keystrokes in the window right after Ctrl-C are dropped
+    // (issue #621), so a test that typed would be testing that bug instead.
     common::expect_input_line_cleared(
         &sess,
         Duration::from_secs(15),
-        "Ctrl-C should clear the input line before more is typed",
+        "Ctrl-C should clear the input line",
+    );
+}
+
+/// The hint auto-dismisses. This matters more than it sounds: the hint is the
+/// ONE thing standing between a second Ctrl-C and an exit, so a hint that never
+/// cleared would leave the REPL one keystroke from quitting indefinitely.
+///
+/// Run with a very short TTL so the end state — hint gone — is what the test
+/// waits for, instead of having to catch the hint mid-flight first. The cleared
+/// input line is the evidence that Ctrl-C was actually processed, so absence of
+/// the hint cannot pass vacuously.
+#[test]
+fn iocraft_repl_ctrlc_hint_auto_dismisses() {
+    let env = TestEnv::new("iocraft-ctrlc-dismiss");
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("SUDOCODE_CTRLC_HINT_TTL_MS", "300"),
+        ],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    sess.expect("\u{276f}").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+    sess.send("~probe~").expect("type readiness probe");
+    sess.expect("~probe~").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("\x03").expect("send Ctrl-C");
+
+    // Ctrl-C landed: the handler clears the input line in the same pass that
+    // raises the hint.
+    common::expect_input_line_cleared(
+        &sess,
+        Duration::from_secs(15),
+        "Ctrl-C should clear the input line",
     );
 
-    // Clean exit. Type and submit as two steps, waiting for the line to
-    // render in between: Enter is only a submit if the input state has
-    // caught up with the characters, and Ctrl-C just cleared that state.
-    // Sending "/exit\r" as one write makes an unrendered line and its Enter
-    // race, and the failure is silent — an empty line submits nothing, so
-    // the test learns about it 60s later as "no EOF" with no clue why.
-    sess.send("/exit").expect("type /exit");
-    common::expect_input_line(
-        &sess,
-        "/exit",
-        Duration::from_secs(15),
-        "typed /exit should render before Enter",
-    );
-    sess.send("\r").expect("send Enter");
-    sess.set_default_timeout(EXIT_BUDGET);
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("exit: {e}\nPTY:\n{screen}");
-    });
-    assert_eq!(exit, 0, "clean exit code");
+    // And the hint does not outlive its TTL.
+    wait_for_no_row_containing(&mut sess, HINT, Duration::from_secs(15));
 }
 
 /// TurnPhase::Thinking renders in the StatusSlot during a turn.
@@ -714,6 +794,60 @@ fn config_tree_navigate_back_and_toggle() {
     // timeout — the macOS-only flake). Settle the render loop first — the same
     // input-slot pause the steps above use — so `/exit` reaches the command
     // parser, and give teardown extra headroom for a loaded runner.
+    std::thread::sleep(Duration::from_millis(400));
+    sess.set_default_timeout(Duration::from_secs(20));
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("exit: {e}\nPTY:\n{screen}");
+    });
+    assert_eq!(exit, 0, "clean exit code");
+}
+
+/// Regression: the `/model` picker sets `allow_custom_input` but renders as a
+/// FuzzySelect (the bundled model list is long). Typing a name that matches no
+/// listed model must still be submittable — Enter uses the typed filter text as
+/// the answer instead of doing nothing. (The sibling DialPad path, used when a
+/// question has <=9 options, is fixed the same way.)
+#[test]
+fn model_picker_accepts_custom_typed_name() {
+    let env = TestEnv::new("dialpad-custom-input");
+    let root = env.workspace_root().to_path_buf();
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    sess.expect("❯").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Open the model picker.
+    sess.send("/model\r").expect("send /model");
+    sess.expect("(?i)select model").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("model picker prompt: {e}\nPTY:\n{screen}");
+    });
+
+    // Type a model name that matches none of the listed options. The filter
+    // empties, and the custom-input hint must appear.
+    sess.send("zzz-custom-model").expect("type custom model");
+    sess.expect("(?i)type a model name").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("custom-input hint missing on no-match: {e}\nPTY:\n{screen}");
+    });
+
+    // Enter submits the typed value as the answer; the switch names it.
+    sess.send("\r").expect("submit custom model");
+    sess.expect("zzz-custom-model").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("custom model not applied: {e}\nPTY:\n{screen}");
+    });
+
     std::thread::sleep(Duration::from_millis(400));
     sess.set_default_timeout(Duration::from_secs(20));
     sess.send("/exit\r").expect("send /exit");

@@ -417,7 +417,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
-    // `tools` array. Discovery via ToolSearch, execution via ExecuteExtraTool.
+    // `tools` array. Discovery via ToolSearch, direct execution by name.
     let deferred_section = tool_registry.deferred_tools_prompt_section();
     if !deferred_section.is_empty() {
         system_prompt.dynamic_sections.push(deferred_section);
@@ -444,30 +444,32 @@ pub(crate) fn build_runtime_with_plugin_state(
             return Err(error);
         }
     };
-    let mut runtime = ConversationRuntime::new_with_features(
+    let mut tool_executor = CliToolExecutor::new(
+        config.allowed_tools,
+        tool_registry.clone(),
+        mcp_state.clone(),
+    );
+    // Hand the dispatcher this session's mailbox: the ONE place local-versus-nexus
+    // is decided. Everything that sends resolves the same handle, so a recipient
+    // name means the same destination to the `send` tool, to a sub-agent reporting
+    // back, and to the receiver tailing its own inbox.
+    //
+    // No A2A session means no nexus configured, and the resolver answers with
+    // workspace-local JSONL — the same code path rather than a fallback branch,
+    // which is what stops the two from drifting.
+    if let Some(a2a_session) = a2a {
+        tool_executor.set_mailbox(a2a_session.mailbox());
+    }
+    let runtime = ConversationRuntime::new_with_features(
         session,
         client,
-        CliToolExecutor::new(
-            config.allowed_tools,
-            tool_registry.clone(),
-            mcp_state.clone(),
-        ),
+        tool_executor,
         policy,
         system_prompt,
         &feature_config,
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
-    // nexus A2A: give the CLI executor the send half so `send` routes to the
-    // peer's replicated DT_STREAM inbox (the shared handler the co-host uses)
-    // instead of the workspace mailbox. Set only when configured — this sender
-    // IS the difference between the two destinations, which is why the model is
-    // offered one tool and never asked to pick a transport.
-    if let Some(session) = a2a {
-        runtime
-            .tool_executor_mut()
-            .set_mailbox_sender(session.sender());
-    }
     // Live plugin-hook progress rides the seam: the observer (the seam's
     // `engine-core` adapter) installs its `HookProgressSink` as the runtime's
     // `hook_progress_reporter` at the start of each turn, so no reporter is

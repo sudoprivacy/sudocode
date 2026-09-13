@@ -53,6 +53,12 @@ pub(crate) struct EngineEventRenderer {
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
+    /// `true` when a staging overlay (the iocraft REPL) shows in-flight tool
+    /// calls as running cards. In that mode the command header is NOT appended
+    /// to scrollback here — the overlay renders it — while the finished result
+    /// card still appends normally (the ordered scrollback sink). Off for
+    /// one-shot / `--print`, where there is no overlay and the header appends.
+    staging_overlay: bool,
 }
 
 impl EngineEventRenderer {
@@ -64,7 +70,15 @@ impl EngineEventRenderer {
             spinner,
             output_writer,
             thinking_active: false,
+            staging_overlay: false,
         }
+    }
+
+    /// Enable staging-overlay mode: suppress the command-header append (the
+    /// overlay shows in-flight calls); the finished result card still appends.
+    pub(crate) fn with_staging_overlay(mut self) -> Self {
+        self.staging_overlay = true;
+        self
     }
 
     fn write_out(&mut self, text: &str) {
@@ -169,8 +183,16 @@ impl EngineEventRenderer {
                     self.write_out(&prefixed);
                 }
                 self.pause_spinner();
-                let line = format!("\n{}\n", format_tool_call_start(&name, &input));
-                self.write_out(&line);
+                // Staging overlay owns the command header (as a running card),
+                // so suppress the scrollback append here to avoid showing it
+                // twice. The glyph reset and spinner pause/resume still run —
+                // they are streaming-cursor bookkeeping, independent of who
+                // renders the header. Without an overlay (one-shot / --print)
+                // the header appends as before.
+                if !self.staging_overlay {
+                    let line = format!("\n{}\n", format_tool_call_start(&name, &input));
+                    self.write_out(&line);
+                }
                 // The tool line reset column 0; the next assistant text starts a
                 // fresh ⏺-margined block.
                 self.glyph.visible_col = 0;
@@ -196,7 +218,13 @@ impl EngineEventRenderer {
                 RenderOutcome::Continue
             }
             EngineEvent::HookProgress(ev) => {
-                render_hook_progress(&ev);
+                // Same pause/write/resume as every other event: writing through
+                // `write_out` keeps this on stdout, behind the same lock the
+                // spinner uses, so a hook line can no longer be torn in half
+                // by a spinner frame.
+                self.pause_spinner();
+                self.write_out(&format!("{}\n", format_hook_progress(&ev)));
+                self.resume_spinner();
                 RenderOutcome::Continue
             }
             EngineEvent::Retry(ev) => {
@@ -286,13 +314,28 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
     }
 }
 
-/// Render one live plugin-hook progress event to stderr. This is the render
-/// half of the pre-seam build-time `CliHookProgressReporter`: hook progress now
-/// rides the seam as [`EngineEvent::HookProgress`] and the stderr formatting
-/// lives here, above the seam. Kept byte-identical to the pre-seam output
-/// (`[hook <event>] <tool>: <cmd>` lines, with `(SudoCode plugin <id>)`
-/// attribution) for PTY parity.
-fn render_hook_progress(event: &HookProgressEvent) {
+/// Format one live plugin-hook progress event for the terminal.
+///
+/// A pure formatter, deliberately: these lines used to go straight to stderr
+/// via `eprintln!` while the turn spinner was painting stdout. Rust gives
+/// stdout and stderr separate locks, so the two writes could interleave
+/// mid-line and the terminal showed a torn line — the spinner's frame with the
+/// tail of a hook line grafted onto it:
+///
+/// ```text
+/// [hook PreToolUse] bash: echo hook-observed
+/// ⠙ 🦀 Thinking... [claude-sonnet-4-6] (0.4s)          ] bash: echo hook-observed
+/// ```
+///
+/// Every other event in this renderer already went through `write_out`, which
+/// writes to `io::stdout()` and so shares the spinner's lock; hook progress was
+/// the one exception, and the only one that tore. Returning a `String` lets the
+/// caller emit it the same way as the rest.
+///
+/// The text is kept byte-identical to the pre-seam output (`[hook <event>]
+/// <tool>: <cmd>` lines, with `(SudoCode plugin <id>)` attribution) for PTY
+/// parity.
+fn format_hook_progress(event: &HookProgressEvent) -> String {
     // Format SudoCode plugin attribution once; each outcome line includes it so
     // the user sees *who* ran the hook in addition to *what* happened.
     fn attribution(plugin_source: Option<&str>) -> String {
@@ -301,56 +344,137 @@ fn render_hook_progress(event: &HookProgressEvent) {
             None => String::new(),
         }
     }
-    match event {
+    let (label, event, tool_name, command, plugin_source) = match event {
         HookProgressEvent::Started {
             event,
             tool_name,
             command,
             plugin_source,
-        } => eprintln!(
-            "[hook {event_name}] {tool_name}: {command}{attr}",
-            event_name = event.as_str(),
-            attr = attribution(plugin_source.as_deref())
-        ),
+        } => ("hook", event, tool_name, command, plugin_source),
         HookProgressEvent::Completed {
             event,
             tool_name,
             command,
             plugin_source,
-        } => eprintln!(
-            "[hook done {event_name}] {tool_name}: {command}{attr}",
-            event_name = event.as_str(),
-            attr = attribution(plugin_source.as_deref())
-        ),
+        } => ("hook done", event, tool_name, command, plugin_source),
         HookProgressEvent::Denied {
             event,
             tool_name,
             command,
             plugin_source,
-        } => eprintln!(
-            "[hook DENIED {event_name}] {tool_name}: {command}{attr}",
-            event_name = event.as_str(),
-            attr = attribution(plugin_source.as_deref())
-        ),
+        } => ("hook DENIED", event, tool_name, command, plugin_source),
         HookProgressEvent::Failed {
             event,
             tool_name,
             command,
             plugin_source,
-        } => eprintln!(
-            "[hook FAILED {event_name}] {tool_name}: {command}{attr}",
-            event_name = event.as_str(),
-            attr = attribution(plugin_source.as_deref())
-        ),
+        } => ("hook FAILED", event, tool_name, command, plugin_source),
         HookProgressEvent::Cancelled {
             event,
             tool_name,
             command,
             plugin_source,
-        } => eprintln!(
-            "[hook cancelled {event_name}] {tool_name}: {command}{attr}",
-            event_name = event.as_str(),
-            attr = attribution(plugin_source.as_deref())
-        ),
+        } => ("hook cancelled", event, tool_name, command, plugin_source),
+    };
+    format!(
+        "[{label} {event_name}] {tool_name}: {command}{attr}",
+        event_name = event.as_str(),
+        attr = attribution(plugin_source.as_deref())
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_hook_progress;
+    use engine_events::HookProgressEvent;
+    use runtime::HookEvent;
+
+    /// The five outcome lines, byte-for-byte. These strings are a terminal
+    /// contract the PTY tests match on, so a reworded label is a breaking
+    /// change and should fail here rather than in a flaky screen scrape.
+    #[test]
+    fn every_outcome_renders_its_documented_line() {
+        let cases = [
+            (
+                HookProgressEvent::Started {
+                    event: HookEvent::PreToolUse,
+                    tool_name: "bash".to_string(),
+                    command: "echo hook-observed".to_string(),
+                    plugin_source: None,
+                },
+                "[hook PreToolUse] bash: echo hook-observed",
+            ),
+            (
+                HookProgressEvent::Completed {
+                    event: HookEvent::PreToolUse,
+                    tool_name: "bash".to_string(),
+                    command: "echo hook-observed".to_string(),
+                    plugin_source: None,
+                },
+                "[hook done PreToolUse] bash: echo hook-observed",
+            ),
+            (
+                HookProgressEvent::Denied {
+                    event: HookEvent::PreToolUse,
+                    tool_name: "bash".to_string(),
+                    command: "echo nope".to_string(),
+                    plugin_source: None,
+                },
+                "[hook DENIED PreToolUse] bash: echo nope",
+            ),
+            (
+                HookProgressEvent::Failed {
+                    event: HookEvent::PostToolUse,
+                    tool_name: "bash".to_string(),
+                    command: "echo boom".to_string(),
+                    plugin_source: None,
+                },
+                "[hook FAILED PostToolUse] bash: echo boom",
+            ),
+            (
+                HookProgressEvent::Cancelled {
+                    event: HookEvent::PostToolUseFailure,
+                    tool_name: "bash".to_string(),
+                    command: "echo stop".to_string(),
+                    plugin_source: None,
+                },
+                "[hook cancelled PostToolUseFailure] bash: echo stop",
+            ),
+        ];
+
+        for (event, expected) in cases {
+            assert_eq!(format_hook_progress(&event), expected);
+        }
+    }
+
+    /// Plugin-contributed hooks name their plugin, so a user can tell which
+    /// installed thing is gating (or slowing) their tool call.
+    #[test]
+    fn a_plugin_hook_is_attributed_to_its_plugin() {
+        let event = HookProgressEvent::Started {
+            event: HookEvent::PreToolUse,
+            tool_name: "bash".to_string(),
+            command: "echo hi".to_string(),
+            plugin_source: Some("guardrails".to_string()),
+        };
+        assert_eq!(
+            format_hook_progress(&event),
+            "[hook PreToolUse] bash: echo hi (SudoCode plugin guardrails)"
+        );
+    }
+
+    /// The formatter returns a line with no trailing newline: the caller adds
+    /// it when writing through `write_out`. Returning it pre-terminated would
+    /// double-space the terminal.
+    #[test]
+    fn the_formatted_line_carries_no_trailing_newline() {
+        let event = HookProgressEvent::Completed {
+            event: HookEvent::PreToolUse,
+            tool_name: "bash".to_string(),
+            command: "echo hi".to_string(),
+            plugin_source: None,
+        };
+        let line = format_hook_progress(&event);
+        assert!(!line.ends_with('\n'), "unexpected newline in {line:?}");
     }
 }

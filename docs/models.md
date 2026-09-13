@@ -174,6 +174,17 @@ Two optional fields on the model entry override the table:
 - Absent means unchanged: the compiled table's numbers apply, exactly as
   before.
 
+### Subagents and compaction
+
+`agent_spawn` inherits the parent agent's current runtime model when `model`
+is omitted, empty, or `inherit`. Pass `model` explicitly to use another model.
+`pid_fork` follows the same inheritance rule. A call outside a parent runtime
+must supply a model; there is no built-in fallback model for subagents.
+
+Subagent result summaries use the subagent's resolved model. Manual and
+automatic compaction reuse the current agent's API client and model route;
+they do not select a separate summarization model.
+
 ### `reasoning_effort` values
 
 `--reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`.

@@ -392,10 +392,17 @@ impl TestEnv {
             // channel for the pinned model answers `500 … 可用渠道不存在` on
             // every attempt, which fails every live test in the suite for a
             // reason that is nothing to do with the code under test.
+            // Allow API-key accounts too; keep the selected auth local to this
+            // test process instead of modifying the developer's credentials.
             Backend::Live { workspace } => spawn_with_workspace(
                 workspace,
                 None,
-                &["--auth", "proxy", "--model", &live_model()],
+                &[
+                    "--auth",
+                    &std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".to_string()),
+                    "--model",
+                    &live_model(),
+                ],
                 extra_args,
                 LIVE_TIMEOUT,
                 env_vars,

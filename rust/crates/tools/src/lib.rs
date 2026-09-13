@@ -57,7 +57,7 @@ pub mod testing {
             prompt: prompt.to_string(),
             subagent_type: Some(subagent_type.to_string()),
             name: None,
-            model: None,
+            model: Some("test-model".to_string()),
             run_in_background: Some(true),
             fresh: None,
             auth_mode: None,
@@ -1092,7 +1092,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
-                    "model": { "type": "string", "description": "Model ID override; defaults to the system default." },
+                    "model": { "type": "string", "description": "Model ID override; when omitted, inherits the parent agent's current model." },
                     "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve the result later with pid_output(pid, block: true). When false, run synchronously and return the result." },
                     "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
                     "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
@@ -4685,7 +4685,6 @@ fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
         .map(|report| report.load_outcome())
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
 fn execute_agent(
@@ -4758,7 +4757,7 @@ fn prepare_agent_job(
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
 
-    let model = resolve_agent_model(input.model.as_deref());
+    let model = resolve_agent_model(input.model.as_deref(), ctx)?;
     let agent_name = input
         .name
         .as_deref()
@@ -4865,10 +4864,11 @@ fn prepare_agent_job(
 /// Only used by the inline `#[cfg(test)] mod tests` block; kept out
 /// of non-test builds so the dead-code analyzer stays quiet.
 #[cfg(test)]
-fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
+fn execute_agent_with_spawn<F>(mut input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
+    input.model.get_or_insert_with(|| "test-model".to_string());
     execute_agent_with_spawn_and_context(input, None, spawn_fn)
 }
 
@@ -5341,7 +5341,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         .manifest
         .model
         .clone()
-        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+        .ok_or_else(|| "subagent has no resolved model".to_string())?;
     let empty_tools: BTreeSet<String> = BTreeSet::new();
     let api_client = ProviderRuntimeClient::new_with_config(
         model,
@@ -5529,14 +5529,14 @@ fn build_agent_runtime(
         .manifest
         .model
         .clone()
-        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+        .ok_or_else(|| "subagent has no resolved model".to_string())?;
     let allowed_tools = job.allowed_tools.clone();
     // Use the config captured at spawn time instead of re-loading from disk.
     // This ensures the subagent thread inherits the parent's auth tokens and
     // provider configuration, preventing 401 Unauthorized errors when the CWD
     // or config state differs between threads.
     let api_client = ProviderRuntimeClient::new_with_config(
-        model,
+        model.clone(),
         allowed_tools.clone(),
         &job.sudocode_config,
         &job.fallback_config,
@@ -5553,6 +5553,7 @@ fn build_agent_runtime(
         job.system_prompt.clone(),
     )
     .with_session_known_date(runtime::today_local())
+    .with_session_known_model(model)
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
@@ -5602,12 +5603,24 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String
     Ok(prompt)
 }
 
-fn resolve_agent_model(model: Option<&str>) -> String {
+fn resolve_agent_model(
+    model: Option<&str>,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<String, String> {
     model
         .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(DEFAULT_AGENT_MODEL)
-        .to_string()
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("inherit"))
+        .or_else(|| {
+            ctx.and_then(|ctx| ctx.parent_assistant_message.as_ref())
+                .and_then(|message| message.model.as_deref())
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "cannot inherit subagent model: parent runtime model is unavailable; supply model explicitly"
+                .to_string()
+        })
 }
 
 fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
@@ -10185,7 +10198,8 @@ mod tests {
             &json!({
                 "description": "Verify the branch",
                 "prompt": "Check tests.",
-                "subagent_type": "explorer"
+                "subagent_type": "explorer",
+                "model": "test-model"
             }),
         )
         .expect("Agent should normalize built-in aliases");
@@ -10198,7 +10212,8 @@ mod tests {
             &json!({
                 "description": "Review the branch",
                 "prompt": "Inspect diff.",
-                "name": "Ship Audit!!!"
+                "name": "Ship Audit!!!",
+                "model": "test-model"
             }),
         )
         .expect("Agent should normalize explicit names");
@@ -11226,7 +11241,7 @@ mod tests {
             prompt: format!("scenario={label}"),
             subagent_type: None,
             name: Some(format!("auto-bg-{label}")),
-            model: None,
+            model: Some("test-model".to_string()),
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,

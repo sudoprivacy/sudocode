@@ -605,7 +605,7 @@ fn serve_delegation(socket: &mut TcpStream, request: &Value) {
     } else if steps == 0 {
         (
             json!({"type":"tool_use","id":"delegate","name":"Agent","input":{
-                "description":"validate child checkpoint", "model":"claude-sonnet", "auth_mode":"api-key",
+                "description":"validate child checkpoint",
                 "run_in_background":false,
                 "prompt":format!("CHILD_COMPACTION PROJECT_ALPHA {}", "Preserve the migration constraints. ".repeat(300))
             }}),
@@ -712,6 +712,20 @@ fn subagent_compaction_uses_shared_text_transport() {
             ))
             .collect::<Vec<_>>()
     );
+    // No model was specified in the spawn. Both the child and its compaction
+    // must use the parent's configured route, not the response's model label.
+    assert!(requests.iter().all(|r| r["model"] == "intranet/child-v1"));
+    let manifests = std::fs::read_dir(workspace.root.join(".sudocode-agents"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| {
+            serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0]["model"], "claude-sonnet");
+    assert_eq!(manifests[0]["status"], "completed");
     let checkpoint = checkpoints[0];
     assert!(checkpoint["messages"]
         .to_string()

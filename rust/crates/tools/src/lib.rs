@@ -7083,6 +7083,15 @@ const CORE_TOOLS: &[&str] = &[
     "Sleep",
     "Skill",
     "agent_spawn",
+    // The other half of `agent_spawn`. It runs in the background by default, so
+    // every spawn has to be collected with `pid_output(pid, block: true)` before
+    // its result exists anywhere the model can read. Leaving that deferred put a
+    // ToolSearch round-trip in the middle of a core workflow: the model would
+    // spawn its agents, search for `pid_output`, and end the turn without ever
+    // collecting — which is what `live_subagent_smoke_stdio` caught (three
+    // agents started, zero results). A tool that is required to finish a core
+    // tool's default path is core.
+    "pid_output",
     "pid_fork",
     "ToolSearch",
     "AskUserQuestion",

@@ -209,7 +209,16 @@ jobs:
 
   live-api-smoke:
     name: Live API smoke test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Also runnable on demand against any branch. Restricting it to pushes on
+    # main meant a break in this job could only ever be discovered *after* a
+    # merge, and a fix for one could not be verified before merging it — which
+    # is how `live_subagent_smoke_stdio` stayed red across three merges.
+    # `workflow_dispatch` is safe here in a way that `pull_request` is not: it
+    # can only be started by someone with write access, so the token secret is
+    # never exposed to a fork's code.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

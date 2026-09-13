@@ -844,14 +844,84 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
     let top = format!("{frame}\u{256d}\u{2500}{RESET}");
     let bar = format!("{frame}\u{2502}{RESET}");
     let bottom = format!("{frame}\u{2570}\u{2500}{RESET}");
-    let mut out = format!("{top} {}", content.header);
+    // Wrap every content line to the width left after the 2-column `│ ` prefix,
+    // then prefix each wrapped segment with the bar. A line longer than the
+    // terminal would otherwise be wrapped by the terminal itself, and that
+    // continuation would carry no `│` — spilling past the left frame. Wrapping
+    // here (not truncating) keeps all content and keeps every visible row
+    // inside the frame. This is the single place that guarantees framed output
+    // stays framed — extractors need not each reason about width.
+    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
+    let content_width = term_width.saturating_sub(2).max(1);
+    let mut out = String::new();
+    for (i, seg) in wrap_ansi_to_width(&content.header, content_width)
+        .iter()
+        .enumerate()
+    {
+        let prefix = if i == 0 { &top } else { &bar };
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "{prefix} {seg}");
+    }
     if let Some(body) = &content.body {
         for line in body.lines() {
-            let _ = write!(out, "\n{bar} {line}");
+            for seg in wrap_ansi_to_width(line, content_width) {
+                let _ = write!(out, "\n{bar} {seg}");
+            }
         }
     }
     let _ = write!(out, "\n{bottom}");
     out
+}
+
+/// Hard-wrap a possibly-ANSI-styled string to `width` visible columns,
+/// returning one string per wrapped row. ANSI SGR escapes are copied verbatim
+/// and don't count toward width; each row is closed with `RESET` so a color
+/// opened before the break doesn't bleed past the frame bar of the next row.
+/// An empty input yields one empty row (so a blank body line still renders a
+/// framed blank row rather than vanishing).
+fn wrap_ansi_to_width(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut vis = 0usize;
+    let mut carried_style = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // Copy the whole CSI sequence verbatim (ESC [ ... final-byte).
+            cur.push(ch);
+            if chars.peek() == Some(&'[') {
+                cur.push(chars.next().unwrap());
+                for c in chars.by_ref() {
+                    cur.push(c);
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            carried_style = true;
+            continue;
+        }
+        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if vis + ch_w > width && vis > 0 {
+            if carried_style {
+                cur.push_str(RESET);
+            }
+            rows.push(std::mem::take(&mut cur));
+            vis = 0;
+        }
+        cur.push(ch);
+        vis += ch_w;
+    }
+    rows.push(cur);
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
 }
 
 pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
@@ -2065,6 +2135,37 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn render_tool_card_body_line_never_exceeds_terminal_width() {
+        // Regression: a body line longer than the terminal used to be wrapped
+        // by the terminal itself, and the continuation had no `│` prefix, so it
+        // spilled past the left frame (seen with pid_status/generic_tool_card's
+        // long JSON values). render_tool_card now wraps every content line to
+        // the frame's inner width, prefixing each segment with `│`.
+        let term_width = crossterm::terminal::size().map_or(80usize, |(cols, _)| cols as usize);
+        let long = "x".repeat(term_width * 3);
+        let content = ToolCardContent::new("pid_status".to_string(), long.clone());
+        let rendered = render_tool_card(&content, ToolStatus::Ok);
+        let plain = strip_ansi(&rendered);
+        // (1) No rendered row exceeds the terminal width.
+        for line in plain.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= term_width,
+                "line exceeds terminal width {term_width}: {line:?}"
+            );
+        }
+        // (2) Wrapping preserves content — every `x` survives (not truncated).
+        let x_count = plain.chars().filter(|&c| c == 'x').count();
+        assert_eq!(x_count, long.len(), "wrapped body must keep all content");
+        // (3) Every body row carries the frame bar (no bare continuation).
+        for line in plain.lines().filter(|l| l.contains('x')) {
+            assert!(
+                line.trim_start().starts_with('\u{2502}'),
+                "wrapped body row must start with the frame bar: {line:?}"
+            );
+        }
     }
 
     #[test]

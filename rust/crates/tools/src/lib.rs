@@ -1322,11 +1322,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         // ── pid.* tools ───────────────────────────────────────────────
-        // The one process-control family. A CC-trained model will name
-        // these `TaskStop`/`TaskGet`/`TaskList`/`TaskOutput` and pass
-        // `task_id`/`agent_id`; `TOOL_ALIASES` + the `normalize_pid_*`
-        // helpers accept those spellings without advertising them as a
-        // second set of tools.
+        // Agent process control. A CC-trained model may spell these as
+        // `TaskStop`/`TaskOutput` and pass `task_id`; `TOOL_ALIASES` +
+        // `normalize_pid_input` accept those without advertising a
+        // second set. (`TaskGet`/`TaskList` are separate canonical tools
+        // for the to-do registry, NOT aliases for pid_status.)
         ToolSpec {
             name: "pid_kill",
             description: "Terminate a running agent by pid.",

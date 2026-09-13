@@ -5,6 +5,15 @@ const DEFAULT_OUTPUT_COST_PER_MILLION: f64 = 75.0;
 const DEFAULT_CACHE_CREATION_COST_PER_MILLION: f64 = 18.75;
 const DEFAULT_CACHE_READ_COST_PER_MILLION: f64 = 1.5;
 
+/// Quota units per USD dollar for `sudo_point`-denominated `cost_units`.
+///
+/// This mirrors new-api's `QuotaPerUnit` (`common/constants.go`:
+/// `500 * 1000` = `$0.002 / 1K tokens`), the billing backend that mints the
+/// `cost_units` we receive: USD = `cost_units / QUOTA_UNITS_PER_USD`. If the
+/// backend ever changes this ratio, real-cost display would scale with it;
+/// it is the one external assumption in the otherwise-exact real-cost path.
+const QUOTA_UNITS_PER_USD: f64 = 500_000.0;
+
 /// Per-million-token pricing used for cost estimation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPricing {
@@ -204,6 +213,23 @@ impl TokenUsage {
     #[must_use]
     pub fn estimate_cost_usd(self) -> UsageCostEstimate {
         self.estimate_cost_usd_with_pricing(ModelPricing::default_sonnet_tier())
+    }
+
+    /// The real USD cost the billing backend charged for this usage, when it
+    /// reported one. `Some` only when `cost_units` is present and denominated
+    /// in `sudo_point`; otherwise `None` and the caller should fall back to a
+    /// per-model estimate. Exact up to the [`QUOTA_UNITS_PER_USD`] ratio.
+    #[must_use]
+    pub fn real_cost_usd(self) -> Option<f64> {
+        match (self.cost_units, self.cost_currency) {
+            (Some(units), Some(UsageCostCurrency::SudoPoint)) => {
+                // Cost precision does not need full u64 range; a lossy cast to
+                // f64 is fine for a dollar figure rounded to cents on display.
+                #[allow(clippy::cast_precision_loss)]
+                Some(units as f64 / QUOTA_UNITS_PER_USD)
+            }
+            _ => None,
+        }
     }
 
     #[must_use]

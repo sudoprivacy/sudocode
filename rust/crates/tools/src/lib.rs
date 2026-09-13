@@ -2407,13 +2407,6 @@ fn run_cron_list(_input: Value) -> Result<String, String> {
 
 // ── SendMessage ────────────────────────────────────────────────────
 
-/// Resolve the workspace root that receives inbox files. The turn's
-/// workspace root is the canonical anchor — matches the way plan-mode,
-/// todos, and agent manifests use [`current_workspace_root`].
-fn send_message_workspace() -> Result<PathBuf, String> {
-    current_workspace_root().map_err(|e| format!("resolve workspace root: {e}"))
-}
-
 /// Best-effort sanitizer for a mailbox filename stem. Recipient
 /// names can be arbitrary strings from the model — collapse anything
 /// outside `[A-Za-z0-9_-]` to `_` so we can't traverse or overwrite
@@ -2558,7 +2551,7 @@ fn normalize_agent_spawn_input(input: &Value) -> Value {
 /// not read. Defaulting to `TEAM_LEAD_NAME` did exactly that: a
 /// cross-machine send stamped `from: "team-lead"` whatever the session's
 /// identity, and the peer's reply addressed `/agents/team-lead/chat-with-me`.
-fn resolve_sender(input: &SendMessageInput) -> String {
+fn resolve_sender(input: &SendMessageInput, mailbox: &runtime::mailbox::Mailbox) -> String {
     if let Some(explicit) = input
         .sender
         .as_deref()
@@ -2567,15 +2560,26 @@ fn resolve_sender(input: &SendMessageInput) -> String {
     {
         return explicit.to_string();
     }
-    let session_identity = runtime::mailbox::sending_mailbox().self_id().to_string();
-    if session_identity.trim().is_empty() {
+    if mailbox.self_id().trim().is_empty() {
         return TEAM_LEAD_NAME.to_string();
     }
-    session_identity
+    mailbox.self_id().to_string()
 }
 
+/// Build one envelope and deliver it through `mailbox`.
+///
+/// Every branch of `send` — point-to-point, broadcast, the structured kinds —
+/// funnels here, so this is the one place that turns a recipient into a
+/// destination: the name goes through the session's convention, and the same
+/// call reaches a JSONL file or a replicated DT_STREAM depending on what the
+/// session is.
+///
+/// The mailbox is a parameter rather than something this resolves, because a
+/// broadcast calls this once per recipient and they must all be the same
+/// session's. Resolving inside would also re-read the workspace root per
+/// recipient for an answer that cannot change mid-send.
 fn write_envelope(
-    workspace: &Path,
+    mailbox: &runtime::mailbox::Mailbox,
     recipient: &str,
     from: &str,
     text: &str,
@@ -2598,19 +2602,8 @@ fn write_envelope(
         kind: kind.to_string(),
         request_id: request_id.map(str::to_string),
     };
-    // Through the session's mailbox, not straight at the workspace: the
-    // recipient names an agent and the convention turns that into a path, so
-    // the same call reaches a JSONL file or a replicated DT_STREAM depending on
-    // what the session resolved. Every branch of `send` — point-to-point,
-    // broadcast, the structured kinds — funnels here, so this is the one place
-    // that has to know.
-    //
-    // `workspace` is still taken because the LocalJsonl convention is built
-    // from it; it is the caller's notion of where the session lives.
-    let _ = workspace;
     let mut envelope = envelope;
     envelope.to = recipient_sanitized.clone();
-    let mailbox = runtime::mailbox::sending_mailbox();
     // The path the convention resolved, not a reconstruction of it. It reaches
     // the model as `mailbox_path`, so it has to be where the envelope actually
     // went — under nexus that is a replicated stream, not a file.
@@ -2639,8 +2632,10 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
         );
     }
 
-    let workspace = send_message_workspace()?;
-    let sender = resolve_sender(&input);
+    // Resolved once for the whole call. `send` has one destination namespace
+    // per session, and a broadcast must not re-resolve it per recipient.
+    let mailbox = runtime::mailbox::sending_mailbox();
+    let sender = resolve_sender(&input, &mailbox);
 
     // ── Plain text branch ──────────────────────────────────────────
     if let Some(text) = input.message.as_str() {
@@ -2652,7 +2647,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             // convention that cannot enumerate says so rather than answering
             // "nobody" — a broadcast reporting success over zero recipients is
             // the silent kind of failure.
-            let mut recipients = runtime::mailbox::sending_mailbox().list_recipients()?;
+            let mut recipients = mailbox.list_recipients()?;
             // Never echo to sender.
             recipients.retain(|r| r != &sender);
             if recipients.is_empty() {
@@ -2664,7 +2659,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             }
             for r in &recipients {
                 write_envelope(
-                    &workspace,
+                    &mailbox,
                     r,
                     &sender,
                     text,
@@ -2694,7 +2689,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             return Err("summary is required when message is a string".to_string());
         }
         let path = write_envelope(
-            &workspace,
+            &mailbox,
             &input.to,
             &sender,
             text,
@@ -2740,7 +2735,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             })
             .to_string();
             write_envelope(
-                &workspace,
+                &mailbox,
                 &input.to,
                 &sender,
                 &body,
@@ -2791,7 +2786,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             })
             .to_string();
             write_envelope(
-                &workspace,
+                &mailbox,
                 &input.to,
                 &sender,
                 &body,
@@ -2825,7 +2820,7 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             })
             .to_string();
             write_envelope(
-                &workspace,
+                &mailbox,
                 &input.to,
                 &sender,
                 &body,

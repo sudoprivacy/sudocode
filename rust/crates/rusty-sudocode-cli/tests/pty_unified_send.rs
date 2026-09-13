@@ -36,32 +36,16 @@ fn send_tool_writes_envelope_and_roundtrips() {
     sess.set_default_timeout(Duration::from_secs(15));
     sess.expect("(?i)(unified send roundtrip complete|Message sent to)")
         .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
             panic!(
-                "send roundtrip text not found: {e}\ntail:\n{tail}",
-                tail = screen
-                    .chars()
-                    .rev()
-                    .take(800)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>(),
+                "send roundtrip text not found: {e}\ntail:\n{}",
+                common::screen_tail(&sess, 800)
             );
         });
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
         panic!(
-            "scode did not exit: {e}\ntail:\n{tail}",
-            tail = screen
-                .chars()
-                .rev()
-                .take(800)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>(),
+            "scode did not exit: {e}\ntail:\n{}",
+            common::screen_tail(&sess, 800)
         );
     });
     assert_eq!(exit, 0, "unified send test should exit 0");

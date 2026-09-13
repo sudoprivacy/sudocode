@@ -178,6 +178,128 @@ fn live_blocking_read_wakes_on_write() {
     println!("blocking read woke on write after {woke:?} (idle timeout was {idle_elapsed:?})");
 }
 
+/// The same wake, across a raft boundary: the writer is on ANOTHER NODE.
+///
+/// This is the question the whole A2A design rests on and the one thing no
+/// single-node test can answer. A receiver parks on `stream_read_at(blocking)`
+/// against its OWN node. When its peer writes, that write is a raft proposal
+/// applied on both nodes, and the waking is done by each node's own apply
+/// observer — so "does a blocking tail work transparently under replication"
+/// is a question about a mechanism that only exists when there are two nodes.
+///
+/// `a2a_wakeup` in nexus-vfs covers the neighbouring case: two real daemons,
+/// and a parked `sys_watch` woken by a peer's write. This covers the primitive
+/// `scode` actually parks on, which is not that one — a cursor-aware tail read
+/// that returns the frame AT the cursor, where a watch returns a change event
+/// and needs a follow-up read.
+///
+/// The timing assertions are what make it a wake rather than a delivery: an
+/// unwoken read still returns the envelope once its timeout expires and the
+/// poll re-reads, so "the message arrived" cannot tell the two apart. Waking
+/// before the deadline can.
+///
+/// Needs a two-node cluster; `e2e/nexus-a2a/run-cross-node.sh` stands one up:
+///
+/// ```text
+/// NEXUS_A2A_TEST_ENDPOINT=127.0.0.1:2142 NEXUS_A2A_TEST_PEER_ENDPOINT=127.0.0.1:2141 \
+///   cargo test -p runtime --test mailbox_nexus_live live_blocking_read_wakes_on_a_peer_nodes_write -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a two-node cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_PEER_ENDPOINT"]
+fn live_blocking_read_wakes_on_a_peer_nodes_write() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let peer_endpoint = std::env::var("NEXUS_A2A_TEST_PEER_ENDPOINT")
+        .expect("set NEXUS_A2A_TEST_PEER_ENDPOINT to the OTHER node");
+    assert_ne!(
+        endpoint, peer_endpoint,
+        "both endpoints name the same node, which proves nothing about replication"
+    );
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial this node"));
+
+    let me = "scode-cross-node-probe";
+    mailbox(&client, me, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox on this node");
+    let (_history, tail) = mailbox(&client, me, &auth)
+        .poll(0, 0)
+        .expect("seek to tail");
+
+    // The inbox has to be visible from the peer node before a write there can
+    // land in it. That is replication of the stream's METADATA, and it is a
+    // precondition of the wake rather than part of it, so it is waited for
+    // separately and loudly.
+    let peer = Arc::new(NexusVfsClient::connect(&peer_endpoint).expect("dial the peer node"));
+    let replicated = Instant::now();
+    loop {
+        if mailbox(&peer, me, &auth).poll(0, 0).is_ok() {
+            break;
+        }
+        assert!(
+            replicated.elapsed() < Duration::from_secs(30),
+            "the inbox never became visible from {peer_endpoint} — \
+             the nodes are not sharing the zone, so nothing below would mean anything"
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    // Idle first, on this node: an inbox nobody is writing to must hold the
+    // read for the whole timeout. Without this, a wake that never happened and
+    // a read that never parked look identical.
+    let t0 = Instant::now();
+    let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
+        .poll(tail, 800)
+        .expect("idle blocking read");
+    let idle_elapsed = t0.elapsed();
+    assert!(
+        idle_msgs.is_empty(),
+        "idle read must surface nothing, got {idle_msgs:?}"
+    );
+    assert_eq!(idle_next, tail, "idle read must not advance the cursor");
+    assert!(
+        idle_elapsed >= Duration::from_millis(700),
+        "idle read returned too early ({idle_elapsed:?}) — it did not park on the tail"
+    );
+
+    // Now the peer node writes, 400ms after the read below parks.
+    let body = "wake up across the raft boundary";
+    let writer = {
+        let auth = auth.clone();
+        let peer = Arc::clone(&peer);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            send_to(&peer, "peer-node", me, body, &auth).expect("peer-node write");
+        })
+    };
+
+    let t1 = Instant::now();
+    let (msgs, next) = mailbox(&client, me, &auth)
+        .poll(tail, 8_000)
+        .expect("armed blocking read");
+    let woke = t1.elapsed();
+    writer.join().expect("writer thread");
+
+    assert!(
+        msgs.iter().any(|m| m.from == "peer-node" && m.body == body),
+        "the read must surface the envelope the OTHER node wrote, got {msgs:?}"
+    );
+    assert!(next > tail, "cursor must advance past the consumed frame");
+    assert!(
+        woke < Duration::from_millis(7_000),
+        "the read returned on its timeout ({woke:?}), not on the peer's write — \
+         the envelope replicated but the apply observer did not wake this node's tail"
+    );
+    assert!(
+        woke >= Duration::from_millis(300),
+        "the read returned before the write was issued ({woke:?}) — stale or instant wake"
+    );
+    println!(
+        "a write on {peer_endpoint} woke a tail parked on {endpoint} after {woke:?} \
+         (idle timeout was {idle_elapsed:?})"
+    );
+}
+
 /// Guard the concurrent-dispatch property that lets the receiver share the ONE
 /// `NexusVfsClient` with the send half: a blocking tail read parked on the
 /// client must NOT stall other ops on the SAME client. Each op runs on its own

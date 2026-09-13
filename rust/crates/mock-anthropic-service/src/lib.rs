@@ -11,6 +11,13 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 pub const SCENARIO_PREFIX: &str = "PARITY_SCENARIO:";
+
+/// The recipient the `unified_send_roundtrip` scenario addresses.
+///
+/// Exported because a test that reads the inbox this scenario writes to has
+/// to name the same agent, and two copies of that name drift into a test that
+/// passes while watching the wrong stream.
+pub const UNIFIED_SEND_RECIPIENT: &str = "test-peer";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Canned compaction summary returned by the `LlmCompactionRoundtrip`
@@ -1079,9 +1086,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_unified_send",
                 "send",
-                &[
-                    r#"{"to":"test-peer","message":"hello from unified send","summary":"greeting test"}"#,
-                ],
+                &[&format!(
+                    r#"{{"to":"{UNIFIED_SEND_RECIPIENT}","message":"hello from unified send","summary":"greeting test"}}"#
+                )],
             ),
         },
         Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {
@@ -1581,7 +1588,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_unified_send_tool",
                 "toolu_unified_send",
                 "send",
-                json!({"to": "test-peer", "message": "hello from unified send", "summary": "greeting test"}),
+                json!({"to": UNIFIED_SEND_RECIPIENT, "message": "hello from unified send", "summary": "greeting test"}),
             ),
         },
         Scenario::DeferredMcpToolRoundtrip => match latest_tool_result(request) {

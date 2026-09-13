@@ -87,6 +87,23 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - name: Every committed shell script must be executable
+        shell: bash
+        # `core.filemode=false` on a Windows checkout means a new script is
+        # committed 100644 and nobody notices until a runner reports
+        # `Permission denied` with exit 126 — which reads as a missing file.
+        # It has cost two rounds now, so the mode is asserted rather than
+        # remembered.
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" { print $4 }')
+          if [ -n "$bad" ]; then
+            echo "::error::not executable in the index — run: git update-index --chmod=+x <file>"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all committed shell scripts are executable"
+
       - name: Renderer crates must not name engine-internal streaming types
         # The engine<->renderer seam is enforced by the dependency graph: a
         # renderer crate that dropped its runtime/api dep literally cannot name
@@ -172,6 +189,16 @@ jobs:
       # surface for signal already covered.
       - name: A2A round-trip against the pinned daemon
         run: e2e/nexus-a2a/run.sh
+
+      # One daemon can only show that a client and a server agree. What A2A
+      # actually rests on is a mechanism that does not exist until there are
+      # two: a receiver parks a blocking tail against its OWN node, a peer
+      # writes to ANOTHER, and the envelope arrives because each node's apply
+      # observer wakes its own waiters. Two nodes on this runner is the
+      # cross-machine topology minus the network, which is the part nexus-vfs's
+      # federation CI already owns.
+      - name: Cross-node A2A against two nodes
+        run: e2e/nexus-a2a/run-cross-node.sh
 
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})

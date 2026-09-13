@@ -351,8 +351,10 @@ pub enum ConfigScope {
 /// Used to spot `api` overrides that route one over the OpenAI-compatible path,
 /// where prompt caching does not exist. Deliberately a string test: the caller
 /// runs before the program has loaded the capabilities SSOT, and reading that
-/// early would freeze it empty.
-fn is_anthropic_model(wire_model_id: &str) -> bool {
+/// early would freeze it empty — which is also why the provider registry uses
+/// it to pick a wire format when the SSOT has nothing to say.
+#[must_use]
+pub fn is_anthropic_model(wire_model_id: &str) -> bool {
     let id = wire_model_id.rsplit('/').next().unwrap_or(wire_model_id);
     id.starts_with("claude-")
 }

@@ -98,6 +98,17 @@ fi
 echo "== [deterministic] standalone A2A client round-trip =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored --nocapture
 
+# The seam the round-trip above leaves out: the `send` TOOL, in the real binary,
+# over this daemon. That one drives `Mailbox` directly, so it proves the
+# transport while saying nothing about whether the tool reaches it — and a tool
+# that silently wrote a local file while reporting success is the failure this
+# whole path exists because of. Mock model, so no key is needed; set
+# SCODE_TEST_BACKEND=live to have a real model choose the call instead.
+echo "== [deterministic] the send tool over the real daemon, in the real binary =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test pty_a2a_send_over_nexus -- --nocapture
+
 # ---- Optional: real 2-LLM co-host duet (gated) --------------------------------
 if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   echo "== [live] scode -> co-host duet =="
@@ -111,7 +122,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   sleep 8
   NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_AGENT="${DUET_SELF:-operator}" NEXUS_A2A_PEER="$R" \
     "$SCODE_BIN" --auth proxy --model "$MODEL" --permission-mode danger-full-access \
-    --print "Call send_message once: to=$R body='reply with exactly one word: PONG'. Then stop."
+    --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop."
   echo "   polling ${DUET_SELF:-operator}'s inbox for the co-host reply..."
   got=
   for i in $(seq 1 30); do

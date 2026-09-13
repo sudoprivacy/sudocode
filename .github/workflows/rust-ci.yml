@@ -173,6 +173,16 @@ jobs:
       - name: A2A round-trip against the pinned daemon
         run: e2e/nexus-a2a/run.sh
 
+      # One daemon can only show that a client and a server agree. What A2A
+      # actually rests on is a mechanism that does not exist until there are
+      # two: a receiver parks a blocking tail against its OWN node, a peer
+      # writes to ANOTHER, and the envelope arrives because each node's apply
+      # observer wakes its own waiters. Two nodes on this runner is the
+      # cross-machine topology minus the network, which is the part nexus-vfs's
+      # federation CI already owns.
+      - name: Cross-node A2A against two nodes
+        run: e2e/nexus-a2a/run-cross-node.sh
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

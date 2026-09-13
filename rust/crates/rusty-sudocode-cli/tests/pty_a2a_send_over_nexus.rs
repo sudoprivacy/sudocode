@@ -30,12 +30,18 @@
 //! into a path — so an envelope whose `from` is wrong is delivered and
 //! unanswerable, which looks like success from the sending side.
 //!
-//! ## Dual mode
+//! ## Dual mode, and two topologies
 //!
 //! Mock by default (CI-safe, no key), live under `SCODE_TEST_BACKEND=live` with
 //! a real model choosing to call the tool. Both need a daemon:
 //! `NEXUS_A2A_TEST_ENDPOINT` is set by `e2e/nexus-a2a/run.sh`, and without it
 //! this returns early rather than pretending to have checked.
+//!
+//! `NEXUS_A2A_TEST_PEER_ENDPOINT` puts the `scode` process on a DIFFERENT node
+//! from the one this test reads, so step 4 can only be satisfied by an envelope
+//! that crossed a raft boundary — the cross-machine case, on one runner.
+//! `e2e/nexus-a2a/run-cross-node.sh` sets both. The steps are unchanged: the
+//! topology decides which node each side holds, not what is being proven.
 
 mod common;
 
@@ -48,18 +54,38 @@ use nexus_vfs_client::NexusVfsClient;
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::mailbox::Mailbox;
 
-/// The recipient the mock scenario addresses. Live mode is told the same name,
-/// so one workflow describes both backends.
-const PEER: &str = "test-peer";
+/// The recipient the mock scenario addresses, from the scenario itself.
+///
+/// Live mode is told the same name, so one workflow describes both backends —
+/// and taking it from the mock means the test cannot end up watching a stream
+/// the scenario stopped writing to.
+const PEER: &str = mock_anthropic_service::UNIFIED_SEND_RECIPIENT;
 
 /// Long enough for a daemon round trip under CI load, short enough that a
 /// genuine failure is not mistaken for slowness.
 const ARRIVAL_BUDGET: Duration = Duration::from_secs(20);
 
+/// The node this test reads and provisions on.
 fn daemon_endpoint() -> Option<String> {
     std::env::var("NEXUS_A2A_TEST_ENDPOINT")
         .ok()
         .filter(|e| !e.is_empty())
+}
+
+/// The node the `scode` process connects to, when it is a different one.
+///
+/// Set it and the same workflow becomes a cross-node one: `scode` sends through
+/// its own node while this test reads the peer's inbox on the OTHER node, so the
+/// envelope has to cross a raft boundary to satisfy step 4. Unset, both sides
+/// share a node and the workflow is the single-node case.
+///
+/// One test rather than two, because the steps and their dependencies do not
+/// change with the topology — only which node each side is holding.
+fn scode_endpoint(reader: &str) -> String {
+    std::env::var("NEXUS_A2A_TEST_PEER_ENDPOINT")
+        .ok()
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| reader.to_string())
 }
 
 /// An agent name no other run can be using.
@@ -112,6 +138,7 @@ fn a_send_crosses_the_daemon_and_the_peer_can_reply_to_its_sender() {
     };
     let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
     let sender = unique_sender();
+    let sender_node = scode_endpoint(&endpoint);
 
     // ── 1. Provision both inboxes ──────────────────────────────────────────
     // A send to a path that is not an append stream fails loudly rather than
@@ -149,7 +176,7 @@ fn a_send_crosses_the_daemon_and_the_peer_can_reply_to_its_sender() {
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "workspace-write", &prompt],
         &[
-            ("NEXUS_A2A_ENDPOINT", endpoint.as_str()),
+            ("NEXUS_A2A_ENDPOINT", sender_node.as_str()),
             ("NEXUS_A2A_AGENT", sender.as_str()),
             ("NEXUS_A2A_PEER", PEER),
         ],
@@ -219,9 +246,16 @@ fn a_send_crosses_the_daemon_and_the_peer_can_reply_to_its_sender() {
         "the envelope must name the session's own identity, not a default"
     );
 
-    // Printed so a CI log shows what crossed rather than only that something did.
+    // Printed so a CI log shows what crossed rather than only that something did,
+    // naming both nodes so a cross-node run is distinguishable from a
+    // single-node one at a glance.
     eprintln!(
-        "crossed the daemon: from={} to={} at {} ({})",
+        "crossed {}: from={} to={} at {} (sent via {sender_node}, read on {endpoint}, {})",
+        if sender_node == endpoint {
+            "the daemon"
+        } else {
+            "a raft boundary"
+        },
         delivered.from,
         delivered.to,
         mailbox_for(&client, PEER).own_inbox_path(),
@@ -246,10 +280,19 @@ fn a_send_crosses_the_daemon_and_the_peer_can_reply_to_its_sender() {
         })
         .expect("reply to the address the envelope gave");
 
-    let answered =
-        await_envelope(&client, &sender, 0, |e| e.body == reply_body).unwrap_or_else(|| {
+    // Read back on the SENDER's node, which is where a real sender would be
+    // parked. In the cross-node topology that sends the reply back over the raft
+    // boundary it just came across, so both directions are covered rather than
+    // only the outbound one; in the single-node case it is the same client.
+    let sender_side = if sender_node == endpoint {
+        Arc::clone(&client)
+    } else {
+        Arc::new(NexusVfsClient::connect(&sender_node).expect("dial the sender's node"))
+    };
+    let answered = await_envelope(&sender_side, &sender, 0, |e| e.body == reply_body)
+        .unwrap_or_else(|| {
             panic!(
-                "the reply addressed to {} never reached {sender}'s own inbox — \
+                "the reply addressed to {} never reached {sender}'s own inbox on {sender_node} — \
                  a `from` that is not the sender's name is delivered and unanswerable",
                 delivered.from
             )

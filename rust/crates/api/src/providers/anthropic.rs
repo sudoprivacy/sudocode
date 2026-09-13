@@ -383,6 +383,8 @@ impl AnthropicClient {
             usage_recorded: false,
             last_prompt_cache_record: Arc::clone(&self.last_prompt_cache_record),
             session_tracer: self.session_tracer().cloned(),
+            cache_diagnosis_buf: String::new(),
+            cache_diagnosis_done: false,
         })
     }
 
@@ -439,6 +441,10 @@ impl AnthropicClient {
         strip_unsupported_beta_body_fields(&mut body, request);
         apply_cache_hints(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
+        let diagnose_cache = cache_diagnostics_enabled();
+        if diagnose_cache {
+            apply_cache_diagnostics(&mut body);
+        }
         dump_request_body("messages", &body);
 
         let mut headers: Vec<(String, String)> =
@@ -450,6 +456,24 @@ impl AnthropicClient {
             headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
         headers.extend(self.request_profile.header_pairs());
+        if diagnose_cache {
+            // Merge into the existing opt-in list rather than adding a second
+            // `anthropic-beta` header, which some proxies forward as only one.
+            match headers
+                .iter_mut()
+                .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            {
+                Some((_, value)) if !value.contains(CACHE_DIAGNOSIS_BETA) => {
+                    value.push(',');
+                    value.push_str(CACHE_DIAGNOSIS_BETA);
+                }
+                Some(_) => {}
+                None => headers.push((
+                    "anthropic-beta".to_string(),
+                    CACHE_DIAGNOSIS_BETA.to_string(),
+                )),
+            }
+        }
 
         self.http
             .send_json(
@@ -870,6 +894,10 @@ pub struct MessageStream {
     usage_recorded: bool,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
     session_tracer: Option<SessionTracer>,
+    /// Partial SSE text held while looking for the `message_start` frame.
+    cache_diagnosis_buf: String,
+    /// Set once that frame has been read (or given up on).
+    cache_diagnosis_done: bool,
 }
 
 impl MessageStream {
@@ -906,6 +934,7 @@ impl MessageStream {
 
             match self.response.chunk().await? {
                 Some(chunk) => {
+                    self.scan_chunk_for_cache_diagnosis(&chunk);
                     self.pending.extend(self.parser.push(&chunk)?);
                 }
                 None => {
@@ -913,6 +942,40 @@ impl MessageStream {
                 }
             }
         }
+    }
+
+    /// Pull the message id (and any cache diagnosis) out of the raw
+    /// `message_start` frame, while cache diagnostics are enabled.
+    ///
+    /// Buffers only until that frame is seen, then stops: `message_start` is
+    /// the first frame of the response, so this never accumulates the body.
+    fn scan_chunk_for_cache_diagnosis(&mut self, chunk: &[u8]) {
+        if self.cache_diagnosis_done || !cache_diagnostics_enabled() {
+            return;
+        }
+        self.cache_diagnosis_buf
+            .push_str(&String::from_utf8_lossy(chunk));
+        let Some(start) = self.cache_diagnosis_buf.find("\"type\":\"message_start\"") else {
+            // Keep a bounded tail: enough to span a frame split across chunks,
+            // small enough that a response without the frame cannot grow it.
+            if self.cache_diagnosis_buf.len() > 65_536 {
+                self.cache_diagnosis_done = true;
+                self.cache_diagnosis_buf.clear();
+            }
+            return;
+        };
+        let Some(line_start) = self.cache_diagnosis_buf[..start].rfind("data:") else {
+            return;
+        };
+        let rest = &self.cache_diagnosis_buf[line_start + "data:".len()..];
+        let Some(line_end) = rest.find('\n') else {
+            return; // frame not complete yet
+        };
+        if let Ok(frame) = serde_json::from_str::<Value>(rest[..line_end].trim()) {
+            observe_cache_diagnostics(&frame);
+        }
+        self.cache_diagnosis_done = true;
+        self.cache_diagnosis_buf.clear();
     }
 
     fn observe_event(&mut self, event: &StreamEvent) {
@@ -1149,6 +1212,95 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
             // rejects this field when extended thinking is not enabled.
             strip_thought_signatures(object);
         }
+    }
+}
+
+/// Beta that turns on Anthropic's server-side cache diagnosis.
+const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
+
+/// The id of the last message the API returned, for `diagnostics.previous_message_id`.
+///
+/// Process-global rather than per-client because this is an opt-in debugging
+/// switch and threading a field through every `AnthropicClient` constructor
+/// would spread a diagnostic across the codebase. The consequence is that it
+/// only reads correctly when one conversation is in flight: concurrent
+/// sessions (subagents) interleave here and would pair a request with another
+/// session's previous message, which the API reports as a divergence that
+/// isn't one. Diagnose one session at a time.
+static LAST_MESSAGE_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether to ask the API where the prompt cache broke
+/// (`SUDOCODE_CACHE_DIAGNOSTICS=1`).
+///
+/// Worth having as a switch rather than a local patch: `SUDOCODE_DUMP_REQUESTS`
+/// can only show what *this process* serialised, so when consecutive bodies are
+/// byte-identical and the cache still misses, it has nothing left to say — the
+/// bytes could still be altered downstream (a gateway rewriting the body, a
+/// proxy rotating upstream accounts so the cache namespace changes) and usage
+/// totals report only *that* reads collapsed, never where. Cache diagnosis is
+/// the server's own answer, so it distinguishes "we sent something different"
+/// from "what arrived was different from what we sent".
+fn cache_diagnostics_enabled() -> bool {
+    std::env::var("SUDOCODE_CACHE_DIAGNOSTICS")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+}
+
+/// Attach `diagnostics.previous_message_id` so the API compares this request
+/// against the previous one. Sent on every request while enabled — the API only
+/// stores a fingerprint for requests that carried the beta, so turning it on
+/// for a single request reports `previous_message_not_found` instead of a
+/// diagnosis.
+fn apply_cache_diagnostics(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let previous = LAST_MESSAGE_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    object.insert(
+        "diagnostics".to_string(),
+        serde_json::json!({ "previous_message_id": previous }),
+    );
+}
+
+/// Record the API's diagnosis for the next request to build on, and print it.
+///
+/// Reads the raw `message_start` frame rather than a parsed event: `diagnostics`
+/// is not part of our `MessageResponse`, and giving a debugging field a typed
+/// home in the shared response type would make every provider construct it.
+fn observe_cache_diagnostics(frame: &Value) {
+    let Some(message) = frame.get("message") else {
+        return;
+    };
+    if let Some(id) = message.get("id").and_then(Value::as_str) {
+        *LAST_MESSAGE_ID
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.to_string());
+    }
+    let Some(diagnostics) = message.get("diagnostics") else {
+        return;
+    };
+    // To a file when a dump directory exists, not to stderr. stderr has its own
+    // lock, so writing there from below the renderer seam interleaves with the
+    // spinner's stdout and tears the line in half — the exact bug this crate's
+    // sibling fix removed from hook progress. A diagnosis is also worth keeping
+    // next to the request bodies it explains.
+    if let Some(dir) = dump_request_dir() {
+        let record = serde_json::json!({
+            "message_id": message.get("id"),
+            "diagnostics": diagnostics,
+        });
+        let _ = write_request_dump(std::path::Path::new(&dir), "cache-diagnosis", &record);
+    } else {
+        eprintln!(
+            "[cache-diagnosis] {}",
+            serde_json::to_string(diagnostics).unwrap_or_else(|_| "<unserializable>".to_string())
+        );
     }
 }
 
@@ -1681,6 +1833,62 @@ mod tests {
             headers.get("authorization").and_then(|v| v.to_str().ok()),
             Some("Bearer proxy-token")
         );
+    }
+
+    #[test]
+    fn cache_diagnostics_chains_the_previous_message_id() {
+        // First request of a session has no predecessor. The field must still
+        // be present and explicitly null: the API stores a fingerprint only for
+        // requests that carried the beta, so skipping it here would make the
+        // next request's diagnosis fail with `previous_message_not_found`.
+        *super::LAST_MESSAGE_ID
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let mut body = serde_json::json!({"model": "claude-sonnet-4-6"});
+        super::apply_cache_diagnostics(&mut body);
+        assert_eq!(
+            body["diagnostics"],
+            serde_json::json!({"previous_message_id": null})
+        );
+
+        // A `message_start` frame supplies the id the next request pairs with.
+        super::observe_cache_diagnostics(&serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_abc123", "type": "message"},
+        }));
+        let mut next = serde_json::json!({"model": "claude-sonnet-4-6"});
+        super::apply_cache_diagnostics(&mut next);
+        assert_eq!(
+            next["diagnostics"],
+            serde_json::json!({"previous_message_id": "msg_abc123"})
+        );
+
+        *super::LAST_MESSAGE_ID
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    #[test]
+    fn cache_diagnostics_is_off_unless_explicitly_enabled() {
+        // Guards the default: this adds a beta header and a body field to every
+        // request, so an accidental truthy reading of "0"/"false" would change
+        // the wire format for everyone.
+        for value in ["", "0", "false", "FALSE"] {
+            std::env::set_var("SUDOCODE_CACHE_DIAGNOSTICS", value);
+            assert!(
+                !super::cache_diagnostics_enabled(),
+                "{value:?} must not enable cache diagnostics"
+            );
+        }
+        for value in ["1", "true", "yes"] {
+            std::env::set_var("SUDOCODE_CACHE_DIAGNOSTICS", value);
+            assert!(
+                super::cache_diagnostics_enabled(),
+                "{value:?} should enable cache diagnostics"
+            );
+        }
+        std::env::remove_var("SUDOCODE_CACHE_DIAGNOSTICS");
+        assert!(!super::cache_diagnostics_enabled());
     }
 
     #[test]

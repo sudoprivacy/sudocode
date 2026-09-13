@@ -729,12 +729,31 @@ fn resolve_api_format(
     // SSOT — same logic as try_proxy_passthrough, single source of truth
     // via endpoint_type_to_api_format.
     if auth_mode == "proxy" {
-        return Ok(
-            runtime::model_capabilities::preferred_endpoint_type(model_id)
-                .as_deref()
-                .map(endpoint_type_to_api_format)
-                .unwrap_or(ApiFormat::OpenAiCompletions),
-        );
+        if let Some(format) = runtime::model_capabilities::preferred_endpoint_type(model_id)
+            .as_deref()
+            .map(endpoint_type_to_api_format)
+        {
+            return Ok(format);
+        }
+        // The SSOT is silent: either the model is genuinely unknown, or the
+        // capabilities cache has not been fetched yet (the bundled copy carries
+        // no endpoint types). Falling back to OpenAI-compatible for everything
+        // silently disables prompt caching for Claude models — that path has no
+        // `cache_control` — which costs full input price on every request for
+        // the whole context, and shows up as nothing worse than a slightly
+        // larger bill. `config::is_anthropic_model` already exists to catch the
+        // explicit version of this mistake in `api` overrides, on the reasoning
+        // that routing Claude over OpenAI "is not a preference, it is a running
+        // cost"; the implicit version deserves the same answer.
+        //
+        // Measured when this fired for real: 70 requests, 1.5M prompt tokens,
+        // zero cache reads and zero cache writes, every token billed at full
+        // rate — against the same workload caching normally serves at 0.1x.
+        return Ok(if runtime::config::is_anthropic_model(model_id) {
+            ApiFormat::AnthropicMessages
+        } else {
+            ApiFormat::OpenAiCompletions
+        });
     }
 
     // Infer from provider name.
@@ -1369,9 +1388,15 @@ mod tests {
         let config = sample_config();
         let resolved = resolve_provider_from_config("opus", Some(AuthMode::Proxy), &config)
             .expect("should resolve");
-        assert_eq!(resolved.kind, ProviderKind::OpenAi);
-        assert_eq!(resolved.api_format, ApiFormat::OpenAiCompletions);
-        assert_eq!(resolved.base_url, "https://hk.sudorouter.ai/v1");
+        // A Claude model behind a proxy resolves to the Anthropic wire format
+        // even though the bundled SSOT lists no endpoint types for it. The
+        // OpenAI-compatible path cannot carry `cache_control`, so routing it
+        // there would silently disable prompt caching.
+        assert_eq!(resolved.kind, ProviderKind::Anthropic);
+        assert_eq!(resolved.api_format, ApiFormat::AnthropicMessages);
+        // Anthropic clients build their own `/v1/messages`, so the proxy's
+        // OpenAI-style `/v1` suffix is stripped.
+        assert_eq!(resolved.base_url, "https://hk.sudorouter.ai");
         assert_eq!(
             resolved.credential,
             Credential::ApiKey("sk-test-key".to_string())
@@ -1504,16 +1529,51 @@ mod tests {
     }
 
     #[test]
-    fn resolve_api_format_proxy_consults_ssot_fallback() {
-        // Bundled SSOT doesn't include endpoint_types, so proxy mode
-        // falls back to OpenAI completions.
-        let format = resolve_api_format("proxy", "sudorouter", None, "claude-sonnet-4-6").unwrap();
-        assert_eq!(format, ApiFormat::OpenAiCompletions);
+    fn resolve_api_format_proxy_keeps_claude_on_the_caching_path_without_the_ssot() {
+        // The bundled SSOT carries no endpoint types, so this exercises the
+        // fallback — the same state a process is in before (or without) a
+        // fetched capabilities cache.
+        //
+        // A Claude model must stay on /v1/messages. The OpenAI-compatible path
+        // cannot carry `cache_control`, so sending Claude over it silently
+        // turns prompt caching off and bills the whole context at full rate on
+        // every request. Observed in production as 70 requests / 1.5M prompt
+        // tokens with cache reads and writes both flat zero.
+        for model in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "anthropic/claude-opus-4-8",
+        ] {
+            assert_eq!(
+                resolve_api_format("proxy", "sudorouter", None, model).unwrap(),
+                ApiFormat::AnthropicMessages,
+                "{model} must not lose prompt caching when the SSOT is silent"
+            );
+        }
 
-        // Unknown model also falls back.
-        let format =
-            resolve_api_format("proxy", "sudorouter", None, "unknown-model-xyz-999").unwrap();
-        assert_eq!(format, ApiFormat::OpenAiCompletions);
+        // Non-Claude models keep the OpenAI-compatible default.
+        for model in ["unknown-model-xyz-999", "gpt-5.4"] {
+            assert_eq!(
+                resolve_api_format("proxy", "sudorouter", None, model).unwrap(),
+                ApiFormat::OpenAiCompletions,
+                "{model} should still default to OpenAI-compatible"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_api_format_still_honours_an_explicit_override() {
+        // The inference must not override a deliberate `api` choice.
+        assert_eq!(
+            resolve_api_format(
+                "proxy",
+                "sudorouter",
+                Some("openai-completions"),
+                "claude-opus-4-6"
+            )
+            .unwrap(),
+            ApiFormat::OpenAiCompletions
+        );
     }
 
     #[test]

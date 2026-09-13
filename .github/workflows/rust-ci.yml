@@ -145,6 +145,10 @@ jobs:
   a2a-live:
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
+    # The workflow default is `rust`; the harness lives at the repo root.
+    defaults:
+      run:
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

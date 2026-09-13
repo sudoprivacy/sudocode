@@ -200,6 +200,14 @@ jobs:
       - name: Cross-node A2A against two nodes
         run: e2e/nexus-a2a/run-cross-node.sh
 
+      # Both scripts above boot `--insecure-no-auth`, where the stamp hook is
+      # fail-open and the authored `from` is preserved by design. That proves
+      # delivery and says nothing about identity — and `from` is an address, so
+      # a forgeable one sends a peer's reply wherever the sender chose. Only an
+      # auth-on node decides who a message is from.
+      - name: Auth-on A2A — the node decides who a message is from
+        run: e2e/nexus-a2a/run-auth-on.sh
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

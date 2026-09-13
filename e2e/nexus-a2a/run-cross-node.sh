@@ -32,6 +32,8 @@ cd "$(dirname "$0")"
 # POSIX `--manifest-path`, and it needs exactly the conversion the daemon must
 # not get. Inert outside Git Bash.
 NO_CONV="MSYS_NO_PATHCONV=1"
+# shellcheck source=lib.sh
+. ./lib.sh
 
 FOUNDER_PORT="${NEXUS_A2A_FOUNDER_PORT:-2141}"
 JOINER_PORT="${NEXUS_A2A_JOINER_PORT:-2142}"
@@ -63,8 +65,8 @@ mkdir -p "$DATA_DIR"/{a,b}/{data,id}
 # reused one leaves a daemon rejoining a cluster that is not there.
 echo "== founder on :${FOUNDER_PORT} (owns ${ZONE}, mounts /agents) =="
 env $NO_CONV \
-NEXUS_DATA_DIR="$DATA_DIR/a/data" \
-NEXUS_IDENTITY_DIR="$DATA_DIR/a/id" \
+NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
+NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
 NEXUS_ADVERTISE_ADDR="$FOUNDER" \
 NEXUS_NO_TLS=true \
 NEXUS_INSECURE_NO_AUTH=true \
@@ -96,8 +98,8 @@ fi
 
 echo "== joiner on :${JOINER_PORT} (DiscoverZones via the founder) =="
 env $NO_CONV \
-NEXUS_DATA_DIR="$DATA_DIR/b/data" \
-NEXUS_IDENTITY_DIR="$DATA_DIR/b/id" \
+NEXUS_DATA_DIR="$(native_path "$DATA_DIR/b/data")" \
+NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/b/id")" \
 NEXUS_ADVERTISE_ADDR="$JOINER" \
 NEXUS_NO_TLS=true \
 NEXUS_INSECURE_NO_AUTH=true \

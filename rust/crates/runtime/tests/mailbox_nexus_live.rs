@@ -53,6 +53,20 @@ fn send_to(
 
 use runtime::mailbox::Mailbox;
 
+/// A counter, for names no other run and no sibling test can be using.
+///
+/// Not a clock: these tests are about the FIRST write to a path, and a
+/// timestamp coarse enough to repeat hands two runs the same name — after
+/// which the second proves nothing, because the path already exists.
+fn fresh() -> u64 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    nanos.wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
 fn live_inbox_roundtrip() {
@@ -176,6 +190,121 @@ fn live_blocking_read_wakes_on_write() {
         "read returned before the write was issued ({woke:?}) — stale/instant wake"
     );
     println!("blocking read woke on write after {woke:?} (idle timeout was {idle_elapsed:?})");
+}
+
+/// A send to an agent that has NEVER RUN reaches it.
+///
+/// The durable-inbox promise: a message waits for its reader, so sending to an
+/// agent that is merely offline has to work. An agent that has never run has no
+/// stream yet, and nobody but the sender can create it — the recipient is not
+/// here, and the sender is the only party that knows the message exists.
+///
+/// Skipping that was silent, destructive loss. `is_append_stream` tests the
+/// PATH's shape for the VFS backend, so every `…/chat-with-me` answers "yes,
+/// framed" and the append did not fail: it created a plain entry at the
+/// stream's path, told the sender it was delivered, and left a path that could
+/// never become a stream again — `entry_type immutable (cannot change 0 →
+/// DT_STREAM)`. The recipient's inbox was destroyed by the first person to
+/// write to it, and nothing reported a problem.
+///
+/// A fresh recipient name per run, because the bug is about the FIRST write to
+/// a path: a name that a previous run already provisioned proves nothing.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn live_send_provisions_an_inbox_that_never_existed() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+
+    let never_ran = format!("never-ran-{}-{}", std::process::id(), fresh());
+    let body = "a message that waited for its reader";
+    send_to(&client, "offline-probe", &never_ran, body, &auth)
+        .expect("a send to an agent that has never run must be delivered, not merely accepted");
+
+    let (msgs, _next) = mailbox(&client, &never_ran, &auth)
+        .poll(0, 0)
+        .expect("the recipient must be able to read its own inbox");
+    assert!(
+        msgs.iter()
+            .any(|m| m.from == "offline-probe" && m.body == body),
+        "the envelope must be readable by the recipient, got {msgs:?}"
+    );
+
+    // And the inbox must be a real stream, not something that merely accepted a
+    // write: provisioning it again is what failed with `entry_type immutable`
+    // once a plain entry had been created at the path.
+    mailbox(&client, &never_ran, &auth)
+        .ensure_inbox()
+        .expect("the inbox must be a stream the recipient can still provision");
+}
+
+/// Under auth-on the daemon decides who a message is FROM.
+///
+/// `from` is an address — the convention turns it straight back into a path —
+/// so a forgeable one is a way to make replies go somewhere else. Auth-off
+/// cannot show this: the stamp hook is fail-open there, and the authored value
+/// is preserved by design, which is why the other tests in this file assert the
+/// value they wrote.
+///
+/// Here the client holds a minted agent cert and authors a DIFFERENT name. The
+/// envelope that lands must carry the cert's identity, because the node
+/// overwrites the authored `from` with the authenticated one.
+///
+/// Set up by `e2e/nexus-a2a/run-auth-on.sh`, which boots TLS-on, mints the
+/// bundle offline, and points this at it:
+///
+/// ```text
+/// NEXUS_A2A_TEST_ENDPOINT=https://127.0.0.1:2161 /// NEXUS_A2A_TEST_CERT_DIR=<bundle> NEXUS_A2A_TEST_IDENTITY=<agent> ///   cargo test -p runtime --test mailbox_nexus_live live_authenticated_from_cannot_be_forged -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires an auth-on nexusd-cluster; set NEXUS_A2A_TEST_CERT_DIR + NEXUS_A2A_TEST_IDENTITY"]
+fn live_authenticated_from_cannot_be_forged() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let cert_dir = std::path::PathBuf::from(
+        std::env::var("NEXUS_A2A_TEST_CERT_DIR").expect("set NEXUS_A2A_TEST_CERT_DIR=<bundle dir>"),
+    );
+    let identity = std::env::var("NEXUS_A2A_TEST_IDENTITY")
+        .expect("set NEXUS_A2A_TEST_IDENTITY to the cert's agent id");
+    let read = |name: &str| {
+        std::fs::read(cert_dir.join(name))
+            .unwrap_or_else(|e| panic!("read {}/{name}: {e}", cert_dir.display()))
+    };
+    let client = Arc::new(
+        NexusVfsClient::connect_tls(
+            &endpoint,
+            read("ca.pem"),
+            read("agent.pem"),
+            read("agent-key.pem"),
+            "nexus-node",
+        )
+        .unwrap_or_else(|e| panic!("dial {endpoint} over mTLS: {e}")),
+    );
+
+    // A recipient nothing else is writing to, so the envelope found below is
+    // unambiguously this one.
+    let recipient = format!("forgery-check-{}-{}", std::process::id(), fresh());
+    let claimed = "impostor";
+    assert_ne!(
+        claimed, identity,
+        "the authored name has to differ from the cert's, or nothing is being tested"
+    );
+    let body = "who wrote this";
+    send_to(&client, claimed, &recipient, body, "").expect("send over mTLS");
+
+    let (msgs, _next) = mailbox(&client, &recipient, "")
+        .poll(0, 0)
+        .expect("read the recipient's inbox");
+    let delivered = msgs
+        .iter()
+        .find(|m| m.body == body)
+        .unwrap_or_else(|| panic!("the envelope never arrived, got {msgs:?}"));
+    assert_eq!(
+        delivered.from, identity,
+        "the node must stamp `from` with the authenticated identity, not the authored          {claimed} — a forgeable `from` sends the reply somewhere the sender chose"
+    );
+    println!("authored from={claimed}, delivered from={}", delivered.from);
 }
 
 /// The same wake, across a raft boundary: the writer is on ANOTHER NODE.

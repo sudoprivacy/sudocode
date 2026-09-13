@@ -2543,17 +2543,35 @@ fn normalize_agent_spawn_input(input: &Value) -> Value {
     v
 }
 
-/// Extract the sender label, defaulting to `TEAM_LEAD_NAME` (matches
-/// CC-fork: `getAgentName() || TEAM_LEAD_NAME`). Callers can override
-/// via the `sender` field for subagent contexts that know their own
-/// name.
+/// Who this message is from: an explicit `sender`, else the session's own
+/// identity, else `TEAM_LEAD_NAME`.
+///
+/// Mirrors CC-fork's `getAgentName() || TEAM_LEAD_NAME`, with the session
+/// mailbox answering `getAgentName()`. The three levels line up with
+/// [`runtime::mailbox::sending_mailbox`]'s own: a caller that knows its name
+/// (a subagent) says so, a session with an A2A identity carries it, and a
+/// plain local coordinator is `team-lead` as it always has been.
+///
+/// Consulting the mailbox is not optional. `from` is the address a recipient
+/// replies to — the convention turns it straight back into a path — so a
+/// name that is not this agent's sends the answer somewhere this agent does
+/// not read. Defaulting to `TEAM_LEAD_NAME` did exactly that: a
+/// cross-machine send stamped `from: "team-lead"` whatever the session's
+/// identity, and the peer's reply addressed `/agents/team-lead/chat-with-me`.
 fn resolve_sender(input: &SendMessageInput) -> String {
-    input
+    if let Some(explicit) = input
         .sender
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(TEAM_LEAD_NAME)
-        .to_string()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return explicit.to_string();
+    }
+    let session_identity = runtime::mailbox::sending_mailbox().self_id().to_string();
+    if session_identity.trim().is_empty() {
+        return TEAM_LEAD_NAME.to_string();
+    }
+    session_identity
 }
 
 fn write_envelope(

@@ -169,7 +169,7 @@ no `usage`. The ACP agent implements a fixed subset of the REPL commands:
 | `/status` | Model, usage, git and config status for this session. |
 | `/cost` | Cumulative token usage for this session. |
 | `/model [<model-id>]` | Show the current model, or switch this session to another model. |
-| `/compact` | Summarise older messages to free context. LLM summary first; if the model call is unavailable or fails, the local structural summary. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. |
+| `/compact` | Summarise older messages to free context. A validated LLM checkpoint; failures preserve the original history and return an error. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. The original transcript is archived before replacement. |
 | `/config [section]` | Show the effective configuration (read-only; `/config set` is REPL-only). |
 | `/diff` | Staged and unstaged git changes in the session directory. |
 | `/doctor` | Local health checks for auth, config and workspace. |
@@ -190,7 +190,7 @@ table, so clients can build a command palette without hard-coding it:
     "update": {
       "sessionUpdate": "available_commands_update",
       "availableCommands": [
-        { "name": "compact", "description": "Summarise older messages to free context (LLM summary, local fallback)" },
+        { "name": "compact", "description": "Summarise older messages to free context (validated LLM checkpoint)" },
         { "name": "model", "description": "…", "input": { "hint": "<model-id>" } }
       ]
     }
@@ -221,6 +221,41 @@ compaction happened; `/compact` itself never sets it (its report is the
 text reply). Like the rest of `_meta.sudocode`, it rides on the success
 response, so a turn that fails after compacting reports the error and no
 `autoCompacted`.
+
+The policy borrows rolling checkpoints, token-priced retention and prune-first
+pressure handling from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/c291e7961a515f6d7af9304e7fd1d257929aef26/docs/subsystems/compaction.md).
+Sudo Code retains its model-specific output reservation and pressure buffer.
+
+Compaction stages changes before replacing the live transcript. An empty,
+truncated, or non-shrinking summary is rejected. Failure before or during a
+turn stops the pending model request with history intact; failure of optional
+post-turn compaction keeps the completed answer and warns. No automatic
+local-statistics fallback is used. The next request cannot proceed when its
+history still exceeds the context budget.
+
+Automatic pressure first trims oversized tool text (over 8,192 Unicode code
+points) to a 4,096-point head and 1,024-point tail plus a marker. ToolSearch
+results are exempt because their JSON also enables deferred tool schemas.
+If trimming suffices, no summary call is made. Otherwise the same checkpoint
+pipeline as manual compaction runs. A checkpoint rewrites prior summaries
+with newer history instead of concatenating them. Recent retention is token
+priced: at most 16% of the model window, capped at half the available history
+budget and one fifth of current history, with a four-message minimum and
+complete tool exchanges taking precedence. File contents are not re-read and
+re-injected after compaction.
+
+Both LLM paths request at most 8,192 output tokens (or the model's smaller
+limit). The preferred path reuses the system prompt, tool schemas and older
+message prefix; the fallback strips thinking and replaces images with text
+placeholders. Neither path drops the oldest input to recover from overflow.
+Transient failures are retried with bounded backoff.
+
+On successful replacement, `<transcript>.before-compact-<timestamp>` retains
+the original JSONL snapshot through the same filesystem backend. These
+snapshots are not listed as independent sessions and are not automatically
+pruned. The current transcript is replaced atomically before memory changes;
+a subsequent load therefore sees the committed checkpoint. This is snapshot
+preservation, not a new event-sourced session format.
 
 ### `session/load`
 

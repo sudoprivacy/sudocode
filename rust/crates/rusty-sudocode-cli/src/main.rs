@@ -3665,7 +3665,19 @@ impl LiveCli {
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
         // (Done / permission / question) straight from the event kinds.
-        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        // With an iocraft `ui` present, in-flight tool calls show as running
+        // cards in the staging overlay, so the renderer must not also append
+        // the command header (it would appear twice). The finished result card
+        // still appends through the renderer — the single ordered scrollback
+        // sink. Off the overlay (one-shot / `--print`) the header appends.
+        let mut renderer = render.then(|| {
+            let r = EngineEventRenderer::new(spinner_ref, output.cloned());
+            if ui.is_some() {
+                r.with_staging_overlay()
+            } else {
+                r
+            }
+        });
         let blocks = vec![runtime::ContentBlock::Text {
             text: input.to_string(),
         }];
@@ -3689,6 +3701,13 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
+                    // Staging overlay (iocraft REPL only): show a running
+                    // yellow card for this in-flight call. Pure overlay — the
+                    // finished card is committed to scrollback by the renderer
+                    // on the ordered output channel, not from here.
+                    if let Some(ui) = ui {
+                        ui.tool_started(id, name, input);
+                    }
                     // Parity: `--output-format json` emits the tool input as the
                     // raw argument STRING exactly as the model produced it — the
                     // pre-seam `collect_tool_uses` serialized `ToolUse.input`
@@ -3724,6 +3743,12 @@ impl LiveCli {
                         {
                             ui.update_context(tools::global_task_list());
                         }
+                        // Staging overlay: this call is done — clear its running
+                        // yellow card. The finished (green/red) card is written
+                        // to scrollback by the renderer below, on the ordered
+                        // output channel; the overlay only drops the transient
+                        // entry, so the two never race across channels.
+                        ui.tool_finished(id);
                     }
                     outcome.tool_results.push(serde_json::json!({
                         "tool_use_id": id,

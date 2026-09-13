@@ -49,51 +49,6 @@ use crate::{
     PRIMARY_SESSION_EXTENSION, VERSION,
 };
 
-/// Wrap a string (possibly containing ANSI escape sequences) to `width`
-/// visible columns. Each input line that exceeds `width` is hard-broken
-/// into multiple output lines. ANSI sequences are copied verbatim and
-/// don't count towards visible width.
-fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return text.lines().map(String::from).collect();
-    }
-    let mut result = Vec::new();
-    for line in text.lines() {
-        let mut current = String::new();
-        let mut vis = 0usize;
-        let mut chars = line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' {
-                current.push(ch);
-                if chars.peek() == Some(&'[') {
-                    current.push(chars.next().unwrap());
-                    for c in chars.by_ref() {
-                        current.push(c);
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-                if vis + ch_w > width {
-                    current.push_str(RESET);
-                    result.push(current);
-                    current = String::new();
-                    vis = 0;
-                }
-                current.push(ch);
-                vis += ch_w;
-            }
-        }
-        result.push(current);
-    }
-    if result.is_empty() {
-        result.push(String::new());
-    }
-    result
-}
-
 // ---------------------------------------------------------------------------
 // Unified message rendering pipeline
 // ---------------------------------------------------------------------------
@@ -799,59 +754,19 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         _ => summarize_tool_payload(input),
     };
 
-    // Closed box drawing:
-    //   ╭─ Name ───────────────╮
-    //   │ content line 1       │
-    //   │ wrapped continuation │
-    //   ╰──────────────────────╯
-    //
-    // Box width is capped at terminal width. Content lines that exceed
-    // the inner area are wrapped (height grows).
-    let term_w = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-    let name_width = display_width(name);
-    // border_chars = chars between ╭ and ╮ (or ╰ and ╯).
-    // Total visible line width = 2 (indent) + 1 (╭) + border_chars + 1 (╮).
-    let max_border = term_w.saturating_sub(4);
-    let header_min = name_width + 4; // "─ Name ─"
-                                     // Content area = border_chars - 2 (spaces flanking content between │…│).
-    let content_area = max_border.saturating_sub(2);
-
-    // Wrap detail lines to fit content_area.
-    let wrapped = wrap_ansi(&detail, content_area);
-
-    let content_max = wrapped
-        .iter()
-        .map(|line| display_width(&strip_ansi_codes(line)))
-        .max()
-        .unwrap_or(0);
-    let border_chars = header_min.max(content_max + 2).min(max_border);
-    let inner = border_chars.saturating_sub(2);
-
-    let g = ansi_fg(theme().muted); // grey
-    let cn = ansi_bold_fg(theme().info); // bold info (name)
-
-    // Header: ╭─ Name ──...──╮
-    let header_fill = border_chars.saturating_sub(name_width + 3);
-    let header = format!(
-        "  {g}╭─ {cn}{name}{RESET}{g} {}╮{RESET}",
-        "─".repeat(header_fill)
-    );
-
-    // Content lines: │ content{padding} │
-    let mut body = String::new();
-    for line in &wrapped {
-        let vis = display_width(&strip_ansi_codes(line));
-        let pad = inner.saturating_sub(vis);
-        body.push_str(&format!(
-            "\n  {g}│{RESET} {line}{}{g} │{RESET}",
-            " ".repeat(pad)
-        ));
-    }
-
-    // Bottom: ╰──────╯
-    let bottom = format!("  {g}╰{}╯{RESET}", "─".repeat(border_chars));
-
-    format!("{header}{body}\n{bottom}")
+    // A tool call in flight is the Running state of the same card that
+    // `format_tool_result` later renders on completion: same L-frame, colored
+    // yellow. The tool name (bold info color) is the header; the summary detail
+    // is the body. One renderer for both moments is the SSOT that makes command
+    // header and result visually identical.
+    let cn = ansi_bold_fg(theme().info);
+    let header = format!("{cn}{name}{RESET}");
+    let content = if detail.is_empty() {
+        ToolCardContent::header_only(header)
+    } else {
+        ToolCardContent::new(header, detail)
+    };
+    render_tool_card(&content, ToolStatus::Running)
 }
 
 /// Split a `ToolResult.output` string into its JSON-payload prefix and any
@@ -869,46 +784,120 @@ pub(crate) fn split_hook_feedback(output: &str) -> (&str, Option<&str>) {
     (output, None)
 }
 
+/// Execution status of a tool call. Single source of truth for the
+/// success/error/running color semantics: it drives the left-frame color in
+/// [`render_tool_card`] and nothing else encodes "did this tool succeed."
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ToolStatus {
+    /// In flight — yellow frame. Rendered in the staging area.
+    Running,
+    /// Completed successfully — green frame.
+    Ok,
+    /// Failed / denied / cancelled — red frame.
+    Error,
+}
+
+/// The *semantic* content of a tool card, free of any frame, prefix, or
+/// status decoration. Per-tool extractors (`bash_card`, `read_card`, …)
+/// produce this; [`render_tool_card`] is the single place that adds the
+/// status-colored L-frame. New tools only supply a header (and optional
+/// body) and inherit the unified look automatically.
+pub(crate) struct ToolCardContent {
+    /// First line: tool identity + summary. May carry emoji and the tool's
+    /// own identity color (bash muted, write green, edit warning, …).
+    pub header: String,
+    /// Optional multi-line body, already styled/highlighted, with **no**
+    /// leading prefix — `render_tool_card` owns the frame.
+    pub body: Option<String>,
+}
+
+impl ToolCardContent {
+    fn header_only(header: String) -> Self {
+        Self { header, body: None }
+    }
+
+    fn new(header: String, body: String) -> Self {
+        Self {
+            header,
+            body: Some(body),
+        }
+    }
+}
+
+/// SSOT for how a tool call looks on screen: an L-frame whose color carries
+/// the status. `╭─ header` / `│ body…` / `╰─`, colored yellow (running),
+/// green (ok), or red (error).
+///
+/// Deliberately never draws a right border: tool output carries ANSI, tabs,
+/// and CJK width, so a closed box's right edge is unreliable — a left frame
+/// keeps output copy-pasteable and pipe-safe, matching Sudo Code's scrollback
+/// ethos. The frame carries the status color; the tool name inside `header`
+/// keeps its own identity color. There is no `⏺` glyph — the frame is the cue.
+pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
+    use std::fmt::Write as _;
+    let t = theme();
+    let frame = match status {
+        ToolStatus::Running => ansi_bold_fg(t.warning),
+        ToolStatus::Ok => ansi_bold_fg(t.success),
+        ToolStatus::Error => ansi_bold_fg(t.error),
+    };
+    let top = format!("{frame}\u{256d}\u{2500}{RESET}");
+    let bar = format!("{frame}\u{2502}{RESET}");
+    let bottom = format!("{frame}\u{2570}\u{2500}{RESET}");
+    let mut out = format!("{top} {}", content.header);
+    if let Some(body) = &content.body {
+        for line in body.lines() {
+            let _ = write!(out, "\n{bar} {line}");
+        }
+    }
+    let _ = write!(out, "\n{bottom}");
+    out
+}
+
 pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
     let t = theme();
-    let icon = if is_error {
-        format!("{}⏺{RESET}", ansi_bold_fg(t.error))
-    } else {
-        format!("{}⏺{RESET}", ansi_bold_fg(t.success))
-    };
     let muted = ansi_fg(t.muted);
     let (payload, hook_feedback) = split_hook_feedback(output);
-    let base = if is_error {
+    let status = if is_error {
+        ToolStatus::Error
+    } else {
+        ToolStatus::Ok
+    };
+    let mut content = if is_error {
         let summary = truncate_for_summary(output.trim(), 160);
         let removed = ansi_fg(t.diff_removed);
         if summary.is_empty() {
-            format!("{icon} {muted}{name}{RESET}")
+            ToolCardContent::header_only(format!("{muted}{name}{RESET}"))
         } else {
-            format!("{icon} {muted}{name}{RESET}\n  {removed}{summary}{RESET}")
+            ToolCardContent::new(
+                format!("{muted}{name}{RESET}"),
+                format!("{removed}{summary}{RESET}"),
+            )
         }
     } else {
         let parsed: serde_json::Value =
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
         match name {
-            "bash" | "Bash" => format_bash_result(&icon, &parsed),
-            "read_file" | "Read" => format_read_result(&icon, &parsed),
-            "write_file" | "Write" => format_write_result(&icon, &parsed),
-            "edit_file" | "Edit" => format_edit_result(&icon, &parsed),
-            "glob_search" | "Glob" => format_glob_result(&icon, &parsed),
-            "grep_search" | "Grep" => format_grep_result(&icon, &parsed),
-            "Skill" => format_skill_result(&icon, &parsed),
-            "read_tool_output" => format_read_tool_output_result(&icon, &parsed),
-            _ => format_generic_tool_result(&icon, name, &parsed),
+            "bash" | "Bash" => bash_card(&parsed),
+            "read_file" | "Read" => read_card(&parsed),
+            "write_file" | "Write" => write_card(&parsed),
+            "edit_file" | "Edit" => edit_card(&parsed),
+            "glob_search" | "Glob" => glob_card(&parsed),
+            "grep_search" | "Grep" => grep_card(&parsed),
+            "Skill" => skill_card(&parsed),
+            "read_tool_output" => read_tool_output_card(&parsed),
+            _ => generic_tool_card(name, &parsed),
         }
     };
-    match hook_feedback {
-        Some(feedback) if !is_error => {
-            let indented = feedback.replace('\n', "\n  ");
-            let hf = ansi_fg(t.hook_feedback);
-            format!("{base}\n  {hf}{indented}{RESET}")
-        }
-        _ => base,
+    if let (Some(feedback), false) = (hook_feedback, is_error) {
+        let hf = ansi_fg(t.hook_feedback);
+        let feedback_body = format!("{hf}{feedback}{RESET}");
+        content.body = Some(match content.body {
+            Some(body) => format!("{body}\n{feedback_body}"),
+            None => feedback_body,
+        });
     }
+    render_tool_card(&content, status)
 }
 
 pub(crate) fn extract_tool_path(parsed: &serde_json::Value) -> String {
@@ -968,7 +957,7 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn bash_card(parsed: &serde_json::Value) -> ToolCardContent {
     use std::fmt::Write as _;
 
     // Extract command from input for the header.
@@ -979,12 +968,9 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
 
     let muted = ansi_fg(theme().muted);
     let mut header = if command.is_empty() {
-        format!("{icon} {muted}Bash{RESET}")
+        format!("{muted}Bash{RESET}")
     } else {
-        format!(
-            "{icon} {muted}Bash{RESET}({})",
-            truncate_for_summary(command, 120)
-        )
+        format!("{muted}Bash{RESET}({})", truncate_for_summary(command, 120))
     };
 
     if let Some(task_id) = parsed
@@ -1009,13 +995,14 @@ pub(crate) fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(|value| value.as_str())
         .unwrap_or_default();
 
-    render_stdout_stderr_block(header, stdout_text, stderr_text)
+    stdout_stderr_card(header, stdout_text, stderr_text)
 }
 
-/// Shared stdout/stderr rendering used by `format_bash_result`.
-/// Combines the two streams, drops blank lines, and
-/// applies the per-tool line cap from `TOOL_OUTPUT_DISPLAY_MAX_LINES`.
-fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> String {
+/// Shared stdout/stderr body builder used by [`bash_card`]. Combines the two
+/// streams, drops blank lines, and applies the per-tool line cap from
+/// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. Returns a [`ToolCardContent`]; the L-frame
+/// prefix is applied later by [`render_tool_card`].
+fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardContent {
     use std::fmt::Write as _;
 
     let all_output: Vec<&str> = stdout
@@ -1025,38 +1012,38 @@ fn render_stdout_stderr_block(header: String, stdout: &str, stderr: &str) -> Str
         .collect();
 
     if all_output.is_empty() {
-        return header;
+        return ToolCardContent::header_only(header);
     }
 
     let term_width = crossterm::terminal::size()
         .map(|(cols, _)| cols as usize)
         .unwrap_or(80);
-    // 4 = indent ("  └ " or "    "), plus safety margin to avoid wrapping
+    // 4 = frame + space prefix applied by render_tool_card, plus safety margin
+    // to avoid wrapping.
     let max_content_width = term_width.saturating_sub(6);
 
     let preview_count = TOOL_OUTPUT_DISPLAY_MAX_LINES;
-    let mut result = header;
+    let mut body = String::new();
 
     for (i, line) in all_output.iter().take(preview_count).enumerate() {
         let truncated = truncate_to_width(line, max_content_width);
-        if i == 0 {
-            write!(&mut result, "\n  └ {truncated}").expect("write to string");
-        } else {
-            write!(&mut result, "\n    {truncated}").expect("write to string");
+        if i > 0 {
+            body.push('\n');
         }
+        body.push_str(&truncated);
     }
 
     if all_output.len() > preview_count {
         let remaining = all_output.len() - preview_count;
         let line_or_lines = if remaining == 1 { "line" } else { "lines" };
         write!(
-            &mut result,
-            "\n  {DIM}… +{remaining} more {line_or_lines} · full output preserved in session{RESET}"
+            &mut body,
+            "\n{DIM}… +{remaining} more {line_or_lines} · full output preserved in session{RESET}"
         )
         .expect("write to string");
     }
 
-    result
+    ToolCardContent::new(header, body)
 }
 
 /// Truncate a string to fit within `max_width` display columns, appending `…`
@@ -1082,7 +1069,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     format!("{}…", &stripped[..byte_end])
 }
 
-pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn read_card(parsed: &serde_json::Value) -> ToolCardContent {
     let file = parsed.get("file").unwrap_or(parsed);
     let path = extract_tool_path(file);
     let content = file
@@ -1096,9 +1083,12 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .get("totalLines")
         .or_else(|| file.get("total_lines"))
         .and_then(serde_json::Value::as_u64);
-    let header = format!("{icon} {DIM}Read {path}{RESET}");
+    let mut header = format!("{DIM}Read {path}{RESET}");
+    if let Some(total) = total_lines {
+        let _ = write!(header, " {DIM}({total} lines){RESET}");
+    }
     if content.is_empty() {
-        return header;
+        return ToolCardContent::header_only(header);
     }
 
     // Cap to READ_DISPLAY_* lines; read_file results commonly run hundreds of
@@ -1134,16 +1124,12 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
         char_budget = char_budget.saturating_sub(line_chars);
     }
     if visible_body.is_empty() {
-        return header;
+        return ToolCardContent::header_only(header);
     }
     let language = language_token_from_path(&path);
     let renderer = crate::render::TerminalRenderer::new();
     let highlighted = renderer.highlight_code(&visible_body, language);
-    let mut indented = highlighted
-        .lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut body = highlighted.lines().collect::<Vec<_>>().join("\n");
 
     let remaining_lines = total_input_lines.saturating_sub(visible_count);
     if remaining_lines > 0 {
@@ -1153,21 +1139,14 @@ pub(crate) fn format_read_result(icon: &str, parsed: &serde_json::Value) -> Stri
             "lines"
         };
         let _ = write!(
-            indented,
-            "\n  {DIM}… +{remaining_lines} more {line_or_lines} · full output preserved in session{RESET}"
+            body,
+            "\n{DIM}… +{remaining_lines} more {line_or_lines} · full output preserved in session{RESET}"
         );
     } else if char_truncated {
-        let _ = write!(indented, "\n  {DISPLAY_TRUNCATION_NOTICE}");
+        let _ = write!(body, "\n{DISPLAY_TRUNCATION_NOTICE}");
     }
 
-    let mut out = String::with_capacity(header.len() + indented.len() + 8);
-    out.push_str(&header);
-    if let Some(total) = total_lines {
-        let _ = write!(out, " {DIM}({total} lines){RESET}");
-    }
-    out.push('\n');
-    out.push_str(&indented);
-    out
+    ToolCardContent::new(header, body)
 }
 
 /// Derive a syntect-friendly language token from a filename.
@@ -1186,7 +1165,7 @@ pub(crate) const DIFF_PREVIEW_MAX_BODY_LINES: usize = 8;
 /// Lines of unchanged context shown above and below the edit window.
 pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
 
-pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn write_card(parsed: &serde_json::Value) -> ToolCardContent {
     let path = extract_tool_path(parsed);
     let kind = parsed
         .get("type")
@@ -1210,23 +1189,20 @@ pub(crate) fn format_write_result(icon: &str, parsed: &serde_json::Value) -> Str
                 std::cmp::Ordering::Equal => String::new(),
             };
             format!(
-                "{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
+                "{success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
             )
         }
         _ => {
-            format!("{icon} {success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
+            format!("{success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
         }
     };
     match original {
         Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)
         {
-            Some(preview) => {
-                let indented = preview.replace('\n', "\n  ");
-                format!("{header}\n  {indented}")
-            }
-            None => header,
+            Some(preview) => ToolCardContent::new(header, preview),
+            None => ToolCardContent::header_only(header),
         },
-        _ => header,
+        _ => ToolCardContent::header_only(header),
     }
 }
 
@@ -1266,7 +1242,7 @@ pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) ->
     ))
 }
 
-pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn edit_card(parsed: &serde_json::Value) -> ToolCardContent {
     let path = extract_tool_path(parsed);
     let replace_all = parsed
         .get("replaceAll")
@@ -1304,12 +1280,10 @@ pub(crate) fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .or_else(|| format_patch_preview(old_value, new_value));
 
     let warning = ansi_bold_fg(theme().warning);
+    let header = format!("{warning}📝 Edited {path}{suffix}{RESET}");
     match preview {
-        Some(preview) => {
-            let indented = preview.replace('\n', "\n  ");
-            format!("{icon} {warning}📝 Edited {path}{suffix}{RESET}\n  {indented}")
-        }
-        None => format!("{icon} {warning}📝 Edited {path}{suffix}{RESET}"),
+        Some(preview) => ToolCardContent::new(header, preview),
+        None => ToolCardContent::header_only(header),
     }
 }
 
@@ -1439,16 +1413,16 @@ fn count_non_overlapping(haystack: &str, needle: &str) -> usize {
     count
 }
 
-pub(crate) fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn glob_card(parsed: &serde_json::Value) -> ToolCardContent {
     let num_files = parsed
         .get("numFiles")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    format!("{icon} {DIM}Found {num_files} files{RESET}")
+    ToolCardContent::header_only(format!("{DIM}Found {num_files} files{RESET}"))
 }
 
-pub(crate) fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
+pub(crate) fn grep_card(parsed: &serde_json::Value) -> ToolCardContent {
     let num_matches = parsed
         .get("numMatches")
         .and_then(serde_json::Value::as_u64)
@@ -1458,14 +1432,12 @@ pub(crate) fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> Stri
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    format!("{icon} {DIM}{num_matches} matches across {num_files} files{RESET}")
+    ToolCardContent::header_only(format!(
+        "{DIM}{num_matches} matches across {num_files} files{RESET}"
+    ))
 }
 
-pub(crate) fn format_generic_tool_result(
-    icon: &str,
-    name: &str,
-    parsed: &serde_json::Value,
-) -> String {
+pub(crate) fn generic_tool_card(name: &str, parsed: &serde_json::Value) -> ToolCardContent {
     let rendered_output = match parsed {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => String::new(),
@@ -1483,12 +1455,9 @@ pub(crate) fn format_generic_tool_result(
 
     let muted = ansi_fg(theme().muted);
     if preview.is_empty() {
-        format!("{icon} {muted}{name}{RESET}")
-    } else if preview.contains('\n') {
-        let indented = preview.replace('\n', "\n  ");
-        format!("{icon} {muted}{name}{RESET}\n  {indented}")
+        ToolCardContent::header_only(format!("{muted}{name}{RESET}"))
     } else {
-        format!("{icon} {muted}{name}:{RESET} {preview}")
+        ToolCardContent::new(format!("{muted}{name}{RESET}"), preview)
     }
 }
 
@@ -1519,15 +1488,17 @@ fn digest_json_object(map: &serde_json::Map<String, serde_json::Value>) -> Strin
     lines.join("\n")
 }
 
-fn format_skill_result(icon: &str, parsed: &serde_json::Value) -> String {
+fn skill_card(parsed: &serde_json::Value) -> ToolCardContent {
     let muted = ansi_fg(theme().muted);
     let path = parsed.get("path").and_then(|v| v.as_str()).unwrap_or("?");
     let prompt = parsed.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     let lines = prompt.lines().count();
-    format!("{icon} {muted}Skill{RESET} loaded {path} {DIM}({lines} lines){RESET}")
+    ToolCardContent::header_only(format!(
+        "{muted}Skill{RESET} loaded {path} {DIM}({lines} lines){RESET}"
+    ))
 }
 
-fn format_read_tool_output_result(icon: &str, parsed: &serde_json::Value) -> String {
+fn read_tool_output_card(parsed: &serde_json::Value) -> ToolCardContent {
     let muted = ansi_fg(theme().muted);
     let total = parsed.get("totalBytes").and_then(serde_json::Value::as_u64);
     // Seek mode reports matches; window mode reports a byte range + content.
@@ -1536,25 +1507,33 @@ fn format_read_tool_output_result(icon: &str, parsed: &serde_json::Value) -> Str
             .get("totalMatches")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(matches.len() as u64);
-        let mut out = format!(
-            "{icon} {muted}read_tool_output{RESET} {total_matches} match(es) for {}",
+        let header = format!(
+            "{muted}read_tool_output{RESET} {total_matches} match(es) for {}",
             parsed
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
         );
+        let mut body = String::new();
         for hit in matches.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
             let line = hit
                 .get("line")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             let text = hit.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            out.push_str(&format!(
-                "\n  {DIM}{line}:{RESET} {}",
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&format!(
+                "{DIM}{line}:{RESET} {}",
                 truncate_for_summary(text, 120)
             ));
         }
-        return out;
+        return if body.is_empty() {
+            ToolCardContent::header_only(header)
+        } else {
+            ToolCardContent::new(header, body)
+        };
     }
     let start = parsed
         .get("byteOffset")
@@ -1572,14 +1551,14 @@ fn format_read_tool_output_result(icon: &str, parsed: &serde_json::Value) -> Str
     );
     let header = match total {
         Some(total) => {
-            format!("{icon} {muted}read_tool_output{RESET} bytes {start}–{end} of {total}")
+            format!("{muted}read_tool_output{RESET} bytes {start}–{end} of {total}")
         }
-        None => format!("{icon} {muted}read_tool_output{RESET} bytes {start}–{end}"),
+        None => format!("{muted}read_tool_output{RESET} bytes {start}–{end}"),
     };
     if preview.is_empty() {
-        header
+        ToolCardContent::header_only(header)
     } else {
-        format!("{header}\n  {}", preview.replace('\n', "\n  "))
+        ToolCardContent::new(header, preview)
     }
 }
 
@@ -2469,7 +2448,7 @@ mod tests {
                 "totalLines": 3
             }
         });
-        let rendered = format_read_result("⏺", &json);
+        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         // Header still present with line count.
         assert!(plain.contains("Read src/main.rs"), "{plain}");
@@ -2491,7 +2470,7 @@ mod tests {
                 "totalLines": 137
             }
         });
-        let rendered = format_read_result("⏺", &json);
+        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(137 lines)"), "{plain}");
     }
@@ -2507,7 +2486,7 @@ mod tests {
                 "total_lines": 42
             }
         });
-        let rendered = format_read_result("⏺", &json);
+        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(42 lines)"), "{plain}");
     }
@@ -2534,7 +2513,7 @@ mod tests {
                 "totalLines": 30
             }
         });
-        let rendered = format_read_result("⏺", &json);
+        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
 
         // The literal text `[2m` and `[0m` must NOT appear without their
         // leading ESC byte — that's the visible-corruption signature.
@@ -2575,7 +2554,7 @@ mod tests {
                 "totalLines": 0
             }
         });
-        let rendered = format_read_result("⏺", &json);
+        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("Read empty.txt"), "{plain}");
         // No content body indented underneath.
@@ -2746,7 +2725,7 @@ mod tests {
             "replaceAll": true,
             "userModified": false,
         });
-        let rendered = format_edit_result("⏺", &json);
+        let rendered = render_tool_card(&edit_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(replace all, 3 occurrences)"), "{plain}");
     }
@@ -2759,7 +2738,7 @@ mod tests {
             "content": "a\nb\nc\nd\n",
             "originalFile": "a\nx\nc\n",
         });
-        let rendered = format_write_result("⏺", &json);
+        let rendered = render_tool_card(&write_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("Updated src/main.rs"), "{plain}");
         // 4 new lines, was 3, delta +1.
@@ -2776,7 +2755,7 @@ mod tests {
             "filePath": "new.txt",
             "content": "hello\nworld\n",
         });
-        let rendered = format_write_result("⏺", &json);
+        let rendered = render_tool_card(&write_card(&json), ToolStatus::Ok);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("Wrote new.txt"), "{plain}");
         assert!(plain.contains("(2 lines)"), "{plain}");

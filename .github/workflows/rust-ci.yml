@@ -157,6 +157,10 @@ jobs:
         with:
           workspaces: rust -> target
       - name: Run workspace tests
+        # Keep panic diagnostics visible if a Windows PTY aborts before libtest
+        # can print its captured failure output.
+        env:
+          RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --workspace
 
   a2a-live:

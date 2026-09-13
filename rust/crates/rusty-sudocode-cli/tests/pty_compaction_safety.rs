@@ -99,11 +99,15 @@ fn serve(
     let streaming = request["stream"] == true;
     let number = if is_post {
         let mut requests = captured.lock().unwrap();
-        requests.push(request);
+        requests.push(request.clone());
         requests.len()
     } else {
         0
     };
+    if streaming && mode == "delegate" {
+        serve_delegation(&mut socket, &request);
+        return;
+    }
     if streaming && mode == "success" {
         let events = [
             (
@@ -490,4 +494,155 @@ fn empty_compacted_history_cannot_continue_a_task() {
         "damaged history must never reach the model"
     );
     assert!(Session::load_from_path(&path).unwrap().messages.is_empty());
+}
+
+// Drive both runtime clients through the real Agent tool. Two closed read
+// exchanges leave a compactable prefix; only the child's final response reports
+// pressure, so its post-turn checkpoint must use the shared text transport.
+fn serve_delegation(socket: &mut TcpStream, request: &Value) {
+    let messages = request["messages"].as_array().unwrap();
+    let child = messages.iter().any(|message| {
+        message["content"].as_array().is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("CHILD_COMPACTION"))
+            })
+        })
+    });
+    let steps = messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .count();
+    let (block, usage) = if child && steps < 2 {
+        (
+            json!({"type":"tool_use","id":format!("read-{steps}"),"name":"read_file","input":{"path":"child-read.txt"}}),
+            1000,
+        )
+    } else if child {
+        (json!({"type":"text","text":"CHILD_DONE"}), 49_000)
+    } else if steps == 0 {
+        (
+            json!({"type":"tool_use","id":"delegate","name":"Agent","input":{
+                "description":"validate child checkpoint", "model":"claude-sonnet", "auth_mode":"api-key",
+                "run_in_background":false,
+                "prompt":format!("CHILD_COMPACTION PROJECT_ALPHA {}", "Preserve the migration constraints. ".repeat(300))
+            }}),
+            1000,
+        )
+    } else {
+        (json!({"type":"text","text":"PARENT_DONE"}), 1000)
+    };
+    let is_tool = block["type"] == "tool_use";
+    let mut start = block.clone();
+    let delta = if is_tool {
+        start["input"] = json!({});
+        json!({"type":"input_json_delta","partial_json":block["input"].to_string()})
+    } else {
+        start["text"] = json!("");
+        json!({"type":"text_delta","text":block["text"]})
+    };
+    let events = [
+        (
+            "message_start",
+            json!({"type":"message_start","message":{"id":"delegate-reply","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":usage,"output_tokens":0}}}),
+        ),
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":start}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":delta}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ),
+        (
+            "message_delta",
+            json!({"type":"message_delta","delta":{"stop_reason":if is_tool {"tool_use"} else {"end_turn"}},"usage":{"input_tokens":usage,"output_tokens":10}}),
+        ),
+        ("message_stop", json!({"type":"message_stop"})),
+    ];
+    let mut body = String::new();
+    for (event, data) in events {
+        write!(&mut body, "event: {event}\ndata: {data}\n\n").unwrap();
+    }
+    let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+}
+
+#[test]
+fn subagent_compaction_uses_shared_text_transport() {
+    let provider = Provider::new("delegate");
+    let workspace = HarnessWorkspace::new("shared-subagent-compact");
+    workspace.write_mock_config(&provider.url);
+    set_small_window(&workspace);
+    std::fs::write(
+        workspace.root.join("child-read.txt"),
+        "alpha migration fixture\n".repeat(120),
+    )
+    .unwrap();
+    let mut cli = spawn_scode_in_dir_with_env(
+        &workspace.root,
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "danger-full-access",
+            "Delegate the checkpoint validation.",
+        ],
+        Duration::from_secs(30),
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
+    )
+    .unwrap();
+    cli.expect("PARENT_DONE").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let requests = provider.requests.lock().unwrap();
+    let checkpoints = requests
+        .iter()
+        .filter(|r| r["stream"] != true)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        checkpoints.len(),
+        1,
+        "child should complete cache-preserving compaction in one request; requests: {:?}",
+        requests
+            .iter()
+            .map(|r| (
+                r["stream"].clone(),
+                r["model"].clone(),
+                r["messages"].as_array().map(Vec::len),
+                r["messages"].as_array().and_then(|m| m.last()).map(|m| m
+                    .to_string()
+                    .chars()
+                    .take(1200)
+                    .collect::<String>())
+            ))
+            .collect::<Vec<_>>()
+    );
+    let checkpoint = checkpoints[0];
+    assert!(checkpoint["messages"]
+        .to_string()
+        .contains("CHILD_COMPACTION"));
+    assert_eq!(checkpoint["max_tokens"], 1024);
+    assert!(checkpoint["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    assert!(
+        checkpoint["system"].to_string().contains("cache_control"),
+        "child should use the shared cache hints"
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|r| r["stream"] == true)
+            .any(|r| r["messages"].to_string().contains("CHILD_DONE")),
+        "parent must receive the child result"
+    );
 }

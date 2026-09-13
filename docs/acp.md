@@ -244,6 +244,11 @@ budget and one fifth of current history, with a four-message minimum and
 complete tool exchanges taking precedence. File contents are not re-read and
 re-injected after compaction.
 
+Main-agent and subagent clients use the same non-streaming text transport in
+`api::ProviderClient::complete_text`. Client adapters select only their model
+and tool schemas; runtime owns compaction prompts, retry policy and validation.
+The shared transport also owns message conversion and cache hints.
+
 Both LLM paths request at most 8,192 output tokens (or the model's smaller
 limit). The preferred path reuses the system prompt, tool schemas and older
 message prefix; the fallback strips thinking and replaces images with text

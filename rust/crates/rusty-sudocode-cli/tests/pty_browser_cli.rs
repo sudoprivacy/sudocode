@@ -1,8 +1,8 @@
-//! Real scode -> Bash -> embedded sudohand CLI -> Chrome -> local page.
+//! Real scode -> Bash -> external suh CLI -> Chrome -> local page.
 //! Only model replies are scripted; browser actions and DOM assertions are real.
 mod common;
 
-use common::{scode_bin, spawn_scode_in_dir_with_env, HarnessWorkspace};
+use common::{spawn_scode_in_dir_with_env, HarnessWorkspace};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -141,18 +141,17 @@ fn element_ref(request: &Value, name: &str) -> String {
 }
 
 fn next_step(step: usize, request: &Value, port: u16, page: &str, shot: &str) -> Value {
-    let bin = quote(&scode_bin().to_string_lossy().replace('\\', "/"));
+    let bin = quote(&suh_bin().to_string_lossy().replace('\\', "/"));
     let base = format!("{bin} browser");
     let command = match step {
         0 => {
-            let binary = scode_bin().to_string_lossy().replace('\\', "/");
             assert!(
                 request["system"].as_array().unwrap().iter().any(|block| {
                     block["text"]
                         .as_str()
-                        .is_some_and(|text| text.contains(&binary))
+                        .is_some_and(|text| text.contains("suh browser --help"))
                 }),
-                "agent must receive this CLI's path, not a potentially older PATH entry"
+                "agent must receive external suh usage instructions"
             );
             // GitHub's Chrome-for-Testing binary has no installed AppArmor
             // sandbox profile on Ubuntu. This is only the isolated test browser.
@@ -225,20 +224,29 @@ fn stream(block: &Value) -> String {
 struct BrowserCleanup(u16);
 impl Drop for BrowserCleanup {
     fn drop(&mut self) {
-        let _ = std::process::Command::new(scode_bin())
+        let _ = std::process::Command::new(suh_bin())
             .args(["browser", "browser_stop", "--port", &self.0.to_string()])
             .output();
     }
 }
 
 #[test]
+#[ignore = "requires independently installed suh and Chrome; run explicitly with --ignored"]
 fn agent_controls_real_browser_through_bash_cli() {
+    let output = std::process::Command::new(suh_bin())
+        .args(["browser", "--help"])
+        .output()
+        .unwrap();
     assert!(
-        sudohand_browser::chrome::find_chrome().is_some(),
-        "install Chrome or set AI_DEV_BROWSER_CHROME for browser PTY tests"
+        output.status.success(),
+        "install suh for browser PTY coverage"
     );
     let workspace = HarnessWorkspace::new("browser-cli-agent");
-    let port = sudohand_browser::port::get_available_port((19350, 19450), &[]).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let _cleanup = BrowserCleanup(port);
     let shot = workspace.root.join("browser.png");
     let provider = Fixture::start(port, shot.to_string_lossy().into_owned());
@@ -258,37 +266,10 @@ fn agent_controls_real_browser_through_bash_cli() {
     );
 }
 
-#[test]
-fn browser_help_and_invalid_arguments_need_no_model_credentials() {
-    let workspace = HarnessWorkspace::new("browser-cli-no-auth");
-    let mut cli = spawn_scode_in_dir_with_env(
-        &workspace.root,
-        &["browser", "--help"],
-        Duration::from_secs(15),
-        &[
-            ("HOME", &workspace.home),
-            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
-        ],
-    )
-    .unwrap();
-    cli.expect("page_discover").unwrap();
-    assert_eq!(cli.expect_eof().unwrap(), 0);
-    let output = std::process::Command::new(scode_bin())
-        .args(["browser", "click_by_ref"])
-        .env("HOME", &workspace.home)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(error["error"]["kind"], "invalid_input");
-    let output = std::process::Command::new(scode_bin())
-        .args(["browser", "browser_stop"])
-        .env("HOME", &workspace.home)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(9));
-    assert!(output.stdout.is_empty());
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert!(error["error"]["message"].as_str().unwrap().contains("port"));
+fn suh_bin() -> std::path::PathBuf {
+    let name = if cfg!(windows) { "suh.exe" } else { "suh" };
+    std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .expect("install the external sudohand CLI (suh) on PATH before browser PTY tests")
 }

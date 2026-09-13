@@ -10,9 +10,6 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
-sudohand-vlm = { git = "https://github.com/sudoprivacy/sudohand", rev = "c62b244a43d53bb87e1f14e97c5858ce41480745" }
-sudohand-browser = { git = "https://github.com/sudoprivacy/sudohand", rev = "c62b244a43d53bb87e1f14e97c5858ce41480745" }
-sudohand-core = { git = "https://github.com/sudoprivacy/sudohand", rev = "c62b244a43d53bb87e1f14e97c5858ce41480745" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"
@@ -66,7 +63,3 @@ tokio-tungstenite = "0.29"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["term", "poll", "signal", "fs"] }
 
-# Upstream optional browser vision commands use native-tls. Keep Linux releases
-# self-contained (musl and GNU); macOS/Windows use their native TLS backend.
-[target.'cfg(target_os = "linux")'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }

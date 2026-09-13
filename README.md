@@ -369,6 +369,6 @@ collaboration platform.
 
 ### Browser automation
 
-Use `scode browser --help` for built-in Chrome/Chromium/Edge automation via
-Bash, without installing a separate `suh` CLI. See [browser CLI usage](docs/browser-cli.md)
+Install the independent sudohand CLI, then use `suh browser --help` for
+Chrome/Chromium/Edge automation through the existing Bash tool. See [browser CLI usage](docs/browser-cli.md)
 for setup, element refs, screenshots, and browser cleanup.

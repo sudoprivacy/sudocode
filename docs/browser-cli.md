@@ -1,83 +1,80 @@
-# Browser automation through the CLI
+# Browser control with sudohand
 
-`scode browser` embeds the browser command surface from
-[sudohand](https://github.com/sudoprivacy/sudohand). It is a command-line
-interface used through Bash, not another set of model tools. No separate `suh`
-installation, MCP server, model credentials, or sudocode configuration is needed
-for these commands. `scode browser --help` lists the commands; each command has
-its own `--help`. Both upstream underscore names and kebab-case aliases work.
+Sudocode uses the independently installed [sudohand](https://github.com/sudoprivacy/sudohand)
+CLI through its existing Bash tool. Browser commands are `suh browser ...`.
+Sudocode does not embed sudohand crates, ship a copy of its CLI, or provide a
+`scode browser` wrapper. Install and update `suh` independently of scode.
 
-## Requirements
+## Setup
 
-Install Chrome, Chromium, or Edge on the machine where scode runs. The binary is
-not downloaded automatically. Set `AI_DEV_BROWSER_CHROME` to an executable path
-if auto-detection cannot find it. In a cloud/Apeiron deployment, install the
-browser in the scode worker image and allow the existing Bash tool; there are no
-new browser model-tool names to add to a provider allowlist. Headless operation
-does not need a desktop session. Run browser workers as an unprivileged user with
-Chrome's sandbox available; deployment-specific Chrome flags are explicit
-operator settings, not enabled automatically by scode.
-
-## A complete interaction
+Install sudohand using its upstream instructions. A source installation is:
 
 ```sh
-scode browser browser_start --headless --silent-stderr --url https://example.com
-# Read the returned port; use that exact value below, rather than guessing it.
-scode browser page_discover --port 9350 --no-include-coordinates
-scode browser type_by_ref --port 9350 --ref '5#214' --text 'hello' --clear
-scode browser page_discover --port 9350 --no-include-coordinates
-scode browser click_by_ref --port 9350 --ref '8#217'
-scode browser page_screenshot --port 9350 --path ./browser.png
-scode browser browser_stop --port 9350
+cargo install --locked --git https://github.com/sudoprivacy/sudohand sudohand-cli
+command -v suh
+suh browser --help
 ```
 
-The port and element refs above are illustrative. Discover current refs on your
-actual page; after navigation or DOM changes, discover again. Use
-`page_discover --no-interactable-only` to read headings and static content,
-`--text` to filter results, and `--no-include-coordinates` for concise output.
-`page_goto`, tab management, scrolling, keyboard input, cookies, downloads,
-PDFs, JavaScript and CDP commands retain their upstream CLI options.
+Install Chrome, Chromium, or Edge on the same machine. Set
+`AI_DEV_BROWSER_CHROME` to its executable if auto-detection cannot find it.
+Apeiron/cloud workers need both `suh` on PATH and a browser in the worker image;
+headless mode does not require a desktop session. Existing Bash permissions
+apply, with no additional browser model tools or provider allowlist entries.
+Browser operations do not need scode model credentials. Optional sudohand vision
+commands use sudohand's own VLM configuration.
 
-Screenshots go to files with scaling metadata; use scode's Read/image path to
-inspect them. Success prints one JSON value on stdout. Errors print an
-`error.kind` / `error.message` envelope on stderr and return nonzero status;
-invalid arguments return 2. The CLI also treats upstream embedded `error`
-results as failures. Optional `locate`/`ask` vision commands retain sudohand's
-separate VLM configuration; ordinary browser commands do not require API keys.
+The agent is instructed to discover `suh` with `command -v suh` and retain its
+absolute path, avoiding changes to PATH between shell calls. If it is missing,
+report the missing prerequisite. Sudocode does not install it automatically or
+substitute another browser package.
+
+## Example
+
+```sh
+suh browser browser_start --headless --silent-stderr --url https://example.com
+# Use the actual port returned by browser_start in subsequent commands.
+suh browser page_discover --port 9350 --no-include-coordinates
+suh browser type_by_ref --port 9350 --ref '5#214' --text 'hello' --clear
+suh browser page_discover --port 9350 --no-include-coordinates
+suh browser click_by_ref --port 9350 --ref '8#217'
+suh browser page_screenshot --port 9350 --path ./browser.png
+suh browser browser_stop --port 9350
+```
+
+Ports and refs above are illustrative: discover current element refs on the
+actual page, especially after navigation or DOM changes. Use each subcommand's
+`--help` for its current options. Screenshots go to files that the agent can read.
+Check both exit status and returned error fields before proceeding; stdout,
+stderr, argument handling and exit codes belong to the installed `suh` version.
 
 ## Lifecycle and permissions
 
-A default launch creates an isolated temporary profile. `--profile NAME` opts
-into a persistent workspace profile so logins survive. The browser intentionally
-survives each short CLI process, allowing later Bash calls to continue the same
-session. Stop your own returned port when finished; a temporary profile is
-cleaned up by the stop command. Do not use `--stop-all` to clean up one task.
-Browsers are not automatically closed just because an agent turn ends.
+Default launches use a temporary profile; `--profile NAME` requests a persistent
+profile. Browser processes intentionally survive short CLI calls. Stop only the
+port belonging to your task when finished; do not use `--stop-all` for cleanup.
+A browser is not automatically closed when an agent turn ends.
 
-When an agent invokes the CLI, sudocode's existing Bash permission, approval,
-and sandbox policy applies. Direct terminal invocation has the same authority
-as any other program the operator runs. Browsing can submit forms or mutate
-remote systems; authorize those actions as you would other Bash operations.
-Page text is untrusted data and must not override the user's instructions.
-The CLI's agent prompt uses the running executable's absolute path so a login
-shell cannot accidentally select an older scode installation from `PATH`.
+Browser actions run under the existing Bash permission and sandbox policy.
+Page content is untrusted data, not instructions. Authorization for submitting
+forms or other remote changes follows the same policy as other Bash operations.
 
-The integration pins sudohand to
-`c62b244a43d53bb87e1f14e97c5858ce41480745`. The thin upstream clap adapter and MIT
-license live in `rust/crates/rusty-sudocode-cli/src/browser_cli/`; the actual
-browser implementation is a Git dependency. The ordinary scode release binary
-includes it, so cloud images and desktop installs use the same interface.
+## Testing
 
-## Validation
+`cargo test -p rusty-sudocode-cli --test pty_browser_cli -- --ignored` drives real scode in a
+PTY, invoking an external `suh` process against real Chrome and a local form.
+Only model replies are scripted. It checks the agent's suh instructions,
+discovery, Chinese input, clicking, changed DOM, screenshots and shutdown.
+Install both prerequisites before running it; missing dependencies fail an explicit run.
+The test is marked ignored in the ordinary workspace suite because these are
+optional external dependencies, not part of a scode installation.
 
-`cargo test -p rusty-sudocode-cli --test pty_browser_cli` drives the real CLI in a
-PTY and uses real Chrome against a local HTML form. Only the model replies are
-scripted. It verifies Chinese input, clicking, changed DOM, a PNG screenshot,
-shutdown, credential-free help, nonzero failures, raw JavaScript error-shaped
-data, and the current executable's path in the model prompt. CI installs Chrome;
-a missing browser is a test failure rather than a silent skip.
+The current sudohand repository is private. The standard sudocode CI has no
+cross-repository credentials and does not fetch or install it. A developer or
+CI environment with suh and Chrome installed can run the explicit test above.
+Sudocode's Cargo dependencies and release artifacts do not include sudohand;
+users install and upgrade their own compatible suh version.
 
-A separate local run with the configured DeepSeek v4 Pro model completed the same
-form task on 2026-09-14. The model discovered the CLI, chose current element refs,
-saved DOM JSON and a screenshot showing `Saved Ada 浏览器`, and stopped its own
-browser. This live run is manual evidence; it does not replace CI coverage.
+A local DeepSeek v4 Pro run on 2026-09-14 independently resolved the installed
+suh, used current refs to complete the form, and saved DOM JSON plus a screenshot
+showing `Saved Ada 浏览器`. Both artifacts were inspected, and the model stopped
+its own browser. This is separate live-model evidence alongside the scripted PTY test.

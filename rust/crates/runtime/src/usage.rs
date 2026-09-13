@@ -306,6 +306,12 @@ pub fn format_usd(amount: f64) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageTracker {
     latest_turn: TokenUsage,
+    // Sum of every model request recorded since the current turn began. A turn
+    // can issue many requests (the tool-call loop); `latest_turn` only holds
+    // the last one, which is right for context-window occupancy but undercounts
+    // what the whole turn spent. This accumulator is what the status line bills.
+    current_turn_total: TokenUsage,
+    current_turn_cost: UsageCostAggregation,
     cumulative: TokenUsage,
     cumulative_cost: UsageCostAggregation,
     turns: u32,
@@ -331,17 +337,42 @@ impl UsageTracker {
         tracker
     }
 
+    /// Reset the per-turn accumulator at the start of a turn, so
+    /// [`current_turn_total_usage`](Self::current_turn_total_usage) sums only
+    /// the requests this turn issues. Does not touch cumulative or latest.
+    pub fn begin_turn(&mut self) {
+        self.current_turn_total = TokenUsage::default();
+        self.current_turn_cost = UsageCostAggregation::default();
+    }
+
     pub fn record(&mut self, usage: TokenUsage) {
         self.latest_turn = usage;
+        self.current_turn_total.add_assign_token_counts(usage);
+        self.current_turn_cost.push(usage);
+        self.current_turn_cost
+            .apply_to(&mut self.current_turn_total);
         self.cumulative.add_assign_token_counts(usage);
         self.cumulative_cost.push(usage);
         self.cumulative_cost.apply_to(&mut self.cumulative);
         self.turns = self.turns.saturating_add(1);
     }
 
+    /// The latest single request's usage. This is the current context-window
+    /// occupancy (what the provider processed for the most recent response) —
+    /// the metric auto-compaction compares against the window. NOT the turn
+    /// total; see [`current_turn_total_usage`](Self::current_turn_total_usage).
     #[must_use]
     pub fn current_turn_usage(&self) -> TokenUsage {
         self.latest_turn
+    }
+
+    /// Everything the current turn spent: the sum of every request since
+    /// [`begin_turn`](Self::begin_turn), including aggregated real cost. This is
+    /// what the status line bills, so a multi-request (tool-loop) turn reports
+    /// its full token/cost total rather than only the last request's.
+    #[must_use]
+    pub fn current_turn_total_usage(&self) -> TokenUsage {
+        self.current_turn_total
     }
 
     /// Returns the usage for the turn that just completed, if any was recorded.
@@ -456,6 +487,62 @@ mod tests {
             tracker.cumulative_usage().cost_currency,
             Some(UsageCostCurrency::SudoPoint)
         );
+    }
+
+    #[test]
+    fn per_turn_total_sums_requests_since_begin_turn() {
+        let mut tracker = UsageTracker::new();
+        tracker.begin_turn();
+        // A tool-loop turn: two model requests before the turn ends.
+        tracker.record(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cost_units: Some(100),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
+            ..TokenUsage::default()
+        });
+        tracker.record(TokenUsage {
+            input_tokens: 20,
+            output_tokens: 6,
+            cost_units: Some(250),
+            cost_currency: Some(UsageCostCurrency::SudoPoint),
+            ..TokenUsage::default()
+        });
+
+        // Latest = last request only (context-window occupancy).
+        assert_eq!(tracker.current_turn_usage().input_tokens, 20);
+        assert_eq!(tracker.current_turn_usage().output_tokens, 6);
+        // Total = both requests summed (what the status line bills).
+        assert_eq!(tracker.current_turn_total_usage().input_tokens, 30);
+        assert_eq!(tracker.current_turn_total_usage().output_tokens, 10);
+        assert_eq!(tracker.current_turn_total_usage().cost_units, Some(350));
+        assert_eq!(
+            tracker.current_turn_total_usage().cost_currency,
+            Some(UsageCostCurrency::SudoPoint)
+        );
+    }
+
+    #[test]
+    fn begin_turn_resets_the_per_turn_total_but_not_cumulative() {
+        let mut tracker = UsageTracker::new();
+        tracker.begin_turn();
+        tracker.record(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            ..TokenUsage::default()
+        });
+        // Next turn starts: the per-turn total resets, cumulative keeps growing.
+        tracker.begin_turn();
+        tracker.record(TokenUsage {
+            input_tokens: 5,
+            output_tokens: 2,
+            ..TokenUsage::default()
+        });
+
+        assert_eq!(tracker.current_turn_total_usage().input_tokens, 5);
+        assert_eq!(tracker.current_turn_total_usage().output_tokens, 2);
+        assert_eq!(tracker.cumulative_usage().input_tokens, 15);
+        assert_eq!(tracker.cumulative_usage().output_tokens, 6);
     }
 
     #[test]

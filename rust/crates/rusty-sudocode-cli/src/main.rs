@@ -3917,14 +3917,21 @@ impl LiveCli {
         ui: Option<&repl_ui::UiCommandSender>,
     ) {
         let usage_tracker = self.lifecycle.usage_snapshot();
-        let usage = usage_tracker.current_turn_usage();
+        // Two different needs from one turn:
+        //  - context occupancy is the LATEST request's context_tokens (what the
+        //    window currently holds; the metric auto-compaction uses).
+        //  - billed tokens/cost is the SUM of every request this turn issued
+        //    (a tool-loop turn makes several), so the status line reports the
+        //    whole turn, not just the last request.
+        let latest = usage_tracker.current_turn_usage();
+        let usage = usage_tracker.current_turn_total_usage();
         let turns = usage_tracker.turns();
         // Current context-window occupancy (what the provider just processed),
         // the same metric auto-compaction uses — not the session-cumulative
         // total, which never shrinks and overshoots the window. Window is sized
         // off the session model so the percentage and the compaction trigger
         // share one denominator.
-        let context_tokens = usage.context_tokens();
+        let context_tokens = latest.context_tokens();
         let context_window = runtime::model_capabilities::context_window_or_default(model);
         let branch = env::current_dir()
             .ok()

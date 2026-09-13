@@ -3,7 +3,7 @@
 End-to-end tests for the standalone-`scode` ↔ nexus A2A path: a terminal `scode`
 dials a real `nexusd-cluster` as a plain gRPC client and sends/receives over the
 replicated `/agents/<name>/chat-with-me` DT_STREAM (`NEXUS_A2A_*` env; off by
-default). The transport lives in `runtime::nexus_mailbox` +
+default). The transport lives in `runtime::mailbox` +
 `nexus-vfs-client`; the send half feeds `CliToolExecutor` via the same
 `handle_send_message` the co-host uses.
 
@@ -11,13 +11,13 @@ default). The transport lives in `runtime::nexus_mailbox` +
 
 | Layer | Command | LLM? |
 |---|---|---|
-| Unit | `cargo test -p runtime --lib nexus_mailbox` | no |
+| Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
-The **live round-trip** (`nexus_mailbox_live`, an ignored `runtime` integration
-test) is the piece unit tests can't cover: it drives `ensure_stream` +
-`stream_write` + `stream_read_at` through a real gRPC server and a real
+The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
+test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
+`Mailbox::send` + `Mailbox::poll` through a real gRPC server and a real
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 

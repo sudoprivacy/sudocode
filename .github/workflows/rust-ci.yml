@@ -20,6 +20,8 @@ on:
       - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
+      # The a2a-live job RUNS these; without them a harness change ships untested.
+      - e2e/**
   pull_request:
     branches:
       - main
@@ -37,6 +39,8 @@ on:
       - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
+      # The a2a-live job RUNS these; without them a harness change ships untested.
+      - e2e/**
   workflow_dispatch:
 
 concurrency:

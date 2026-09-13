@@ -209,9 +209,23 @@ fn a_send_crosses_the_daemon_and_the_peer_can_reply_to_its_sender() {
     // `from` is what step 5 addresses, and the only reason this assertion is
     // separate from the one above: a reply is sent to the name the envelope
     // carries, so a stamped-in default would be delivered and unanswerable.
+    //
+    // It is also what makes this test impossible to satisfy by accident. `sender`
+    // is generated here and reaches the binary only as `NEXUS_A2A_AGENT`, so an
+    // envelope on the daemon carrying it can only have been written by that
+    // process, through the tool, over this transport.
     assert_eq!(
         delivered.from, sender,
         "the envelope must name the session's own identity, not a default"
+    );
+
+    // Printed so a CI log shows what crossed rather than only that something did.
+    eprintln!(
+        "crossed the daemon: from={} to={} at {} ({})",
+        delivered.from,
+        delivered.to,
+        mailbox_for(&client, PEER).own_inbox_path(),
+        if env.is_mock() { "mock" } else { "live" },
     );
 
     // ── 5. Reply to the sender the envelope named ──────────────────────────

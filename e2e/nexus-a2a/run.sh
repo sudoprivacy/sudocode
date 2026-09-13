@@ -39,7 +39,10 @@ MODE=binary
 if [ -n "${NEXUS_DAEMON_IMAGE:-}" ]; then
   MODE=docker
 elif [ -z "${NEXUSD_BIN:-}" ]; then
-  NEXUSD_BIN="$(./fetch-daemon.sh)" || exit 1
+  # Through `bash`, not `./`: a repo cloned from a Windows checkout can
+  # arrive without the exec bit, and the failure then reads as a missing
+  # file rather than a permissions one.
+  NEXUSD_BIN="$(bash ./fetch-daemon.sh)" || exit 1
 fi
 
 DAEMON_PID=

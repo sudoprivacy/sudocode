@@ -25,9 +25,6 @@ const EXIT_BUDGET: Duration = Duration::from_secs(60);
 /// The Ctrl-C confirmation hint, verbatim from `repl_ui`.
 const HINT: &str = "Press Ctrl-C again to exit";
 
-/// How long `repl_ui` shows that hint before clearing it.
-const HINT_TTL: Duration = Duration::from_secs(3);
-
 /// Index of the first rendered row containing `needle`, if any.
 ///
 /// A row index, not a boolean, because "the hint is in the footer" is a claim
@@ -156,51 +153,57 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
     assert_eq!(exit, 0, "clean exit code");
 }
 
-/// Ctrl-C hint appears in the FooterSlot (not scrollback) and
-/// auto-dismisses. Pressing Ctrl-C once while idle should show
-/// "Press Ctrl-C again to exit" in the footer area, and a subsequent
-/// keypress should dismiss it. The hint must NOT appear in scrollback.
+/// Ctrl-C hint renders in the FooterSlot, below the input line, not in
+/// scrollback.
+///
+/// Split from the auto-dismiss check below, and run with a TTL long enough
+/// that the hint cannot expire mid-test. The two claims need opposite timing
+/// to observe — one needs the hint present, the other needs it gone — and
+/// asserting both against one 3-second transient is what made this the flake
+/// that blocked merges: a polling loop on a loaded runner can miss the window
+/// entirely, after which the hint is gone for good and the test spins out its
+/// budget having measured the scheduler rather than the footer.
 #[test]
-fn iocraft_repl_ctrlc_hint_in_footer() {
+fn iocraft_repl_ctrlc_hint_renders_in_the_footer() {
     let env = TestEnv::new("iocraft-ctrlc-hint");
     let root = env.workspace_root().to_path_buf();
     std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            // Effectively never expires for the life of this test.
+            ("SUDOCODE_CTRLC_HINT_TTL_MS", "600000"),
+        ],
     );
     sess.set_default_timeout(Duration::from_secs(10));
 
-    sess.expect("❯").unwrap_or_else(|e| {
+    sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("prompt: {e}\nPTY:\n{screen}");
     });
 
     // Readiness, not a guess. Until iocraft has taken the terminal out of
     // canonical mode, ^C is still a terminal signal and would kill the child
-    // outright instead of arriving as a key event. The prompt can be on
-    // screen before that happens, so the prompt alone is not the signal —
-    // a keystroke that renders is: it proves iocraft owns the keyboard and
-    // is distributing key events. (A fixed sleep here was the old guard;
-    // any duration is either too short on a loaded runner or wasted.)
-    // Ctrl-C clears the input line, so the probe leaves nothing behind.
+    // outright instead of arriving as a key event. The prompt can be on screen
+    // before that happens, so the prompt alone is not the signal — a keystroke
+    // that renders is: it proves iocraft owns the keyboard and is distributing
+    // key events. Ctrl-C clears the input line, so the probe leaves nothing.
     sess.send("~probe~").expect("type readiness probe");
     sess.expect("~probe~").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
     });
 
-    // Press Ctrl-C once — the hint belongs in the footer.
     sess.send("\x03").expect("send Ctrl-C");
 
     // Read the SCREEN, not the byte stream: iocraft redraws everything on any
     // change, so a stream match says a frame went past, not what is displayed.
-    let hint_row = wait_for_row_containing(&mut sess, HINT, Duration::from_secs(15));
+    let hint_row = wait_for_row_containing(&mut sess, HINT, Duration::from_secs(30));
 
     // BELOW the prompt, which is what "in the footer and not scrollback" means
-    // in terms a test can check. The docstring has always claimed this; nothing
-    // asserted it, so a hint printed into the transcript would have passed.
+    // in terms a test can check.
     let prompt_row = row_containing(&mut sess, "\u{276f}")
         .expect("the prompt row is on screen once the REPL is up");
     assert!(
@@ -210,43 +213,61 @@ fn iocraft_repl_ctrlc_hint_in_footer() {
         sess.render(|s| s.contents())
     );
 
-    // Wait for Ctrl-C to have CLEARED the line, not merely for a prompt row to
-    // exist. Its handler emits the footer hint and clears `input_value` in the
-    // same pass, but the frame carrying the hint can reach the PTY before the
-    // cleared buffer is observable. Characters typed into that window get
-    // inserted by `TextInput` and then wiped, so they never show up — which is
-    // how this test failed on macOS CI: `/exit` absent for the whole budget
-    // with the prompt marker plainly on screen and the hint already expired.
-    //
-    // `expect_input_line(&sess, "", …)` cannot express this — `contains("")` is
-    // always true, so it waits for nothing.
+    // Ctrl-C also clears the input line. Asserted here rather than by typing
+    // afterwards: keystrokes in the window right after Ctrl-C are dropped
+    // (issue #621), so a test that typed would be testing that bug instead.
     common::expect_input_line_cleared(
         &sess,
         Duration::from_secs(15),
-        "Ctrl-C should clear the input line before more is typed",
+        "Ctrl-C should clear the input line",
+    );
+}
+
+/// The hint auto-dismisses. This matters more than it sounds: the hint is the
+/// ONE thing standing between a second Ctrl-C and an exit, so a hint that never
+/// cleared would leave the REPL one keystroke from quitting indefinitely.
+///
+/// Run with a very short TTL so the end state — hint gone — is what the test
+/// waits for, instead of having to catch the hint mid-flight first. The cleared
+/// input line is the evidence that Ctrl-C was actually processed, so absence of
+/// the hint cannot pass vacuously.
+#[test]
+fn iocraft_repl_ctrlc_hint_auto_dismisses() {
+    let env = TestEnv::new("iocraft-ctrlc-dismiss");
+    let root = env.workspace_root().to_path_buf();
+    std::fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("SUDOCODE_CTRLC_HINT_TTL_MS", "300"),
+        ],
+    );
+    sess.set_default_timeout(Duration::from_secs(10));
+
+    sess.expect("\u{276f}").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("prompt: {e}\nPTY:\n{screen}");
+    });
+    sess.send("~probe~").expect("type readiness probe");
+    sess.expect("~probe~").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("iocraft should render typed input before Ctrl-C is sent: {e}\nPTY:\n{screen}");
+    });
+
+    sess.send("\x03").expect("send Ctrl-C");
+
+    // Ctrl-C landed: the handler clears the input line in the same pass that
+    // raises the hint.
+    common::expect_input_line_cleared(
+        &sess,
+        Duration::from_secs(15),
+        "Ctrl-C should clear the input line",
     );
 
-    // And it auto-dismisses. Also claimed by the docstring and never checked,
-    // which matters more than it sounds: the hint is the ONE thing standing
-    // between a second Ctrl-C and an exit, so a hint that never clears leaves
-    // the REPL one keystroke from quitting indefinitely.
-    wait_for_no_row_containing(&mut sess, HINT, HINT_TTL + Duration::from_secs(5));
-
-    // No `/exit` teardown, deliberately. `PtySession`'s `Drop` kills the child,
-    // and typing after Ctrl-C is exactly what issue #621 is about: keystrokes
-    // in that window are dropped outright, measured at 32% on macOS and
-    // reproducible on Windows. This test's subject is where the hint renders and
-    // that it clears; making it depend on a keystroke it cannot rely on tested
-    // the bug rather than the subject, and it is what turned this into the
-    // flake that blocked merges.
-    //
-    // Clean exit keeps its own guard in `iocraft_repl_auto_grow_exit_no_hang`,
-    // which exits from an untouched REPL and so is unaffected.
-    //
-    // Worth being explicit: CI loses an accidental detector for #621 here. The
-    // deliberate one is the measurement harness on
-    // `diag/ctrlc-keystroke-loss-repro`, which reports a rate instead of
-    // failing one run in seven.
+    // And the hint does not outlive its TTL.
+    wait_for_no_row_containing(&mut sess, HINT, Duration::from_secs(15));
 }
 
 /// TurnPhase::Thinking renders in the StatusSlot during a turn.

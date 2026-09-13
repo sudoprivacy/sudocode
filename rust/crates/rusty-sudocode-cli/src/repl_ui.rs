@@ -804,6 +804,29 @@ fn split_for_iocraft(text: &str, terminated: bool, mut issue: impl FnMut(OutputO
     }
 }
 
+/// Default lifetime of the "Press Ctrl-C again to exit" footer hint.
+const CTRLC_HINT_TTL: Duration = Duration::from_secs(3);
+
+/// How long that hint stays in the footer.
+///
+/// Overridable through `SUDOCODE_CTRLC_HINT_TTL_MS` because the hint is a
+/// short-lived transient and a PTY test can only observe it by polling the
+/// rendered screen. At three seconds a loaded machine can stall a 50ms poll
+/// past the deadline, and the hint is then gone for good — the test spins out
+/// its whole budget and fails, having tested the scheduler rather than the
+/// footer. Handing the test a TTL makes both directions deterministic: a long
+/// one to assert *where* the hint renders, a short one to assert that it
+/// clears.
+///
+/// Read per use rather than cached: tests set it per-process before the REPL
+/// starts, and a `OnceLock` would freeze whichever value happened to be first.
+fn ctrlc_hint_ttl() -> Duration {
+    std::env::var("SUDOCODE_CTRLC_HINT_TTL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map_or(CTRLC_HINT_TTL, Duration::from_millis)
+}
+
 /// Channel-backed output handle for routing text from the runner thread
 /// to the iocraft render loop. Clone is cheap. Implements `std::io::Write`
 /// so it can be used as a stdout replacement.
@@ -1587,7 +1610,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             last_ctrlc.set(Some(now));
                             let _ = input_tx_for_events.send(InputEvent::Abort);
                             let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
-                            footer_hint.set(Some((hint_msg, Instant::now() + Duration::from_secs(3))));
+                            footer_hint.set(Some((hint_msg, Instant::now() + ctrlc_hint_ttl())));
                             input_value.set(String::new());
                         }
                     }

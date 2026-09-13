@@ -10095,6 +10095,16 @@ mod tests {
 
     #[test]
     fn discovered_tools_get_defer_loading_false() {
+        // Held because this reads the registry, and the registry reads the
+        // environment: `cron_tools_hidden_when_host_owns_scheduling` sets
+        // `SUDOCODE_DISABLE_CRON_TOOLS` to prove cron tools disappear. Landing
+        // inside that window makes `CronCreate` absent here and this test panic
+        // on a missing definition — a race that shows up on one runner and not
+        // another. The mutating test already takes this lock; a reader that
+        // depends on what it changes has to take it too.
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = GlobalToolRegistry::builtin();
         let discovered: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
         let defs = registry.core_definitions(None, Some(&discovered));

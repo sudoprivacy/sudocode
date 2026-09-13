@@ -142,6 +142,37 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+  a2a-live:
+    name: nexus-A2A live (real daemon)
+    runs-on: ubuntu-latest
+    # The workflow default is `rust`; the harness lives at the repo root.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      # The one thing unit tests structurally cannot reach: an envelope moving
+      # through a real gRPC server and a real DT_STREAM, and a blocking tail
+      # woken by a real write. `ensure_inbox` shipped broken for exactly that
+      # reason — the shape was right, the code ran, and only a daemon has an
+      # opinion about whether the stream exists.
+      #
+      # `run.sh` downloads the daemon the lockfile pins (see fetch-daemon.sh),
+      # boots it auth-off on loopback, waits for a writable single-voter leader,
+      # and runs the deterministic live tests. No secrets: the LLM duet inside
+      # the same script gates on SUDOROUTER_API_KEY, which this job has not got.
+      #
+      # One OS on purpose. What this catches is the client/daemon contract,
+      # which does not vary by host — platform-specific daemon behaviour is
+      # nexus-vfs's own CI. Adding runners would multiply the daemon-boot flake
+      # surface for signal already covered.
+      - name: A2A round-trip against the pinned daemon
+        run: e2e/nexus-a2a/run.sh
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

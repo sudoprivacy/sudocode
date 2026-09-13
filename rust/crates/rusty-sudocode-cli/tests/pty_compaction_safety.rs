@@ -143,6 +143,19 @@ fn serve(
         ("200 OK", json!({"input_tokens": 1000}))
     } else if !is_post {
         ("200 OK", json!({"data": []}))
+    } else if mode.starts_with("internal")
+        && (request["model"]
+            != if mode == "internal-prefixed" {
+                "intranet/apeiron-v1"
+            } else {
+                "apeiron-v1"
+            }
+            || request["max_tokens"].as_u64().unwrap_or(u64::MAX) > 1024)
+    {
+        (
+            "400 Bad Request",
+            json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
+        )
     } else if mode == "error" {
         (
             "400 Bad Request",
@@ -194,16 +207,25 @@ fn fixture(workspace: &HarnessWorkspace) -> PathBuf {
     path
 }
 
-// The method pointer does not satisfy render's higher-ranked Screen lifetime.
-#[allow(clippy::redundant_closure_for_method_calls)]
 fn compact(workspace: &HarnessWorkspace, path: &std::path::Path, expected: &str) -> u32 {
+    compact_with_model(workspace, path, "sonnet", expected)
+}
+
+// render requires a closure with a higher-ranked Screen lifetime.
+#[allow(clippy::redundant_closure_for_method_calls)]
+fn compact_with_model(
+    workspace: &HarnessWorkspace,
+    path: &std::path::Path,
+    model: &str,
+    expected: &str,
+) -> u32 {
     let mut cli = spawn_scode_in_dir_with_env(
         &workspace.root,
         &[
             "--auth",
             "api-key",
             "--model",
-            "sonnet",
+            model,
             "--resume",
             path.to_str().unwrap(),
             "/compact",
@@ -578,6 +600,11 @@ fn subagent_compaction_uses_shared_text_transport() {
     let workspace = HarnessWorkspace::new("shared-subagent-compact");
     workspace.write_mock_config(&provider.url);
     set_small_window(&workspace);
+    let config_path = workspace.config_home.join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("intranet/child-v1");
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] = json!("anthropic-messages");
+    std::fs::write(config_path, config.to_string()).unwrap();
     std::fs::write(
         workspace.root.join("child-read.txt"),
         "alpha migration fixture\n".repeat(120),
@@ -589,7 +616,7 @@ fn subagent_compaction_uses_shared_text_transport() {
             "--auth",
             "api-key",
             "--model",
-            "sonnet",
+            "claude-sonnet",
             "--permission-mode",
             "danger-full-access",
             "Delegate the checkpoint validation.",
@@ -630,6 +657,7 @@ fn subagent_compaction_uses_shared_text_transport() {
     assert!(checkpoint["messages"]
         .to_string()
         .contains("CHILD_COMPACTION"));
+    assert_eq!(checkpoint["model"], "intranet/child-v1");
     assert_eq!(checkpoint["max_tokens"], 1024);
     assert!(checkpoint["tools"]
         .as_array()
@@ -645,4 +673,51 @@ fn subagent_compaction_uses_shared_text_transport() {
             .any(|r| r["messages"].to_string().contains("CHILD_DONE")),
         "parent must receive the child result"
     );
+}
+
+#[test]
+fn internal_model_alias_and_resumed_model_use_active_wire_identity() {
+    for (mode, wire_model, saved_model) in [
+        ("internal", "apeiron-v1", "apeiron-alias"),
+        (
+            "internal-prefixed",
+            "intranet/apeiron-v1",
+            "claude-sonnet-4-6",
+        ),
+    ] {
+        let provider = Provider::new(mode);
+        let workspace = HarnessWorkspace::new(mode);
+        workspace.write_mock_config(&provider.url);
+        let config_path = workspace.config_home.join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let mut model = config["models"]["claude-sonnet"].clone();
+        model["alias"] = json!("apeiron-alias");
+        model["name"] = json!("Apeiron display label, not a routing ID");
+        model["contextWindow"] = json!(50_000);
+        model["maxOutputTokens"] = json!(1024);
+        for mapping in model["providers"].as_object_mut().unwrap().values_mut() {
+            mapping["model"] = json!(wire_model);
+            mapping["api"] = json!("anthropic-messages");
+        }
+        config["models"]["apeiron-alias"] = model;
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let path = fixture(&workspace);
+        let mut session = Session::load_from_path(&path).unwrap();
+        session.model = Some(saved_model.into());
+        session.save_to_path(&path).unwrap();
+        assert_eq!(
+            compact_with_model(&workspace, &path, "apeiron-alias", "Messages removed"),
+            0
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "configured checkpoint should succeed on its first attempt"
+        );
+        assert_eq!(requests[0]["model"], wire_model);
+        assert_eq!(requests[0]["max_tokens"], 1024);
+        assert!(Session::load_from_path(&path).unwrap().compaction.is_some());
+    }
 }

@@ -180,6 +180,12 @@ pub type AssistantEventStream =
 pub trait ApiClient: Send {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
 
+    /// Provider-facing model ID for the active route. Config aliases, display
+    /// labels and model names reported by older responses are not routing IDs.
+    fn wire_model_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Complete a text request using this client's configured model route.
     /// Request conversion and transport live in the shared API layer.
     async fn complete_text(
@@ -2637,14 +2643,15 @@ where
         self.session
     }
 
-    /// Model name used for capability lookups and compaction. The single
-    /// home of the fallback, so the in-turn budget is always derived from
-    /// the same model the compaction itself will run against.
+    /// Use the active provider route for capability lookups. Session metadata
+    /// can contain a config alias or the model used before a resume/switch.
     fn compaction_model(&self) -> String {
-        self.session
-            .model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_COMPACTION_MODEL.to_string())
+        self.api_client
+            .wire_model_id()
+            .filter(|model| !model.is_empty())
+            .or_else(|| Some(self.running_model()).filter(|model| !model.is_empty()))
+            .unwrap_or(DEFAULT_COMPACTION_MODEL)
+            .to_owned()
     }
 
     /// Whether the request this iteration is about to build would not fit.
@@ -2688,13 +2695,8 @@ where
         &mut self,
         observer: Option<&mut dyn RuntimeObserver>,
     ) -> Option<AutoCompactionEvent> {
-        let running = self.running_model();
-        let model = if running.is_empty() {
-            DEFAULT_COMPACTION_MODEL
-        } else {
-            running
-        };
-        let threshold = auto_compact_threshold_for_model(model);
+        let model = self.compaction_model();
+        let threshold = auto_compact_threshold_for_model(&model);
         // Compare the context the provider actually processed on the latest
         // response (uncached input + cache reads + cache writes) against the
         // window. The session-wide cumulative input count is the wrong

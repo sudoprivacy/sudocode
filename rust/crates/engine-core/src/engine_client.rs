@@ -300,6 +300,10 @@ impl api::RetryNotifier for RetrySinkNotifier {
 
 #[async_trait]
 impl ApiClient for EngineApiClient {
+    fn wire_model_id(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
     fn set_retry_sink(&mut self, sink: Option<runtime::RetrySink>) {
         self.client.set_retry_notifier(sink.map(|sink| {
             std::sync::Arc::new(RetrySinkNotifier(sink)) as std::sync::Arc<dyn api::RetryNotifier>

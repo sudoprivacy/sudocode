@@ -6624,6 +6624,10 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
 
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    fn wire_model_id(&self) -> Option<&str> {
+        self.chain.first().map(|entry| entry.model.as_str())
+    }
+
     /// The runtime's default cannot see the tool definitions attached to
     /// every request, and this client attaches the subagent's whole allowed
     /// set. Left to the default the budget would be too generous by exactly

@@ -94,12 +94,13 @@ pub struct CliToolExecutor {
     // blocking pool, so the prompter must be protected across threads.
     question_prompter: Mutex<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
-    /// Optional nexus A2A send capability. When set (nexus-A2A configured),
-    /// `send_message` writes to the peer's `/agents/<to>/chat-with-me`
-    /// DT_STREAM over gRPC (the node stamps `from`) via the SAME shared
-    /// `handle_send_message` the co-host uses — only the transport differs.
-    /// Held here like the other per-session capabilities.
-    mailbox_sender: Option<runtime::spawn_task::MailboxSender>,
+    /// This session's mailbox — the one `send` delivers through, whatever the
+    /// recipient. `None` for a session that never built one, which resolves to
+    /// the workspace inbox inside [`runtime::mailbox::sending_mailbox`].
+    ///
+    /// Held here, per dispatcher, rather than in a process global: a daemon
+    /// co-hosts several agents at once and each owns its identity and inbox.
+    mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
 }
 
 impl CliToolExecutor {
@@ -114,16 +115,15 @@ impl CliToolExecutor {
             mcp_state,
             question_prompter: Mutex::new(None),
             abort_signal: None,
-            mailbox_sender: None,
+            mailbox: None,
         }
     }
 
-    /// Enable nexus A2A: `send_message` now routes to the peer's replicated
-    /// DT_STREAM inbox over gRPC (via the shared `handle_send_message`).
-    /// Set at startup only when nexus-A2A is configured; absent it,
-    /// `send_message` is not advertised to the model.
-    pub fn set_mailbox_sender(&mut self, sender: runtime::spawn_task::MailboxSender) {
-        self.mailbox_sender = Some(sender);
+    /// Deliver `send` through `mailbox` — the session's own, with its identity
+    /// and its convention. Set at startup by whatever built the session's
+    /// transport; a session that sets none delivers to the workspace inbox.
+    pub fn set_mailbox(&mut self, mailbox: Arc<runtime::mailbox::Mailbox>) {
+        self.mailbox = Some(mailbox);
     }
 
     pub fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -306,12 +306,18 @@ impl ToolExecutor for CliToolExecutor {
             // cancellation select while a slow search or remote server is active.
             let registry = self.tool_registry.clone();
             let mcp_state = self.mcp_state.clone();
-            let mailbox_sender = self.mailbox_sender.clone();
+            let mailbox = self.mailbox.clone();
             let abort_signal = self.abort_signal.clone();
             let ctx = ctx.clone();
             let workspace = WorkspaceRootHandoff::capture();
             tokio::task::spawn_blocking(move || {
                 let _workspace = workspace.enter();
+                // The session's mailbox rides along by value, so it lands on
+                // whichever blocking thread took this call. A thread-local
+                // captured on the turn's thread would not have: this closure
+                // runs somewhere else, and `send` would quietly resolve to the
+                // workspace inbox while the session was on nexus.
+                let _mailbox = mailbox.map(runtime::mailbox::MailboxScope::enter);
                 if tool_name == "bash" {
                     if let Some(sink) = ctx.progress_sink.clone() {
                         runtime::set_bash_progress_callback(bash_progress_forward(sink));
@@ -323,35 +329,29 @@ impl ToolExecutor for CliToolExecutor {
                     }
                 }
 
-                // nexus A2A: when the host wired a mailbox sender, `send`
-                // delivers to the peer's replicated DT_STREAM inbox over gRPC
-                // via the SAME shared handler the co-host uses — only the
-                // transport differs. Absent that sender it falls through to the
-                // registry, whose `send` writes the workspace mailbox.
+                // `send` has no arm here any more, and that is the fix.
                 //
-                // Falling through is the contract, not a failure path: `send`
-                // is ONE tool, and which destination it reaches is the host's
-                // choice, never the model's. The input is normalized with the
-                // SAME helper the registry arm uses, so the field a model
-                // picked — `message`, or the wire envelope's `body` — cannot
-                // decide the destination either.
-                let result = if tool_name == "send" {
-                    match mailbox_sender.as_ref() {
-                        Some(sender) => runtime::spawn_task::handle_send_message(
-                            sender,
-                            &tools::normalize_send_input(&value),
-                        )
-                        .map_err(ToolError::new),
-                        None => registry
-                            .execute_with_abort_and_context(
-                                &tool_name,
-                                &value,
-                                abort_signal.as_ref(),
-                                Some(&ctx),
-                            )
-                            .map_err(ToolError::new),
-                    }
-                } else if is_mcp_tool {
+                // It used to branch on whether the host had wired an A2A sender
+                // for the PROCESS — one destination when present, another when
+                // absent — and the recipient was never consulted. Two decisions
+                // that had to agree, with nothing making them: a session with
+                // A2A on addressed a local sub-agent at
+                // `/agents/<name>/chat-with-me`, a stream no ephemeral agent
+                // has, while that sub-agent read `.sudocode-inbox/<name>.jsonl`
+                // and heard nothing.
+                //
+                // The branch also picked between two different TOOLS. The A2A
+                // arm was a two-field pipe; the registry's `send` validates the
+                // recipient, broadcasts to `*`, carries a summary and the
+                // structured kinds. Routing a local recipient through the
+                // former silently dropped all of that.
+                //
+                // So `send` now goes where every other tool goes, and
+                // `runtime::mailbox::sending_mailbox()` — the session's mailbox,
+                // scoped onto this thread above — turns the recipient into a path. The
+                // transport is a property of the session, the destination a
+                // property of the name, and neither is a fork in the dispatcher.
+                let result = if is_mcp_tool {
                     execute_runtime_tool_with_state(mcp_state.as_ref(), &tool_name, value)
                 } else {
                     registry

@@ -211,7 +211,7 @@ use api::{
 };
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
-    agent_mailbox::{self, kinds as mailbox_kinds, MailboxEnvelope},
+    agent_mailbox::{kinds as mailbox_kinds, MailboxEnvelope},
     check_freshness,
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
@@ -2565,12 +2565,33 @@ fn write_envelope(
         to: recipient.to_string(),
         body: text.to_string(),
         summary: summary.map(str::to_string),
-        timestamp: 0, // filled in by append_envelope
+        // Stamped by the local JSONL writer, and deliberately left unset over
+        // nexus: a DT_STREAM's raft-assigned offset is the ordering authority
+        // there, and a sender's wall clock would only add skew. See
+        // `MailboxEnvelope::timestamp`.
+        timestamp: 0,
         color: None,
         kind: kind.to_string(),
         request_id: request_id.map(str::to_string),
     };
-    agent_mailbox::append_envelope(workspace, &recipient_sanitized, envelope)
+    // Through the session's mailbox, not straight at the workspace: the
+    // recipient names an agent and the convention turns that into a path, so
+    // the same call reaches a JSONL file or a replicated DT_STREAM depending on
+    // what the session resolved. Every branch of `send` — point-to-point,
+    // broadcast, the structured kinds — funnels here, so this is the one place
+    // that has to know.
+    //
+    // `workspace` is still taken because the LocalJsonl convention is built
+    // from it; it is the caller's notion of where the session lives.
+    let _ = workspace;
+    let mut envelope = envelope;
+    envelope.to = recipient_sanitized.clone();
+    let mailbox = runtime::mailbox::sending_mailbox();
+    // The path the convention resolved, not a reconstruction of it. It reaches
+    // the model as `mailbox_path`, so it has to be where the envelope actually
+    // went — under nexus that is a replicated stream, not a file.
+    let path = PathBuf::from(mailbox.inbox_path(&recipient_sanitized));
+    mailbox.send(envelope).map(|()| path)
 }
 
 fn generate_request_id(prefix: &str, target: &str) -> String {
@@ -2602,7 +2623,12 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
         // Broadcast
         if input.to == "*" {
             let summary = input.summary.as_deref();
-            let mut recipients = agent_mailbox::list_recipients(&workspace)?;
+            // Enumerated through the session's mailbox, so "everyone" means
+            // everyone in the namespace the message would actually go to. A
+            // convention that cannot enumerate says so rather than answering
+            // "nobody" — a broadcast reporting success over zero recipients is
+            // the silent kind of failure.
+            let mut recipients = runtime::mailbox::sending_mailbox().list_recipients()?;
             // Never echo to sender.
             recipients.retain(|r| r != &sender);
             if recipients.is_empty() {

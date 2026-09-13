@@ -2,16 +2,16 @@
 //!
 //! Holds the one daemon connection an interactive `scode` process makes,
 //! lazily dialed from [`runtime::nexus_mailbox::Config::from_env`]. The send
-//! half feeds [`crate::tool_executor::CliToolExecutor`] via the shared
-//! [`MailboxSender`]; the receive half is a background poller that surfaces
-//! peer messages into the REPL as they arrive.
+//! half is the session's [`Mailbox`], handed to
+//! [`crate::tool_executor::CliToolExecutor`] so `send` resolves recipients
+//! through it; the receive half is a background poller that surfaces peer
+//! messages into the REPL as they arrive.
 //!
 //! Transport is the unified [`runtime::mailbox::Mailbox`] backed by
 //! [`NexusVfsFsBackend`] — the same abstraction the local JSONL path uses
 //! (with [`StdFsBackend`]), so standalone A2A and coordinator sub-agents
 //! share every line except the backend construction.
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -19,7 +19,6 @@ use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::NexusVfsFsBackend;
 use runtime::mailbox::{InboxConvention, InboxCursor, Mailbox};
 use runtime::nexus_mailbox::Config;
-use runtime::spawn_task::MailboxSender;
 use runtime::HookAbortSignal;
 
 /// Blocking-tail wait per receive iteration.
@@ -43,9 +42,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// Build a [`MailboxSender`] for the CLI tool executor.
-    pub fn sender(&self) -> MailboxSender {
-        self.mailbox.sender()
+    /// The session's mailbox — handed to the tool dispatcher so everything that
+    /// sends resolves the same namespace.
+    #[must_use]
+    pub fn mailbox(&self) -> Arc<Mailbox> {
+        Arc::clone(&self.mailbox)
     }
 
     /// The peer-awareness system-prompt section.

@@ -1569,6 +1569,9 @@ where
         self.user_request_intent = Some(crate::file_intent::UserRequestIntent::analyze(&label));
 
         self.record_turn_started(&label);
+        // Start a fresh per-turn usage accumulator so the status line bills the
+        // whole turn (all tool-loop requests), not just the last request.
+        self.usage_tracker.begin_turn();
         self.session
             .push_user_blocks(blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;

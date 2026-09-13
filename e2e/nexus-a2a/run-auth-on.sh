@@ -32,6 +32,8 @@ cd "$(dirname "$0")"
 # cargo below is invoked with a POSIX manifest path that needs the conversion
 # the daemon must not get. Inert elsewhere.
 NO_CONV="MSYS_NO_PATHCONV=1"
+# shellcheck source=lib.sh
+. ./lib.sh
 
 PORT="${NEXUS_A2A_AUTHON_PORT:-2161}"
 ENDPOINT="https://127.0.0.1:${PORT}"
@@ -58,8 +60,8 @@ mkdir -p "$DATA_DIR"/{data,id}
 # the hashes do not line up and a minted credential authenticates as nobody.
 # TLS is ON by its absence: NEXUS_NO_TLS is deliberately unset.
 daemon_env=(
-  "NEXUS_DATA_DIR=$DATA_DIR/data"
-  "NEXUS_IDENTITY_DIR=$DATA_DIR/id"
+  "NEXUS_DATA_DIR=$(native_path "$DATA_DIR/data")"
+  "NEXUS_IDENTITY_DIR=$(native_path "$DATA_DIR/id")"
   "NEXUS_API_KEY_SECRET=${NEXUS_API_KEY_SECRET:-scode-e2e-secret}"
   "NEXUS_ADVERTISE_ADDR=127.0.0.1:${PORT}"
   "NEXUS_CLUSTER_INIT=$ZONE"
@@ -104,12 +106,13 @@ BUNDLE="$(env $NO_CONV "${daemon_env[@]}" RUST_LOG=error \
   "$NEXUSD_BIN" auth mint --subject-type agent --subject-id "$AGENT" \
   --name e2e --allow-existing 2>/dev/null | tail -1 | tr -d '\r')"
 [ -n "$BUNDLE" ] || { echo "!! mint printed no bundle path" >&2; exit 1; }
+# The daemon prints a path in its own form; `shell_path` is the one place
+# that knows how to read one. The tests below get the daemon-form value,
+# because they hand it back to a Rust `File::open` rather than to this shell.
+BUNDLE_LOCAL="$(shell_path "$BUNDLE")"
 echo "   $BUNDLE"
 for f in agent.pem agent-key.pem ca.pem; do
-  # `ls` rather than `test -f`: the mint prints a Windows path, which a POSIX
-  # test would miss while `ls` resolves it either way.
-  ls "$BUNDLE/$f" >/dev/null 2>&1 || ls "$(cygpath -u "$BUNDLE" 2>/dev/null)/$f" >/dev/null 2>&1 \
-    || { echo "!! the bundle has no $f" >&2; exit 1; }
+  [ -f "$BUNDLE_LOCAL/$f" ] || { echo "!! the bundle has no $f" >&2; exit 1; }
 done
 
 echo "== 4. restart TLS-on =="

@@ -1632,15 +1632,6 @@ where
                 return Err(error);
             }
 
-            // Nothing rewrites history here. A microcompact pass used to run
-            // on this line, content-clearing older tool results before every
-            // request; see the commit that removed it for the measurements.
-            // The short version: editing an earlier message invalidates the
-            // provider's cached prefix from that point on, so eliding a few KB
-            // of stale output cost a full re-cache of the entire conversation.
-            // Context pressure is handled below, by compaction, which rebuilds
-            // the prefix anyway and so can clear for free.
-
             // Compact before dispatching, not after the provider rejects.
             // A turn that takes many tool-call steps grows its own history
             // while it runs; the per-turn preflight ran once, before any of

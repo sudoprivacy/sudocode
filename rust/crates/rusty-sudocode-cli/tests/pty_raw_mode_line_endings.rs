@@ -85,7 +85,7 @@ fn screen_rows(sess: &pty_expect::PtySession) -> Vec<String> {
 ///
 /// Anchors are chosen to be absent from the echoed prompt: the prompt
 /// contains `printf 'alpha from bash'`, so `alpha from bash` would match the
-/// echo — `─╮`, `└ `, and `ctx ` cannot.
+/// echo — `╭─`, `│`, and `ctx ` cannot.
 #[test]
 fn bash_turn_uses_crlf_and_does_not_staircase() {
     let env = TestEnv::new("raw-lf-bash");
@@ -99,12 +99,16 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
 
     // Raw-stream assertions double as sync points: with a bare LF (the bug)
     // `[^\n]*` cannot reach a `\r\n` and the expect times out.
-    sess.expect("─╮[^\n]*\r\n")
-        .expect("tool-call box top line should end with CRLF, not a bare LF");
-    // The tool result line uses ⏺ (bold dot) as the icon. Match either
-    // the legacy `└ ` or the current `⏺` format — both must end CRLF.
-    sess.expect("(?:└ |⏺)[^\n]*\r\n")
-        .expect("tool-result line should end with CRLF, not a bare LF");
+    //
+    // Both the command header and the result render as the same L-frame card:
+    // a header line opening with `╭─` and body lines with `│`, each written
+    // through `split_for_iocraft` so every line must be CRLF-terminated. The
+    // frame glyph is followed by an ANSI reset before the space, so the anchors
+    // intentionally do not require a literal following space.
+    sess.expect("╭─[^\n]*\r\n")
+        .expect("tool card header line should end with CRLF, not a bare LF");
+    sess.expect("│[^\n]*\r\n")
+        .expect("tool card body line should end with CRLF, not a bare LF");
     // The status line is rendered in the StatusSlot::TurnResult ChromeSlot,
     // above the upper separator. (It is no longer echoed to scrollback — that
     // duplicated the line in history.) The ChromeSlot line is the sync point.
@@ -113,12 +117,10 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
         .expect("separator redrawn after the status line");
 
     let mut box_indents = indents_of_rows_containing(&sess, "╭─ ");
-    box_indents.extend(indents_of_rows_containing(&sess, "$ printf"));
-    box_indents.extend(indents_of_rows_containing(&sess, "└ "));
-    box_indents.extend(indents_of_rows_containing(&sess, "⏺"));
+    box_indents.extend(indents_of_rows_containing(&sess, "│ "));
     assert!(
         !box_indents.is_empty(),
-        "expected the tool-call box and tool-result rows on screen"
+        "expected the tool card rows on screen"
     );
     for indent in &box_indents {
         assert!(

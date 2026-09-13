@@ -837,7 +837,10 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
     use std::fmt::Write as _;
     let t = theme();
     let frame = match status {
-        ToolStatus::Running => ansi_bold_fg(t.warning),
+        // Running uses the brand amber (primary), NOT warning/teal: teal read
+        // too close to the success green, so an in-flight card looked already
+        // done. Amber vs green vs red now reads at a glance.
+        ToolStatus::Running => ansi_bold_fg(t.primary),
         ToolStatus::Ok => ansi_bold_fg(t.success),
         ToolStatus::Error => ansi_bold_fg(t.error),
     };
@@ -2166,6 +2169,19 @@ mod tests {
                 "wrapped body row must start with the frame bar: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn render_tool_card_running_color_differs_from_ok() {
+        // Bug 3: running used warning/teal, too close to success green. It now
+        // uses the brand amber (primary) so the three states read distinctly.
+        let content = ToolCardContent::header_only("Bash".to_string());
+        let running = render_tool_card(&content, ToolStatus::Running);
+        let ok = render_tool_card(&content, ToolStatus::Ok);
+        assert_ne!(
+            running, ok,
+            "running and ok cards must differ (distinct frame color)"
+        );
     }
 
     #[test]

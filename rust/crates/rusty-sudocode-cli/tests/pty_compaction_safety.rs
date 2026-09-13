@@ -109,40 +109,15 @@ fn serve(
         return;
     }
     if streaming && mode == "success" {
-        let events = [
-            (
-                "message_start",
-                json!({"type":"message_start","message":{"id":"reply","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":1000,"output_tokens":0}}}),
-            ),
-            (
-                "content_block_start",
-                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-            ),
-            (
-                "content_block_delta",
-                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ALPHA_CONTEXT_OK"}}),
-            ),
-            (
-                "content_block_stop",
-                json!({"type":"content_block_stop","index":0}),
-            ),
-            (
-                "message_delta",
-                json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}),
-            ),
-            ("message_stop", json!({"type":"message_stop"})),
-        ];
-        let mut body = String::new();
-        for (event, data) in &events {
-            write!(&mut body, "event: {event}\ndata: {data}\n\n").unwrap();
-        }
-        let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        serve_success_stream(&mut socket);
         return;
     }
     let (status, response) = if counting {
         ("200 OK", json!({"input_tokens": 1000}))
     } else if !is_post {
         ("200 OK", json!({"data": []}))
+    } else if mode.starts_with("openai-") {
+        openai_completion_response(&first, mode, number)
     } else if mode.starts_with("internal")
         && (request["model"]
             != if mode == "internal-prefixed" {
@@ -184,6 +159,59 @@ fn serve(
     let body = response.to_string();
     let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     let _ = socket.write_all(response.as_bytes());
+}
+
+fn serve_success_stream(socket: &mut TcpStream) {
+    let events = [
+        (
+            "message_start",
+            json!({"type":"message_start","message":{"id":"reply","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":1000,"output_tokens":0}}}),
+        ),
+        (
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ALPHA_CONTEXT_OK"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        ),
+        (
+            "message_delta",
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}),
+        ),
+        ("message_stop", json!({"type":"message_stop"})),
+    ];
+    let mut body = String::new();
+    for (event, data) in &events {
+        write!(&mut body, "event: {event}\ndata: {data}\n\n").unwrap();
+    }
+    let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+}
+
+fn openai_completion_response(first: &str, mode: &str, number: usize) -> (&'static str, Value) {
+    assert!(first.contains("/chat/completions"), "{first}");
+    if mode == "openai-fallback" && number == 1 {
+        (
+            "400 Bad Request",
+            json!({"error":{"message":"cached checkpoint rejected","type":"invalid_request_error"}}),
+        )
+    } else {
+        let mut message = json!({"role":"assistant","content":"<summary>Preserve PROJECT_ALPHA and pending deployment. Next: verify tests.</summary>"});
+        if mode == "openai-empty" {
+            message["content"] = json!("");
+        }
+        if mode == "openai-tool" {
+            message["tool_calls"] = json!([{"id":"unexpected-tool","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"touch SHOULD_NOT_EXIST\"}"}}]);
+        }
+        (
+            "200 OK",
+            json!({"id":"checkpoint","object":"chat.completion","created":0,"model":"provider-response-label","choices":[{"index":0,"message":message,"finish_reason":match mode { "openai-truncated" => "length", "openai-tool" => "tool_calls", _ => "stop" }}],"usage":{"prompt_tokens":1000,"completion_tokens":50,"total_tokens":1050}}),
+        )
+    }
 }
 
 fn fixture(workspace: &HarnessWorkspace) -> PathBuf {
@@ -396,6 +424,26 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
             }
         }
     }
+    // Pruning happens on a staged clone before the failing model call. The
+    // remaining text is still over budget, so failure must restore this output too.
+    original
+        .push_message(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "staged-read".into(),
+                name: "Read".into(),
+                input: "{}".into(),
+                thought_signature: None,
+            },
+        ]))
+        .unwrap();
+    original
+        .push_message(ConversationMessage::tool_result(
+            "staged-read",
+            "Read",
+            "preserve the original tool output ".repeat(2000),
+            false,
+        ))
+        .unwrap();
     original.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
     cli.expect("❯").unwrap();
@@ -719,5 +767,71 @@ fn internal_model_alias_and_resumed_model_use_active_wire_identity() {
         assert_eq!(requests[0]["model"], wire_model);
         assert_eq!(requests[0]["max_tokens"], 1024);
         assert!(Session::load_from_path(&path).unwrap().compaction.is_some());
+    }
+}
+
+#[test]
+fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
+    for mode in [
+        "openai-success",
+        "openai-fallback",
+        "openai-empty",
+        "openai-truncated",
+        "openai-tool",
+    ] {
+        let provider = Provider::new(mode);
+        let workspace = HarnessWorkspace::new(mode);
+        workspace.write_mock_config(&provider.url);
+        let config_path = workspace.config_home.join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let model = &mut config["models"]["claude-sonnet"];
+        model["contextWindow"] = json!(50_000);
+        model["maxOutputTokens"] = json!(1024);
+        model["providers"]["api-key"]["model"] = json!("intranet/apeiron-openai");
+        model["providers"]["api-key"]["api"] = json!("openai-completions");
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let path = fixture(&workspace);
+        let original = std::fs::read(&path).unwrap();
+        let succeeds = matches!(mode, "openai-success" | "openai-fallback");
+        let exit = compact_with_model(
+            &workspace,
+            &path,
+            "claude-sonnet",
+            if succeeds {
+                "Messages removed"
+            } else {
+                "history preserved"
+            },
+        );
+        assert_eq!(exit == 0, succeeds, "{mode}");
+        if succeeds {
+            let restored = Session::load_from_path(&path).unwrap();
+            assert!(restored
+                .compaction
+                .unwrap()
+                .summary
+                .contains("PROJECT_ALPHA"));
+            assert!(restored.messages.len() < 32);
+        } else {
+            assert_eq!(std::fs::read(&path).unwrap(), original, "{mode}");
+        }
+        assert!(!workspace.root.join("SHOULD_NOT_EXIST").exists());
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            if mode == "openai-success" { 1 } else { 2 },
+            "{mode}"
+        );
+        for request in requests.iter() {
+            assert_eq!(request["model"], "intranet/apeiron-openai");
+            assert_eq!(request["max_tokens"], 1024);
+            assert_ne!(request["stream"], true);
+            assert!(request["messages"].to_string().contains("PROJECT_ALPHA"));
+        }
+        if mode == "openai-fallback" {
+            assert!(requests[0]["tools"].is_array());
+            assert!(requests[1]["tools"].is_null());
+        }
     }
 }

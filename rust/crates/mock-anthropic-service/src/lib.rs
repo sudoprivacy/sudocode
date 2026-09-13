@@ -546,7 +546,7 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     if is_standard_compaction {
         return false;
     }
-    request.messages.last().map_or(false, |msg| {
+    request.messages.last().is_some_and(|msg| {
         msg.content.iter().any(|block| match block {
             InputContentBlock::Text { text } => {
                 text.contains("Create a concise checkpoint for continuing this coding task")

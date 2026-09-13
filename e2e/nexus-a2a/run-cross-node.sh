@@ -142,9 +142,9 @@ NEXUS_A2A_TEST_ENDPOINT="$JOINER" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER" \
 
 # The same workflow `run.sh` runs on one node, with the sender moved to the
 # other. `send` writes through the founder; every assertion reads the joiner.
-echo "== [cross-node] the send tool, from one node, read on the other =="
+echo "== [cross-node] two scode processes, one per node =="
 NEXUS_A2A_TEST_ENDPOINT="$JOINER" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test pty_a2a_send_over_nexus -- --nocapture
+  --test pty_agent_duet -- --nocapture
 
 echo "CROSS-NODE E2E OK"

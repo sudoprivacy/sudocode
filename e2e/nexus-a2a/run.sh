@@ -98,16 +98,18 @@ fi
 echo "== [deterministic] standalone A2A client round-trip =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored --nocapture
 
-# The seam the round-trip above leaves out: the `send` TOOL, in the real binary,
-# over this daemon. That one drives `Mailbox` directly, so it proves the
-# transport while saying nothing about whether the tool reaches it — and a tool
-# that silently wrote a local file while reporting success is the failure this
-# whole path exists because of. Mock model, so no key is needed; set
+# The seam the round-trip above leaves out. That one drives `Mailbox` directly,
+# so it proves the transport while saying nothing about whether the tool reaches
+# it, nor whether a receiver surfaces what arrives — and a `send` that wrote a
+# local file while reporting success is the failure this whole path exists
+# because of. This runs two real binaries: one calls the tool, the other's REPL
+# is parked on its inbox. It also covers the workspace-file transport, which
+# needs no daemon at all. Mock model, so no key is needed; set
 # SCODE_TEST_BACKEND=live to have a real model choose the call instead.
-echo "== [deterministic] the send tool over the real daemon, in the real binary =="
+echo "== [deterministic] two scode processes, one daemon =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
-  --test pty_a2a_send_over_nexus -- --nocapture
+  --test pty_agent_duet -- --nocapture
 
 # ---- Optional: real 2-LLM co-host duet (gated) --------------------------------
 if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then

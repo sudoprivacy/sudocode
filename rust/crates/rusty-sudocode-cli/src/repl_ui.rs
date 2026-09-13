@@ -596,17 +596,20 @@ fn format_paste_placeholder(id: u32, text: &str) -> String {
     }
 }
 
-/// Replace all `[Pasted text #N ...]` placeholders in `input` with the real
-/// text from `store`, producing the final string to send to the LLM.
-/// The store is consumed after each submit — it is ephemeral by design.
+/// Core expansion engine shared by plain and display variants.
 ///
 /// Scans left to right and copies each placeholder's replacement into a fresh
 /// output buffer. Inserted text is never re-scanned, so a stored paste whose
 /// own text happens to contain a `[Pasted text #N]` string can never cause an
 /// infinite loop (it is emitted verbatim, not re-expanded).
-fn expand_paste_placeholders(
+///
+/// When `wrap` is `Some((before, after))`, each pasted region is wrapped with
+/// the given ANSI sequences for visual distinction in terminal output.
+#[inline]
+fn expand_paste_inner(
     input: &str,
     store: &std::collections::HashMap<u32, String>,
+    wrap: Option<(&str, &str)>,
 ) -> String {
     if store.is_empty() || !input.contains("[Pasted text #") {
         return input.to_string();
@@ -615,11 +618,9 @@ fn expand_paste_placeholders(
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(rel_start) = rest.find(placeholder_prefix) {
-        // Copy everything before the candidate placeholder unchanged.
         result.push_str(&rest[..rel_start]);
         let after_prefix = &rest[rel_start + placeholder_prefix.len()..];
 
-        // Parse the numeric id, then the optional " +N lines" and closing "]".
         let id_end = after_prefix.find(|c: char| !c.is_ascii_digit());
         let matched = id_end.and_then(|id_end| {
             if id_end == 0 {
@@ -629,19 +630,21 @@ fn expand_paste_placeholders(
             let tail = &after_prefix[id_end..];
             let close = tail.find(']')?;
             let real_text = store.get(&id)?;
-            // Byte length consumed from `after_prefix` including the ']'.
             Some((id_end + close + 1, real_text))
         });
 
         match matched {
             Some((consumed_after_prefix, real_text)) => {
-                // Emit the real text verbatim; do NOT rescan it.
-                result.push_str(real_text);
+                if let Some((before, after)) = wrap {
+                    result.push_str(before);
+                    result.push_str(real_text);
+                    result.push_str(after);
+                } else {
+                    result.push_str(real_text);
+                }
                 rest = &after_prefix[consumed_after_prefix..];
             }
             None => {
-                // Not a valid/known placeholder: emit the literal prefix and
-                // continue scanning after it so we make forward progress.
                 result.push_str(placeholder_prefix);
                 rest = after_prefix;
             }
@@ -649,6 +652,24 @@ fn expand_paste_placeholders(
     }
     result.push_str(rest);
     result
+}
+
+/// Replace all `[Pasted text #N ...]` placeholders with the real text (plain).
+fn expand_paste_placeholders(
+    input: &str,
+    store: &std::collections::HashMap<u32, String>,
+) -> String {
+    expand_paste_inner(input, store, None)
+}
+
+/// Replace placeholders with the real text, wrapping each pasted region in DIM
+/// so it's visually distinguishable from typed text in scrollback.
+fn expand_paste_for_display(input: &str, store: &std::collections::HashMap<u32, String>) -> String {
+    expand_paste_inner(
+        input,
+        store,
+        Some((crate::render::DIM, crate::render::RESET)),
+    )
 }
 
 fn enter_key_event_for_value(
@@ -1377,10 +1398,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             let _ = input_tx_for_events.send(InputEvent::Exit);
                                         }
                                         InputEvent::Submit(text) => {
-                                            // Expand any [Pasted text #N] placeholders back to
-                                            // the real pasted content before sending to the LLM.
                                             let store_snap = paste_store.read().clone();
                                             let expanded = expand_paste_placeholders(&text, &store_snap);
+                                            let display = expand_paste_for_display(&text, &store_snap);
                                             paste_store.write().clear();
                                             next_paste_id.set(1);
                                             let trimmed = expanded.trim();
@@ -1390,7 +1410,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                     h.push(trimmed.to_string());
                                                 }
                                             }
-                                            stdout_for_events.println(format!("{}\u{276f} {val}{}", crate::render::BOLD, crate::render::RESET));
+                                            stdout_for_events.println(format!("{}\u{276f} {display}{}", crate::render::BOLD, crate::render::RESET));
                                             let _ = input_tx_for_events.send(InputEvent::Submit(expanded));
                                         }
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
@@ -2081,5 +2101,28 @@ mod tests {
         store.insert(3u32, "hello".to_string());
         let input = "[Pasted text #3]";
         assert_eq!(expand_paste_placeholders(input, &store), "hello");
+    }
+
+    #[test]
+    fn expand_paste_for_display_wraps_pasted_regions_in_dim() {
+        let mut store = std::collections::HashMap::new();
+        store.insert(1u32, "pasted stuff".to_string());
+        let input = "typed [Pasted text #1] more";
+        let display = expand_paste_for_display(input, &store);
+        assert_eq!(
+            display,
+            format!(
+                "typed {}pasted stuff{} more",
+                crate::render::DIM,
+                crate::render::RESET
+            ),
+        );
+    }
+
+    #[test]
+    fn expand_paste_for_display_noop_without_placeholders() {
+        let store = std::collections::HashMap::new();
+        let input = "plain text";
+        assert_eq!(expand_paste_for_display(input, &store), input);
     }
 }

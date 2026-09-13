@@ -33,14 +33,18 @@ use tools::GlobalToolRegistry;
 /// Every append this backend was asked to make, as `(path, bytes)`.
 type Appends = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// A backend that records appends and refuses everything else.
+/// Every inbox this backend was asked to create.
+type Provisions = Arc<Mutex<Vec<String>>>;
+
+/// A backend that records what a send does and refuses everything else.
 ///
-/// Only `append` and `is_append_stream` are reachable from a send. The rest
-/// panic rather than return plausible defaults: a send that starts reading or
-/// renaming is doing something these tests do not describe, and a silent default
-/// would hide it.
+/// `append`, `is_append_stream` and `create_append_log` are what a send
+/// reaches. The rest panic rather than return plausible defaults: a send that
+/// starts reading or renaming is doing something these tests do not describe,
+/// and a silent default would hide it.
 struct RecordingBackend {
     appends: Appends,
+    provisions: Provisions,
 }
 
 impl FsBackend for RecordingBackend {
@@ -49,6 +53,20 @@ impl FsBackend for RecordingBackend {
             .lock()
             .expect("appends poisoned")
             .push((path.to_string(), data.to_vec()));
+        Ok(())
+    }
+
+    /// A send creates the recipient's inbox before writing to it.
+    ///
+    /// Overridden rather than left to the trait's default, which probes
+    /// `exists` and falls back to `write` — the file-backend shape, and not
+    /// what a stream backend does. Recording it is also the point: the path a
+    /// send provisions has to be the path it then appends to.
+    fn create_append_log(&self, path: &str, _retention: u64) -> io::Result<()> {
+        self.provisions
+            .lock()
+            .expect("provisions poisoned")
+            .push(path.to_string());
         Ok(())
     }
 
@@ -99,17 +117,19 @@ fn executor() -> CliToolExecutor {
 /// Given to the dispatcher exactly as the host gives it the A2A session's
 /// mailbox, so the test exercises the real handover. Per-executor rather than
 /// per-process, so each test gets its own and they need not run in any order.
-fn nexus_executor() -> (CliToolExecutor, Appends) {
+fn nexus_executor() -> (CliToolExecutor, Appends, Provisions) {
     let appends: Appends = Arc::new(Mutex::new(Vec::new()));
+    let provisions: Provisions = Arc::new(Mutex::new(Vec::new()));
     let mut executor = executor();
     executor.set_mailbox(Arc::new(Mailbox::new(
         Arc::new(RecordingBackend {
             appends: Arc::clone(&appends),
+            provisions: Arc::clone(&provisions),
         }),
         "win-ai".to_string(),
         InboxConvention::NexusA2a,
     )));
-    (executor, appends)
+    (executor, appends, provisions)
 }
 
 /// Run one tool call to completion on a throwaway runtime.
@@ -161,7 +181,7 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
             r#"{"to":"mac-ai","body":"body field, new name","summary":"s"}"#,
         ),
     ] {
-        let (executor, appends) = nexus_executor();
+        let (executor, appends, provisions) = nexus_executor();
         let result =
             call(&executor, tool, input).unwrap_or_else(|e| panic!("`{tool}` must not fail: {e}"));
 
@@ -174,6 +194,17 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
         assert_eq!(
             wrote[0].0, "/agents/mac-ai/chat-with-me",
             "`{tool}` addressed the wrong path"
+        );
+
+        // The inbox is created before it is written to, at the same path. A
+        // recipient that has never run has no stream, and an append to a path
+        // that is not one does not fail — it leaves a plain entry there, tells
+        // the sender it was delivered, and the inbox can never become a stream
+        // again.
+        assert_eq!(
+            provisions.lock().expect("provisions poisoned").as_slice(),
+            [wrote[0].0.clone()],
+            "`{tool}` must create exactly the inbox it wrote to"
         );
 
         // `mailbox_path` is what a human reads to decide whether a message left
@@ -203,7 +234,7 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
 /// stream cannot be taken back.
 #[test]
 fn a_plain_text_send_without_a_summary_is_refused_and_writes_nothing() {
-    let (executor, appends) = nexus_executor();
+    let (executor, appends, _provisions) = nexus_executor();
     let error = call(
         &executor,
         "send",
@@ -230,7 +261,7 @@ fn a_plain_text_send_without_a_summary_is_refused_and_writes_nothing() {
 /// is DERIVED from the name rather than branched on.
 #[test]
 fn a_local_looking_recipient_resolves_through_the_same_convention() {
-    let (executor, appends) = nexus_executor();
+    let (executor, appends, _provisions) = nexus_executor();
     call(
         &executor,
         "send",
@@ -253,7 +284,7 @@ fn a_local_looking_recipient_resolves_through_the_same_convention() {
 /// the local one carried. One send means one envelope shape.
 #[test]
 fn the_envelope_carries_its_summary_over_nexus() {
-    let (executor, appends) = nexus_executor();
+    let (executor, appends, _provisions) = nexus_executor();
     call(
         &executor,
         "send",

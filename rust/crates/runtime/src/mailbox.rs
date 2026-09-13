@@ -370,14 +370,26 @@ impl Mailbox {
     /// and a `SharedStream` has no per-recipient path to enumerate at all — one
     /// stream, every name resolving to it.
     ///
-    /// Empty is therefore "this convention does not enumerate", not "no
-    /// recipients". A caller that needs agent discovery wants the registry.
+    /// # Errors
+    ///
+    /// An `Err` for a convention that cannot enumerate, rather than an empty
+    /// list. The difference matters to the one caller that needs this: a
+    /// broadcast over "no recipients" reports success having delivered nothing,
+    /// which is the silent kind of failure. Saying so at the source means no
+    /// caller has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         match &self.convention {
             InboxConvention::LocalJsonl { root } => {
                 crate::agent_mailbox::list_recipients(std::path::Path::new(root))
             }
-            InboxConvention::NexusA2a | InboxConvention::SharedStream { .. } => Ok(vec![]),
+            InboxConvention::NexusA2a => Err(
+                "this session's mailbox is the replicated /agents namespace, which is                  enumerated through the agent registry rather than by listing paths"
+                    .to_string(),
+            ),
+            InboxConvention::SharedStream { .. } => Err(
+                "a shared stream has no per-recipient inbox to enumerate — every name                  resolves to the one path"
+                    .to_string(),
+            ),
         }
     }
 
@@ -400,13 +412,6 @@ impl Mailbox {
             mb.send(env)
         })
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 const LOCAL_POLL_BLOCK_MS: u64 = 1000;
@@ -606,6 +611,90 @@ pub fn spawn_local_poller(
         abort,
         sink,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Which mailbox a send writes through
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static SCOPED_MAILBOX: std::cell::RefCell<Option<Arc<Mailbox>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The session's mailbox, established for the duration of one tool call.
+///
+/// Before this existed, `send`'s destination came from whether an A2A sender had
+/// been wired for the PROCESS, and the recipient was never consulted. Two
+/// decisions that had to agree, with nothing making them: a session with A2A on
+/// addressed a local sub-agent at `/agents/<name>/chat-with-me`, a stream no
+/// ephemeral agent has, while that sub-agent read `.sudocode-inbox/<name>.jsonl`
+/// and heard nothing.
+///
+/// Now there is one mailbox, `send` names a recipient, the convention turns that
+/// into a path, and the backend decides what crossing it means.
+///
+/// The mailbox is OWNED by the tool dispatcher — one per session, handed over at
+/// startup — and this scope only carries it the last hop, onto whichever thread
+/// the dispatcher runs the synchronous tool body on. Deliberately not a process
+/// global: a daemon hosts several co-hosted agents at once, each with its own
+/// identity and inbox, and one global would have them writing as each other. The
+/// same reasoning (and the same shape) as
+/// [`crate::workspace_root::WorkspaceRootScope`], which crosses that last hop
+/// beside this one.
+///
+/// Also what makes this testable: a handle set once per process cannot be
+/// changed, so two tests in one binary needing different conventions would be in
+/// each other's way. A test gives its executor a mailbox like the host does.
+pub struct MailboxScope {
+    previous: Option<Arc<Mailbox>>,
+}
+
+impl MailboxScope {
+    /// Enter `mailbox` as this thread's mailbox until the guard drops.
+    #[must_use]
+    pub fn enter(mailbox: Arc<Mailbox>) -> Self {
+        let previous = SCOPED_MAILBOX.with(|cell| cell.borrow_mut().replace(mailbox));
+        Self { previous }
+    }
+}
+
+impl Drop for MailboxScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SCOPED_MAILBOX.with(|cell| {
+            *cell.borrow_mut() = previous;
+        });
+    }
+}
+
+/// The mailbox to send through: the one this thread is scoped onto, else
+/// workspace-local JSONL.
+///
+/// Two levels, and the second is the contract rather than a fallback: a session
+/// that has a mailbox hands it to its dispatcher, which scopes the thread running
+/// the tool; a plain `scode` with no nexus configured has always delivered to
+/// `.sudocode-inbox/` in the workspace, and still does — through this same call,
+/// resolved one level down. Being one code path is what stops the two drifting.
+///
+/// `self_id` is empty on the ambient fallback deliberately. It serves two
+/// purposes on a `Mailbox` — filling an envelope's `from`, and filtering your own
+/// writes out of a poll — and neither applies: `send` always supplies `from`, and
+/// this handle is never polled. A receiver builds its own with its real identity.
+#[must_use]
+pub fn sending_mailbox() -> Arc<Mailbox> {
+    if let Some(mailbox) = SCOPED_MAILBOX.with(|cell| cell.borrow().clone()) {
+        return mailbox;
+    }
+    Arc::new(Mailbox::new(
+        Arc::new(crate::fs_backend::StdFsBackend),
+        String::new(),
+        InboxConvention::LocalJsonl {
+            root: crate::current_workspace_root_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        },
+    ))
 }
 
 #[cfg(test)]

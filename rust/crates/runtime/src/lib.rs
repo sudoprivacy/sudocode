@@ -195,8 +195,9 @@ pub use policy_engine::{
 };
 pub use prompt::{
     load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with,
-    load_system_prompt_with_memory, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
-    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt_with_memory, prepend_bullets, section_order, ContextFile, ProjectContext,
+    PromptBuildError, SystemPrompt, SystemPromptBuilder, SystemPromptOverrides,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,
@@ -209,10 +210,11 @@ pub use remote::{
     UPSTREAM_PROXY_ENV_KEYS,
 };
 pub use sandbox::{
-    build_linux_sandbox_command, detect_container_environment, detect_container_environment_from,
-    resolve_sandbox_status, resolve_sandbox_status_for_request, ContainerEnvironment,
-    FilesystemIsolationMode, LinuxSandboxCommand, SandboxConfig, SandboxDetectionInputs,
-    SandboxRequest, SandboxStatus,
+    build_linux_sandbox_command, build_macos_sandbox_command, build_sandbox_command,
+    detect_container_environment, detect_container_environment_from, resolve_sandbox_status,
+    resolve_sandbox_status_for_request, seatbelt_profile, ContainerEnvironment,
+    FilesystemIsolationMode, LinuxSandboxCommand, SandboxBackend, SandboxCommand, SandboxConfig,
+    SandboxDetectionInputs, SandboxRequest, SandboxStatus,
 };
 pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,

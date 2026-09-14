@@ -11,7 +11,7 @@ use tokio::runtime::Builder;
 use crate::hooks::HookAbortSignal;
 use crate::lane_events::{LaneEvent, ShipMergeMethod, ShipProvenance};
 use crate::sandbox::{
-    build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
+    build_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
 };
 use crate::workspace_root::current_workspace_root;
@@ -616,7 +616,7 @@ fn prepare_command(
         prepare_sandbox_dirs(cwd);
     }
 
-    if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
+    if let Some(launcher) = build_sandbox_command(command, cwd, sandbox_status) {
         let mut prepared = Command::new(launcher.program);
         prepared.args(launcher.args);
         prepared.current_dir(cwd);
@@ -643,21 +643,20 @@ fn prepare_tokio_command(
         prepare_sandbox_dirs(cwd);
     }
 
-    let mut prepared =
-        if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-            let mut cmd = TokioCommand::new(launcher.program);
-            cmd.args(launcher.args);
-            cmd.envs(launcher.env);
-            cmd
-        } else {
-            let mut cmd = TokioCommand::new("sh");
-            cmd.arg("-lc").arg(command);
-            if sandbox_status.filesystem_active {
-                cmd.env("HOME", cwd.join(".sandbox-home"));
-                cmd.env("TMPDIR", cwd.join(".sandbox-tmp"));
-            }
-            cmd
-        };
+    let mut prepared = if let Some(launcher) = build_sandbox_command(command, cwd, sandbox_status) {
+        let mut cmd = TokioCommand::new(launcher.program);
+        cmd.args(launcher.args);
+        cmd.envs(launcher.env);
+        cmd
+    } else {
+        let mut cmd = TokioCommand::new("sh");
+        cmd.arg("-lc").arg(command);
+        if sandbox_status.filesystem_active {
+            cmd.env("HOME", cwd.join(".sandbox-home"));
+            cmd.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        }
+        cmd
+    };
 
     prepared.current_dir(cwd);
     prepared.stdin(Stdio::null());

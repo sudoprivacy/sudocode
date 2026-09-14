@@ -58,6 +58,9 @@ pub enum AcpError {
     Internal(String),
 }
 
+/// What a client shows when context maintenance ends the run.
+const COMPACTION_FAILED_MESSAGE: &str = "上下文压缩失败，本次对话已停止。已有对话历史已保留。";
+
 impl AcpError {
     #[must_use]
     pub fn invalid_params(message: impl Into<String>) -> Self {
@@ -75,6 +78,10 @@ impl AcpError {
         let raw_message = match self {
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
         };
+
+        if raw_message.contains(runtime::COMPACTION_FAILED) {
+            return COMPACTION_FAILED_MESSAGE.to_string();
+        }
 
         if raw_message.contains("[context_window_exceeded]") {
             return raw_message.clone();
@@ -1426,11 +1433,13 @@ pub(crate) async fn run_acp_on_transport(
                                 .unwrap_or_else(|| std::path::PathBuf::from("."));
 
                             if is_slash_command {
+                                let mut observer = ObserverAdapter::new(evt_tx.clone());
                                 let (text, stop) = session_ops::handle_slash_command(
                                     &engine_blocking,
                                     &config_blocking,
                                     &turn_cwd,
                                     &prompt_blocking,
+                                    &mut observer,
                                 )?;
                                 let _ = evt_tx.send(EngineEvent::TextDelta { text });
                                 return Ok::<_, AcpError>((stop, None));
@@ -1922,7 +1931,20 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
         }
         AcpError::Internal(msg) => {
-            Error::internal_error().data(serde_json::Value::String(msg.clone()))
+            let mut error = Error::internal_error().data(serde_json::Value::String(msg.clone()));
+            if msg.contains(runtime::COMPACTION_FAILED) {
+                // Clients use the JSON-RPC `message` for the terminal run
+                // banner. Only compaction overrides it because only compaction
+                // ends the run on something the USER is expected to act on;
+                // every other Internal error keeps JSON-RPC's generic message
+                // and carries its detail in `data`, which clients render as a
+                // diagnostic. Blanket-applying `user_friendly_message()` here
+                // is not the alternative: its catch-all truncates the raw
+                // message to 100 chars, which would lose detail for every
+                // unclassified failure.
+                error.message = COMPACTION_FAILED_MESSAGE.to_string();
+            }
+            error
         }
     }
 }

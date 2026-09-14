@@ -20,7 +20,7 @@ const NO_TOOLS_PREAMBLE: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call a
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.\n\
 - Your entire response must be plain text: a <summary> block.\n\n";
 
-const BASE_COMPACT_PROMPT: &str = "Create a concise checkpoint for continuing this coding task. Output only a <summary> block with these sections, using short bullets and (none) for empty sections:
+const BASE_COMPACT_PROMPT: &str = "Create a concise checkpoint for continuing this coding task. Aim to keep the entire summary within 8,000 tokens while preserving the information needed to continue the task. Output only a <summary> block with these sections, using short bullets and (none) for empty sections:
 
 1. Primary Request and Intent
 2. Key Technical Concepts
@@ -41,9 +41,9 @@ Tool calls will be rejected and you will fail the task.";
 const COMPACTION_SYSTEM_PROMPT: &str =
     "You are a helpful AI assistant tasked with summarizing conversations.";
 
-/// Maximum output tokens requested from the LLM for a compaction summary.
-/// Keep rolling checkpoints bounded; providers may have a smaller ceiling.
-pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 8_192;
+/// Fixed compaction output ceiling, with room to finish an 8,000-token target
+/// summary. Providers may impose a smaller output limit.
+pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 12_000;
 
 /// Base buffer subtracted from context window when computing the auto-compact
 /// threshold. Scaled by [`autocompact_buffer_tokens`] for large context
@@ -138,6 +138,12 @@ impl ContextBudget {
 // Error type
 // ---------------------------------------------------------------------------
 
+/// The marker every terminal compaction failure carries, and the ONLY spelling
+/// of it. Upper layers (the ACP renderer's user-facing message and JSON-RPC
+/// mapping) recognize a compaction failure by this substring, so a copy that
+/// drifts would silently stop matching.
+pub const COMPACTION_FAILED: &str = "Context compaction failed";
+
 /// Errors specific to the compaction subsystem.
 #[derive(Debug)]
 pub enum CompactionError {
@@ -151,6 +157,24 @@ pub enum CompactionError {
     InvalidSummary(String),
     /// A replacement could not be durably saved.
     Persistence(String),
+    /// A failure the caller must treat as terminal for the turn. Carries the
+    /// underlying error already rendered, so it is never re-decorated: the
+    /// inner variant keeps its own class name and its single
+    /// "history preserved" tail.
+    Failed(String),
+}
+
+impl CompactionError {
+    /// Mark a failure terminal without restating what it was. Idempotent: an
+    /// error that already carries the marker is returned unchanged.
+    #[must_use]
+    pub fn into_terminal(self) -> Self {
+        let rendered = self.to_string();
+        if rendered.contains(COMPACTION_FAILED) {
+            return self;
+        }
+        Self::Failed(rendered)
+    }
 }
 
 impl fmt::Display for CompactionError {
@@ -165,6 +189,7 @@ impl fmt::Display for CompactionError {
             Self::Persistence(msg) => {
                 write!(f, "compaction persistence failed: {msg}; history preserved")
             }
+            Self::Failed(msg) => write!(f, "{COMPACTION_FAILED}: {msg}"),
         }
     }
 }
@@ -632,7 +657,6 @@ pub async fn compact_session<C: ApiClient>(
     let prompt = build_compaction_prompt(custom_instructions);
     let compaction_messages = build_compaction_messages(removed, &prompt);
 
-    // Determine max tokens for compaction output
     let max_tokens = std::cmp::min(
         COMPACT_MAX_OUTPUT_TOKENS,
         crate::model_capabilities::max_output_tokens_or_default(model),
@@ -1892,6 +1916,52 @@ mod tests {
         // Should fail with ApiError since default impl returns "not supported"
         assert!(result.is_err());
         assert!(matches!(result, Err(super::CompactionError::ApiError(_))));
+    }
+
+    #[test]
+    fn terminal_failure_marks_without_restating_the_inner_error() {
+        let inner = super::CompactionError::ApiError("summarizer unavailable".to_string());
+        let rendered = inner.into_terminal().to_string();
+
+        assert_eq!(
+            rendered,
+            "Context compaction failed: compaction API error: summarizer unavailable; \
+             history preserved"
+        );
+        // What the user reads, not just what a substring grep accepts: the
+        // marker and the reassurance each appear exactly once.
+        assert_eq!(rendered.matches(super::COMPACTION_FAILED).count(), 1);
+        assert_eq!(rendered.matches("history preserved").count(), 1);
+    }
+
+    #[test]
+    fn terminal_failure_keeps_the_failing_stage_visible() {
+        for (error, expected_class) in [
+            (
+                super::CompactionError::InvalidSummary("truncated".to_string()),
+                "invalid compaction summary",
+            ),
+            (
+                super::CompactionError::Persistence("disk full".to_string()),
+                "compaction persistence failed",
+            ),
+        ] {
+            let rendered = error.into_terminal().to_string();
+            assert!(
+                rendered.contains(expected_class),
+                "a summary/persistence failure must not report itself as an API error: {rendered}"
+            );
+            assert_eq!(rendered.matches("history preserved").count(), 1);
+        }
+    }
+
+    #[test]
+    fn terminal_failure_is_idempotent() {
+        let once = super::CompactionError::ApiError("boom".to_string()).into_terminal();
+        let rendered = once.to_string();
+        let twice = once.into_terminal().to_string();
+
+        assert_eq!(rendered, twice);
     }
 
     #[tokio::test]

@@ -25,7 +25,8 @@ use commands::{
     acp_slash_commands, format_acp_unsupported_slash_command, render_acp_slash_command_help,
     SlashCommand,
 };
-use engine_core::{EngineEvent, TurnComplete};
+use engine_core::engine_events::CompactionStatus;
+use engine_core::{EngineEvent, ObserverAdapter, TurnComplete};
 use engine_host::config::{
     default_permission_mode, extract_sudorouter_credentials, load_sudocode_config_for_current_dir,
     load_sudocode_config_for_cwd,
@@ -59,6 +60,33 @@ pub(crate) fn engine_event_to_session_update(
     event: EngineEvent,
 ) -> Option<SessionNotification> {
     let update = match event {
+        // ACP's standard operation lifecycle represents engine-owned
+        // maintenance too. No tool is registered or offered to the model.
+        EngineEvent::Compaction(progress) => {
+            if progress.status == CompactionStatus::Started {
+                SessionUpdate::ToolCall(
+                    ToolCall::new(progress.id.clone(), "context_compaction")
+                        .kind(ToolKind::Other)
+                        .status(ToolCallStatus::InProgress)
+                        .raw_input(serde_json::json!({
+                            "trigger": progress.trigger, "before_tokens": progress.before_tokens,
+                        })),
+                )
+            } else {
+                let status = if progress.status == CompactionStatus::Failed {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    progress.id.clone(),
+                    ToolCallUpdateFields::new().status(status).raw_output(
+                        serde_json::to_value(progress)
+                            .expect("compaction progress is serializable"),
+                    ),
+                ))
+            }
+        }
         EngineEvent::ThinkingDelta { text } => SessionUpdate::AgentThoughtChunk(ContentChunk::new(
             AcpContentBlock::Text(TextContent::new(text)),
         )),
@@ -490,6 +518,7 @@ pub(crate) fn handle_slash_command(
     config: &SdkAcpConfig,
     cwd: &Path,
     input: &str,
+    observer: &mut ObserverAdapter,
 ) -> Result<(String, AcpStopReason), crate::AcpError> {
     let command = match SlashCommand::parse(input) {
         Ok(Some(command)) => command,
@@ -546,7 +575,7 @@ pub(crate) fn handle_slash_command(
         SlashCommand::Help => render_acp_slash_command_help(),
         SlashCommand::Compact => {
             let outcome = engine
-                .compact_cancellable()
+                .compact_cancellable(observer)
                 .map_err(crate::AcpError::internal)?;
             if outcome.cancelled {
                 stop = AcpStopReason::Cancelled;

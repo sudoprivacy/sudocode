@@ -410,6 +410,10 @@ impl ObserverAdapter {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn on_compaction(&mut self, event: &runtime::CompactionProgress) {
+        let _ = self.tx.send(EngineEvent::Compaction(event.clone()));
+    }
+
     fn on_notice(&mut self, text: &str) {
         let _ = self.tx.send(EngineEvent::Notice { text: text.into() });
     }

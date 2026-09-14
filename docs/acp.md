@@ -212,6 +212,20 @@ the transcript in memory and on disk is left untouched and the prompt ends
 with `stopReason: "cancelled"`. The other commands are local and complete
 before a cancel could matter.
 
+**Live compaction lifecycle.** Before manual or automatic context maintenance,
+`session/update` emits a standard ACP `tool_call` with title `context_compaction`,
+kind `other`, status `in_progress`, and a unique `toolCallId`. This is an
+engine-owned operation, not a tool registered with the model. `rawInput` carries
+`trigger` (`manual`, `preflight`, `in_turn_budget`, `provider_rejection`, or
+`post_turn_usage`) and `before_tokens`. Completion emits `tool_call_update` with
+the same ID, status `completed` or `failed`, and `rawOutput` containing `id`,
+`trigger`, `status` (`completed`, `failed`, or `cancelled`), `before_tokens`, and
+`after_tokens` on success. Counts are estimates; summary text is never included.
+Cancellation uses ACP status `completed` with `rawOutput.status: "cancelled"`.
+Every terminal update is delivered before the prompt response, including error
+responses. A failed compaction ends the prompt with an error; clients must mark
+the run failed. The completed operation remains available for client replay.
+
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the
 `session/prompt` response carries `_meta.sudocode.autoCompacted: true`
@@ -228,8 +242,9 @@ Sudo Code retains its model-specific output reservation and pressure buffer.
 
 Compaction stages changes before replacing the live transcript. An empty,
 truncated, or non-shrinking summary is rejected. Failure before or during a
-turn stops the pending model request with history intact; failure of optional
-post-turn compaction keeps the completed answer and warns. No automatic
+turn stops the pending model request with history intact. Post-turn compaction
+failure also fails the prompt, even if answer text has already streamed; it must
+not report a successful run or continue queued work. No automatic
 local-statistics fallback is used. The next request cannot proceed when its
 history still exceeds the context budget.
 
@@ -249,8 +264,9 @@ Main-agent and subagent clients use the same non-streaming text transport in
 and tool schemas; runtime owns compaction prompts, retry policy and validation.
 The shared transport also owns message conversion and cache hints.
 
-Both LLM paths request at most 8,192 output tokens (or the model's smaller
-limit). The preferred path reuses the system prompt, tool schemas and older
+Both LLM paths ask for a summary within 8,000 tokens where possible and request
+at most 12,000 output tokens (or the model's smaller limit). The preferred
+path reuses the system prompt, tool schemas and older
 message prefix; the fallback strips thinking and replaces images with text
 placeholders. Neither path drops the oldest input to recover from overflow.
 Transient failures are retried with bounded backoff.

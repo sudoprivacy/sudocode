@@ -38,6 +38,8 @@ pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
     AutoCompactionEvent,
+    CompactionProgress,
+    CompactionStatus,
     // The content-block vocabulary a renderer sends back in an
     // `EngineCommand::Prompt` (text, images, …).
     ContentBlock,
@@ -179,6 +181,8 @@ pub enum EngineEvent {
     PromptCache(PromptCacheEvent),
     /// Automatic session compaction happened mid-turn.
     AutoCompaction(AutoCompactionEvent),
+    /// Live context-maintenance lifecycle.
+    Compaction(CompactionProgress),
     /// The engine needs the renderer to approve/deny a tool invocation (was
     /// the synchronous `PermissionPrompter::decide` callback). Emitting this
     /// moves the engine into [`EngineState::AwaitingInput`]; the renderer

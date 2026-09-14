@@ -306,5 +306,4 @@ mod tests {
         assert!(env.kind.is_empty());
         assert_eq!(env.timestamp, 0);
     }
-
 }

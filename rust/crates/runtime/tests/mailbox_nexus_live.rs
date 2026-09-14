@@ -32,6 +32,40 @@ fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
     Mailbox::over_nexus(Arc::clone(client), agent, auth)
 }
 
+/// The client every test here dials with: mTLS when the harness points at an
+/// agent bundle (`NEXUS_A2A_TEST_CERT_DIR`), plaintext otherwise.
+///
+/// One constructor rather than one per test. An auth-on daemon refuses a
+/// plaintext dial outright — `Unavailable: Connecting to HTTPS without TLS
+/// enabled` — so a test that reaches for `connect` directly is a test that can
+/// only ever run auth-off, and the posture it can prove things under is decided
+/// by the line it was written on rather than by the harness driving it. Taking
+/// the posture from the environment lets the SAME body assert the SAME property
+/// against both daemons.
+fn dial(endpoint: &str) -> Arc<NexusVfsClient> {
+    let Some(dir) = std::env::var("NEXUS_A2A_TEST_CERT_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        return Arc::new(NexusVfsClient::connect(endpoint).expect("dial daemon"));
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let read = |name: &str| {
+        std::fs::read(dir.join(name))
+            .unwrap_or_else(|e| panic!("read {}/{name}: {e}", dir.display()))
+    };
+    Arc::new(
+        NexusVfsClient::connect_tls(
+            endpoint,
+            read("ca.pem"),
+            read("agent.pem"),
+            read("agent-key.pem"),
+            "nexus-node",
+        )
+        .unwrap_or_else(|e| panic!("dial {endpoint} over mTLS: {e}")),
+    )
+}
+
 fn send_to(
     client: &Arc<NexusVfsClient>,
     from: &str,
@@ -73,7 +107,7 @@ fn live_inbox_roundtrip() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
 
     let me = "scode-probe";
     // Provision our own inbox (idempotent) — the standalone self-provision path.
@@ -122,7 +156,7 @@ fn live_blocking_read_wakes_on_write() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
 
     let me = "scode-blocking-read-probe";
     mailbox(&client, me, &auth)
@@ -162,7 +196,7 @@ fn live_blocking_read_wakes_on_write() {
         let endpoint = endpoint.clone();
         let auth = auth.clone();
         thread::spawn(move || {
-            let wclient = Arc::new(NexusVfsClient::connect(&endpoint).expect("writer dial"));
+            let wclient = dial(&endpoint);
             thread::sleep(Duration::from_millis(400));
             send_to(&wclient, "peer-block", me, body, &auth).expect("peer write");
         })
@@ -234,7 +268,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     let expected = std::env::var("NEXUS_A2A_TEST_REPLY_BODY")
         .expect("set NEXUS_A2A_TEST_REPLY_BODY to what the scenario answers");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the co-host daemon"));
+    let client = dial(&endpoint);
 
     // From where the operator's inbox is NOW, so the reply found below is this
     // run's rather than a previous one's.
@@ -294,7 +328,7 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
 
     let never_ran = format!("never-ran-{}-{}", std::process::id(), fresh());
     let body = "a message that waited for its reader";
@@ -341,25 +375,14 @@ fn live_send_provisions_an_inbox_that_never_existed() {
 fn live_authenticated_from_cannot_be_forged() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    let cert_dir = std::path::PathBuf::from(
-        std::env::var("NEXUS_A2A_TEST_CERT_DIR").expect("set NEXUS_A2A_TEST_CERT_DIR=<bundle dir>"),
-    );
+    // Asserted rather than merely used: `dial` falls back to plaintext when no
+    // bundle is named, and a plaintext run of THIS test would pass against a
+    // daemon that stamps nothing — green, and proving the opposite of the point.
+    std::env::var("NEXUS_A2A_TEST_CERT_DIR")
+        .expect("set NEXUS_A2A_TEST_CERT_DIR=<bundle dir>; without mTLS this asserts nothing");
     let identity = std::env::var("NEXUS_A2A_TEST_IDENTITY")
         .expect("set NEXUS_A2A_TEST_IDENTITY to the cert's agent id");
-    let read = |name: &str| {
-        std::fs::read(cert_dir.join(name))
-            .unwrap_or_else(|e| panic!("read {}/{name}: {e}", cert_dir.display()))
-    };
-    let client = Arc::new(
-        NexusVfsClient::connect_tls(
-            &endpoint,
-            read("ca.pem"),
-            read("agent.pem"),
-            read("agent-key.pem"),
-            "nexus-node",
-        )
-        .unwrap_or_else(|e| panic!("dial {endpoint} over mTLS: {e}")),
-    );
+    let client = dial(&endpoint);
 
     // A recipient nothing else is writing to, so the envelope found below is
     // unambiguously this one.
@@ -424,7 +447,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
         "both endpoints name the same node, which proves nothing about replication"
     );
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial this node"));
+    let client = dial(&endpoint);
 
     let me = "scode-cross-node-probe";
     mailbox(&client, me, &auth)
@@ -438,7 +461,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
     // land in it. That is replication of the stream's METADATA, and it is a
     // precondition of the wake rather than part of it, so it is waited for
     // separately and loudly.
-    let peer = Arc::new(NexusVfsClient::connect(&peer_endpoint).expect("dial the peer node"));
+    let peer = dial(&peer_endpoint);
     let replicated = Instant::now();
     loop {
         if mailbox(&peer, me, &auth).poll(0, 0).is_ok() {
@@ -528,7 +551,7 @@ fn live_blocking_read_does_not_stall_shared_client() {
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
 
     let me = "scode-starve-probe";
-    let shared = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial shared"));
+    let shared = dial(&endpoint);
     mailbox(&shared, me, &auth)
         .ensure_inbox()
         .expect("ensure inbox");
@@ -574,7 +597,7 @@ fn live_ensure_inbox() {
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
     mailbox(&client, &inbox, &auth)
         .ensure_inbox()
         .expect("ensure inbox");
@@ -600,7 +623,7 @@ fn live_spawn_cohost() {
     let model =
         std::env::var("NEXUS_A2A_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
 
     // String-only params -> rpc_codec is plain JSON, so a raw JSON payload works.
     let payload =
@@ -632,7 +655,7 @@ fn live_collect_inbox() {
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial daemon"));
+    let client = dial(&endpoint);
 
     // poll_new reads inbox_path(self_agent), so pass the target inbox name.
     // Its self-filter only drops the inbox owner's OWN writes (none here) —

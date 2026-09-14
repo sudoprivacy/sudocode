@@ -500,12 +500,37 @@ impl SessionEngine {
     /// round-trip — or one that lands right after it — leaves the transcript
     /// untouched and returns `cancelled`. Returns report DATA; the renderer
     /// formats it. Ports `AcpCliAgent::handle_acp_compact`.
-    pub fn compact_cancellable(&self) -> Result<CompactionOutcome, String> {
+    pub fn compact_cancellable(
+        &self,
+        observer: &mut dyn runtime::RuntimeObserver,
+    ) -> Result<CompactionOutcome, String> {
         let mut session = self.lock_session();
-        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
-        // Fresh turn: a cancel left over from an earlier turn must not abort this
-        // one (mirrors `run_turn`).
+        // Reset before publishing Started: a cancel in response to that event
+        // must not be cleared when the summarizer begins.
         session.abort_signal.reset();
+        let mut progress = runtime::CompactionProgress::started(
+            "manual",
+            estimate_session_tokens(session.runtime.session()),
+        );
+        observer.on_compaction(&progress);
+        let result = self.compact_cancellable_inner(&mut session);
+        progress.status = match &result {
+            Ok(outcome) if outcome.cancelled => runtime::CompactionStatus::Cancelled,
+            Ok(outcome) => {
+                progress.after_tokens = Some(outcome.after_tokens);
+                runtime::CompactionStatus::Completed
+            }
+            Err(_) => runtime::CompactionStatus::Failed,
+        };
+        observer.on_compaction(&progress);
+        result.map_err(|error| format!("Context compaction failed; history preserved: {error}"))
+    }
+
+    fn compact_cancellable_inner(
+        &self,
+        session: &mut AcpCliSession,
+    ) -> Result<CompactionOutcome, String> {
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let abort_signal = session.abort_signal.clone();
         let before_tokens = estimate_session_tokens(session.runtime.session());
         let config = CompactionConfig {
@@ -700,19 +725,28 @@ impl engine_core::EngineDelegate for SessionEngine {
                     attrs
                 });
             }
-            pre_send_compaction = self
-                .rt()
-                .block_on(session.runtime.compact_in_place(
-                    CompactionConfig {
-                        // Bypass the size heuristic: the budget check above is
-                        // the decision, and `should_compact`'s coarser default
-                        // gate would only be able to veto it.
-                        max_estimated_tokens: 0,
-                        ..CompactionConfig::default()
-                    },
-                    runtime::CompactionTrigger::Preflight,
-                ))
-                .map_err(|error| error.to_string())?;
+            let attempt = self.rt().block_on(session.runtime.compact_in_place(
+                CompactionConfig {
+                    // Bypass the size heuristic: the budget check above is
+                    // the decision, and `should_compact`'s coarser default
+                    // gate would only be able to veto it.
+                    max_estimated_tokens: 0,
+                    ..CompactionConfig::default()
+                },
+                runtime::CompactionTrigger::Preflight,
+                Some(observer),
+            ));
+            if session.abort_signal.is_aborted() {
+                return Ok(engine_core::TurnComplete {
+                    iterations: 0,
+                    turn_usage: runtime::TokenUsage::default(),
+                    session_usage: session.runtime.usage().cumulative_usage(),
+                    cancelled: true,
+                    response_model: None,
+                    auto_compaction: None,
+                });
+            }
+            pre_send_compaction = attempt.map_err(|error| error.to_string())?;
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());

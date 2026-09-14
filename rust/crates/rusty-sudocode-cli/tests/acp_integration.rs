@@ -959,6 +959,30 @@ async fn scenario_session_prompt_with_image_attachment(
     );
 }
 
+fn assert_compaction_lifecycle(notifs: &[Value], status: &str) {
+    let start = notifs
+        .iter()
+        .position(|n| n["params"]["update"]["title"] == "context_compaction")
+        .expect("compaction must announce its start");
+    let started = &notifs[start]["params"]["update"];
+    assert_eq!(started["status"], "in_progress");
+    let end = notifs
+        .iter()
+        .position(|n| n["params"]["update"]["rawOutput"]["status"] == status)
+        .expect("compaction must announce its terminal state before prompt response");
+    assert!(start < end);
+    let ended = &notifs[end]["params"]["update"];
+    assert_eq!(started["toolCallId"], ended["toolCallId"]);
+    assert_eq!(
+        ended["status"],
+        if status == "failed" {
+            "failed"
+        } else {
+            "completed"
+        }
+    );
+}
+
 /// Send one slash command and return the concatenated agent text it produced
 /// plus the response.
 async fn run_slash_command(
@@ -980,6 +1004,9 @@ async fn run_slash_command(
         Some("end_turn"),
         "{command} should end the turn normally: {resp}"
     );
+    if command == "/compact" {
+        assert_compaction_lifecycle(&notifs, "completed");
+    }
     let text = notifs
         .iter()
         .filter(|m| {
@@ -1157,6 +1184,15 @@ async fn scenario_slash_compact_cancel(
             }),
         )
         .await;
+    // The start is observable while the model is still busy, not buffered
+    // until the final prompt response. Cancel only after seeing it.
+    let (mut prefix, start) = client
+        .recv_until(Duration::from_secs(20), |n| {
+            n["params"]["update"]["title"] == "context_compaction"
+        })
+        .await
+        .expect("live compaction start");
+    prefix.push(start);
     // Wait until the compaction request is in flight at the mock.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
@@ -1195,6 +1231,8 @@ async fn scenario_slash_compact_cancel(
         .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
         .collect::<String>();
     assert!(text.contains("cancelled"), "got: {text}");
+    prefix.extend(notifs);
+    assert_compaction_lifecycle(&prefix, "cancelled");
 
     // Nothing changed on disk…
     let transcript_after = read_session_transcript(&workspace.root, &session_id);
@@ -4493,6 +4531,55 @@ async fn acp_stdio_fork_from_persisted_session_across_processes() {
     .await;
     assert_invalid_params(&resp, "forkFrom.cwd with no persisted session");
 
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// A provider failure during manual maintenance is a failed prompt, with
+/// ordered lifecycle notifications and an unchanged durable transcript.
+#[tokio::test]
+async fn acp_compaction_failure_is_terminal_and_preserves_history() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("compaction-terminal-failure");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let (session_id, path) = seed_filler_history(&server, &workspace, 32).await;
+    let before = fs::read(&path).unwrap();
+    // A deliberately incompatible response is a permanent summary failure,
+    // avoiding the transport backoff used for an unreachable provider.
+    let invalid_provider = OpenAiCompatMock::spawn("").await.unwrap();
+    workspace.write_sudocode_json(invalid_provider.base_url());
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let (_, loaded) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": session_id, "cwd": workspace.root, "mcpServers": []
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let (notifs, response) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }]
+            }),
+        )
+        .await;
+    assert_compaction_lifecycle(&notifs, "failed");
+    let text = notifs
+        .iter()
+        .filter_map(|n| n["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(response.get("error").is_some(), "{response}");
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("上下文压缩失败，本次对话已停止"));
+    assert!(text.contains("上下文压缩失败，本次对话已停止"), "{text}");
+    assert_eq!(fs::read(path).unwrap(), before);
     client.shutdown().await;
     workspace.cleanup();
 }

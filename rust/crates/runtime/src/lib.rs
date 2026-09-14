@@ -114,9 +114,9 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compact_threshold_for_model, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
-    AutoCompactionEvent, CompactionMethod, CompactionTrigger, ConversationRuntime,
-    HookProgressSink, ProgressSink, PromptCacheEvent, RetryEvent, RetrySink, RuntimeError,
-    RuntimeObserver, StaticToolExecutor, TextCompletion, TextCompletionOptions,
+    AutoCompactionEvent, CompactionMethod, CompactionProgress, CompactionStatus, CompactionTrigger,
+    ConversationRuntime, HookProgressSink, ProgressSink, PromptCacheEvent, RetryEvent, RetrySink,
+    RuntimeError, RuntimeObserver, StaticToolExecutor, TextCompletion, TextCompletionOptions,
     ToolDispatchContext, ToolError, ToolExecutor, ToolProgressEvent, TurnSummary,
     FORK_BOILERPLATE_TAG,
 };

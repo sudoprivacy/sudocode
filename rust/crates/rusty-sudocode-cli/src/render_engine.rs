@@ -268,6 +268,7 @@ impl EngineEventRenderer {
             | EngineEvent::Usage(_)
             | EngineEvent::PromptCache(_)
             | EngineEvent::AutoCompaction(_)
+            | EngineEvent::Compaction(_)
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. } => RenderOutcome::Continue,
         }

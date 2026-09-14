@@ -76,6 +76,10 @@ impl AcpError {
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
         };
 
+        if raw_message.contains("Context compaction failed") {
+            return "上下文压缩失败，本次对话已停止。已有对话历史已保留。".to_string();
+        }
+
         if raw_message.contains("[context_window_exceeded]") {
             return raw_message.clone();
         }
@@ -1426,11 +1430,13 @@ pub(crate) async fn run_acp_on_transport(
                                 .unwrap_or_else(|| std::path::PathBuf::from("."));
 
                             if is_slash_command {
+                                let mut observer = ObserverAdapter::new(evt_tx.clone());
                                 let (text, stop) = session_ops::handle_slash_command(
                                     &engine_blocking,
                                     &config_blocking,
                                     &turn_cwd,
                                     &prompt_blocking,
+                                    &mut observer,
                                 )?;
                                 let _ = evt_tx.send(EngineEvent::TextDelta { text });
                                 return Ok::<_, AcpError>((stop, None));
@@ -1922,7 +1928,12 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
         }
         AcpError::Internal(msg) => {
-            Error::internal_error().data(serde_json::Value::String(msg.clone()))
+            let mut error = Error::internal_error().data(serde_json::Value::String(msg.clone()));
+            if msg.contains("Context compaction failed") {
+                // Clients use the JSON-RPC message for the terminal run banner.
+                error.message = e.user_friendly_message();
+            }
+            error
         }
     }
 }

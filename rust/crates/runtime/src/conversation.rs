@@ -306,6 +306,9 @@ pub trait RuntimeObserver {
     /// Non-fatal runtime maintenance notices, forwarded through the engine seam.
     fn on_notice(&mut self, _text: &str) {}
 
+    /// Context maintenance lifecycle, including failures before a model request.
+    fn on_compaction(&mut self, _event: &CompactionProgress) {}
+
     fn on_thinking_delta(&mut self, _delta: &str) {}
 
     fn on_text_delta(&mut self, _delta: &str) {}
@@ -796,6 +799,47 @@ impl CompactionTrigger {
             Self::InTurnBudget => "in_turn_budget",
             Self::ProviderRejection => "provider_rejection",
             Self::PostTurnUsage => "post_turn_usage",
+        }
+    }
+}
+
+/// One context-maintenance operation. UI events, never model messages or
+/// tools offered to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStatus {
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CompactionProgress {
+    pub id: String,
+    pub trigger: &'static str,
+    pub status: CompactionStatus,
+    pub before_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_tokens: Option<usize>,
+}
+
+impl CompactionProgress {
+    #[must_use]
+    pub fn started(trigger: &'static str, before_tokens: usize) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        Self {
+            id: format!(
+                "compaction-{}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_millis(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ),
+            trigger,
+            status: CompactionStatus::Started,
+            before_tokens,
+            after_tokens: None,
         }
     }
 }
@@ -1649,13 +1693,23 @@ where
             // is all a long turn ever gets.
             while self.next_request_exceeds_budget() {
                 if turn_compactions < MAX_TURN_COMPACTIONS {
-                    if let Some(event) = self
+                    let attempt = self
                         .compact_in_place(
                             forced_compaction_config(),
                             CompactionTrigger::InTurnBudget,
+                            runtime_observer_mut(&mut observer),
                         )
-                        .await
-                        .map_err(|error| RuntimeError::new(error.to_string()))?
+                        .await;
+                    if self.hook_abort_signal.is_aborted() {
+                        return Ok(self.cancelled_summary(
+                            assistant_messages,
+                            tool_results,
+                            prompt_cache_events,
+                            iterations,
+                        ));
+                    }
+                    if let Some(event) =
+                        attempt.map_err(|error| RuntimeError::new(error.to_string()))?
                     {
                         overflow_compaction =
                             merge_auto_compaction(overflow_compaction, Some(event));
@@ -1728,13 +1782,23 @@ where
                     // remove anything the error is real and must surface.
                     if error.is_context_window_blocked() && turn_compactions < MAX_TURN_COMPACTIONS
                     {
-                        if let Some(event) = self
+                        let attempt = self
                             .compact_in_place(
                                 forced_compaction_config(),
                                 CompactionTrigger::ProviderRejection,
+                                runtime_observer_mut(&mut observer),
                             )
-                            .await
-                            .map_err(|error| RuntimeError::new(error.to_string()))?
+                            .await;
+                        if self.hook_abort_signal.is_aborted() {
+                            return Ok(self.cancelled_summary(
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
+                                iterations,
+                            ));
+                        }
+                        if let Some(event) =
+                            attempt.map_err(|error| RuntimeError::new(error.to_string()))?
                         {
                             turn_compactions += 1;
                             overflow_compaction =
@@ -1852,11 +1916,18 @@ where
                             self.record_turn_failed(iterations, &error);
                             return Err(error);
                         }
-                        let auto_compaction = merge_auto_compaction(
-                            overflow_compaction,
-                            self.maybe_auto_compact(runtime_observer_mut(&mut observer))
-                                .await,
-                        );
+                        let attempt = self
+                            .maybe_auto_compact(runtime_observer_mut(&mut observer))
+                            .await;
+                        if self.hook_abort_signal.is_aborted() {
+                            return Ok(self.cancelled_summary(
+                                assistant_messages,
+                                tool_results,
+                                prompt_cache_events,
+                                iterations,
+                            ));
+                        }
+                        let auto_compaction = merge_auto_compaction(overflow_compaction, attempt?);
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
                         self.user_request_intent = None;
@@ -2403,11 +2474,18 @@ where
             }
         }
 
-        let auto_compaction = merge_auto_compaction(
-            overflow_compaction,
-            self.maybe_auto_compact(runtime_observer_mut(&mut observer))
-                .await,
-        );
+        let attempt = self
+            .maybe_auto_compact(runtime_observer_mut(&mut observer))
+            .await;
+        if self.hook_abort_signal.is_aborted() {
+            return Ok(self.cancelled_summary(
+                assistant_messages,
+                tool_results,
+                prompt_cache_events,
+                iterations,
+            ));
+        }
+        let auto_compaction = merge_auto_compaction(overflow_compaction, attempt?);
 
         self.finish_current_turn_tracking();
 
@@ -2693,7 +2771,7 @@ where
     async fn maybe_auto_compact(
         &mut self,
         observer: Option<&mut dyn RuntimeObserver>,
-    ) -> Option<AutoCompactionEvent> {
+    ) -> Result<Option<AutoCompactionEvent>, RuntimeError> {
         let model = self.compaction_model();
         let threshold = auto_compact_threshold_for_model(&model);
         // Compare the context the provider actually processed on the latest
@@ -2704,7 +2782,7 @@ where
         // caching it grows quadratically, never decreases, and re-compacts
         // after every turn once crossed.
         if self.usage_tracker.current_context_tokens() < threshold {
-            return None;
+            return Ok(None);
         }
 
         // Circuit-breaker: once N consecutive turns have tried + no-op'd,
@@ -2712,23 +2790,17 @@ where
         // rationale (CC parity; bounds noise floor when session is
         // structurally pinned above the threshold).
         if self.consecutive_auto_compact_noops >= MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS {
-            return None;
+            return Ok(None);
         }
 
         let event = self
-            .compact_in_place(forced_compaction_config(), CompactionTrigger::PostTurnUsage)
-            .await;
-        let event = match event {
-            Ok(event) => event,
-            Err(error) => {
-                // The response has already completed. Report maintenance failure
-                // without replacing history or turning success into a failed task.
-                if let Some(observer) = observer {
-                    observer.on_notice(&format!("Automatic compaction failed: {error}"));
-                }
-                return None;
-            }
-        };
+            .compact_in_place(
+                forced_compaction_config(),
+                CompactionTrigger::PostTurnUsage,
+                observer,
+            )
+            .await
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
         if event.is_some() {
             // Success → reset the noop counter so the breaker only trips on
             // SUSTAINED inability to shrink, not on transient threshold dance.
@@ -2737,12 +2809,44 @@ where
             self.consecutive_auto_compact_noops =
                 self.consecutive_auto_compact_noops.saturating_add(1);
         }
-        event
+        Ok(event)
     }
 
     /// Stage pruning and summarization on a clone. Only install a useful,
     /// durably saved replacement; errors never erase the original transcript.
     pub async fn compact_in_place(
+        &mut self,
+        config: CompactionConfig,
+        trigger: CompactionTrigger,
+        mut observer: Option<&mut dyn RuntimeObserver>,
+    ) -> Result<Option<AutoCompactionEvent>, CompactionError> {
+        let mut progress =
+            CompactionProgress::started(trigger.as_str(), estimate_session_tokens(&self.session));
+        if let Some(observer) = observer.as_deref_mut() {
+            observer.on_compaction(&progress);
+        }
+        let result = self.compact_in_place_inner(config, trigger).await;
+        progress.status = if self.hook_abort_signal.is_aborted() {
+            CompactionStatus::Cancelled
+        } else if result.is_ok() {
+            CompactionStatus::Completed
+        } else {
+            CompactionStatus::Failed
+        };
+        if result.is_ok() {
+            progress.after_tokens = Some(estimate_session_tokens(&self.session));
+        }
+        if let Some(observer) = observer {
+            observer.on_compaction(&progress);
+        }
+        result.map_err(|error| {
+            CompactionError::ApiError(format!(
+                "Context compaction failed; history preserved: {error}"
+            ))
+        })
+    }
+
+    async fn compact_in_place_inner(
         &mut self,
         config: CompactionConfig,
         trigger: CompactionTrigger,
@@ -5245,7 +5349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_post_turn_compaction_keeps_history_and_completed_answer() {
+    async fn failed_post_turn_compaction_fails_turn_and_keeps_history() {
         let _g = env_guard();
         // Env-var override sets threshold to 100 — test-only, independent of SSOT.
         // Mock reports a 200-token context on the latest response → crosses
@@ -5292,14 +5396,14 @@ mod tests {
             SystemPrompt::default(),
         );
 
-        let summary = runtime
+        let error = runtime
             .run_turn("trigger", None, None)
             .await
-            .expect("turn should succeed");
+            .expect_err("compaction failure must fail the turn");
 
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
 
-        assert_eq!(summary.auto_compaction, None);
+        assert!(error.to_string().contains("Context compaction failed"));
         assert_eq!(runtime.session().messages.len(), 6);
         assert_eq!(runtime.session().messages[0].role, MessageRole::User);
     }

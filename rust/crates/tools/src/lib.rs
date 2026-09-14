@@ -885,7 +885,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: "Run a shell command with `sh -lc` in the workspace and return its stdout, stderr, and returnCodeInterpretation. Check returnCodeInterpretation on every result: absent means exit 0; \"exit_code:N\" means the command failed, so investigate before moving on; \"timeout\" or \"interrupted\" mean it did not finish. Keep bash for builds, tests, git, and other real shell work; use read_file, edit_file, write_file, glob_search, and grep_search for files. Output beyond the inline budget is offloaded and paged back with read_tool_output. run_in_background starts the command detached with its output discarded, so redirect output to a file when you need it. When the sandbox is active, HOME and TMPDIR point inside the workspace and, where the platform backend enforces it, writes outside the workspace are denied: a denial is policy, not a bug in the command, so report it rather than retrying another way, and set dangerouslyDisableSandbox only when the user explicitly asked for an unsandboxed run.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -938,7 +938,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "Create a UTF-8 text file or completely replace its contents; missing parent directories are created. An existing file is overwritten wholesale, so read_file it first and prefer edit_file for targeted changes. Content above 10 MiB is rejected.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -952,7 +952,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "Edit an existing text file by replacing literal old_string with new_string. old_string must match the file exactly, whitespace and indentation included, and unless replace_all is true it must occur exactly once: an ambiguous match is rejected, so include enough surrounding lines to pin it down. old_string and new_string must differ. Read the file first unless you created or edited it earlier in this session.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -968,7 +968,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "glob_search",
-            description: "Find files by glob pattern.",
+            description: "Find files by glob pattern, e.g. `**/*.rs` or `src/**/*.{ts,tsx}`, resolved against `path` or the workspace root. Returns files only, most recently modified first, capped at 100 entries (truncated is true when more matched, so narrow the pattern). .git, node_modules, target, dist, coverage and .build are skipped. Use grep_search to search file contents.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -592,7 +592,8 @@ impl EngineApiClient {
                 tools,
                 self.session_request_fields(),
             );
-            message_request.tool_choice = (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
+            message_request.tool_choice =
+                (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.

@@ -203,6 +203,7 @@ enum Scenario {
     WriteFileAllowed,
     WriteFileDenied,
     MultiToolTurnRoundtrip,
+    StepBudget,
     BashStdoutRoundtrip,
     BashCompactResults,
     BashInterruptLongRunning,
@@ -355,6 +356,7 @@ impl Scenario {
             "write_file_denied" => Some(Self::WriteFileDenied),
             "multi_tool_turn_roundtrip" => Some(Self::MultiToolTurnRoundtrip),
             "bash_compact_results" => Some(Self::BashCompactResults),
+            "step_budget" => Some(Self::StepBudget),
             "bash_stdout_roundtrip" => Some(Self::BashStdoutRoundtrip),
             "bash_interrupt_long_running" => Some(Self::BashInterruptLongRunning),
             "bash_permission_prompt_approved" => Some(Self::BashPermissionPromptApproved),
@@ -437,6 +439,7 @@ impl Scenario {
             Self::WriteFileDenied => "write_file_denied",
             Self::MultiToolTurnRoundtrip => "multi_tool_turn_roundtrip",
             Self::BashCompactResults => "bash_compact_results",
+            Self::StepBudget => "step_budget",
             Self::BashStdoutRoundtrip => "bash_stdout_roundtrip",
             Self::BashInterruptLongRunning => "bash_interrupt_long_running",
             Self::BashPermissionPromptApproved => "bash_permission_prompt_approved",
@@ -1813,6 +1816,14 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             Some((id, name, input)) => tool_use_sse(&id, name, &[&input.to_string()]),
             None => final_text_sse("compact bash results verified"),
         },
+        Scenario::StepBudget => match step_budget_answer(request) {
+            Some(text) => final_text_sse(&text),
+            None => tool_use_sse(
+                "toolu_budget",
+                "bash",
+                &[r#"{"command":"echo step >> steps.txt"}"#],
+            ),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "bash completed: {}",
@@ -2476,6 +2487,15 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             Some((id, name, input)) => tool_message_response("compact", &id, name, input),
             None => text_message_response("compact_done", "compact bash results verified"),
         },
+        Scenario::StepBudget => match step_budget_answer(request) {
+            Some(text) => text_message_response("msg_budget_final", &text),
+            None => tool_message_response(
+                "msg_budget_tool",
+                "toolu_budget",
+                "bash",
+                json!({"command": "echo step >> steps.txt"}),
+            ),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_bash_stdout_final",
@@ -2993,6 +3013,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::WriteFileDenied => "req_write_file_denied",
         Scenario::MultiToolTurnRoundtrip => "req_multi_tool_turn_roundtrip",
         Scenario::BashCompactResults => "req_bash_compact_results",
+        },
+        Scenario::StepBudget => "req_step_budget",
         Scenario::BashStdoutRoundtrip => "req_bash_stdout_roundtrip",
         Scenario::BashInterruptLongRunning => "req_bash_interrupt_long_running",
         Scenario::BashPermissionPromptApproved => "req_bash_permission_prompt_approved",
@@ -3947,3 +3969,17 @@ fn mcp_echo_verdict(tool_output: &str) -> String {
 /// Long source rows exercise both syntax and wrapped diff backgrounds.
 pub const CODEX_DIFF_OLD: &str = r#"    let old_message = "OLD_MARKER source text stays selectable across the wrapped diff continuation, including punctuation: $HOME and ~/.zshrc";"#;
 pub const CODEX_DIFF_NEW: &str = r#"    let new_message = "NEW_MARKER source text stays selectable across the wrapped diff continuation, including punctuation: $HOME and ~/.zshrc";"#;
+// The marker is returned only when the runtime supplies both the instruction and
+// a tool-free wire request. Without either, the PTY regression cannot pass.
+fn step_budget_answer(request: &MessageRequest) -> Option<String> {
+    let messages = serde_json::to_string(&request.messages).expect("serialize mock messages");
+    if messages.contains("The computation step limit (") {
+        let valid = request.tools.as_ref().is_none_or(Vec::is_empty)
+            && request.tool_choice.is_none()
+            && messages.contains("suggest concrete next steps")
+            && latest_tool_result(request).is_some();
+        Some(if valid { "Step budget reached. Existing results retained. Next steps: discuss continuing with the user." } else { "Invalid step budget finalization request" }.into())
+    } else {
+        None
+    }
+}

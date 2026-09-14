@@ -85,6 +85,8 @@ fn assistant_only_history_is_not_inside_fork_child() {
         parent_assistant_message: None,
         tool_results_dir: None,
         progress_sink: None,
+        parent_reasoning_effort: None,
+        parent_thinking_enabled: false,
         parent_session_messages: vec![
             assistant_text("hi"),
             assistant_text(&format!("<{FORK_BOILERPLATE_TAG}> ignore me")),
@@ -99,6 +101,8 @@ fn user_without_boilerplate_is_not_inside_fork_child() {
         parent_assistant_message: None,
         tool_results_dir: None,
         progress_sink: None,
+        parent_reasoning_effort: None,
+        parent_thinking_enabled: false,
         parent_session_messages: vec![
             user_text("please spawn a fork subagent"),
             assistant_text("Sure."),
@@ -116,6 +120,8 @@ fn user_with_boilerplate_tag_is_inside_fork_child() {
         parent_assistant_message: None,
         tool_results_dir: None,
         progress_sink: None,
+        parent_reasoning_effort: None,
+        parent_thinking_enabled: false,
         parent_session_messages: vec![user_text(&seeded_directive)],
     };
     assert!(ctx.is_inside_fork_child());
@@ -132,6 +138,8 @@ fn boilerplate_in_any_prior_user_message_is_detected() {
         parent_assistant_message: None,
         tool_results_dir: None,
         progress_sink: None,
+        parent_reasoning_effort: None,
+        parent_thinking_enabled: false,
         parent_session_messages: vec![
             boilerplate_message,
             assistant_text("did stuff"),
@@ -156,6 +164,8 @@ fn parent_assistant_message_is_preserved_verbatim() {
         parent_assistant_message: Some(parent.clone()),
         tool_results_dir: None,
         progress_sink: None,
+        parent_reasoning_effort: None,
+        parent_thinking_enabled: false,
         parent_session_messages: vec![],
     };
     assert_eq!(ctx.parent_assistant_message.as_ref(), Some(&parent));

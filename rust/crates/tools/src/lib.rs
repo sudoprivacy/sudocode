@@ -216,7 +216,7 @@ use runtime::{
     current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
     glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
-    read_file,
+    read_file, section_order,
     summary_compression::compress_summary_text,
     task_registry::TaskRegistry,
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
@@ -5637,6 +5637,11 @@ fn build_agent_runtime(
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
+/// Name of the dynamic section carrying a sub-agent's identity line.
+const AGENT_ROLE_SECTION_NAME: &str = "agent-role";
+/// Name of the dynamic section carrying a custom `.md` agent's body.
+const AGENT_ROLE_BODY_SECTION_NAME: &str = "agent-role-body";
+
 fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String> {
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     // Route sub-agents through the per-agent-type memory scope
@@ -5660,25 +5665,39 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String
         // body (build_fork_child_message) so the child sees them as
         // its FIRST user message rather than buried in the system
         // prompt.
-        prompt.dynamic_sections.push(String::from(
-            "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop."
-        ));
+        prompt.set_dynamic_section(
+            AGENT_ROLE_SECTION_NAME,
+            section_order::AGENT_ROLE,
+            "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop.",
+        );
     } else if let Some(custom) = lookup_custom_agent(subagent_type) {
         // Custom `.md` agent — its body IS the sub-agent's role
         // section. Prepend a compact identity line so the child knows
         // its own type even if the body is terse. Mirrors CC-fork's
         // `parseAgentFromMarkdown` → `getSystemPrompt` closure that
         // returns the raw markdown body as the agent's system prompt.
-        prompt.dynamic_sections.push(format!(
-            "You are the custom sub-agent `{}` defined at {}.",
-            custom.name,
-            custom.source_path.display()
-        ));
-        prompt.dynamic_sections.push(custom.system_prompt);
+        prompt.set_dynamic_section(
+            AGENT_ROLE_SECTION_NAME,
+            section_order::AGENT_ROLE,
+            format!(
+                "You are the custom sub-agent `{}` defined at {}.",
+                custom.name,
+                custom.source_path.display()
+            ),
+        );
+        prompt.set_dynamic_section(
+            AGENT_ROLE_BODY_SECTION_NAME,
+            section_order::AGENT_ROLE,
+            custom.system_prompt,
+        );
     } else {
-        prompt.dynamic_sections.push(format!(
-            "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
-        ));
+        prompt.set_dynamic_section(
+            AGENT_ROLE_SECTION_NAME,
+            section_order::AGENT_ROLE,
+            format!(
+                "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
+            ),
+        );
     }
     Ok(prompt)
 }

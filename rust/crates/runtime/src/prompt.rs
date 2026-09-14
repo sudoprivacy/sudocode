@@ -42,6 +42,45 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 
+/// Canonical render orders for named dynamic sections. Lower renders first.
+///
+/// Dynamic sections are a small registry rather than a push-order list:
+/// every contributor (the builder's own blocks, memory, coordinator mode, the
+/// sub-agent role line) names its section and picks a slot from this table,
+/// and [`SystemPrompt::set_dynamic_section`] places it by order rather than by
+/// who happened to run last. A contributor that must precede the environment
+/// block — coordinator mode used to `insert(0, …)` for this — takes
+/// [`ROLE`]; one that only needs to be present takes [`APPEND`].
+///
+/// Gaps between slots are deliberate so a new contributor can pick a place
+/// without renumbering. Sections that share an order keep insertion order.
+pub mod section_order {
+    /// A role override that must lead the dynamic block (coordinator mode).
+    pub const ROLE: i32 = 0;
+    /// `# Environment context`.
+    pub const ENVIRONMENT: i32 = 100;
+    /// `# Project instructions` (`AGENTS.md` chain).
+    pub const INSTRUCTION_FILES: i32 = 200;
+    /// `# auto memory`.
+    pub const MEMORY: i32 = 300;
+    /// The sub-agent identity line and custom-agent body.
+    pub const AGENT_ROLE: i32 = 400;
+    /// Anything appended without naming a slot: legacy
+    /// [`super::SystemPromptBuilder::append_section`] callers and direct
+    /// pushes onto `dynamic_sections`.
+    pub const APPEND: i32 = 1_000;
+}
+
+/// Name + order for one dynamic section, kept alongside `dynamic_sections`
+/// by index so ordered insertion and by-name replacement work after `build()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SectionMeta {
+    /// Empty for anonymous sections (legacy appends, direct pushes); an
+    /// anonymous section is never matched by name.
+    name: String,
+    order: i32,
+}
+
 /// Structured system prompt with an explicit static/dynamic split.
 ///
 /// Static sections are stable across requests and suitable for aggressive
@@ -60,9 +99,91 @@ pub struct SystemPrompt {
     /// overrides are two separate applications, and the session one must not
     /// silently drop what the process appended.
     builtin_static_sections: usize,
+    /// Name and order of each entry in `dynamic_sections`, by index.
+    ///
+    /// `dynamic_sections` is public and some callers still push onto it
+    /// directly; [`Self::sync_dynamic_meta`] pads this to match before any
+    /// ordered operation, treating such entries as anonymous
+    /// [`section_order::APPEND`] sections.
+    dynamic_meta: Vec<SectionMeta>,
 }
 
 impl SystemPrompt {
+    /// Place a named dynamic section at its ordered position.
+    ///
+    /// The section lands after every existing section whose order is less
+    /// than or equal to `order` and before the first whose order is greater,
+    /// so contributors that share a slot keep insertion order. A section
+    /// already registered under `name` is replaced in place (its position
+    /// and order are kept), which is how a mode shadows a default section
+    /// without knowing where it was rendered.
+    pub fn set_dynamic_section(
+        &mut self,
+        name: impl Into<String>,
+        order: i32,
+        text: impl Into<String>,
+    ) {
+        let name = name.into();
+        let text = text.into();
+        self.sync_dynamic_meta();
+        if !name.is_empty() {
+            if let Some(index) = self.dynamic_meta.iter().position(|m| m.name == name) {
+                self.dynamic_sections[index] = text;
+                return;
+            }
+        }
+        let index = self
+            .dynamic_meta
+            .iter()
+            .position(|m| m.order > order)
+            .unwrap_or(self.dynamic_meta.len());
+        self.dynamic_sections.insert(index, text);
+        self.dynamic_meta.insert(index, SectionMeta { name, order });
+    }
+
+    /// The text of the named dynamic section, if registered.
+    #[must_use]
+    pub fn dynamic_section(&self, name: &str) -> Option<&str> {
+        if name.is_empty() {
+            return None;
+        }
+        self.dynamic_meta
+            .iter()
+            .position(|m| m.name == name)
+            .and_then(|index| self.dynamic_sections.get(index))
+            .map(String::as_str)
+    }
+
+    /// Remove the named dynamic section; returns whether one was present.
+    pub fn remove_dynamic_section(&mut self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        self.sync_dynamic_meta();
+        match self.dynamic_meta.iter().position(|m| m.name == name) {
+            Some(index) => {
+                self.dynamic_sections.remove(index);
+                self.dynamic_meta.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Bring `dynamic_meta` back in step with `dynamic_sections` after direct
+    /// mutation of the public vector: sections without metadata become
+    /// anonymous [`section_order::APPEND`] entries; surplus metadata is
+    /// dropped.
+    fn sync_dynamic_meta(&mut self) {
+        self.dynamic_meta.truncate(self.dynamic_sections.len());
+        while self.dynamic_meta.len() < self.dynamic_sections.len() {
+            self.dynamic_meta.push(SectionMeta {
+                name: String::new(),
+                order: section_order::APPEND,
+            });
+        }
+    }
+
     /// Concatenate all sections (static then dynamic) into a single prompt string.
     #[must_use]
     pub fn render(&self) -> String {
@@ -229,7 +350,10 @@ pub struct SystemPromptBuilder {
     output_style_prompt: Option<String>,
     os_name: Option<String>,
     os_version: Option<String>,
-    append_sections: Vec<String>,
+    /// Named dynamic sections with an explicit [`section_order`] slot, plus
+    /// anonymous [`Self::append_section`] entries (empty name,
+    /// [`section_order::APPEND`]). Placed by order at [`Self::build`].
+    dynamic_sections: Vec<(String, i32, String)>,
     project_context: Option<ProjectContext>,
     config: Option<RuntimeConfig>,
 }
@@ -266,9 +390,36 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Append an anonymous dynamic section at the [`section_order::APPEND`]
+    /// slot. Prefer [`Self::with_dynamic_section`] for anything another
+    /// contributor may need to find, replace, or order against.
     #[must_use]
-    pub fn append_section(mut self, section: impl Into<String>) -> Self {
-        self.append_sections.push(section.into());
+    pub fn append_section(self, section: impl Into<String>) -> Self {
+        self.with_dynamic_section("", section_order::APPEND, section)
+    }
+
+    /// Register a named dynamic section at `order` (see [`section_order`]).
+    /// Registering the same non-empty name again replaces the earlier text.
+    #[must_use]
+    pub fn with_dynamic_section(
+        mut self,
+        name: impl Into<String>,
+        order: i32,
+        text: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let text = text.into();
+        if !name.is_empty() {
+            if let Some(existing) = self
+                .dynamic_sections
+                .iter_mut()
+                .find(|(n, _, _)| *n == name)
+            {
+                existing.2 = text;
+                return self;
+            }
+        }
+        self.dynamic_sections.push((name, order, text));
         self
     }
 
@@ -286,25 +437,35 @@ impl SystemPromptBuilder {
         static_sections.push(get_actions_section());
         static_sections.push(get_using_tools_section());
 
-        let mut dynamic_sections = Vec::new();
+        let mut prompt = SystemPrompt {
+            builtin_static_sections: static_sections.len(),
+            static_sections,
+            dynamic_sections: Vec::new(),
+            dynamic_meta: Vec::new(),
+        };
         // `# Environment context` absorbed the two sections that used to follow
         // it. `# Project context` restated the working directory verbatim and
         // added a count of discovered instruction files, which the files
         // themselves make redundant; `# Runtime config` named the settings file
         // that had been loaded, which the model can neither read nor change.
-        dynamic_sections.push(self.environment_section());
+        prompt.set_dynamic_section(
+            "environment",
+            section_order::ENVIRONMENT,
+            self.environment_section(),
+        );
         if let Some(project_context) = &self.project_context {
             if !project_context.instruction_files.is_empty() {
-                dynamic_sections.push(render_instruction_files(&project_context.instruction_files));
+                prompt.set_dynamic_section(
+                    "instruction-files",
+                    section_order::INSTRUCTION_FILES,
+                    render_instruction_files(&project_context.instruction_files),
+                );
             }
         }
-        dynamic_sections.extend(self.append_sections.iter().cloned());
-
-        SystemPrompt {
-            builtin_static_sections: static_sections.len(),
-            static_sections,
-            dynamic_sections,
+        for (name, order, text) in &self.dynamic_sections {
+            prompt.set_dynamic_section(name.clone(), *order, text.clone());
         }
+        prompt
     }
 
     /// Legacy helper: build and render into a single string.
@@ -749,13 +910,84 @@ fn get_using_tools_section() -> String {
 mod tests {
     use super::{
         collapse_blank_lines, display_context_path, normalize_instruction_content,
-        render_instruction_content, render_instruction_files, truncate_instruction_content,
-        ContextFile, ProjectContext, SystemPromptBuilder,
+        render_instruction_content, render_instruction_files, section_order,
+        truncate_instruction_content, ContextFile, ProjectContext, SystemPrompt,
+        SystemPromptBuilder,
     };
     use crate::config::ConfigLoader;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn named_dynamic_sections_render_by_order_not_by_registration_time() {
+        // Registered out of order: memory, then a ROLE override, then an
+        // anonymous append. The rendered block must follow the slot table.
+        let prompt = SystemPromptBuilder::new()
+            .with_os("linux", "6.8")
+            .with_dynamic_section("memory", section_order::MEMORY, "# auto memory")
+            .append_section("appended last")
+            .with_dynamic_section("coordinator-role", section_order::ROLE, "You coordinate.")
+            .build();
+
+        assert_eq!(
+            prompt.dynamic_sections,
+            vec![
+                "You coordinate.".to_string(),
+                prompt.dynamic_sections[1].clone(), // # Environment context
+                "# auto memory".to_string(),
+                "appended last".to_string(),
+            ]
+        );
+        assert!(prompt.dynamic_sections[1].starts_with("# Environment context"));
+        assert_eq!(prompt.dynamic_section("memory"), Some("# auto memory"));
+        assert_eq!(prompt.dynamic_section(""), None);
+    }
+
+    #[test]
+    fn set_dynamic_section_replaces_same_name_in_place_and_orders_after_build() {
+        let mut prompt = SystemPromptBuilder::new().with_os("linux", "6.8").build();
+        // A direct push (legacy caller) is an anonymous APPEND entry …
+        prompt.dynamic_sections.push("pushed directly".to_string());
+        // … so a ROLE section registered afterwards still lands first.
+        prompt.set_dynamic_section("role", section_order::ROLE, "v1");
+        prompt.set_dynamic_section("agent-role", section_order::AGENT_ROLE, "agent");
+        assert_eq!(prompt.dynamic_sections[0], "v1");
+        assert_eq!(
+            prompt.dynamic_sections.last().map(String::as_str),
+            Some("pushed directly")
+        );
+        let agent_index = prompt
+            .dynamic_sections
+            .iter()
+            .position(|s| s == "agent")
+            .unwrap();
+        assert!(agent_index > 1 && agent_index < prompt.dynamic_sections.len() - 1);
+
+        let len = prompt.dynamic_sections.len();
+        prompt.set_dynamic_section("role", section_order::ROLE, "v2");
+        assert_eq!(
+            prompt.dynamic_sections.len(),
+            len,
+            "same name replaces, never duplicates"
+        );
+        assert_eq!(prompt.dynamic_sections[0], "v2");
+        assert_eq!(prompt.dynamic_section("role"), Some("v2"));
+
+        assert!(prompt.remove_dynamic_section("role"));
+        assert!(!prompt.remove_dynamic_section("role"));
+        assert_eq!(prompt.dynamic_section("role"), None);
+        assert!(prompt.dynamic_sections[0].starts_with("# Environment context"));
+    }
+
+    #[test]
+    fn same_order_keeps_insertion_order() {
+        let mut prompt = SystemPrompt::default();
+        prompt.set_dynamic_section("a", section_order::AGENT_ROLE, "a");
+        prompt.set_dynamic_section("b", section_order::AGENT_ROLE, "b");
+        prompt.set_dynamic_section("first", section_order::ROLE, "first");
+        assert_eq!(prompt.dynamic_sections, vec!["first", "a", "b"]);
+    }
 
     fn temp_dir() -> std::path::PathBuf {
         let nanos = SystemTime::now()

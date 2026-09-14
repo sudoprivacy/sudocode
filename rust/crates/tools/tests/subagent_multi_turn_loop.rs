@@ -229,7 +229,7 @@ fn abort_signal_after_turn_exits_without_draining_or_resuming() {
         move |_prompt| {
             let idx = turn_count_cb.fetch_add(1, Ordering::SeqCst);
             if idx == 0 {
-                // Simulate an out-of-band abort (e.g., TaskStop or
+                // Simulate an out-of-band abort (e.g., pid_kill or
                 // shutdown_request via the abort registry) AND ALSO
                 // drop a plain-text envelope onto the mailbox to
                 // prove abort wins over the envelope drain.

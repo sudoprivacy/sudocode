@@ -1,9 +1,9 @@
-//! Wire-schema lock for `TaskOutput`'s JSON projection of an
+//! Wire-schema lock for `pid_output`'s JSON projection of an
 //! `AgentOutput` manifest.
 //!
 //! The coordinator prompt + our PTY tests (`pty_agent_summary` in
 //! particular) train the LLM to look for specific snake_case field
-//! names in the TaskOutput response. Any drift in the wire shape
+//! names in the pid_output response. Any drift in the wire shape
 //! silently breaks that contract — the model can't find fields the
 //! coordinator prompt tells it exist, and downstream tests fail
 //! obliquely with "field not found" chains.
@@ -18,7 +18,7 @@
 //! 4. **Optionals present when set** — this is exactly the bug that
 //!    slipped through 4 commits before session 4's live-PTY run
 //!    caught it: `result_full_path` stored on disk but not surfaced
-//!    to TaskOutput. Regression guard.
+//!    to pid_output. Regression guard.
 //!
 //! The compile-time guard against forgotten fields lives in
 //! `build_agent_output_view`'s exhaustive destructure; this file
@@ -55,7 +55,7 @@ fn unique_workspace(label: &str) -> std::path::PathBuf {
 
 fn task_output_for(agent_id: &str) -> serde_json::Value {
     let out =
-        tools::execute_tool("TaskOutput", &serde_json::json!({ "agent_id": agent_id })).unwrap();
+        tools::execute_tool("pid_output", &serde_json::json!({ "agent_id": agent_id })).unwrap();
     serde_json::from_str(&out).expect("valid json")
 }
 
@@ -89,15 +89,15 @@ fn wire_schema_has_snake_case_base_fields_after_terminal_state() {
     ] {
         assert!(
             value.get(key).is_some(),
-            "TaskOutput wire schema MUST expose base field `{key}` in snake_case"
+            "pid_output wire schema MUST expose base field `{key}` in snake_case"
         );
     }
     // Explicitly reject camelCase — a serde annotation drift would
     // silently ship both, doubling every response's size.
-    assert!(value.get("agentId").is_none(), "no camelCase in TaskOutput");
+    assert!(value.get("agentId").is_none(), "no camelCase in pid_output");
     assert!(
         value.get("outputFile").is_none(),
-        "no camelCase in TaskOutput"
+        "no camelCase in pid_output"
     );
 
     std::env::remove_var("SUDOCODE_AGENT_STORE");
@@ -166,7 +166,7 @@ fn wire_schema_surfaces_result_full_path_when_summarizer_recorded_it() {
     assert_eq!(
         value["result_full_path"].as_str(),
         Some(sidecar.display().to_string().as_str()),
-        "result_full_path MUST surface in TaskOutput"
+        "result_full_path MUST surface in pid_output"
     );
     assert_eq!(
         value["total_tokens"].as_u64(),

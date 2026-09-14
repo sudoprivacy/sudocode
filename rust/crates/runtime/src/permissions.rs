@@ -612,19 +612,19 @@ mod tests {
     fn cc_spelled_tools_resolve_to_their_canonical_requirement() {
         let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
             .with_tool_requirement("pid_status", PermissionMode::ReadOnly)
-            .with_tool_requirement("send", PermissionMode::WorkspaceWrite);
+            .with_tool_requirement("send", PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("TaskGet", PermissionMode::ReadOnly)
+            .with_tool_requirement("TaskList", PermissionMode::ReadOnly);
 
-        for cc_name in ["TaskList", "TaskGet"] {
+        // TaskGet/TaskList are their own tools now (to-do registry),
+        // separate from pid_status (agent process table).
+        for name in ["TaskList", "TaskGet"] {
             assert_eq!(
-                policy.required_mode_for(cc_name),
+                policy.required_mode_for(name),
                 PermissionMode::ReadOnly,
-                "`{cc_name}` must resolve to pid_status's requirement, not the \
-                 DangerFullAccess default"
+                "`{name}` should be ReadOnly"
             );
-            assert_eq!(
-                policy.authorize(cc_name, "{}", None),
-                PermissionOutcome::Allow
-            );
+            assert_eq!(policy.authorize(name, "{}", None), PermissionOutcome::Allow);
         }
         assert_eq!(
             policy.required_mode_for("SendMessage"),

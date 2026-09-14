@@ -108,6 +108,11 @@ checkpoint are summarized together; recent messages and complete tool exchanges
 are retained by token budget. Automatic compaction first tries trimming large
 tool outputs to avoid an unnecessary model call.
 
+The checkpoint prompt asks for a complete summary within 8,000 tokens where
+possible. Generation has a fixed ceiling of 12,000 output tokens, capped by
+the model's smaller output limit (including a `maxOutputTokens` override).
+The model's context-window limit still applies.
+
 Failed, empty, truncated, or non-shrinking summaries leave history intact and
 report an error instead of continuing with a statistical or empty history.
 Pre-request failure stops that request. A post-turn maintenance failure keeps

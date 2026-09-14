@@ -119,7 +119,7 @@ fn serve(
         serve_delegation(&mut socket, &request);
         return;
     }
-    if streaming && mode == "success" {
+    if streaming && (mode == "success" || mode.starts_with("long-summary")) {
         serve_success_stream(&mut socket);
         return;
     }
@@ -142,20 +142,32 @@ fn serve(
             "400 Bad Request",
             json!({"type":"error","error":{"type":"invalid_request_error","message":format!("internal deployment rejected model={} max_tokens={}", request["model"], request["max_tokens"])}}),
         )
+    } else if mode == "long-summary-fallback" && number == 1 {
+        (
+            "400 Bad Request",
+            json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction unavailable"}}),
+        )
     } else if mode == "error" {
         (
             "400 Bad Request",
             json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
         )
     } else {
+        // A checkpoint that needs more than the former 8192-token ceiling.
+        // The provider truncates it when the actual request budget is too small.
+        let long_summary = mode.starts_with("long-summary");
+        let truncated = mode == "truncated"
+            || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
         let text = match mode {
             "empty" => String::new(),
             "growing" => "unhelpful repetition ".repeat(20_000),
+            _ if long_summary && truncated => "<summary>Incomplete checkpoint".into(),
+            _ if long_summary => format!("<summary>PROJECT_ALPHA {}CHECKPOINT_COMPLETE</summary>", "fact ".repeat(7_200)),
             _ => format!("<summary>Consolidated checkpoint {number}: preserve project ALPHA and pending deployment. Next: verify tests.</summary>"),
         };
         (
             "200 OK",
-            json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if mode == "truncated" {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":50}}),
+            json!({"id":"compact-fixture", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6", "content":[{"type":"text", "text":text}], "stop_reason":if truncated {"max_tokens"} else {"end_turn"}, "usage":{"input_tokens":1000,"output_tokens":if long_summary {10_000} else {50}}}),
         )
     };
     #[cfg(unix)]
@@ -315,6 +327,48 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
 }
 
 #[test]
+fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
+    for (mode, configured_limit, expected_limit) in [
+        ("long-summary", None, 12_000),
+        ("long-summary", Some(16_384), 12_000),
+        ("long-summary", Some(10_000), 10_000),
+        ("long-summary-fallback", Some(16_384), 12_000),
+    ] {
+        let provider = Provider::new(mode);
+        let workspace = HarnessWorkspace::new(mode);
+        workspace.write_mock_config(&provider.url);
+        if let Some(limit) = configured_limit {
+            let config_path = workspace.config_home.join("sudocode.json");
+            let mut config: Value =
+                serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+            config["models"]["claude-sonnet"]["maxOutputTokens"] = json!(limit);
+            std::fs::write(config_path, config.to_string()).unwrap();
+        }
+        let path = fixture(&workspace);
+        assert_eq!(compact(&workspace, &path, "Messages removed"), 0);
+        let restored = Session::load_from_path(&path).unwrap();
+        let summary = &restored.compaction.as_ref().unwrap().summary;
+        assert!(summary.len() > 8_192 * 4);
+        assert!(summary.ends_with("CHECKPOINT_COMPLETE</summary>"));
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            if mode.ends_with("fallback") { 2 } else { 1 }
+        );
+        assert!(requests.iter().all(|r| r["max_tokens"] == expected_limit));
+        assert!(requests.iter().all(|r| {
+            r["messages"].as_array().unwrap().last().unwrap()["content"]
+                .to_string()
+                .contains("Aim to keep the entire summary within 8,000 tokens")
+        }));
+        assert!(requests[0]["tools"].is_array());
+        if mode.ends_with("fallback") {
+            assert!(requests[1]["tools"].is_null());
+        }
+    }
+}
+
+#[test]
 fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     let provider = Provider::new("success");
     let workspace = HarnessWorkspace::new("rolling-checkpoint");
@@ -418,6 +472,53 @@ fn resume(workspace: &HarnessWorkspace, path: &std::path::Path) -> pty_expect::P
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn automatic_compaction_continues_after_a_long_summary() {
+    let provider = Provider::new("long-summary");
+    let workspace = HarnessWorkspace::new("automatic-long-summary");
+    workspace.write_mock_config(&provider.url);
+    let config_path = workspace.config_home.join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    // Trigger on the original history, leaving enough room below the pressure
+    // threshold for a 10K checkpoint plus the preserved recent messages.
+    config["models"]["claude-sonnet"]["contextWindow"] = json!(64_000);
+    config["models"]["claude-sonnet"]["maxOutputTokens"] = json!(16_384);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let path = fixture(&workspace);
+    let mut session = Session::load_from_path(&path).unwrap();
+    for message in &mut session.messages {
+        for block in &mut message.blocks {
+            if let ContentBlock::Text { text } = block {
+                *text = text.repeat(2);
+            }
+        }
+    }
+    session.save_to_path(&path).unwrap();
+
+    let mut cli = resume(&workspace, &path);
+    cli.expect("❯").unwrap();
+    cli.send("Continue PROJECT_ALPHA using all earlier decisions.\r")
+        .unwrap();
+    cli.expect("ALPHA_CONTEXT_OK").unwrap();
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let restored = Session::load_from_path(&path).unwrap();
+    assert!(restored
+        .compaction
+        .as_ref()
+        .unwrap()
+        .summary
+        .ends_with("CHECKPOINT_COMPLETE</summary>"));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.iter().filter(|r| r["stream"] != true).count(), 1);
+    assert!(requests
+        .iter()
+        .all(|r| { r["max_tokens"] == if r["stream"] == true { 16_384 } else { 12_000 } }));
+    assert!(requests
+        .iter()
+        .any(|r| r["stream"] == true && r["messages"].to_string().contains("CHECKPOINT_COMPLETE")));
 }
 
 #[test]

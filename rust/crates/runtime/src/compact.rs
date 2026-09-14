@@ -20,7 +20,7 @@ const NO_TOOLS_PREAMBLE: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call a
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.\n\
 - Your entire response must be plain text: a <summary> block.\n\n";
 
-const BASE_COMPACT_PROMPT: &str = "Create a concise checkpoint for continuing this coding task. Output only a <summary> block with these sections, using short bullets and (none) for empty sections:
+const BASE_COMPACT_PROMPT: &str = "Create a concise checkpoint for continuing this coding task. Aim to keep the entire summary within 8,000 tokens while preserving the information needed to continue the task. Output only a <summary> block with these sections, using short bullets and (none) for empty sections:
 
 1. Primary Request and Intent
 2. Key Technical Concepts
@@ -41,9 +41,9 @@ Tool calls will be rejected and you will fail the task.";
 const COMPACTION_SYSTEM_PROMPT: &str =
     "You are a helpful AI assistant tasked with summarizing conversations.";
 
-/// Maximum output tokens requested from the LLM for a compaction summary.
-/// Keep rolling checkpoints bounded; providers may have a smaller ceiling.
-pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 8_192;
+/// Fixed compaction output ceiling, with room to finish an 8,000-token target
+/// summary. Providers may impose a smaller output limit.
+pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 12_000;
 
 /// Base buffer subtracted from context window when computing the auto-compact
 /// threshold. Scaled by [`autocompact_buffer_tokens`] for large context
@@ -632,7 +632,6 @@ pub async fn compact_session<C: ApiClient>(
     let prompt = build_compaction_prompt(custom_instructions);
     let compaction_messages = build_compaction_messages(removed, &prompt);
 
-    // Determine max tokens for compaction output
     let max_tokens = std::cmp::min(
         COMPACT_MAX_OUTPUT_TOKENS,
         crate::model_capabilities::max_output_tokens_or_default(model),

@@ -131,3 +131,51 @@ fn resume_latest_renders_messages_after_banner() {
     });
     assert_eq!(exit, 0);
 }
+
+/// Regression: the iocraft REPL (queue mode) must replay the restored
+/// conversation to scrollback on resume, not just print the banner. Before the
+/// fix, only the rustyline path (queue mode off) rendered history, so a resumed
+/// session in the default async REPL looked empty.
+#[test]
+fn resume_renders_history_in_iocraft_queue_mode() {
+    let env = common::TestEnv::new("resume-iocraft");
+    let root = env.workspace_root().to_path_buf();
+    fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
+
+    // Run a turn in queue (iocraft) mode so the session has a distinctive
+    // assistant reply.
+    let prompt = env.prompt("say hello world", "single_turn_text");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(Duration::from_secs(15));
+    sess.expect("❯").expect("REPL prompt");
+    sess.send(&format!("{prompt}\r")).expect("send prompt");
+    sess.expect("The answer is 4").expect("assistant reply");
+    std::thread::sleep(Duration::from_millis(400));
+    sess.send("/exit\r").expect("send exit");
+    sess.expect_eof().expect("clean exit");
+
+    // Resume in queue mode: the restored assistant reply must appear in
+    // scrollback (rendered history), not just the banner.
+    let mut sess2 = env.spawn_with_env(
+        &["--resume", "latest", "--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess2.set_default_timeout(Duration::from_secs(15));
+    sess2.expect("The answer is 4").unwrap_or_else(|e| {
+        let screen = sess2.render(|s| s.contents());
+        panic!(
+            "resumed iocraft REPL must replay history to scrollback: {e}\nPTY screen:\n{screen}"
+        );
+    });
+
+    std::thread::sleep(Duration::from_millis(400));
+    sess2.send("/exit\r").expect("send exit");
+    let exit = sess2.expect_eof().unwrap_or_else(|e| {
+        let screen = sess2.render(|s| s.contents());
+        panic!("exit: {e}\nPTY screen:\n{screen}");
+    });
+    assert_eq!(exit, 0);
+}

@@ -69,7 +69,7 @@ Enable it per project or per user:
 ```
 
 Passing `filesystemMode` or `isolateNetwork` on a single `bash` call also
-counts as opting in for that call. `scode sandbox --status` shows the
+counts as opting in for that call. `scode sandbox` shows the
 resolved backend (`none`, `linux-namespaces`, or `macos-seatbelt`) and,
 while Seatbelt is off, the fallback reason says how to turn it on.
 
@@ -84,7 +84,7 @@ be unsandboxed.
 surfaces the detection through `scode sandbox` and `scode doctor`.
 
 ```bash
-scode sandbox --status
+scode sandbox
 ```
 
 ## Inspecting the current state

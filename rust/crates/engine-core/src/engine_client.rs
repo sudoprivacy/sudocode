@@ -351,6 +351,14 @@ impl ApiClient for EngineApiClient {
             .await
     }
 
+    fn reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref()
+    }
+
+    fn thinking_enabled(&self) -> bool {
+        self.thinking_enabled
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let is_post_tool = request_ends_with_tool_result(&request);
         let discovered = self.enable_tools.then(|| {

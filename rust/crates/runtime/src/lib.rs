@@ -210,10 +210,11 @@ pub use remote::{
     UPSTREAM_PROXY_ENV_KEYS,
 };
 pub use sandbox::{
-    build_linux_sandbox_command, detect_container_environment, detect_container_environment_from,
-    resolve_sandbox_status, resolve_sandbox_status_for_request, ContainerEnvironment,
-    FilesystemIsolationMode, LinuxSandboxCommand, SandboxConfig, SandboxDetectionInputs,
-    SandboxRequest, SandboxStatus,
+    build_linux_sandbox_command, build_macos_sandbox_command, build_sandbox_command,
+    detect_container_environment, detect_container_environment_from, resolve_sandbox_status,
+    resolve_sandbox_status_for_request, seatbelt_profile, ContainerEnvironment,
+    FilesystemIsolationMode, LinuxSandboxCommand, SandboxBackend, SandboxCommand, SandboxConfig,
+    SandboxDetectionInputs, SandboxRequest, SandboxStatus,
 };
 pub use session::{
     ContentBlock, ConversationMessage, MessageRole, Session, SessionCompaction, SessionError,

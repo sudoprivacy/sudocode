@@ -518,7 +518,7 @@ impl SessionEngine {
                 () = wait_for_abort(&abort_signal) => None,
             }
         });
-        let Some((result, method)) = compaction.filter(|_| !abort_signal.is_aborted()) else {
+        let Some(attempt) = compaction.filter(|_| !abort_signal.is_aborted()) else {
             if let Some(tracer) = session.runtime.session_tracer() {
                 tracer.record("slash_compact_cancelled", Map::new());
             }
@@ -531,16 +531,20 @@ impl SessionEngine {
                 method: None,
             });
         };
+        let (result, method) = attempt.map_err(|error| error.to_string())?;
         let removed = result.removed_message_count;
         let summary_source = result.summary_source;
         if removed > 0 {
-            *session.runtime.session_mut() = result.compacted_session;
             let path = session.handle.path.clone();
+            result
+                .compacted_session
+                .save_compacted_to_path(session.runtime.session(), &path)
+                .map_err(|e| {
+                    format!("failed to persist compacted session; history preserved: {e}")
+                })?;
             session
                 .runtime
-                .session()
-                .save_to_path(&path)
-                .map_err(|e| format!("failed to persist compacted session: {e}"))?;
+                .install_compacted_session(result.compacted_session);
         }
         let kept = session.runtime.session().messages.len();
         let after_tokens = estimate_session_tokens(session.runtime.session());
@@ -696,16 +700,19 @@ impl engine_core::EngineDelegate for SessionEngine {
                     attrs
                 });
             }
-            pre_send_compaction = self.rt().block_on(session.runtime.compact_in_place(
-                CompactionConfig {
-                    // Bypass the size heuristic: the budget check above is
-                    // the decision, and `should_compact`'s coarser default
-                    // gate would only be able to veto it.
-                    max_estimated_tokens: 0,
-                    ..CompactionConfig::default()
-                },
-                runtime::CompactionTrigger::Preflight,
-            ));
+            pre_send_compaction = self
+                .rt()
+                .block_on(session.runtime.compact_in_place(
+                    CompactionConfig {
+                        // Bypass the size heuristic: the budget check above is
+                        // the decision, and `should_compact`'s coarser default
+                        // gate would only be able to veto it.
+                        max_estimated_tokens: 0,
+                        ..CompactionConfig::default()
+                    },
+                    runtime::CompactionTrigger::Preflight,
+                ))
+                .map_err(|error| error.to_string())?;
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
@@ -1174,21 +1181,26 @@ impl SessionLifecycle for SessionEngine {
         let _scope = runtime::WorkspaceRootScope::enter(&cwd);
         let result = self
             .rt()
-            .block_on(session.runtime.compact(CompactionConfig::default(), None));
+            .block_on(session.runtime.compact(CompactionConfig::default(), None))
+            .map_err(|error| error.to_string())?;
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
         // Surface the summary provenance to the renderer's `/compact` report
         // (LLM vs heuristic) — main's compaction hardening added this column.
         let summary_source = result.summary_source;
-        let handle = session.handle.clone();
-        self.rebuild_locked(&mut session, result.compacted_session, handle)?;
-        let path = session.handle.path.clone();
-        session
-            .runtime
-            .session()
-            .save_to_path(&path)
-            .map_err(|e| e.to_string())?;
+        if !skipped {
+            let path = session.handle.path.clone();
+            result
+                .compacted_session
+                .save_compacted_to_path(session.runtime.session(), &path)
+                .map_err(|error| {
+                    format!("compaction persistence failed; history preserved: {error}")
+                })?;
+            session
+                .runtime
+                .install_compacted_session(result.compacted_session);
+        }
         Ok((removed, kept, skipped, summary_source))
     }
 }

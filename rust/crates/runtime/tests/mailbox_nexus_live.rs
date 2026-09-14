@@ -192,6 +192,85 @@ fn live_blocking_read_wakes_on_write() {
     println!("blocking read woke on write after {woke:?} (idle timeout was {idle_elapsed:?})");
 }
 
+/// A co-host agent reads its inbox, runs a turn, and replies.
+///
+/// The third plane, and the one nothing else here reaches. Every other test in
+/// this file drives an agent that is a CLIENT of a daemon; a co-host agent runs
+/// INSIDE one, so its receive loop, its turn and its `send` all happen in the
+/// daemon's process. That loop has had bugs of its own — the re-reply storm a
+/// durable cursor fixed was this one — and from outside, a co-host that never
+/// wakes is indistinguishable from a message that never arrived.
+///
+/// So the assertion is the agent's OWN outbound envelope, not its inbox: a
+/// message landing proves the send worked, and only a reply proves the agent
+/// read it, decided, and acted.
+///
+/// Deterministic because the agent's provider is this repo's mock service —
+/// `e2e/nexus-a2a/run-cohost.sh` boots the daemon pointed at it — so the turn
+/// is scripted rather than a live model's choice. The body carries the scenario
+/// marker that selects it.
+///
+/// ## Not yet observed passing
+///
+/// Everything up to the reply is verified: the co-host boots against the mock,
+/// an agent spawns, and the message lands in the inbox that agent's loop reads
+/// (`Mailbox::a2a_inbox`, so `/agents/<name>/chat-with-me`). The reply has not
+/// been seen, and the reason is not this test: the only co-host image available
+/// carries the sudocode rev the NEXUS `Cargo.lock` pins, which is hundreds of
+/// commits behind — the agent inside it predates the send path this is meant to
+/// exercise. Proving it needs that pin bumped and the image rebuilt, which is a
+/// nexus-repo integration rather than a test fix.
+///
+/// Left `#[ignore]` and driven only by the harness, so it cannot be mistaken
+/// for a passing guard in the meantime.
+#[test]
+#[ignore = "requires a co-host daemon; e2e/nexus-a2a/run-cohost.sh sets this up"]
+fn live_cohost_reads_its_inbox_and_replies() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let agent = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<co-host>");
+    let reply_to =
+        std::env::var("NEXUS_A2A_TEST_REPLY_TO").expect("set NEXUS_A2A_TEST_REPLY_TO=<operator>");
+    let expected = std::env::var("NEXUS_A2A_TEST_REPLY_BODY")
+        .expect("set NEXUS_A2A_TEST_REPLY_BODY to what the scenario answers");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the co-host daemon"));
+
+    // From where the operator's inbox is NOW, so the reply found below is this
+    // run's rather than a previous one's.
+    let (_history, before) = mailbox(&client, &reply_to, &auth)
+        .poll(0, 0)
+        .expect("seek the operator's inbox to its tail");
+
+    // The marker is what makes the agent's turn scripted. Without it the mock
+    // refuses an unrecognised prompt, and the agent would fail its turn rather
+    // than reply — which reads identically to a receive loop that never woke.
+    let ask = "reply to me PARITY_SCENARIO:cohost_reply";
+    send_to(&client, &reply_to, &agent, ask, &auth).expect("send to the co-host's inbox");
+
+    // Generous: this waits on a whole turn inside the daemon — read, model
+    // round trip, tool dispatch, write — not on a single RPC.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let (msgs, _next) = mailbox(&client, &reply_to, &auth)
+            .poll(before, 0)
+            .expect("read the operator's inbox");
+        if let Some(reply) = msgs.iter().find(|m| m.from == agent) {
+            assert!(
+                reply.body.contains(&expected),
+                "the co-host replied, but not with what its turn was scripted to say: {reply:?}"
+            );
+            println!("co-host {agent} replied to {reply_to}: {}", reply.body);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the co-host never replied to {reply_to} — it either never woke on its              inbox, never ran a turn, or its `send` did not reach the operator"
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// A send to an agent that has NEVER RUN reaches it.
 ///
 /// The durable-inbox promise: a message waits for its reader, so sending to an

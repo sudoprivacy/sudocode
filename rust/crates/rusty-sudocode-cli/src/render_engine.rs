@@ -59,10 +59,11 @@ pub(crate) struct EngineEventRenderer {
     /// card still appends normally (the ordered scrollback sink). Off for
     /// one-shot / `--print`, where there is no overlay and the header appends.
     staging_overlay: bool,
-    /// Tool-call arguments remembered from `ToolCall`, keyed by tool_use_id,
-    /// so the completed card (`ToolResult`) can show what was requested — the
-    /// result payload does not echo command/path/strings. Removed on result.
-    tool_inputs: std::collections::HashMap<String, String>,
+    /// Tool-call arguments remembered from `ToolCall` and paired with the
+    /// matching `ToolResult`, so the completed card can show what was requested
+    /// — the result payload does not echo command/path/strings. Shared type
+    /// with session replay ([`crate::cli::format::ToolInputRegistry`]).
+    tool_inputs: crate::cli::format::ToolInputRegistry,
 }
 
 impl EngineEventRenderer {
@@ -75,7 +76,7 @@ impl EngineEventRenderer {
             output_writer,
             thinking_active: false,
             staging_overlay: false,
-            tool_inputs: std::collections::HashMap::new(),
+            tool_inputs: crate::cli::format::ToolInputRegistry::default(),
         }
     }
 
@@ -191,7 +192,7 @@ impl EngineEventRenderer {
                 // requested — the ToolResult event/payload does not echo the
                 // command (bash) or the path/strings (edit), they live only in
                 // the call's input.
-                self.tool_inputs.insert(id.clone(), input.clone());
+                self.tool_inputs.remember(&id, &input);
                 self.pause_spinner();
                 // Staging overlay owns the command header (as a running card),
                 // so suppress the scrollback append here to avoid showing it
@@ -216,7 +217,7 @@ impl EngineEventRenderer {
                 is_error,
             } => {
                 self.pause_spinner();
-                let input = self.tool_inputs.remove(&id).unwrap_or_default();
+                let input = self.tool_inputs.take(&id);
                 let line = format!("{}\n", format_tool_result(&name, &input, &output, is_error));
                 self.write_out(&line);
                 self.resume_spinner();

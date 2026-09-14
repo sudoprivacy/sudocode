@@ -53,12 +53,42 @@ use crate::{
 // Unified message rendering pipeline
 // ---------------------------------------------------------------------------
 
+/// Pairs each tool call's `input` with the `ToolResult` that follows it,
+/// keyed by tool-use id. A tool's identity fields — bash's command,
+/// edit/read/write's path, grep/glob's pattern — live only in the call
+/// `input`; the result payload never echoes them. Both render paths (live
+/// streaming in `render_engine`, and session replay in [`render_message`])
+/// use this one type so the pairing rule has a single home.
+#[derive(Default)]
+pub(crate) struct ToolInputRegistry {
+    inputs: std::collections::HashMap<String, String>,
+}
+
+impl ToolInputRegistry {
+    /// Record a call's input under its tool-use id (seen on `ToolUse`).
+    pub(crate) fn remember(&mut self, id: &str, input: &str) {
+        self.inputs.insert(id.to_string(), input.to_string());
+    }
+
+    /// Take the input remembered for `id` (seen on the matching `ToolResult`),
+    /// removing it. Returns `""` when the call is missing (e.g. a truncated
+    /// session), which the card extractors tolerate by falling back to the
+    /// result payload.
+    pub(crate) fn take(&mut self, id: &str) -> String {
+        self.inputs.remove(id).unwrap_or_default()
+    }
+}
+
 /// Render a single `ConversationMessage` into styled terminal output.
 ///
 /// This is the SSOT for "how does a completed message look on screen."
 /// Both session replay (`--resume`) and any future message display
 /// (e.g. `/history`, export) should call this instead of hand-rolling
 /// role/block matching.
+///
+/// `tool_inputs` carries call inputs forward from each `ToolUse` message to
+/// the `ToolResult` message that follows it (they are separate messages), so
+/// completed cards can show the identity fields the result omits.
 ///
 /// The live REPL uses a different path (streaming event callbacks) for
 /// progressive rendering during a turn, but the *final* visual result
@@ -68,6 +98,7 @@ pub(crate) fn render_message(
     msg: &runtime::ConversationMessage,
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
+    tool_inputs: &mut ToolInputRegistry,
 ) -> Option<String> {
     let mut out = String::new();
 
@@ -95,10 +126,16 @@ pub(crate) fn render_message(
                         }
                         out.push_str(&rendered);
                     }
-                    runtime::ContentBlock::ToolUse { name, input, .. } => {
+                    runtime::ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         if !out.is_empty() {
                             out.push('\n');
                         }
+                        // Remember the call's input so the matching ToolResult
+                        // below can show the identity fields (command, path,
+                        // pattern) that the result payload never echoes.
+                        tool_inputs.remember(id, input);
                         out.push_str(&format_tool_call_start(name, input));
                     }
                     _ => {}
@@ -111,21 +148,20 @@ pub(crate) fn render_message(
         runtime::MessageRole::Tool => {
             for block in &msg.blocks {
                 if let runtime::ContentBlock::ToolResult {
+                    tool_use_id,
                     tool_name,
                     output,
                     is_error,
-                    ..
                 } = block
                 {
                     if !out.is_empty() {
                         out.push('\n');
                     }
-                    // Session replay renders each ToolResult block on its own;
-                    // the matching call's input isn't threaded here, so pass
-                    // empty (extractors fall back to the result payload — same
-                    // as before input threading existed). Live turns supply the
-                    // input via the render engine's per-turn id→input map.
-                    out.push_str(&format_tool_result(tool_name, "", output, *is_error));
+                    // Pair this result with the input remembered from its call
+                    // (`""` if the call is missing, e.g. a truncated session) —
+                    // the same pairing the live render engine does.
+                    let input = tool_inputs.take(tool_use_id);
+                    out.push_str(&format_tool_result(tool_name, &input, output, *is_error));
                 }
             }
             if out.is_empty() {
@@ -139,15 +175,18 @@ pub(crate) fn render_message(
 }
 
 /// Render a slice of messages into a single string. Convenience wrapper
-/// over [`render_message`] for session replay.
+/// over [`render_message`] for session replay. Owns the [`ToolInputRegistry`]
+/// so call inputs carry forward from each `ToolUse` message to the
+/// `ToolResult` message that follows it.
 pub(crate) fn render_messages(
     messages: &[runtime::ConversationMessage],
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
     let mut parts = Vec::new();
+    let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
-        if let Some(rendered) = render_message(msg, term_width, renderer) {
+        if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             parts.push(rendered);
         }
     }
@@ -2327,6 +2366,44 @@ mod tests {
         let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
+    }
+
+    #[test]
+    fn replay_pairs_tool_result_with_its_call_input() {
+        // Regression: the bash command / edit path live only in the ToolUse
+        // input, which is a *separate message* from the ToolResult. Replay must
+        // carry the input forward (via ToolInputRegistry) so the completed card
+        // shows `Bash(<cmd>)`, not an empty `Bash()`.
+        let renderer = crate::render::TerminalRenderer::new();
+        let messages = vec![
+            runtime::ConversationMessage {
+                role: runtime::MessageRole::Assistant,
+                blocks: vec![runtime::ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: r#"{"command":"cargo test --workspace"}"#.to_string(),
+                    thought_signature: None,
+                }],
+                usage: None,
+                model: None,
+            },
+            runtime::ConversationMessage {
+                role: runtime::MessageRole::Tool,
+                blocks: vec![runtime::ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    tool_name: "bash".to_string(),
+                    output: r#"{"stdout":"ok","stderr":""}"#.to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
+        assert!(
+            plain.contains("Bash(cargo test --workspace)"),
+            "replay must show the command from the call input: {plain}"
+        );
     }
 
     #[test]

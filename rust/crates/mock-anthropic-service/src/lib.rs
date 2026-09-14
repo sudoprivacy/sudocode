@@ -38,6 +38,16 @@ pub const UNIFIED_SEND_RECIPIENT: &str = "team-lead";
 /// for. Over nexus the session identity answers instead and this is unused.
 pub const LOCAL_PEER_SENDER: &str = "peer-bot";
 
+/// Who the `cohost_reply` scenario answers.
+///
+/// A co-host agent runs inside the daemon, so nothing on the test side picks
+/// its reply for it — the scenario is the only place that decides, and the
+/// harness watching for that reply has to be watching the same name.
+pub const COHOST_REPLY_TO: &str = "operator";
+
+/// What it answers with. Distinctive enough that finding it cannot be chance.
+pub const COHOST_REPLY_BODY: &str = "PONG from the co-host";
+
 pub const UNIFIED_SEND_BODY: &str = "hello from unified send PARITY_SCENARIO:single_turn_text";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
@@ -211,6 +221,7 @@ enum Scenario {
     DeferredToolRoundtrip,
     UnifiedSendRoundtrip,
     UnifiedSendFromNamedPeer,
+    CohostReply,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -276,6 +287,7 @@ impl Scenario {
             "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
+            "cohost_reply" => Some(Self::CohostReply),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -322,6 +334,7 @@ impl Scenario {
             Self::DeferredToolRoundtrip => "deferred_tool_roundtrip",
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
             Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
+            Self::CohostReply => "cohost_reply",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -508,15 +521,18 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
             _ => None,
         })
     });
+    // Keep the deliberate cancellation delay; otherwise a checkpoint request
+    // must not replay a task scenario from the history it is summarizing.
+    if from_marker != Some(Scenario::DelayedText)
+        && request
+            .system
+            .as_ref()
+            .is_some_and(|system| system.contains("summarizing conversations"))
+    {
+        return Some(Scenario::LlmCompactionRoundtrip);
+    }
     if from_marker.is_some() {
         return from_marker;
-    }
-
-    // Fallback: detect LLM compaction requests by their system prompt.
-    if let Some(system) = &request.system {
-        if system.contains("summarizing conversations") {
-            return Some(Scenario::LlmCompactionRoundtrip);
-        }
     }
 
     None
@@ -530,10 +546,10 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     if is_standard_compaction {
         return false;
     }
-    request.messages.last().map_or(false, |msg| {
+    request.messages.last().is_some_and(|msg| {
         msg.content.iter().any(|block| match block {
             InputContentBlock::Text { text } => {
-                text.contains("create a detailed summary of the conversation")
+                text.contains("Create a concise checkpoint for continuing this coding task")
             }
             _ => false,
         })
@@ -1115,6 +1131,19 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 )],
             ),
         },
+        // A co-host agent answers a peer message by calling `send` back. The
+        // reply's recipient is fixed here because nothing outside the daemon
+        // chooses it: the agent runs in-process and this scenario is its mind.
+        Scenario::CohostReply => match latest_tool_result(request) {
+            Some((tool_output, _)) => final_text_sse(&format!("cohost replied: {tool_output}")),
+            None => tool_use_sse(
+                "toolu_cohost_reply",
+                "send",
+                &[&format!(
+                    r#"{{"to":"{COHOST_REPLY_TO}","message":"{COHOST_REPLY_BODY}","summary":"reply"}}"#
+                )],
+            ),
+        },
         Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
@@ -1628,6 +1657,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
             ),
         },
+        Scenario::CohostReply => match latest_tool_result(request) {
+            Some((tool_output, _)) => text_message_response(
+                "msg_cohost_reply_final",
+                &format!("cohost replied: {tool_output}"),
+            ),
+            None => tool_message_response(
+                "msg_cohost_reply_tool",
+                "toolu_cohost_reply",
+                "send",
+                json!({"to": COHOST_REPLY_TO, "message": COHOST_REPLY_BODY, "summary": "reply"}),
+            ),
+        },
         Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_unified_send_named_final",
@@ -1753,6 +1794,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::DeferredToolRoundtrip => "req_deferred_tool_roundtrip",
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
         Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
+        Scenario::CohostReply => "req_cohost_reply",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",

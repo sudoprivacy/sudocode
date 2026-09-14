@@ -204,6 +204,59 @@ fn paste_containing_placeholder_string_then_enter_does_not_hang() {
     let _ = sess.expect_eof();
 }
 
+/// After submitting a multi-line paste, the scrollback echo must show the
+/// expanded real text — not the compact placeholder — with each continuation
+/// line indented by two spaces (matching `ResponseGlyphState`'s margin for
+/// AI output). This guards the fix for the bug where scrollback printed the
+/// raw `[Pasted text #N]` string and multi-line expansions had no indent.
+#[test]
+fn paste_scrollback_expands_with_continuation_indent() {
+    let env = TestEnv::new("paste-scrollback-indent");
+    let mut sess = spawn_iocraft_repl(&env);
+
+    let payload = "first_xyz\nsecond_xyz\nthird_xyz\nfourth_xyz";
+    sess.send(&bracketed(payload)).expect("send paste");
+    sess.expect("Pasted text #1")
+        .expect("placeholder should appear in the input box");
+
+    sess.send("\r").expect("press Enter to submit");
+
+    // The scrollback echo is a synchronous println before the turn starts.
+    // Poll the rendered screen for the expanded text.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let screen = sess.render(|s| s.contents());
+        if screen.contains("first_xyz") && screen.contains("second_xyz") {
+            // Expansion worked. Verify continuation-line indent: lines
+            // containing "second_xyz" / "third_xyz" / "fourth_xyz" must
+            // start with exactly two spaces (the glyph-margin convention).
+            for target in ["second_xyz", "third_xyz", "fourth_xyz"] {
+                let line = screen
+                    .lines()
+                    .find(|l| l.contains(target))
+                    .unwrap_or_else(|| {
+                        panic!("expected {target} in scrollback, screen:\n{screen}")
+                    });
+                assert!(
+                    line.starts_with("  "),
+                    "continuation line for {target} should have 2-space indent, got: {line:?}\nscreen:\n{screen}"
+                );
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scrollback should show expanded paste text within 10s, screen:\n{}",
+            sess.render(|s| s.contents()),
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    sess.send_ctrl('c').ok();
+    sess.send_ctrl('c').ok();
+    let _ = sess.expect_eof();
+}
+
 /// With bracketed paste enabled (VT console input active for the whole REPL
 /// session on the Windows fork), ordinary keyboard typing must still reach
 /// the TextInput and render — proving the shared ANSI parser path delivers

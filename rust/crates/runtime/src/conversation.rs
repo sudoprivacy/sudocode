@@ -186,6 +186,23 @@ pub trait ApiClient: Send {
         None
     }
 
+    /// Reasoning effort this client sends. Subagents inherit it (an agent
+    /// definition may override), matching CC's
+    /// `agentDefinition.effort ?? state.effortValue`.
+    fn reasoning_effort(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this client enables extended thinking.
+    ///
+    /// Only fork children inherit it. CC disables thinking for ordinary
+    /// subagents "to control output token costs", and inherits it for forks
+    /// specifically "to match the parent's API request prefix for prompt cache
+    /// hits" — a diverging request shape costs the cache.
+    fn thinking_enabled(&self) -> bool {
+        false
+    }
+
     /// Complete a text request using this client's configured model route.
     /// Request conversion and transport live in the shared API layer.
     async fn complete_text(
@@ -564,6 +581,12 @@ pub struct ToolDispatchContext {
     /// there is no observer). The tool executor installs it narrowly around a
     /// single tool call — see [`ProgressSink`].
     pub progress_sink: Option<ProgressSink>,
+    /// The parent's reasoning effort, so a spawned subagent runs at the same
+    /// effort unless its agent definition overrides it.
+    pub parent_reasoning_effort: Option<String>,
+    /// Whether the parent has extended thinking on. Consumed only by the fork
+    /// path; ordinary subagents keep thinking off regardless.
+    pub parent_thinking_enabled: bool,
 }
 
 impl ToolDispatchContext {
@@ -1930,6 +1953,8 @@ where
                 progress_sink: observer
                     .as_deref()
                     .and_then(RuntimeObserver::tool_progress_sink),
+                parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
+                parent_thinking_enabled: self.api_client.thinking_enabled(),
             };
 
             let mut batch_start = 0usize;

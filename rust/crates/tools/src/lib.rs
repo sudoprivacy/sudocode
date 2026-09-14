@@ -1297,12 +1297,34 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        ToolSpec {
+            name: "TaskGet",
+            description: "Get a task's details by ID. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The ID of the task to look up" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskList",
+            description: "List all tasks in the session's to-do registry. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
         // ── pid.* tools ───────────────────────────────────────────────
-        // The one process-control family. A CC-trained model will name
-        // these `TaskStop`/`TaskGet`/`TaskList`/`TaskOutput` and pass
-        // `task_id`/`agent_id`; `TOOL_ALIASES` + the `normalize_pid_*`
-        // helpers accept those spellings without advertising them as a
-        // second set of tools.
+        // Agent process control. `normalize_pid_input` accepts `task_id`
+        // as a field alias for `pid` so older prompts still work.
+        // (`TaskGet`/`TaskList` are separate canonical tools for the
+        // to-do registry, NOT aliases for pid_status.)
         ToolSpec {
             name: "pid_kill",
             description: "Terminate a running agent by pid.",
@@ -1320,9 +1342,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "pid_status",
             description: concat!(
                 "Query the status of one or all agent pids. ",
-                "With `pid`: returns READY/BUSY/TERMINATED for that pid. ",
-                "Without `pid`: returns `background_agents` (every spawned agent and its ",
-                "status) plus `tasks` (the session's task list)."
+                "With `pid`: returns that agent's status. ",
+                "Without `pid`: lists every spawned agent and its status."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1657,21 +1678,22 @@ fn execute_tool_with_enforcer(
         }
         "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
-        // The pid.* family. A CC-trained model names these TaskStop,
-        // TaskGet, TaskList and TaskOutput; TOOL_ALIASES folds those
-        // spellings onto these arms.
+        // Task* to-do registry: TaskGet and TaskList query the planning
+        // checklist (TaskCreate/TaskUpdate items), NOT the process table.
+        // A CC-trained model reaches these through TOOL_ALIASES.
+        "TaskGet" => {
+            let input = normalize_pid_input(input);
+            from_value::<TaskIdInput>(&input).and_then(run_task_get)
+        }
+        "TaskList" => run_task_list(input),
+        // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
             from_value::<TaskIdInput>(&input).and_then(run_task_stop)
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
-            // Single-pid query (like TaskGet) vs list-all (like TaskList)
-            if input.get("task_id").and_then(|v| v.as_str()).is_some() {
-                from_value::<TaskIdInput>(&input).and_then(run_task_get)
-            } else {
-                run_task_list(input)
-            }
+            run_pid_status(input)
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
@@ -1875,7 +1897,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
     }
 }
 
-fn run_task_list(input: Value) -> Result<String, String> {
+fn run_task_list(_input: &Value) -> Result<String, String> {
     let registry = global_task_registry();
     let tasks: Vec<_> = registry
         .list(None)
@@ -1894,12 +1916,38 @@ fn run_task_list(input: Value) -> Result<String, String> {
         })
         .collect();
 
-    // Sub-agents (Agent tool spawns) live in a separate registry —
-    // read them off disk so `TaskList` can be a single stop for
-    // "everything running in this session," matching the downgraded
-    // Background Agent Selector plan (§4.6). `backgrounded_only`
-    // narrows to agents whose status is `backgrounded` or `running`
-    // — exactly the set a coordinator would want to switch between.
+    to_pretty_json(json!({
+        "tasks": tasks,
+        "count": tasks.len(),
+    }))
+}
+
+fn run_pid_status(input: Value) -> Result<String, String> {
+    let pid = input
+        .get("task_id")
+        .or_else(|| input.get("pid"))
+        .and_then(|v| v.as_str());
+
+    if let Some(pid) = pid {
+        let store = agent_store_dir()?;
+        let path = store.join(format!("{pid}.json"));
+        if !path.exists() {
+            return Err(format!("pid not found: {pid}"));
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
+        let manifest: AgentOutput =
+            serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
+        return to_pretty_json(json!({
+            "pid": manifest.agent_id,
+            "status": manifest.status,
+            "name": manifest.name,
+            "description": manifest.description,
+            "subagent_type": manifest.subagent_type,
+            "created_at": manifest.created_at,
+        }));
+    }
+
     let backgrounded_only = input
         .get("backgrounded_only")
         .and_then(Value::as_bool)
@@ -1907,10 +1955,8 @@ fn run_task_list(input: Value) -> Result<String, String> {
     let agents = list_agent_snapshots_from_store(backgrounded_only).unwrap_or_default();
 
     to_pretty_json(json!({
-        "tasks": tasks,
-        "count": tasks.len(),
-        "background_agents": agents,
-        "background_agent_count": agents.len(),
+        "agents": agents,
+        "count": agents.len(),
     }))
 }
 
@@ -2095,8 +2141,8 @@ fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
-// Cap a single blocking TaskOutput call so ACP/upper-layer transports don't
-// drop the connection while we wait. Callers can re-issue TaskOutput to keep
+// Cap a single blocking pid_output call so ACP/upper-layer transports don't
+// drop the connection while we wait. Callers can re-issue pid_output to keep
 // polling — see retrieval_status="timeout" in the returned JSON.
 const MAX_AGENT_AWAIT_TIMEOUT_MS: u64 = 60_000;
 
@@ -9007,10 +9053,10 @@ mod tests {
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
+        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]
@@ -9126,10 +9172,8 @@ mod tests {
         // would admit a name `definitions()` can never match against
         // `spec.name`, silently allow-listing nothing.
         for (requested, spec_name) in [
-            ("TaskList", "pid_status"),
-            ("TaskGet", "pid_status"),
-            ("TaskStop", "pid_kill"),
-            ("TaskOutput", "pid_output"),
+            ("TaskList", "TaskList"),
+            ("TaskGet", "TaskGet"),
             ("SendMessage", "send"),
             ("Agent", "agent_spawn"),
             // Canonical names resolve to themselves.
@@ -9953,8 +9997,6 @@ mod tests {
         for (cc_name, canonical) in [
             ("select:Agent", "agent_spawn"),
             ("select:SendMessage", "send"),
-            ("select:TaskStop", "pid_kill"),
-            ("select:TaskOutput", "pid_output"),
             ("select:AgentTool", "agent_spawn"),
         ] {
             let out = execute_tool("ToolSearch", &json!({ "query": cc_name }))
@@ -12960,19 +13002,11 @@ printf 'pwsh:%s' "$1"
     // ── Unified pid alias routing ─────────────────────────────────────
 
     #[test]
-    fn canonicalize_task_stop_to_pid_kill() {
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
-    }
-
-    #[test]
-    fn canonicalize_task_get_and_list_to_pid_status() {
-        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
-    }
-
-    #[test]
-    fn canonicalize_task_output_to_pid_output() {
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+    fn canonicalize_task_tools_pass_through_unchanged() {
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
+        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]

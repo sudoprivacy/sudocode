@@ -265,7 +265,9 @@ fn account_lists_configured_accounts_and_marks_current() {
 fn account_switch_persists_the_selection() {
     let env = TestEnv::new("account-switch");
     if env.is_live() {
-        eprintln!("SKIP account switch: account selection is covered by the mock-backed PTY tests.");
+        eprintln!(
+            "SKIP account switch: account selection is covered by the mock-backed PTY tests."
+        );
         return;
     }
     write_two_account_config(&env);
@@ -311,7 +313,9 @@ fn account_switch_persists_the_selection() {
 fn account_refuses_a_name_that_is_not_configured() {
     let env = TestEnv::new("account-unknown");
     if env.is_live() {
-        eprintln!("SKIP account refusal: account selection is covered by the mock-backed PTY tests.");
+        eprintln!(
+            "SKIP account refusal: account selection is covered by the mock-backed PTY tests."
+        );
         return;
     }
     write_two_account_config(&env);

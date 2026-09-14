@@ -383,6 +383,13 @@ fn run_loop<K, C, T, F>(
                             // calling `send` means silence, so the
                             // conversation ends instead of two agents bouncing every
                             // turn's output back to each other forever (the ping-pong).
+                            // The body is a peer's text — another organisation's
+                            // on a cross-org hop — so its harness markup is made
+                            // inert before it becomes part of a prompt. Without
+                            // this a peer can spell a `<system-reminder>`, the
+                            // one tag the system prompt tells this model to
+                            // treat as authoritative.
+                            let body = crate::agent_mailbox::neutralize_untrusted_markup(&body);
                             let turn_input = format!("[message from {sender}]\n\n{body}");
                             if let Err(e) = rt.block_on(runtime.run_turn(&turn_input, None, None)) {
                                 eprintln!("[managed-agent {self_id}] turn error: {e:?}");

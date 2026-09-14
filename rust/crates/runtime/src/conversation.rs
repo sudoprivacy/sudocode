@@ -1107,15 +1107,29 @@ where
     ///
     /// - When the session does not yet carry a date announcement (first turn,
     ///   or after compaction dropped the message that carried it), a
-    ///   `<system-reminder>` content block stating today's date is appended
-    ///   AFTER the user's content, so the turn label (derived from the first
-    ///   Text block) still reflects what the user typed.
+    ///   `<system-reminder>` content block stating today's date is PREPENDED to
+    ///   the user's content.
     /// - When the local date no longer matches the session's known date, a
     ///   rollover reminder is prepended and the known date advanced so the
     ///   reminder fires only once per rollover.
     ///
     /// Both shapes live in user-side content blocks, leaving the system
     /// prompt byte-stable across days so its prompt-cache prefix stays warm.
+    ///
+    /// **Prepended, never appended** — the invariant every injector here holds:
+    /// harness-injected content does not TRAIL user-authored content in the
+    /// same message. Adjacent text blocks reach the model with nothing between
+    /// them, so a reminder placed after the user's text silently extends what
+    /// "this text" refers to; an instruction like *"send exactly this text: X"*
+    /// then has the model copy the reminder into the tool argument, and harness
+    /// context leaves the process as user-authored content. That is
+    /// sudocode#623, observed on a cross-org A2A hop and reproducing only on
+    /// the turn that carries an announcement — which is this one.
+    ///
+    /// The first-turn shape used to append, to keep the turn label reading as
+    /// what the user typed. That reason did not hold: `turn_label`
+    /// (`engine-core::session`, its only caller) is computed from the blocks
+    /// handed to the turn, upstream of every injector here.
     fn inject_date_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
         let Some(known) = self.prompt_known_date.clone() else {
             return blocks;
@@ -1138,10 +1152,11 @@ where
         if self.session_has_date_context() {
             return blocks;
         }
-        let mut combined = blocks;
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
         combined.push(ContentBlock::Text {
             text: format!("{DATE_CONTEXT_REMINDER_PREFIX}{today}.</system-reminder>"),
         });
+        combined.extend(blocks);
         combined
     }
 
@@ -1193,7 +1208,7 @@ where
         if self.session_has_model_context() {
             return blocks;
         }
-        let mut combined = blocks;
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
         combined.push(ContentBlock::Text {
             text: format!(
                 "{MODEL_CONTEXT_REMINDER_PREFIX}{active}. \
@@ -1202,6 +1217,7 @@ where
                  when asked which model you are, answer {active}.</system-reminder>"
             ),
         });
+        combined.extend(blocks);
         combined
     }
 
@@ -6025,11 +6041,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_turn_announces_current_date_after_user_content() {
+    async fn first_turn_announces_current_date_before_user_content() {
         // The system prompt carries no date, so the first turn must announce
-        // it via a user-side system-reminder block — appended AFTER the
-        // user's content so the turn label still reflects what the user
-        // typed.
+        // it via a user-side system-reminder block — PREPENDED, so harness
+        // text never trails what the user typed. Appended, it extended the
+        // referent of "send exactly this text" and the model copied the
+        // reminder into the tool argument (sudocode#623).
         let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
         let mut runtime = ConversationRuntime::new(
             Session::new(),
@@ -6053,15 +6070,16 @@ mod tests {
         assert_eq!(
             user_blocks.len(),
             2,
-            "first turn should carry user text + date announcement"
+            "first turn should carry date announcement + user text"
         );
-        assert!(matches!(
-            &user_blocks[0],
-            ContentBlock::Text { text } if text == "hello"
-        ));
-        let ContentBlock::Text { text: announcement } = &user_blocks[1] else {
-            panic!("second block should be the date announcement");
+        let ContentBlock::Text { text: announcement } = &user_blocks[0] else {
+            panic!("first block should be the date announcement");
         };
+        assert!(
+            matches!(&user_blocks[1], ContentBlock::Text { text } if text == "hello"),
+            "the user's own text must come LAST, so nothing the harness wrote \
+             trails it: {user_blocks:?}"
+        );
         assert!(
             announcement.contains("<system-reminder>")
                 && announcement.contains("Today's date is 2026-05-15"),
@@ -6110,10 +6128,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_turn_announces_active_model_after_user_content() {
+    async fn first_turn_announces_active_model_before_user_content() {
         // The system prompt carries no model, so the first turn must announce
-        // it via a user-side system-reminder block appended AFTER the user's
-        // content (mirrors the date announcement).
+        // it via a user-side system-reminder block PREPENDED to the user's
+        // content (mirrors the date announcement, same reason: sudocode#623).
         let captured: Arc<std::sync::Mutex<Vec<ApiRequest>>> = Arc::default();
         let mut runtime = ConversationRuntime::new(
             Session::new(),
@@ -6136,15 +6154,16 @@ mod tests {
         assert_eq!(
             user_blocks.len(),
             2,
-            "first turn should carry user text + model announcement"
+            "first turn should carry model announcement + user text"
         );
-        assert!(matches!(
-            &user_blocks[0],
-            ContentBlock::Text { text } if text == "hello"
-        ));
-        let ContentBlock::Text { text: announcement } = &user_blocks[1] else {
-            panic!("second block should be the model announcement");
+        let ContentBlock::Text { text: announcement } = &user_blocks[0] else {
+            panic!("first block should be the model announcement");
         };
+        assert!(
+            matches!(&user_blocks[1], ContentBlock::Text { text } if text == "hello"),
+            "the user's own text must come LAST, so nothing the harness wrote \
+             trails it: {user_blocks:?}"
+        );
         assert!(
             announcement.contains("<system-reminder>")
                 && announcement.contains("You are running as claude-opus-5"),
@@ -6269,10 +6288,14 @@ mod tests {
             .blocks
             .clone();
         assert_eq!(user_blocks.len(), 2, "announcement should be re-injected");
-        assert!(matches!(
-            &user_blocks[1],
-            ContentBlock::Text { text } if text.contains("Today's date is 2026-05-15")
-        ));
+        assert!(
+            matches!(
+                &user_blocks[0],
+                ContentBlock::Text { text } if text.contains("Today's date is 2026-05-15")
+            ),
+            "re-injection lands in FRONT, like the first-turn announcement — \
+             harness text never trails the user's own: {user_blocks:?}"
+        );
     }
 
     #[tokio::test]

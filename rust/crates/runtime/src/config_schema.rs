@@ -232,6 +232,11 @@ const OAUTH_CHILDREN: &[FieldSchema] = &[
 
 /// All known fields in `settings.json`.
 pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
+    FieldSchema::leaf(
+        "maxSteps",
+        FieldType::Number,
+        "Maximum tool rounds before answering with existing results",
+    ),
     FieldSchema::leaf("$schema", FieldType::String, "JSON schema URL"),
     {
         let mut f = FieldSchema::leaf("model", FieldType::String, "Active model identifier");

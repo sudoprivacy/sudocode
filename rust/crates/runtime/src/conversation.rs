@@ -180,6 +180,16 @@ pub type AssistantEventStream =
 pub trait ApiClient: Send {
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
 
+    /// Stream a final answer without offering tools. Custom clients must opt in.
+    async fn stream_final_answer(
+        &mut self,
+        _request: ApiRequest,
+    ) -> Result<AssistantEventStream, RuntimeError> {
+        Err(RuntimeError::new(
+            "tool-free final answer streaming not supported by this API client",
+        ))
+    }
+
     /// Provider-facing model ID for the active route. Config aliases, display
     /// labels and model names reported by older responses are not routing IDs.
     fn wire_model_id(&self) -> Option<&str> {
@@ -854,6 +864,7 @@ pub struct ConversationRuntime<C, T> {
     #[cfg(test)]
     today_override: Option<String>,
     max_iterations: usize,
+    max_steps: Option<u32>,
     usage_tracker: UsageTracker,
     hook_runner: HookRunner,
     /// Consecutive turns where `maybe_auto_compact` ran and returned a no-op
@@ -923,6 +934,7 @@ where
             #[cfg(test)]
             today_override: None,
             max_iterations: usize::MAX,
+            max_steps: feature_config.max_steps(),
             usage_tracker,
             hook_runner: HookRunner::from_feature_config(feature_config),
             consecutive_auto_compact_noops: 0,
@@ -1631,6 +1643,8 @@ where
         let mut tool_results = Vec::new();
         let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
+        let mut completed_steps = 0u32;
+        let mut final_answer_requested = false;
         let mut retried_empty_post_tool_deliverable = false;
         let mut turn_compactions = 0usize;
         let mut recorded_compaction_budget_exhausted = false;
@@ -1655,6 +1669,13 @@ where
                 });
             }
 
+            let final_answer = self.max_steps.is_some_and(|limit| completed_steps >= limit);
+            if final_answer && !final_answer_requested {
+                self.session.push_user_text(format!(
+                    "<system-reminder>\nThe computation step limit ({completed_steps} steps) has been reached. No further tools or execution steps are available in this turn. Answer the user's question using the results already obtained. Clearly distinguish completed work, findings, and remaining uncertainties. Explain any unfinished work and suggest concrete next steps for discussion with the user. Do not claim unperformed work is complete. Respond in the user's language.\n</system-reminder>"
+                )).map_err(|error| RuntimeError::new(error.to_string()))?;
+                final_answer_requested = true;
+            }
             iterations += 1;
             if iterations > self.max_iterations {
                 let error = RuntimeError::new(
@@ -1738,7 +1759,13 @@ where
                             response_model: None,
                         });
                     }
-                    result = self.api_client.stream(request) => result,
+                    result = async {
+                        if final_answer {
+                            self.api_client.stream_final_answer(request).await
+                        } else {
+                            self.api_client.stream(request).await
+                        }
+                    } => result,
                 }
             };
             let mut stream = match stream_result {
@@ -1851,6 +1878,10 @@ where
             let (mut assistant_message, usage, turn_prompt_cache_events, iter_response_model) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
+                    Err(error) if final_answer => {
+                        self.record_turn_failed(iterations, &error);
+                        return Err(error);
+                    }
                     Err(error)
                         if assistant_messages.last().is_some_and(has_pending_tool_uses)
                             && error.message == "assistant stream produced no content" =>
@@ -1923,6 +1954,14 @@ where
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            // Reject provider violations before persisting unmatched tool calls or dispatching.
+            if final_answer && !pending_tool_uses.is_empty() {
+                let error = RuntimeError::new(
+                    "model requested tools after the computation step limit was reached",
+                );
+                self.record_turn_failed(iterations, &error);
+                return Err(error);
+            }
             self.record_assistant_iteration(
                 iterations,
                 &assistant_message,
@@ -2426,6 +2465,7 @@ where
                     result_message,
                 )?;
             }
+            completed_steps = completed_steps.saturating_add(1);
         }
 
         let auto_compaction = merge_auto_compaction(

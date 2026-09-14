@@ -6750,14 +6750,32 @@ impl ApiClient for ProviderRuntimeClient {
             .await
     }
 
+    async fn stream_final_answer(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, false).await
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, true).await
+    }
+}
+
+impl ProviderRuntimeClient {
+    async fn stream_with_tool_availability(
+        &mut self,
+        request: ApiRequest,
+        allow_tools: bool,
+    ) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
             .map(ToolDefinition::from)
             .collect::<Vec<_>>();
         let messages = convert_messages(&request.messages);
         let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
-        let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        let tool_choice =
+            (allow_tools && !self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
         // Subagents cache like the main loop does. Without this the request
         // carries no `cache_control` at all, so every turn re-sends the whole
         // prompt uncached at full input price — measured in production as 64
@@ -6779,7 +6797,7 @@ impl ApiClient for ProviderRuntimeClient {
                 max_tokens: max_tokens_for_model(&entry.model),
                 messages: messages.clone(),
                 system: system.clone(),
-                tools: (!tools.is_empty()).then(|| tools.clone()),
+                tools: (allow_tools && !tools.is_empty()).then(|| tools.clone()),
                 tool_choice: tool_choice.clone(),
                 stream: true,
                 cache_hints: cache_hints.clone(),

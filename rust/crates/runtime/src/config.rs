@@ -177,6 +177,7 @@ impl SudoCodeConfig {
 /// Structured feature configuration consumed by runtime subsystems.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeFeatureConfig {
+    max_steps: Option<u32>,
     hooks: RuntimeHookConfig,
     plugins: RuntimePluginConfig,
     mcp: McpConfigCollection,
@@ -913,7 +914,14 @@ impl ConfigLoader {
 
         let merged_value = JsonValue::Object(merged.clone());
 
+        let max_steps = optional_u32(&merged, "maxSteps", "merged settings")?;
+        if max_steps == Some(0) {
+            return Err(ConfigError::Parse(
+                "maxSteps must be a positive integer".into(),
+            ));
+        }
         let feature_config = RuntimeFeatureConfig {
+            max_steps,
             hooks: parse_optional_hooks_config(&merged_value)?,
             plugins: parse_optional_plugin_config(&merged_value)?,
             mcp: McpConfigCollection {
@@ -1133,6 +1141,12 @@ impl RuntimeConfig {
 }
 
 impl RuntimeFeatureConfig {
+    /// Maximum tool rounds per user turn; absent means unlimited.
+    #[must_use]
+    pub fn max_steps(&self) -> Option<u32> {
+        self.max_steps
+    }
+
     #[must_use]
     pub fn with_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
         self.hooks = hooks;

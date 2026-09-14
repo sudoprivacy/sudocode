@@ -46,7 +46,7 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 ///
 /// Entries are CANONICAL names only. [`is_tool_allowed_in_coordinator_mode`]
 /// canonicalizes what the model asked for before looking it up, so a
-/// CC-spelled `Agent`/`TaskList`/`SendMessage` is admitted by its canonical
+/// CC-spelled `Agent`/`SendMessage` is admitted by its canonical
 /// entry rather than by a second one listed here. Listing both spellings is
 /// how this set silently kept admitting names the tool list no longer
 /// advertises.
@@ -75,9 +75,11 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         "read_tool_output",
         "glob_search",
         "grep_search",
-        // Coordinator's own bookkeeping
+        // Coordinator's own to-do bookkeeping
         "TaskCreate",
         "TaskUpdate",
+        "TaskGet",
+        "TaskList",
         "AskUserQuestion",
         "StructuredOutput",
         "ToolSearch",
@@ -144,9 +146,9 @@ Every message you send is to the user. Worker results and system notifications a
 
 - **agent_spawn** - Spawn a new worker (alias: `Agent`)
 - **send** - Continue an existing worker (send follow-up to its pid) or signal shutdown (alias: `SendMessage`)
-- **pid_kill** - Stop a running worker (alias: `TaskStop`)
-- **pid_status** - Fetch a running worker's metadata by `pid`, or list every worker when `pid` is omitted (alias: `TaskGet`)
-- **pid_output** - Read a running or completed worker's output by `pid` (alias: `TaskOutput`)
+- **pid_kill** - Stop a running worker by `pid`
+- **pid_status** - Fetch a running worker's status by `pid`, or list every spawned agent when `pid` is omitted
+- **pid_output** - Read a running or completed worker's output by `pid`
 - **pid_fork** - Fork the current session into a background worker
 
 Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.

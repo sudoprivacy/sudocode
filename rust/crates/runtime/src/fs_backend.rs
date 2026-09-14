@@ -353,7 +353,24 @@ impl FsBackend for StdFsBackend {
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
-            let meta = entry.metadata()?;
+            // `read_dir` hands back a whole directory block at a time, so an
+            // entry it names can already be gone by the time we stat it — on
+            // Unix `DirEntry::metadata` is a separate `lstat` and returns
+            // `NotFound`. That is normal in any directory something else
+            // writes to: a temp dir, a cache dir, a log dir another process is
+            // rotating. It is not a reason to abandon the listing. Callers that
+            // clean up by listing then deleting would silently stop cleaning
+            // up, and the only symptom is disk that never comes back.
+            //
+            // Skip the vanished entry; report every other error, including
+            // permission errors — dropping those would under-report a
+            // directory we simply are not allowed to read, which is worse than
+            // failing loudly.
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             entries.push(FsDirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 is_dir: meta.is_dir(),

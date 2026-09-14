@@ -1983,8 +1983,16 @@ mod tests {
 
     #[test]
     fn rotates_and_cleans_up_large_session_logs() {
-        // given
-        let path = temp_session_path("rotation");
+        // given — its own directory, not the shared system temp dir.
+        // Rotation cleanup lists the parent directory, so anything else
+        // writing there is part of this test's input. Sharing the system
+        // temp dir with the rest of a `--workspace` run made this test fail
+        // intermittently on CI: an unrelated file vanishing mid-listing
+        // aborted the listing, cleanup silently did nothing, and the
+        // rotated-file count stayed above the cap.
+        let dir = temp_session_path("rotation").with_extension("d");
+        fs::create_dir_all(&dir).expect("rotation dir should create");
+        let path = dir.join("session.json");
         let oversized_length =
             usize::try_from(super::ROTATE_AFTER_BYTES + 10).expect("rotate threshold should fit");
         fs::write(&path, "x".repeat(oversized_length)).expect("oversized file should write");
@@ -2012,9 +2020,13 @@ mod tests {
 
         let rotated_count = rotation_files(&path).len();
         assert!(rotated_count <= super::MAX_ROTATED_FILES);
-        for rotated in rotation_files(&path) {
-            fs::remove_file(rotated).expect("rotated file should be removable");
-        }
+        assert_eq!(
+            rotated_count,
+            super::MAX_ROTATED_FILES,
+            "cleanup should leave exactly the cap, not fewer and not more",
+        );
+
+        fs::remove_dir_all(&dir).expect("rotation dir should be removable");
     }
 
     #[test]

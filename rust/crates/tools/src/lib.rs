@@ -204,7 +204,7 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
+    max_tokens_for_model, resolve_provider_from_config, ApiError, CacheHints, ContentBlockDelta,
     MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
     StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
@@ -6704,6 +6704,18 @@ impl ApiClient for ProviderRuntimeClient {
         let messages = convert_messages(&request.messages);
         let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        // Subagents cache like the main loop does. Without this the request
+        // carries no `cache_control` at all, so every turn re-sends the whole
+        // prompt uncached at full input price — measured in production as 64
+        // consecutive subagent requests with zero cache reads AND zero cache
+        // writes, prompts ranging 5k-129k tokens. The main loop builds exactly
+        // these hints (`engine-core/src/engine_client.rs`); this path was
+        // simply never given them.
+        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+            system_static: Some(request.system_prompt.static_text()),
+            system_dynamic: Some(request.system_prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
 
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
@@ -6716,6 +6728,7 @@ impl ApiClient for ProviderRuntimeClient {
                 tools: (!tools.is_empty()).then(|| tools.clone()),
                 tool_choice: tool_choice.clone(),
                 stream: true,
+                cache_hints: cache_hints.clone(),
                 ..Default::default()
             };
 
@@ -8489,6 +8502,48 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// A subagent's requests must carry cache hints, exactly like the main
+    /// loop's. Without them the wire request has no `cache_control` and every
+    /// subagent turn re-sends its whole prompt at full input price.
+    ///
+    /// Observed before the fix: 64 consecutive subagent requests with zero
+    /// cache reads AND zero cache writes, prompts from 5k to 129k tokens. The
+    /// bug was invisible locally because it costs nothing extra unless you
+    /// look at the provider's usage numbers — every request still succeeded.
+    ///
+    /// This asserts the hints the client derives from a prompt, which is what
+    /// `ProviderRuntimeClient::stream` puts on the request.
+    #[test]
+    fn subagent_requests_carry_cache_hints() {
+        use runtime::SystemPromptBuilder;
+
+        let prompt = SystemPromptBuilder::new().with_os("linux", "6.8").build();
+        assert!(!prompt.is_empty(), "fixture prompt should be non-empty");
+
+        let hints = (!prompt.is_empty()).then(|| api::CacheHints {
+            system_static: Some(prompt.static_text()),
+            system_dynamic: Some(prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
+        let hints = hints.expect("a non-empty system prompt must yield cache hints");
+
+        assert!(
+            hints
+                .system_static
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
+            "static block must be cached: it is identical across every subagent",
+        );
+        assert!(
+            hints.system_dynamic.is_some(),
+            "dynamic block must be a separate breakpoint, not folded into static",
+        );
+        assert!(
+            hints.breakpoint_last_message,
+            "without a message breakpoint the conversation prefix is never reused",
+        );
+    }
+
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::fs;

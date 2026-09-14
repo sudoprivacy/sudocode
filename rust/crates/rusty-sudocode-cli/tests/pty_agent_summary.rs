@@ -30,12 +30,12 @@ mod common;
 use common::{TestEnv, LIVE_TIMEOUT};
 
 fn require_live(env: &TestEnv, test_name: &str) -> bool {
-    if env.is_live() {
+    if env.is_live() && std::env::var_os("SCODE_LIVE_AGENT_TESTS").is_some() {
         return true;
     }
     eprintln!(
-        "SKIP {test_name}: SCODE_TEST_BACKEND=mock — subagent-spawning \
-         chain blocked by mock scenario-inheritance gap (plan §6.4)."
+        "SKIP {test_name}: requires SCODE_TEST_BACKEND=live and SCODE_LIVE_AGENT_TESTS=1; \
+         live agent orchestration is model- and service-dependent."
     );
     false
 }

@@ -2667,7 +2667,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
     // `sonnet` = CLI alias other tests use (safe pass-through to mock).
     // `claude-sonnet-4-6` = the WIRE model name scode resolves the alias
     // to, and what push_images actually calls vision_capable() with — the
-    // cache seed MUST use the wire name (CI eprintln verified on 2026-07-01).
+    // cache seed MUST use the wire name.
     const TEST_MODEL: &str = "sonnet";
     const WIRE_MODEL: &str = "claude-sonnet-4-6";
     const MOCK_DESCRIPTION: &str = "MOCK_VLM_DESCRIPTION_a1b2c3";
@@ -2751,7 +2751,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         .await;
     let session_id = new_resp["result"]["sessionId"]
         .as_str()
-        .expect("sessionId string")
+        .unwrap_or_else(|| panic!("session/new failed or returned no sessionId: {new_resp}"))
         .to_string();
 
     // Send prompt with inline image; text-only fixture model → VLM route

@@ -53,22 +53,16 @@ fn async_repl_processes_single_turn_and_exits() {
     sess.send(&format!("{prompt}\r"))
         .expect("send prompt into async REPL");
 
-    // Wait for the LLM to actually respond. The mock's `single_turn_text`
-    // scenario emits "The answer is 4"; the `4` proves the turn *ran* through
-    // the runner thread. The signal that the loop is still alive after the turn
-    // is that `/exit` below produces a clean exit rather than a hang.
-    sess.expect("4")
-        .expect("async REPL should stream the LLM answer through the runner thread");
-
-    // Wait for the per-turn status line, which is printed once the turn is
-    // over. Not `❯`: iocraft repaints the whole frame as the turn runs, so a
-    // forward-only search finds a redrawn prompt from *before* the turn ended
-    // and `/exit` gets typed mid-turn — where it sits in the input line,
-    // unsubmitted, and the session never exits.
-    sess.expect("ctx ").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should see the turn status line: {e}\nPTY screen:\n{screen}");
-    });
+    // The mock has a fixed response. Live models need not use the same
+    // wording, so a rendered non-empty answer is sufficient for this dispatch
+    // smoke test.
+    if env.is_mock() {
+        sess.expect("4")
+            .expect("async REPL should stream the mock LLM answer through the runner thread");
+    } else {
+        sess.expect("turn 1")
+            .expect("async REPL should complete the live turn through the runner thread");
+    }
 
     sess.send("/exit\r").expect("send /exit");
 

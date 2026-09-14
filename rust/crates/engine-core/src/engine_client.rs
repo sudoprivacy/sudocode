@@ -558,7 +558,24 @@ impl ApiClient for EngineApiClient {
         Some(self.session_id.as_str())
     }
 
+    async fn stream_final_answer(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, false).await
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, true).await
+    }
+}
+
+impl EngineApiClient {
+    async fn stream_with_tool_availability(
+        &mut self,
+        request: ApiRequest,
+        allow_tools: bool,
+    ) -> Result<AssistantEventStream, RuntimeError> {
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
@@ -568,14 +585,14 @@ impl ApiClient for EngineApiClient {
                 &request,
                 runtime::TextCompletionOptions {
                     max_tokens: api::max_tokens_for_model(&self.model),
-                    include_tools: self.enable_tools,
+                    include_tools: self.enable_tools && allow_tools,
                     cache_prefix: true,
                     thinking_enabled: self.thinking_enabled,
                 },
                 tools,
                 self.session_request_fields(),
             );
-            message_request.tool_choice = self.enable_tools.then_some(ToolChoice::Auto);
+            message_request.tool_choice = (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.

@@ -359,9 +359,26 @@ impl ApiClient for EngineApiClient {
         self.thinking_enabled
     }
 
+    async fn stream_final_answer(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, false).await
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, true).await
+    }
+}
+
+impl EngineApiClient {
+    async fn stream_with_tool_availability(
+        &mut self,
+        request: ApiRequest,
+        allow_tools: bool,
+    ) -> Result<AssistantEventStream, RuntimeError> {
         let is_post_tool = request_ends_with_tool_result(&request);
-        let discovered = self.enable_tools.then(|| {
+        let discovered = (self.enable_tools && allow_tools).then(|| {
             let mut d = tools::extract_discovered_tool_names(&request.messages);
             d.extend(request.pre_compact_discovered_tools.iter().cloned());
             d
@@ -376,11 +393,11 @@ impl ApiClient for EngineApiClient {
             max_tokens: api::max_tokens_for_model(&self.model),
             messages: tools::convert_messages(&request.messages),
             system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: self.enable_tools.then(|| {
+            tools: (self.enable_tools && allow_tools).then(|| {
                 self.tool_registry
                     .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
             }),
-            tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
+            tool_choice: (self.enable_tools && allow_tools).then_some(ToolChoice::Auto),
             stream: true,
             reasoning_effort: self.reasoning_effort.clone(),
             cache_hints,

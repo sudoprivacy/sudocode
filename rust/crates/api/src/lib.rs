@@ -1,4 +1,6 @@
 mod client;
+mod completion;
+pub use completion::convert_messages;
 mod error;
 mod http_client;
 mod http_transport;

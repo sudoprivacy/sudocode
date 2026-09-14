@@ -148,8 +148,7 @@ pub fn apply_config_limits(config: &crate::config::SudoCodeConfig) {
 /// number" (cap it) from "the user's number" (obey it).
 #[must_use]
 pub fn config_max_output_tokens(model_id: &str) -> Option<u32> {
-    let base = model_id.rsplit('/').next().unwrap_or(model_id);
-    config_limit_for(base).and_then(|over| over.max_output_tokens)
+    config_limit_for(model_id).and_then(|over| over.max_output_tokens)
 }
 
 /// The `max_tokens` a chat request for this model is sent with.
@@ -180,10 +179,15 @@ pub fn request_max_output_tokens(model_id: &str) -> u32 {
 }
 
 /// Look up the configured override for a wire model ID, if any.
-fn config_limit_for(base: &str) -> Option<ModelLimitOverride> {
+fn config_limit_for(model_id: &str) -> Option<ModelLimitOverride> {
     let guard = CONFIG_LIMITS.read().ok()?;
     let map = guard.as_ref()?;
-    map.get(&base.to_ascii_lowercase()).copied()
+    let full_id = model_id.to_ascii_lowercase();
+    // A provider prefix or local deployment path can be part of the actual
+    // model ID. Honor an exact configured ID before the legacy basename fallback.
+    map.get(&full_id)
+        .or_else(|| map.get(full_id.rsplit('/').next().unwrap_or(&full_id)))
+        .copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +208,7 @@ pub fn lookup(model_id: &str) -> Option<ModelCapability> {
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
         .map(|(_, cap)| cap.clone());
-    let Some(over) = config_limit_for(base) else {
+    let Some(over) = config_limit_for(model_id) else {
         return table_entry;
     };
     // A configured model is "known" even when the table has never heard of

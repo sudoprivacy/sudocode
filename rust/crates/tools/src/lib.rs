@@ -57,7 +57,7 @@ pub mod testing {
             prompt: prompt.to_string(),
             subagent_type: Some(subagent_type.to_string()),
             name: None,
-            model: None,
+            model: Some("test-model".to_string()),
             run_in_background: Some(true),
             fresh: None,
             auth_mode: None,
@@ -204,10 +204,9 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
-    InputContentBlock, InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
-    ProviderClient, StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    max_tokens_for_model, resolve_provider_from_config, ApiError, CacheHints, ContentBlockDelta,
+    MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
+    StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
 use plugins::{PluginLoadOutcome, PluginManager, PluginTool};
 use runtime::{
@@ -1093,7 +1092,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
-                    "model": { "type": "string", "description": "Model ID override; defaults to the system default." },
+                    "model": { "type": "string", "description": "Model ID override; when omitted, inherits the parent agent's current model." },
                     "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve the result later with pid_output(pid, block: true). When false, run synchronously and return the result." },
                     "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
                     "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
@@ -4686,7 +4685,6 @@ fn load_plugin_outcome_for_cwd(cwd: &Path) -> Option<PluginLoadOutcome> {
         .map(|report| report.load_outcome())
 }
 
-const DEFAULT_AGENT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 
 fn execute_agent(
@@ -4759,7 +4757,7 @@ fn prepare_agent_job(
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
 
-    let model = resolve_agent_model(input.model.as_deref());
+    let model = resolve_agent_model(input.model.as_deref(), ctx)?;
     let agent_name = input
         .name
         .as_deref()
@@ -4866,10 +4864,11 @@ fn prepare_agent_job(
 /// Only used by the inline `#[cfg(test)] mod tests` block; kept out
 /// of non-test builds so the dead-code analyzer stays quiet.
 #[cfg(test)]
-fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
+fn execute_agent_with_spawn<F>(mut input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
+    input.model.get_or_insert_with(|| "test-model".to_string());
     execute_agent_with_spawn_and_context(input, None, spawn_fn)
 }
 
@@ -5342,7 +5341,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         .manifest
         .model
         .clone()
-        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+        .ok_or_else(|| "subagent has no resolved model".to_string())?;
     let empty_tools: BTreeSet<String> = BTreeSet::new();
     let api_client = ProviderRuntimeClient::new_with_config(
         model,
@@ -5530,14 +5529,14 @@ fn build_agent_runtime(
         .manifest
         .model
         .clone()
-        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+        .ok_or_else(|| "subagent has no resolved model".to_string())?;
     let allowed_tools = job.allowed_tools.clone();
     // Use the config captured at spawn time instead of re-loading from disk.
     // This ensures the subagent thread inherits the parent's auth tokens and
     // provider configuration, preventing 401 Unauthorized errors when the CWD
     // or config state differs between threads.
     let api_client = ProviderRuntimeClient::new_with_config(
-        model,
+        model.clone(),
         allowed_tools.clone(),
         &job.sudocode_config,
         &job.fallback_config,
@@ -5554,6 +5553,7 @@ fn build_agent_runtime(
         job.system_prompt.clone(),
     )
     .with_session_known_date(runtime::today_local())
+    .with_session_known_model(model)
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
@@ -5603,12 +5603,24 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String
     Ok(prompt)
 }
 
-fn resolve_agent_model(model: Option<&str>) -> String {
+fn resolve_agent_model(
+    model: Option<&str>,
+    ctx: Option<&ToolDispatchContext>,
+) -> Result<String, String> {
     model
         .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(DEFAULT_AGENT_MODEL)
-        .to_string()
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("inherit"))
+        .or_else(|| {
+            ctx.and_then(|ctx| ctx.parent_assistant_message.as_ref())
+                .and_then(|message| message.model.as_deref())
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "cannot inherit subagent model: parent runtime model is unavailable; supply model explicitly"
+                .to_string()
+        })
 }
 
 fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
@@ -6625,6 +6637,10 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
 
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    fn wire_model_id(&self) -> Option<&str> {
+        self.chain.first().map(|entry| entry.model.as_str())
+    }
+
     /// The runtime's default cannot see the tool definitions attached to
     /// every request, and this client attaches the subagent's whole allowed
     /// set. Left to the default the budget would be too generous by exactly
@@ -6659,6 +6675,27 @@ impl ApiClient for ProviderRuntimeClient {
         }
     }
 
+    async fn complete_text(
+        &mut self,
+        request: ApiRequest,
+        options: runtime::TextCompletionOptions,
+    ) -> Result<runtime::TextCompletion, RuntimeError> {
+        let entry = self
+            .chain
+            .first()
+            .ok_or_else(|| RuntimeError::new("no completion provider"))?;
+        let tools = options.include_tools.then(|| {
+            tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+                .into_iter()
+                .map(ToolDefinition::from)
+                .collect()
+        });
+        entry
+            .client
+            .complete_text(&entry.model, request, options, tools)
+            .await
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
             .into_iter()
@@ -6667,6 +6704,18 @@ impl ApiClient for ProviderRuntimeClient {
         let messages = convert_messages(&request.messages);
         let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        // Subagents cache like the main loop does. Without this the request
+        // carries no `cache_control` at all, so every turn re-sends the whole
+        // prompt uncached at full input price — measured in production as 64
+        // consecutive subagent requests with zero cache reads AND zero cache
+        // writes, prompts ranging 5k-129k tokens. The main loop builds exactly
+        // these hints (`engine-core/src/engine_client.rs`); this path was
+        // simply never given them.
+        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+            system_static: Some(request.system_prompt.static_text()),
+            system_dynamic: Some(request.system_prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
 
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
@@ -6679,6 +6728,7 @@ impl ApiClient for ProviderRuntimeClient {
                 tools: (!tools.is_empty()).then(|| tools.clone()),
                 tool_choice: tool_choice.clone(),
                 stream: true,
+                cache_hints: cache_hints.clone(),
                 ..Default::default()
             };
 
@@ -6894,104 +6944,7 @@ pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeS
 /// requires every `tool_use` to have its matching `tool_result` in the same next
 /// user message). Shared by the subagent provider client and the engine's
 /// `EngineApiClient` — the one message-shaping mapping, identical for both.
-pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
-    let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
-    for message in messages {
-        let role = match message.role {
-            MessageRole::System | MessageRole::User | MessageRole::Tool => "user",
-            MessageRole::Assistant => "assistant",
-        };
-        let content = message
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
-                ContentBlock::Thinking { .. } => None,
-                ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    thought_signature,
-                } => Some(InputContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: serde_json::from_str(input)
-                        .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                    thought_signature: thought_signature.clone(),
-                }),
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    tool_name: _,
-                    output,
-                    is_error,
-                } => {
-                    // A tool result is its text, ToolSearch's included.
-                    //
-                    // This used to append one `tool_reference` block per match
-                    // beside that text, which made every request that followed a
-                    // ToolSearch fail: `400 invalid_request_error — Tool
-                    // definitions/code execution functions cannot be mixed with
-                    // other content`. A content array carrying tool definitions
-                    // may carry nothing else, so the text and the references
-                    // could not both be there, and deferred tools were
-                    // unreachable in practice — the model searched, and the turn
-                    // after the search died.
-                    //
-                    // Dropping the references costs nothing, because they were
-                    // the second of two mechanisms doing one job.
-                    // `extract_discovered_tool_names` reads the same `matches`
-                    // out of this text and `core_definitions` clears
-                    // `defer_loading` for those names, so the next request
-                    // carries their full schemas and the model can call them.
-                    // That is the path the deferred-tools prompt section
-                    // describes, and keeping the text is what lets the model see
-                    // what a keyword search actually matched.
-                    let content: Vec<ToolResultContentBlock> = vec![ToolResultContentBlock::Text {
-                        text: output.clone(),
-                    }];
-                    Some(InputContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content,
-                        is_error: *is_error,
-                    })
-                }
-                ContentBlock::Image { data, mime_type } => Some(InputContentBlock::Image {
-                    source: api::ImageSource {
-                        source_type: "base64".to_string(),
-                        media_type: mime_type.clone(),
-                        data: data.clone(),
-                    },
-                }),
-            })
-            .collect::<Vec<_>>();
-        if content.is_empty() {
-            continue;
-        }
-
-        // Merge consecutive Tool-role messages into the previous user-role
-        // InputMessage. Anthropic requires every `tool_use` in an assistant
-        // turn to have its matching `tool_result` in the SAME next user
-        // message; emitting one user message per tool_result breaks this.
-        if matches!(message.role, MessageRole::Tool) {
-            if let Some(last) = result.last_mut() {
-                if last.role == "user"
-                    && last
-                        .content
-                        .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
-                {
-                    last.content.extend(content);
-                    continue;
-                }
-            }
-        }
-        result.push(InputMessage {
-            role: role.to_string(),
-            content,
-        });
-    }
-    result
-}
+pub use api::convert_messages;
 
 fn push_output_block(
     block: OutputContentBlock,
@@ -8549,6 +8502,48 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// A subagent's requests must carry cache hints, exactly like the main
+    /// loop's. Without them the wire request has no `cache_control` and every
+    /// subagent turn re-sends its whole prompt at full input price.
+    ///
+    /// Observed before the fix: 64 consecutive subagent requests with zero
+    /// cache reads AND zero cache writes, prompts from 5k to 129k tokens. The
+    /// bug was invisible locally because it costs nothing extra unless you
+    /// look at the provider's usage numbers — every request still succeeded.
+    ///
+    /// This asserts the hints the client derives from a prompt, which is what
+    /// `ProviderRuntimeClient::stream` puts on the request.
+    #[test]
+    fn subagent_requests_carry_cache_hints() {
+        use runtime::SystemPromptBuilder;
+
+        let prompt = SystemPromptBuilder::new().with_os("linux", "6.8").build();
+        assert!(!prompt.is_empty(), "fixture prompt should be non-empty");
+
+        let hints = (!prompt.is_empty()).then(|| api::CacheHints {
+            system_static: Some(prompt.static_text()),
+            system_dynamic: Some(prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
+        let hints = hints.expect("a non-empty system prompt must yield cache hints");
+
+        assert!(
+            hints
+                .system_static
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
+            "static block must be cached: it is identical across every subagent",
+        );
+        assert!(
+            hints.system_dynamic.is_some(),
+            "dynamic block must be a separate breakpoint, not folded into static",
+        );
+        assert!(
+            hints.breakpoint_last_message,
+            "without a message breakpoint the conversation prefix is never reused",
+        );
+    }
+
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::fs;
@@ -10168,6 +10163,16 @@ mod tests {
 
     #[test]
     fn discovered_tools_get_defer_loading_false() {
+        // Held because this reads the registry, and the registry reads the
+        // environment: `cron_tools_hidden_when_host_owns_scheduling` sets
+        // `SUDOCODE_DISABLE_CRON_TOOLS` to prove cron tools disappear. Landing
+        // inside that window makes `CronCreate` absent here and this test panic
+        // on a missing definition — a race that shows up on one runner and not
+        // another. The mutating test already takes this lock; a reader that
+        // depends on what it changes has to take it too.
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = GlobalToolRegistry::builtin();
         let discovered: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
         let defs = registry.core_definitions(None, Some(&discovered));
@@ -10248,7 +10253,8 @@ mod tests {
             &json!({
                 "description": "Verify the branch",
                 "prompt": "Check tests.",
-                "subagent_type": "explorer"
+                "subagent_type": "explorer",
+                "model": "test-model"
             }),
         )
         .expect("Agent should normalize built-in aliases");
@@ -10261,7 +10267,8 @@ mod tests {
             &json!({
                 "description": "Review the branch",
                 "prompt": "Inspect diff.",
-                "name": "Ship Audit!!!"
+                "name": "Ship Audit!!!",
+                "model": "test-model"
             }),
         )
         .expect("Agent should normalize explicit names");
@@ -11289,7 +11296,7 @@ mod tests {
             prompt: format!("scenario={label}"),
             subagent_type: None,
             name: Some(format!("auto-bg-{label}")),
-            model: None,
+            model: Some("test-model".to_string()),
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,

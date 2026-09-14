@@ -275,12 +275,18 @@ fn undo_restores_file_on_disk() {
 #[test]
 fn compact_reduces_messages() {
     let workspace = HarnessWorkspace::new("compact");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(mock_anthropic_service::MockAnthropicService::spawn())
+        .unwrap();
+    workspace.write_mock_config(&server.base_url());
     let mut messages: Vec<(&str, &str, &str)> = Vec::new();
     let texts: Vec<String> = (0..12)
         .flat_map(|i| {
             vec![
-                format!("User message number {i} with some padding text to make it longer"),
-                format!("Assistant response number {i} with detailed explanation"),
+                format!("User message number {i} with some padding text to make it longer")
+                    .repeat(50),
+                format!("Assistant response number {i} with detailed explanation").repeat(50),
             ]
         })
         .collect();
@@ -293,7 +299,15 @@ fn compact_reduces_messages() {
 
     let mut sess = spawn_scode_in_dir_with_env(
         &workspace.root,
-        &["--resume", session_str, "/compact"],
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--resume",
+            session_str,
+            "/compact",
+        ],
         DEFAULT_TIMEOUT,
         &[
             ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),

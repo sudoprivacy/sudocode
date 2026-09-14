@@ -53,12 +53,42 @@ use crate::{
 // Unified message rendering pipeline
 // ---------------------------------------------------------------------------
 
+/// Pairs each tool call's `input` with the `ToolResult` that follows it,
+/// keyed by tool-use id. A tool's identity fields — bash's command,
+/// edit/read/write's path, grep/glob's pattern — live only in the call
+/// `input`; the result payload never echoes them. Both render paths (live
+/// streaming in `render_engine`, and session replay in [`render_message`])
+/// use this one type so the pairing rule has a single home.
+#[derive(Default)]
+pub(crate) struct ToolInputRegistry {
+    inputs: std::collections::HashMap<String, String>,
+}
+
+impl ToolInputRegistry {
+    /// Record a call's input under its tool-use id (seen on `ToolUse`).
+    pub(crate) fn remember(&mut self, id: &str, input: &str) {
+        self.inputs.insert(id.to_string(), input.to_string());
+    }
+
+    /// Take the input remembered for `id` (seen on the matching `ToolResult`),
+    /// removing it. Returns `""` when the call is missing (e.g. a truncated
+    /// session), which the card extractors tolerate by falling back to the
+    /// result payload.
+    pub(crate) fn take(&mut self, id: &str) -> String {
+        self.inputs.remove(id).unwrap_or_default()
+    }
+}
+
 /// Render a single `ConversationMessage` into styled terminal output.
 ///
 /// This is the SSOT for "how does a completed message look on screen."
 /// Both session replay (`--resume`) and any future message display
 /// (e.g. `/history`, export) should call this instead of hand-rolling
 /// role/block matching.
+///
+/// `tool_inputs` carries call inputs forward from each `ToolUse` message to
+/// the `ToolResult` message that follows it (they are separate messages), so
+/// completed cards can show the identity fields the result omits.
 ///
 /// The live REPL uses a different path (streaming event callbacks) for
 /// progressive rendering during a turn, but the *final* visual result
@@ -68,6 +98,7 @@ pub(crate) fn render_message(
     msg: &runtime::ConversationMessage,
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
+    tool_inputs: &mut ToolInputRegistry,
 ) -> Option<String> {
     let mut out = String::new();
 
@@ -95,10 +126,16 @@ pub(crate) fn render_message(
                         }
                         out.push_str(&rendered);
                     }
-                    runtime::ContentBlock::ToolUse { name, input, .. } => {
+                    runtime::ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         if !out.is_empty() {
                             out.push('\n');
                         }
+                        // Remember the call's input so the matching ToolResult
+                        // below can show the identity fields (command, path,
+                        // pattern) that the result payload never echoes.
+                        tool_inputs.remember(id, input);
                         out.push_str(&format_tool_call_start(name, input));
                     }
                     _ => {}
@@ -111,16 +148,20 @@ pub(crate) fn render_message(
         runtime::MessageRole::Tool => {
             for block in &msg.blocks {
                 if let runtime::ContentBlock::ToolResult {
+                    tool_use_id,
                     tool_name,
                     output,
                     is_error,
-                    ..
                 } = block
                 {
                     if !out.is_empty() {
                         out.push('\n');
                     }
-                    out.push_str(&format_tool_result(tool_name, output, *is_error));
+                    // Pair this result with the input remembered from its call
+                    // (`""` if the call is missing, e.g. a truncated session) —
+                    // the same pairing the live render engine does.
+                    let input = tool_inputs.take(tool_use_id);
+                    out.push_str(&format_tool_result(tool_name, &input, output, *is_error));
                 }
             }
             if out.is_empty() {
@@ -134,15 +175,18 @@ pub(crate) fn render_message(
 }
 
 /// Render a slice of messages into a single string. Convenience wrapper
-/// over [`render_message`] for session replay.
+/// over [`render_message`] for session replay. Owns the [`ToolInputRegistry`]
+/// so call inputs carry forward from each `ToolUse` message to the
+/// `ToolResult` message that follows it.
 pub(crate) fn render_messages(
     messages: &[runtime::ConversationMessage],
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
     let mut parts = Vec::new();
+    let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
-        if let Some(rendered) = render_message(msg, term_width, renderer) {
+        if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
             parts.push(rendered);
         }
     }
@@ -647,11 +691,74 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     (rendered, raw_lines.len())
 }
 
+/// The built-in tools the card renderer recognizes, each matched from *both*
+/// its snake_case wire name (`bash`, `read_file`) and its TitleCase alias
+/// (`Bash`, `Read`). This is the SSOT that both the running header
+/// ([`format_tool_call_start`]) and the completed card ([`format_tool_result`])
+/// resolve through, so the two moments can never disagree on the tool's
+/// display label — the casing drift that showed a lowercase `bash` while
+/// running and a TitleCase `Bash` once done.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolKind {
+    Bash,
+    Read,
+    Write,
+    Edit,
+    Glob,
+    Grep,
+    WebSearch,
+    Skill,
+    ReadToolOutput,
+}
+
+impl ToolKind {
+    /// Parse a wire tool name (either spelling). `None` for tools without a
+    /// bespoke card — they fall through to the generic renderer.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bash" | "Bash" => Some(Self::Bash),
+            "read_file" | "Read" => Some(Self::Read),
+            "write_file" | "Write" => Some(Self::Write),
+            "edit_file" | "Edit" => Some(Self::Edit),
+            "glob_search" | "Glob" => Some(Self::Glob),
+            "grep_search" | "Grep" => Some(Self::Grep),
+            "web_search" | "WebSearch" => Some(Self::WebSearch),
+            "Skill" => Some(Self::Skill),
+            "read_tool_output" => Some(Self::ReadToolOutput),
+            _ => None,
+        }
+    }
+
+    /// The one canonical label shown in the card header, running or done.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Bash => "Bash",
+            Self::Read => "Read",
+            Self::Write => "Write",
+            Self::Edit => "Edit",
+            Self::Glob => "Glob",
+            Self::Grep => "Grep",
+            Self::WebSearch => "WebSearch",
+            Self::Skill => "Skill",
+            Self::ReadToolOutput => "read_tool_output",
+        }
+    }
+}
+
+/// The label shown in a tool card header for `name`, canonical for both the
+/// running and completed states. Unknown tools keep their raw wire name.
+pub(crate) fn tool_display_label(name: &str) -> &str {
+    match ToolKind::from_name(name) {
+        Some(kind) => kind.label(),
+        None => name,
+    }
+}
+
 pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-    match name {
-        "bash" | "Bash" => {
+    match ToolKind::from_name(name) {
+        Some(ToolKind::Bash) => {
             let command = parsed
                 .get("command")
                 .and_then(|value| value.as_str())
@@ -662,10 +769,10 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 format!("command {}", truncate_for_summary(command.trim(), 100))
             }
         }
-        "read_file" | "Read" => format!("reading {}", extract_tool_path(&parsed)),
-        "write_file" | "Write" => format!("writing {}", extract_tool_path(&parsed)),
-        "edit_file" | "Edit" => format!("editing {}", extract_tool_path(&parsed)),
-        "glob_search" | "Glob" => {
+        Some(ToolKind::Read) => format!("reading {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Write) => format!("writing {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Edit) => format!("editing {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Glob) => {
             let pattern = parsed
                 .get("pattern")
                 .and_then(|value| value.as_str())
@@ -676,7 +783,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 .unwrap_or(".");
             format!("glob `{pattern}` in {scope}")
         }
-        "grep_search" | "Grep" => {
+        Some(ToolKind::Grep) => {
             let pattern = parsed
                 .get("pattern")
                 .and_then(|value| value.as_str())
@@ -687,7 +794,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 .unwrap_or(".");
             format!("grep `{pattern}` in {scope}")
         }
-        "web_search" | "WebSearch" => parsed
+        Some(ToolKind::WebSearch) => parsed
             .get("query")
             .and_then(|value| value.as_str())
             .map_or_else(
@@ -709,13 +816,13 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
 
-    let detail = match name {
-        "bash" | "Bash" => format_bash_call(&parsed),
-        "read_file" | "Read" => {
+    let detail = match ToolKind::from_name(name) {
+        Some(ToolKind::Bash) => format_bash_call(&parsed),
+        Some(ToolKind::Read) => {
             let path = extract_tool_path(&parsed);
             format!("{DIM}📄 Reading {path}…{RESET}")
         }
-        "write_file" | "Write" => {
+        Some(ToolKind::Write) => {
             let path = extract_tool_path(&parsed);
             let lines = parsed
                 .get("content")
@@ -724,7 +831,7 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
             let success = ansi_bold_fg(theme().success);
             format!("{success}✏️ Writing {path}{RESET} {DIM}({lines} lines){RESET}")
         }
-        "edit_file" | "Edit" => {
+        Some(ToolKind::Edit) => {
             let path = extract_tool_path(&parsed);
             let old_value = parsed
                 .get("old_string")
@@ -744,9 +851,9 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
                     .unwrap_or_default()
             )
         }
-        "glob_search" | "Glob" => format_search_start("🔎 Glob", &parsed),
-        "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
-        "web_search" | "WebSearch" => parsed
+        Some(ToolKind::Glob) => format_search_start("🔎 Glob", &parsed),
+        Some(ToolKind::Grep) => format_search_start("🔎 Grep", &parsed),
+        Some(ToolKind::WebSearch) => parsed
             .get("query")
             .and_then(|value| value.as_str())
             .unwrap_or("?")
@@ -757,10 +864,12 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     // A tool call in flight is the Running state of the same card that
     // `format_tool_result` later renders on completion: same L-frame, colored
     // yellow. The tool name (bold info color) is the header; the summary detail
-    // is the body. One renderer for both moments is the SSOT that makes command
-    // header and result visually identical.
+    // is the body. The header uses `tool_display_label` — the SAME canonical
+    // label the completed card resolves — so a tool never shows lowercase
+    // `bash` while running and TitleCase `Bash` once done. One renderer for
+    // both moments is the SSOT that makes command header and result identical.
     let cn = ansi_bold_fg(theme().info);
-    let header = format!("{cn}{name}{RESET}");
+    let header = format!("{cn}{}{RESET}", tool_display_label(name));
     let content = if detail.is_empty() {
         ToolCardContent::header_only(header)
     } else {
@@ -837,24 +946,97 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
     use std::fmt::Write as _;
     let t = theme();
     let frame = match status {
-        ToolStatus::Running => ansi_bold_fg(t.warning),
+        // Running uses the brand amber (primary), NOT warning/teal: teal read
+        // too close to the success green, so an in-flight card looked already
+        // done. Amber vs green vs red now reads at a glance.
+        ToolStatus::Running => ansi_bold_fg(t.primary),
         ToolStatus::Ok => ansi_bold_fg(t.success),
         ToolStatus::Error => ansi_bold_fg(t.error),
     };
     let top = format!("{frame}\u{256d}\u{2500}{RESET}");
     let bar = format!("{frame}\u{2502}{RESET}");
     let bottom = format!("{frame}\u{2570}\u{2500}{RESET}");
-    let mut out = format!("{top} {}", content.header);
+    // Wrap every content line to the width left after the 2-column `│ ` prefix,
+    // then prefix each wrapped segment with the bar. A line longer than the
+    // terminal would otherwise be wrapped by the terminal itself, and that
+    // continuation would carry no `│` — spilling past the left frame. Wrapping
+    // here (not truncating) keeps all content and keeps every visible row
+    // inside the frame. This is the single place that guarantees framed output
+    // stays framed — extractors need not each reason about width.
+    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
+    let content_width = term_width.saturating_sub(2).max(1);
+    let mut out = String::new();
+    for (i, seg) in wrap_ansi_to_width(&content.header, content_width)
+        .iter()
+        .enumerate()
+    {
+        let prefix = if i == 0 { &top } else { &bar };
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "{prefix} {seg}");
+    }
     if let Some(body) = &content.body {
         for line in body.lines() {
-            let _ = write!(out, "\n{bar} {line}");
+            for seg in wrap_ansi_to_width(line, content_width) {
+                let _ = write!(out, "\n{bar} {seg}");
+            }
         }
     }
     let _ = write!(out, "\n{bottom}");
     out
 }
 
-pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
+/// Hard-wrap a possibly-ANSI-styled string to `width` visible columns,
+/// returning one string per wrapped row. ANSI SGR escapes are copied verbatim
+/// and don't count toward width; each row is closed with `RESET` so a color
+/// opened before the break doesn't bleed past the frame bar of the next row.
+/// An empty input yields one empty row (so a blank body line still renders a
+/// framed blank row rather than vanishing).
+fn wrap_ansi_to_width(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut vis = 0usize;
+    let mut carried_style = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // Copy the whole CSI sequence verbatim (ESC [ ... final-byte).
+            cur.push(ch);
+            if chars.peek() == Some(&'[') {
+                cur.push(chars.next().unwrap());
+                for c in chars.by_ref() {
+                    cur.push(c);
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            carried_style = true;
+            continue;
+        }
+        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if vis + ch_w > width && vis > 0 {
+            if carried_style {
+                cur.push_str(RESET);
+            }
+            rows.push(std::mem::take(&mut cur));
+            vis = 0;
+        }
+        cur.push(ch);
+        vis += ch_w;
+    }
+    rows.push(cur);
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {
     let t = theme();
     let muted = ansi_fg(t.muted);
     let (payload, hook_feedback) = split_hook_feedback(output);
@@ -866,27 +1048,38 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
     let mut content = if is_error {
         let summary = truncate_for_summary(output.trim(), 160);
         let removed = ansi_fg(t.diff_removed);
+        let label = tool_display_label(name);
         if summary.is_empty() {
-            ToolCardContent::header_only(format!("{muted}{name}{RESET}"))
+            ToolCardContent::header_only(format!("{muted}{label}{RESET}"))
         } else {
             ToolCardContent::new(
-                format!("{muted}{name}{RESET}"),
+                format!("{muted}{label}{RESET}"),
                 format!("{removed}{summary}{RESET}"),
             )
         }
     } else {
-        let parsed: serde_json::Value =
+        // Every card is built from BOTH the tool's `input` (the arguments the
+        // model sent — command, path, oldString…) and its `output` (the
+        // result — stdout, diff, content). The header's identity fields live
+        // in `input`; the body lives in `output`. Passing both to every
+        // extractor is the uniform contract that stops a tool from silently
+        // reading a field out of the wrong payload (bash's command and edit's
+        // path are ONLY in input, never in output).
+        let in_val: serde_json::Value =
+            serde_json::from_str(input).unwrap_or(serde_json::Value::Null);
+        let out_val: serde_json::Value =
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
-        match name {
-            "bash" | "Bash" => bash_card(&parsed),
-            "read_file" | "Read" => read_card(&parsed),
-            "write_file" | "Write" => write_card(&parsed),
-            "edit_file" | "Edit" => edit_card(&parsed),
-            "glob_search" | "Glob" => glob_card(&parsed),
-            "grep_search" | "Grep" => grep_card(&parsed),
-            "Skill" => skill_card(&parsed),
-            "read_tool_output" => read_tool_output_card(&parsed),
-            _ => generic_tool_card(name, &parsed),
+        match ToolKind::from_name(name) {
+            Some(ToolKind::Bash) => bash_card(&in_val, &out_val),
+            Some(ToolKind::Read) => read_card(&in_val, &out_val),
+            Some(ToolKind::Write) => write_card(&in_val, &out_val),
+            Some(ToolKind::Edit) => edit_card(&in_val, &out_val),
+            Some(ToolKind::Glob) => glob_card(&in_val, &out_val),
+            Some(ToolKind::Grep) => grep_card(&in_val, &out_val),
+            Some(ToolKind::Skill) => skill_card(&in_val, &out_val),
+            Some(ToolKind::ReadToolOutput) => read_tool_output_card(&in_val, &out_val),
+            // WebSearch has no bespoke completed card; fall through to generic.
+            Some(ToolKind::WebSearch) | None => generic_tool_card(name, &in_val, &out_val),
         }
     };
     if let (Some(feedback), false) = (hook_feedback, is_error) {
@@ -898,6 +1091,39 @@ pub(crate) fn format_tool_result(name: &str, output: &str, is_error: bool) -> St
         });
     }
     render_tool_card(&content, status)
+}
+
+/// Read a string field that may live in the tool's `input` (arguments) or its
+/// `output` (result), preferring `input` — that is the authoritative record of
+/// what the model asked for, and some tools (bash, edit) never echo it back in
+/// the result. Falls back to `output`, then `""`.
+#[inline]
+fn field<'a>(input: &'a serde_json::Value, output: &'a serde_json::Value, key: &str) -> &'a str {
+    input
+        .get(key)
+        .or_else(|| output.get(key))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+}
+
+/// Like [`field`] but tries several keys in order (e.g. snake_case vs
+/// camelCase across the input/output boundary).
+#[inline]
+fn field_any<'a>(
+    input: &'a serde_json::Value,
+    output: &'a serde_json::Value,
+    keys: &[&str],
+) -> &'a str {
+    for k in keys {
+        let v = input
+            .get(k)
+            .or_else(|| output.get(k))
+            .and_then(|v| v.as_str());
+        if let Some(s) = v {
+            return s;
+        }
+    }
+    ""
 }
 
 pub(crate) fn extract_tool_path(parsed: &serde_json::Value) -> String {
@@ -957,14 +1183,11 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-pub(crate) fn bash_card(parsed: &serde_json::Value) -> ToolCardContent {
+pub(crate) fn bash_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
     use std::fmt::Write as _;
 
-    // Extract command from input for the header.
-    let command = parsed
-        .get("command")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
+    // Command lives in `input` (never echoed in the result payload).
+    let command = field(input, output, "command");
 
     let muted = ansi_fg(theme().muted);
     let mut header = if command.is_empty() {
@@ -973,12 +1196,13 @@ pub(crate) fn bash_card(parsed: &serde_json::Value) -> ToolCardContent {
         format!("{muted}Bash{RESET}({})", truncate_for_summary(command, 120))
     };
 
-    if let Some(task_id) = parsed
+    // Background id / return-code interpretation live in `output`.
+    if let Some(task_id) = output
         .get("backgroundTaskId")
         .and_then(|value| value.as_str())
     {
         write!(&mut header, " backgrounded ({task_id})").expect("write to string");
-    } else if let Some(status) = parsed
+    } else if let Some(status) = output
         .get("returnCodeInterpretation")
         .and_then(|value| value.as_str())
         .filter(|status| !status.is_empty())
@@ -986,13 +1210,13 @@ pub(crate) fn bash_card(parsed: &serde_json::Value) -> ToolCardContent {
         write!(&mut header, " {status}").expect("write to string");
     }
 
-    let stdout_text = parsed
+    let stdout_text = output
         .get("stdout")
-        .and_then(|value| value.as_str())
+        .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let stderr_text = parsed
+    let stderr_text = output
         .get("stderr")
-        .and_then(|value| value.as_str())
+        .and_then(|v| v.as_str())
         .unwrap_or_default();
 
     stdout_stderr_card(header, stdout_text, stderr_text)
@@ -1069,9 +1293,17 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     format!("{}…", &stripped[..byte_end])
 }
 
-pub(crate) fn read_card(parsed: &serde_json::Value) -> ToolCardContent {
-    let file = parsed.get("file").unwrap_or(parsed);
-    let path = extract_tool_path(file);
+pub(crate) fn read_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
+    let file = output.get("file").unwrap_or(output);
+    // Path is authoritative in `input`; fall back to the result envelope.
+    let path = {
+        let p = extract_tool_path(input);
+        if p == "?" {
+            extract_tool_path(file)
+        } else {
+            p
+        }
+    };
     let content = file
         .get("content")
         .and_then(|value| value.as_str())
@@ -1165,18 +1397,27 @@ pub(crate) const DIFF_PREVIEW_MAX_BODY_LINES: usize = 8;
 /// Lines of unchanged context shown above and below the edit window.
 pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
 
-pub(crate) fn write_card(parsed: &serde_json::Value) -> ToolCardContent {
-    let path = extract_tool_path(parsed);
-    let kind = parsed
+pub(crate) fn write_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
+    // Path is authoritative in `input`; the body (type/content/originalFile)
+    // comes from the result envelope.
+    let path = {
+        let p = extract_tool_path(input);
+        if p == "?" {
+            extract_tool_path(output)
+        } else {
+            p
+        }
+    };
+    let kind = output
         .get("type")
         .and_then(|value| value.as_str())
         .unwrap_or("write");
-    let new_content = parsed
+    let new_content = output
         .get("content")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let new_line_count = new_content.lines().count();
-    let original = parsed.get("originalFile").and_then(|value| value.as_str());
+    let original = output.get("originalFile").and_then(|value| value.as_str());
     let verb = if kind == "create" { "Wrote" } else { "Updated" };
     let success = ansi_bold_fg(theme().success);
     let header = match original {
@@ -1242,24 +1483,28 @@ pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) ->
     ))
 }
 
-pub(crate) fn edit_card(parsed: &serde_json::Value) -> ToolCardContent {
-    let path = extract_tool_path(parsed);
-    let replace_all = parsed
+pub(crate) fn edit_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
+    // path / oldString / newString / replaceAll are what the model sent → input.
+    // originalFile (the pre-edit file, for the diff) is only in the result → output.
+    let path = {
+        let p = extract_tool_path(input);
+        if p == "?" {
+            extract_tool_path(output)
+        } else {
+            p
+        }
+    };
+    let replace_all = input
         .get("replaceAll")
+        .or_else(|| output.get("replaceAll"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let original = parsed
+    let original = output
         .get("originalFile")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let old_value = parsed
-        .get("oldString")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let new_value = parsed
-        .get("newString")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
+    let old_value = field_any(input, output, &["oldString", "old_string"]);
+    let new_value = field_any(input, output, &["newString", "new_string"]);
 
     let occurrences = if replace_all && !old_value.is_empty() {
         count_non_overlapping(original, old_value)
@@ -1413,8 +1658,8 @@ fn count_non_overlapping(haystack: &str, needle: &str) -> usize {
     count
 }
 
-pub(crate) fn glob_card(parsed: &serde_json::Value) -> ToolCardContent {
-    let num_files = parsed
+pub(crate) fn glob_card(_input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
+    let num_files = output
         .get("numFiles")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
@@ -1422,12 +1667,12 @@ pub(crate) fn glob_card(parsed: &serde_json::Value) -> ToolCardContent {
     ToolCardContent::header_only(format!("{DIM}Found {num_files} files{RESET}"))
 }
 
-pub(crate) fn grep_card(parsed: &serde_json::Value) -> ToolCardContent {
-    let num_matches = parsed
+pub(crate) fn grep_card(_input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
+    let num_matches = output
         .get("numMatches")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let num_files = parsed
+    let num_files = output
         .get("numFiles")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
@@ -1437,15 +1682,19 @@ pub(crate) fn grep_card(parsed: &serde_json::Value) -> ToolCardContent {
     ))
 }
 
-pub(crate) fn generic_tool_card(name: &str, parsed: &serde_json::Value) -> ToolCardContent {
-    let rendered_output = match parsed {
+pub(crate) fn generic_tool_card(
+    name: &str,
+    _input: &serde_json::Value,
+    output: &serde_json::Value,
+) -> ToolCardContent {
+    let rendered_output = match output {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Null => String::new(),
         serde_json::Value::Object(map) => digest_json_object(map),
         serde_json::Value::Array(_) => {
-            serde_json::to_string_pretty(parsed).unwrap_or_else(|_| parsed.to_string())
+            serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
         }
-        _ => parsed.to_string(),
+        _ => output.to_string(),
     };
     let preview = truncate_output_for_display(
         &rendered_output,
@@ -1488,32 +1737,42 @@ fn digest_json_object(map: &serde_json::Map<String, serde_json::Value>) -> Strin
     lines.join("\n")
 }
 
-fn skill_card(parsed: &serde_json::Value) -> ToolCardContent {
+fn skill_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
     let muted = ansi_fg(theme().muted);
-    let path = parsed.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-    let prompt = parsed.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    let path = {
+        let p = field(input, output, "path");
+        if p.is_empty() {
+            "?"
+        } else {
+            p
+        }
+    };
+    let prompt = output.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     let lines = prompt.lines().count();
     ToolCardContent::header_only(format!(
         "{muted}Skill{RESET} loaded {path} {DIM}({lines} lines){RESET}"
     ))
 }
 
-fn read_tool_output_card(parsed: &serde_json::Value) -> ToolCardContent {
+fn read_tool_output_card(input: &serde_json::Value, output: &serde_json::Value) -> ToolCardContent {
     let muted = ansi_fg(theme().muted);
-    let total = parsed.get("totalBytes").and_then(serde_json::Value::as_u64);
+    let total = output.get("totalBytes").and_then(serde_json::Value::as_u64);
     // Seek mode reports matches; window mode reports a byte range + content.
-    if let Some(matches) = parsed.get("matches").and_then(|v| v.as_array()) {
-        let total_matches = parsed
+    if let Some(matches) = output.get("matches").and_then(|v| v.as_array()) {
+        let total_matches = output
             .get("totalMatches")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(matches.len() as u64);
-        let header = format!(
-            "{muted}read_tool_output{RESET} {total_matches} match(es) for {}",
-            parsed
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-        );
+        let pattern = {
+            let p = field(input, output, "pattern");
+            if p.is_empty() {
+                "?"
+            } else {
+                p
+            }
+        };
+        let header =
+            format!("{muted}read_tool_output{RESET} {total_matches} match(es) for {pattern}");
         let mut body = String::new();
         for hit in matches.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
             let line = hit
@@ -1535,15 +1794,15 @@ fn read_tool_output_card(parsed: &serde_json::Value) -> ToolCardContent {
             ToolCardContent::new(header, body)
         };
     }
-    let start = parsed
+    let start = output
         .get("byteOffset")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let end = parsed
+    let end = output
         .get("byteEnd")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let content = parsed.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let content = output.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let preview = truncate_output_for_display(
         content,
         TOOL_OUTPUT_DISPLAY_MAX_LINES,
@@ -2067,6 +2326,79 @@ mod tests {
         out
     }
 
+    /// Render a completed (`Ok`) tool card and strip ANSI, in one step — the
+    /// shape every card test needs. Collapses the repeated
+    /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
+    fn ok_card_plain(content: ToolCardContent) -> String {
+        strip_ansi(&render_tool_card(&content, ToolStatus::Ok))
+    }
+
+    #[test]
+    fn render_tool_card_body_line_never_exceeds_terminal_width() {
+        // Regression: a body line longer than the terminal used to be wrapped
+        // by the terminal itself, and the continuation had no `│` prefix, so it
+        // spilled past the left frame (seen with pid_status/generic_tool_card's
+        // long JSON values). render_tool_card now wraps every content line to
+        // the frame's inner width, prefixing each segment with `│`.
+        let term_width = crossterm::terminal::size().map_or(80usize, |(cols, _)| cols as usize);
+        let long = "x".repeat(term_width * 3);
+        let content = ToolCardContent::new("pid_status".to_string(), long.clone());
+        let rendered = render_tool_card(&content, ToolStatus::Ok);
+        let plain = strip_ansi(&rendered);
+        // (1) No rendered row exceeds the terminal width.
+        for line in plain.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= term_width,
+                "line exceeds terminal width {term_width}: {line:?}"
+            );
+        }
+        // (2) Wrapping preserves content — every `x` survives (not truncated).
+        let x_count = plain.chars().filter(|&c| c == 'x').count();
+        assert_eq!(x_count, long.len(), "wrapped body must keep all content");
+        // (3) Every body row carries the frame bar (no bare continuation).
+        for line in plain.lines().filter(|l| l.contains('x')) {
+            assert!(
+                line.trim_start().starts_with('\u{2502}'),
+                "wrapped body row must start with the frame bar: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_tool_card_running_color_differs_from_ok() {
+        // Bug 3: running used warning/teal, too close to success green. It now
+        // uses the brand amber (primary) so the three states read distinctly.
+        let content = ToolCardContent::header_only("Bash".to_string());
+        let running = render_tool_card(&content, ToolStatus::Running);
+        let ok = render_tool_card(&content, ToolStatus::Ok);
+        assert_ne!(
+            running, ok,
+            "running and ok cards must differ (distinct frame color)"
+        );
+    }
+
+    #[test]
+    fn tool_card_reads_identity_fields_from_input() {
+        // Bug: bash's command and edit's path live ONLY in the call input, not
+        // the result payload. The completed card must read them from input.
+        let bash_in = r#"{"command":"cargo test --workspace"}"#;
+        let bash_out = r#"{"stdout":"ok","stderr":""}"#;
+        let rendered = strip_ansi(&format_tool_result("bash", bash_in, bash_out, false));
+        assert!(
+            rendered.contains("Bash(cargo test --workspace)"),
+            "bash header must show the command from input: {rendered}"
+        );
+
+        let edit_in = r#"{"filePath":"src/main.rs","oldString":"a","newString":"b"}"#;
+        // Result payload without filePath (the field the header needs).
+        let edit_out = r#"{"originalFile":"a\n","structuredPatch":[]}"#;
+        let rendered = strip_ansi(&format_tool_result("edit_file", edit_in, edit_out, false));
+        assert!(
+            rendered.contains("Edited src/main.rs"),
+            "edit header must show the path from input, not `?`: {rendered}"
+        );
+    }
+
     #[test]
     fn tool_timeline_is_silent_when_no_tools_ran() {
         let messages = vec![user_message_with_results(vec![])];
@@ -2108,6 +2440,68 @@ mod tests {
         let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
+    }
+
+    #[test]
+    fn running_header_and_completed_card_agree_on_tool_label() {
+        // Bug: the running card built its header from the raw wire name
+        // (lowercase `bash`), while the completed card hardcoded `Bash` — so a
+        // tool changed case the moment it finished. Both must resolve the same
+        // canonical label via ToolKind.
+        let running = strip_ansi(&format_tool_call_start("bash", r#"{"command":"echo hi"}"#));
+        let done = strip_ansi(&format_tool_result(
+            "bash",
+            r#"{"command":"echo hi"}"#,
+            r#"{"stdout":"hi","stderr":""}"#,
+            false,
+        ));
+        assert!(
+            running.contains("Bash"),
+            "running header should show canonical `Bash`: {running}"
+        );
+        assert!(
+            !running.contains("bash"),
+            "running header must not show lowercase `bash`: {running}"
+        );
+        assert!(done.contains("Bash"), "completed card shows `Bash`: {done}");
+    }
+
+    #[test]
+    fn replay_pairs_tool_result_with_its_call_input() {
+        // Regression: the bash command / edit path live only in the ToolUse
+        // input, which is a *separate message* from the ToolResult. Replay must
+        // carry the input forward (via ToolInputRegistry) so the completed card
+        // shows `Bash(<cmd>)`, not an empty `Bash()`.
+        let renderer = crate::render::TerminalRenderer::new();
+        let messages = vec![
+            runtime::ConversationMessage {
+                role: runtime::MessageRole::Assistant,
+                blocks: vec![runtime::ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: r#"{"command":"cargo test --workspace"}"#.to_string(),
+                    thought_signature: None,
+                }],
+                usage: None,
+                model: None,
+            },
+            runtime::ConversationMessage {
+                role: runtime::MessageRole::Tool,
+                blocks: vec![runtime::ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    tool_name: "bash".to_string(),
+                    output: r#"{"stdout":"ok","stderr":""}"#.to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+                model: None,
+            },
+        ];
+        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
+        assert!(
+            plain.contains("Bash(cargo test --workspace)"),
+            "replay must show the command from the call input: {plain}"
+        );
     }
 
     #[test]
@@ -2448,8 +2842,7 @@ mod tests {
                 "totalLines": 3
             }
         });
-        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         // Header still present with line count.
         assert!(plain.contains("Read src/main.rs"), "{plain}");
         assert!(plain.contains("(3 lines)"), "{plain}");
@@ -2470,8 +2863,7 @@ mod tests {
                 "totalLines": 137
             }
         });
-        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(137 lines)"), "{plain}");
     }
 
@@ -2486,8 +2878,7 @@ mod tests {
                 "total_lines": 42
             }
         });
-        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(42 lines)"), "{plain}");
     }
 
@@ -2513,7 +2904,8 @@ mod tests {
                 "totalLines": 30
             }
         });
-        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
+        let rendered =
+            render_tool_card(&read_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
 
         // The literal text `[2m` and `[0m` must NOT appear without their
         // leading ESC byte — that's the visible-corruption signature.
@@ -2554,8 +2946,7 @@ mod tests {
                 "totalLines": 0
             }
         });
-        let rendered = render_tool_card(&read_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Read empty.txt"), "{plain}");
         // No content body indented underneath.
         assert!(!plain.contains("\n  "), "{plain}");
@@ -2622,7 +3013,7 @@ mod tests {
         })
         .to_string();
         let polluted = format!("{edit_json}\n\nHook feedback:\nformatter clean");
-        let rendered = format_tool_result("edit_file", &polluted, false);
+        let rendered = format_tool_result("edit_file", "", &polluted, false);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("Edited src/main.rs"), "{plain}");
         // Diff preview survives — the +/- lines come from oldString/newString
@@ -2725,8 +3116,7 @@ mod tests {
             "replaceAll": true,
             "userModified": false,
         });
-        let rendered = render_tool_card(&edit_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(edit_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(replace all, 3 occurrences)"), "{plain}");
     }
 
@@ -2738,8 +3128,7 @@ mod tests {
             "content": "a\nb\nc\nd\n",
             "originalFile": "a\nx\nc\n",
         });
-        let rendered = render_tool_card(&write_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(write_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Updated src/main.rs"), "{plain}");
         // 4 new lines, was 3, delta +1.
         assert!(plain.contains("(4 lines, was 3 +1)"), "{plain}");
@@ -2755,8 +3144,7 @@ mod tests {
             "filePath": "new.txt",
             "content": "hello\nworld\n",
         });
-        let rendered = render_tool_card(&write_card(&json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(write_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Wrote new.txt"), "{plain}");
         assert!(plain.contains("(2 lines)"), "{plain}");
         assert!(!plain.contains("was"), "{plain}");
@@ -2785,7 +3173,7 @@ mod tests {
         println!("\n=== SAMPLE 1: edit_file with surrounding context ===");
         println!(
             "{}",
-            format_tool_result("edit_file", &edit_with_context, false)
+            format_tool_result("edit_file", "", &edit_with_context, false)
         );
 
         let edit_replace_all = serde_json::json!({
@@ -2800,7 +3188,7 @@ mod tests {
         println!("\n=== SAMPLE 2: edit_file with replaceAll + occurrence count ===");
         println!(
             "{}",
-            format_tool_result("edit_file", &edit_replace_all, false)
+            format_tool_result("edit_file", "", &edit_replace_all, false)
         );
 
         let write_update = serde_json::json!({
@@ -2811,7 +3199,10 @@ mod tests {
         })
         .to_string();
         println!("\n=== SAMPLE 3: write_file update with line-count delta ===");
-        println!("{}", format_tool_result("write_file", &write_update, false));
+        println!(
+            "{}",
+            format_tool_result("write_file", "", &write_update, false)
+        );
 
         let with_hook_feedback = format!(
             "{}\n\nHook feedback:\nrustfmt clean\nclippy clean",
@@ -2820,7 +3211,7 @@ mod tests {
         println!("\n=== SAMPLE 4: edit_file with hook feedback suffix (regression #1) ===");
         println!(
             "{}",
-            format_tool_result("edit_file", &with_hook_feedback, false)
+            format_tool_result("edit_file", "", &with_hook_feedback, false)
         );
         println!();
     }

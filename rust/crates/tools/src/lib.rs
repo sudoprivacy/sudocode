@@ -5570,7 +5570,15 @@ pub fn compose_next_turn_from_envelopes(
             header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
         }
         header.push('>');
-        blocks.push(format!("{header}\n{}\n</{tag}>", env.body));
+        // `from` and `request-id` are escaped above so a hostile envelope can't
+        // break this synthetic prompt. The body is the same envelope from the
+        // same stranger, and it is the field that can both close `</{tag}>`
+        // early and impersonate a `<system-reminder>` — so it gets the same
+        // treatment, through the one neutralizer the co-host loop also uses.
+        blocks.push(format!(
+            "{header}\n{}\n</{tag}>",
+            runtime::agent_mailbox::neutralize_untrusted_markup(&env.body)
+        ));
     }
     blocks.join("\n\n")
 }

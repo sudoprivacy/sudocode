@@ -141,7 +141,7 @@ pub fn input_line_of(screen: &str) -> String {
 ///
 /// See the `Backend::Live` arm of [`TestEnv::spawn_with_env`] for why it is
 /// pinned and why the pin is overridable.
-fn live_model() -> String {
+pub fn live_model() -> String {
     std::env::var("SCODE_LIVE_MODEL")
         .ok()
         .filter(|m| !m.trim().is_empty())

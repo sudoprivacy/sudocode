@@ -36,9 +36,10 @@ fn collect_spawns(dir: &Path, spawns: &mut Vec<(String, Value)>) {
 #[test]
 fn subagent_and_result_summary_inherit_current_parent_model() {
     let env = TestEnv::new("agent-model-inheritance");
-    if !env.is_live() {
+    if !env.is_live() || std::env::var_os("SCODE_LIVE_AGENT_TESTS").is_none() {
         eprintln!(
-            "SKIP: run with SCODE_TEST_BACKEND=live to verify actual subagent model inheritance"
+            "SKIP: requires SCODE_TEST_BACKEND=live and SCODE_LIVE_AGENT_TESTS=1; \
+             live agent orchestration is model- and service-dependent"
         );
         return;
     }

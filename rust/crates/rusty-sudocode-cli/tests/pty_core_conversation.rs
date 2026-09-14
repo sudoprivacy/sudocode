@@ -139,8 +139,11 @@ fn multi_tool_roundtrip() {
     // call appears and the response references the fixture content.
     sess.set_default_timeout(Duration::from_secs(60));
     if env.is_mock() {
-        sess.expect("(?i)read_file")
-            .expect("should see read_file tool call (agent trigger)");
+        // The card header now shows the canonical tool label (`Read`, `Grep`),
+        // not the wire name (`read_file`, `grep_search`), consistently in the
+        // running overlay and the completed scrollback card.
+        sess.expect("(?i)read")
+            .expect("should see read tool call (agent trigger)");
         sess.expect("(?i)grep")
             .expect("should see grep_search tool call (agent trigger)");
     } else {

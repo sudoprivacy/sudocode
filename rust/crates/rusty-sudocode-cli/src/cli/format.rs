@@ -691,11 +691,74 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     (rendered, raw_lines.len())
 }
 
+/// The built-in tools the card renderer recognizes, each matched from *both*
+/// its snake_case wire name (`bash`, `read_file`) and its TitleCase alias
+/// (`Bash`, `Read`). This is the SSOT that both the running header
+/// ([`format_tool_call_start`]) and the completed card ([`format_tool_result`])
+/// resolve through, so the two moments can never disagree on the tool's
+/// display label — the casing drift that showed a lowercase `bash` while
+/// running and a TitleCase `Bash` once done.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolKind {
+    Bash,
+    Read,
+    Write,
+    Edit,
+    Glob,
+    Grep,
+    WebSearch,
+    Skill,
+    ReadToolOutput,
+}
+
+impl ToolKind {
+    /// Parse a wire tool name (either spelling). `None` for tools without a
+    /// bespoke card — they fall through to the generic renderer.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bash" | "Bash" => Some(Self::Bash),
+            "read_file" | "Read" => Some(Self::Read),
+            "write_file" | "Write" => Some(Self::Write),
+            "edit_file" | "Edit" => Some(Self::Edit),
+            "glob_search" | "Glob" => Some(Self::Glob),
+            "grep_search" | "Grep" => Some(Self::Grep),
+            "web_search" | "WebSearch" => Some(Self::WebSearch),
+            "Skill" => Some(Self::Skill),
+            "read_tool_output" => Some(Self::ReadToolOutput),
+            _ => None,
+        }
+    }
+
+    /// The one canonical label shown in the card header, running or done.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Bash => "Bash",
+            Self::Read => "Read",
+            Self::Write => "Write",
+            Self::Edit => "Edit",
+            Self::Glob => "Glob",
+            Self::Grep => "Grep",
+            Self::WebSearch => "WebSearch",
+            Self::Skill => "Skill",
+            Self::ReadToolOutput => "read_tool_output",
+        }
+    }
+}
+
+/// The label shown in a tool card header for `name`, canonical for both the
+/// running and completed states. Unknown tools keep their raw wire name.
+pub(crate) fn tool_display_label(name: &str) -> &str {
+    match ToolKind::from_name(name) {
+        Some(kind) => kind.label(),
+        None => name,
+    }
+}
+
 pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-    match name {
-        "bash" | "Bash" => {
+    match ToolKind::from_name(name) {
+        Some(ToolKind::Bash) => {
             let command = parsed
                 .get("command")
                 .and_then(|value| value.as_str())
@@ -706,10 +769,10 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 format!("command {}", truncate_for_summary(command.trim(), 100))
             }
         }
-        "read_file" | "Read" => format!("reading {}", extract_tool_path(&parsed)),
-        "write_file" | "Write" => format!("writing {}", extract_tool_path(&parsed)),
-        "edit_file" | "Edit" => format!("editing {}", extract_tool_path(&parsed)),
-        "glob_search" | "Glob" => {
+        Some(ToolKind::Read) => format!("reading {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Write) => format!("writing {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Edit) => format!("editing {}", extract_tool_path(&parsed)),
+        Some(ToolKind::Glob) => {
             let pattern = parsed
                 .get("pattern")
                 .and_then(|value| value.as_str())
@@ -720,7 +783,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 .unwrap_or(".");
             format!("glob `{pattern}` in {scope}")
         }
-        "grep_search" | "Grep" => {
+        Some(ToolKind::Grep) => {
             let pattern = parsed
                 .get("pattern")
                 .and_then(|value| value.as_str())
@@ -731,7 +794,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 .unwrap_or(".");
             format!("grep `{pattern}` in {scope}")
         }
-        "web_search" | "WebSearch" => parsed
+        Some(ToolKind::WebSearch) => parsed
             .get("query")
             .and_then(|value| value.as_str())
             .map_or_else(
@@ -753,13 +816,13 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
 
-    let detail = match name {
-        "bash" | "Bash" => format_bash_call(&parsed),
-        "read_file" | "Read" => {
+    let detail = match ToolKind::from_name(name) {
+        Some(ToolKind::Bash) => format_bash_call(&parsed),
+        Some(ToolKind::Read) => {
             let path = extract_tool_path(&parsed);
             format!("{DIM}📄 Reading {path}…{RESET}")
         }
-        "write_file" | "Write" => {
+        Some(ToolKind::Write) => {
             let path = extract_tool_path(&parsed);
             let lines = parsed
                 .get("content")
@@ -768,7 +831,7 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
             let success = ansi_bold_fg(theme().success);
             format!("{success}✏️ Writing {path}{RESET} {DIM}({lines} lines){RESET}")
         }
-        "edit_file" | "Edit" => {
+        Some(ToolKind::Edit) => {
             let path = extract_tool_path(&parsed);
             let old_value = parsed
                 .get("old_string")
@@ -788,9 +851,9 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
                     .unwrap_or_default()
             )
         }
-        "glob_search" | "Glob" => format_search_start("🔎 Glob", &parsed),
-        "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
-        "web_search" | "WebSearch" => parsed
+        Some(ToolKind::Glob) => format_search_start("🔎 Glob", &parsed),
+        Some(ToolKind::Grep) => format_search_start("🔎 Grep", &parsed),
+        Some(ToolKind::WebSearch) => parsed
             .get("query")
             .and_then(|value| value.as_str())
             .unwrap_or("?")
@@ -801,10 +864,12 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     // A tool call in flight is the Running state of the same card that
     // `format_tool_result` later renders on completion: same L-frame, colored
     // yellow. The tool name (bold info color) is the header; the summary detail
-    // is the body. One renderer for both moments is the SSOT that makes command
-    // header and result visually identical.
+    // is the body. The header uses `tool_display_label` — the SAME canonical
+    // label the completed card resolves — so a tool never shows lowercase
+    // `bash` while running and TitleCase `Bash` once done. One renderer for
+    // both moments is the SSOT that makes command header and result identical.
     let cn = ansi_bold_fg(theme().info);
-    let header = format!("{cn}{name}{RESET}");
+    let header = format!("{cn}{}{RESET}", tool_display_label(name));
     let content = if detail.is_empty() {
         ToolCardContent::header_only(header)
     } else {
@@ -983,11 +1048,12 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
     let mut content = if is_error {
         let summary = truncate_for_summary(output.trim(), 160);
         let removed = ansi_fg(t.diff_removed);
+        let label = tool_display_label(name);
         if summary.is_empty() {
-            ToolCardContent::header_only(format!("{muted}{name}{RESET}"))
+            ToolCardContent::header_only(format!("{muted}{label}{RESET}"))
         } else {
             ToolCardContent::new(
-                format!("{muted}{name}{RESET}"),
+                format!("{muted}{label}{RESET}"),
                 format!("{removed}{summary}{RESET}"),
             )
         }
@@ -1003,16 +1069,17 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
             serde_json::from_str(input).unwrap_or(serde_json::Value::Null);
         let out_val: serde_json::Value =
             serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
-        match name {
-            "bash" | "Bash" => bash_card(&in_val, &out_val),
-            "read_file" | "Read" => read_card(&in_val, &out_val),
-            "write_file" | "Write" => write_card(&in_val, &out_val),
-            "edit_file" | "Edit" => edit_card(&in_val, &out_val),
-            "glob_search" | "Glob" => glob_card(&in_val, &out_val),
-            "grep_search" | "Grep" => grep_card(&in_val, &out_val),
-            "Skill" => skill_card(&in_val, &out_val),
-            "read_tool_output" => read_tool_output_card(&in_val, &out_val),
-            _ => generic_tool_card(name, &in_val, &out_val),
+        match ToolKind::from_name(name) {
+            Some(ToolKind::Bash) => bash_card(&in_val, &out_val),
+            Some(ToolKind::Read) => read_card(&in_val, &out_val),
+            Some(ToolKind::Write) => write_card(&in_val, &out_val),
+            Some(ToolKind::Edit) => edit_card(&in_val, &out_val),
+            Some(ToolKind::Glob) => glob_card(&in_val, &out_val),
+            Some(ToolKind::Grep) => grep_card(&in_val, &out_val),
+            Some(ToolKind::Skill) => skill_card(&in_val, &out_val),
+            Some(ToolKind::ReadToolOutput) => read_tool_output_card(&in_val, &out_val),
+            // WebSearch has no bespoke completed card; fall through to generic.
+            Some(ToolKind::WebSearch) | None => generic_tool_card(name, &in_val, &out_val),
         }
     };
     if let (Some(feedback), false) = (hook_feedback, is_error) {
@@ -2366,6 +2433,30 @@ mod tests {
         let rendered = format_tool_timeline(&messages, Duration::from_millis(900)).unwrap();
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("(2 tools, 0.9s)"), "{plain}");
+    }
+
+    #[test]
+    fn running_header_and_completed_card_agree_on_tool_label() {
+        // Bug: the running card built its header from the raw wire name
+        // (lowercase `bash`), while the completed card hardcoded `Bash` — so a
+        // tool changed case the moment it finished. Both must resolve the same
+        // canonical label via ToolKind.
+        let running = strip_ansi(&format_tool_call_start("bash", r#"{"command":"echo hi"}"#));
+        let done = strip_ansi(&format_tool_result(
+            "bash",
+            r#"{"command":"echo hi"}"#,
+            r#"{"stdout":"hi","stderr":""}"#,
+            false,
+        ));
+        assert!(
+            running.contains("Bash"),
+            "running header should show canonical `Bash`: {running}"
+        );
+        assert!(
+            !running.contains("bash"),
+            "running header must not show lowercase `bash`: {running}"
+        );
+        assert!(done.contains("Bash"), "completed card shows `Bash`: {done}");
     }
 
     #[test]

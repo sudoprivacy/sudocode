@@ -2768,7 +2768,19 @@ fn run_repl_iocraft_dispatch(
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cli.is_repl = true;
-    let banner = cli.startup_banner();
+    // Banner + restored history: on resume the iocraft REPL must replay the
+    // session's messages to scrollback (same as the rustyline path), not just
+    // the banner — otherwise a resumed conversation looks empty. Both come from
+    // one println in spawn_repl_ui, before raw mode.
+    let banner = {
+        let banner = cli.startup_banner();
+        let history = cli.render_restored_scrollback();
+        if history.is_empty() {
+            banner
+        } else {
+            format!("{banner}\n{history}")
+        }
+    };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
 
     // iocraft owns stdin (raw mode) and delivers Ctrl-C / ESC as key events;
@@ -3634,6 +3646,23 @@ impl LiveCli {
             boxed_lines.join("\n"),
             bottom,
         )
+    }
+
+    /// Render the restored conversation history to a scrollback string, or an
+    /// empty string when there is none (a fresh session). Reuses the same
+    /// `render_messages` the rustyline REPL replays on resume, so both REPL
+    /// paths render the session SSOT identically — the iocraft path previously
+    /// printed only the banner, leaving a resumed session's history invisible.
+    fn render_restored_scrollback(&self) -> String {
+        let session = self.lifecycle.session_snapshot();
+        if session.messages.is_empty() {
+            return String::new();
+        }
+        let term_width = crossterm::terminal::size()
+            .map(|(cols, _)| cols as usize)
+            .unwrap_or(80);
+        let renderer = render::TerminalRenderer::new();
+        render_messages(&session.messages, term_width, &renderer)
     }
 
     fn repl_completion_candidates(

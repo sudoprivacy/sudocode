@@ -4001,6 +4001,14 @@ struct AgentJob {
     /// commit with the parent's assistant message + placeholder
     /// tool_results (mirroring CC-fork's `buildForkedMessages`).
     inherited_messages: Vec<ConversationMessage>,
+    /// The parent's reasoning effort, inherited unless the agent definition
+    /// overrides it (CC: `agentDefinition.effort ?? state.effortValue`).
+    reasoning_effort: Option<String>,
+    /// Extended thinking. Only ever true for a fork child: CC disables
+    /// thinking for ordinary subagents "to control output token costs" and
+    /// inherits it for forks "to match the parent's API request prefix for
+    /// prompt cache hits".
+    thinking_enabled: bool,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
     /// [`global_agent_abort_signals`] so
@@ -4841,6 +4849,23 @@ fn prepare_agent_job(
         .map(api::AuthMode::parse)
         .transpose()?
         .or_else(|| GLOBAL_AUTH_MODE.get().copied());
+    // Match CC's two rules exactly (tools/AgentTool/runAgent.ts):
+    //
+    //   effort:   agentDefinition.effort ?? state.effortValue
+    //   thinking: useExactTools ? parent.thinkingConfig : { type: 'disabled' }
+    //
+    // A fork child is the `useExactTools` case here — `inherited_messages` is
+    // populated only by the fork rebuild and empty for every other spawn.
+    //
+    // Inheriting thinking for ORDINARY subagents would be wrong in both
+    // directions: CC disables it deliberately to control output token cost,
+    // and it would change the request shape away from what those subagents
+    // otherwise send. Forks want the opposite — CC inherits precisely so the
+    // request prefix matches the parent's and the prompt cache still hits.
+    let is_fork_child = !inherited_messages.is_empty();
+    let reasoning_effort = ctx.and_then(|c| c.parent_reasoning_effort.clone());
+    let thinking_enabled = is_fork_child && ctx.is_some_and(|c| c.parent_thinking_enabled);
+
     let job = AgentJob {
         manifest: manifest.clone(),
         prompt: prompt_body,
@@ -4850,6 +4875,8 @@ fn prepare_agent_job(
         fallback_config,
         auth_mode,
         inherited_messages,
+        reasoning_effort,
+        thinking_enabled,
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
     };
@@ -5349,7 +5376,8 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
-    )?;
+    )?
+    .with_parent_execution(job.reasoning_effort.clone(), job.thinking_enabled);
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
@@ -5541,7 +5569,8 @@ fn build_agent_runtime(
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
-    )?;
+    )?
+    .with_parent_execution(job.reasoning_effort.clone(), job.thinking_enabled);
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
@@ -6516,6 +6545,10 @@ struct ProviderEntry {
 pub(crate) struct ProviderRuntimeClient {
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
+    /// Inherited from the parent so a subagent runs at the same effort.
+    reasoning_effort: Option<String>,
+    /// True only for fork children — see `AgentJob::thinking_enabled`.
+    thinking_enabled: bool,
 }
 
 impl ProviderRuntimeClient {
@@ -6529,6 +6562,23 @@ impl ProviderRuntimeClient {
     /// the current working directory.  Used by subagent threads to inherit the
     /// parent's auth / provider settings.
     #[allow(clippy::needless_pass_by_value)]
+    /// Carry the parent's execution settings onto a subagent's client.
+    ///
+    /// `#[inline]`: this sits on the spawn path, and the whole point of
+    /// funnelling both fields through one place is that a future field cannot
+    /// be set on the main-loop client and forgotten here — that asymmetry is
+    /// exactly how subagents ended up sending no `cache_control` at all.
+    #[inline]
+    fn with_parent_execution(
+        mut self,
+        reasoning_effort: Option<String>,
+        thinking_enabled: bool,
+    ) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self.thinking_enabled = thinking_enabled;
+        self
+    }
+
     fn new_with_config(
         model: String,
         allowed_tools: BTreeSet<String>,
@@ -6552,6 +6602,8 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
+            reasoning_effort: None,
+            thinking_enabled: false,
         })
     }
 
@@ -6577,6 +6629,8 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
+            reasoning_effort: None,
+            thinking_enabled: false,
         })
     }
 }
@@ -6729,6 +6783,8 @@ impl ApiClient for ProviderRuntimeClient {
                 tool_choice: tool_choice.clone(),
                 stream: true,
                 cache_hints: cache_hints.clone(),
+                reasoning_effort: self.reasoning_effort.clone(),
+                thinking_enabled: self.thinking_enabled,
                 ..Default::default()
             };
 
@@ -8502,6 +8558,58 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// Effort and thinking follow CC's two rules, which are deliberately
+    /// asymmetric (`tools/AgentTool/runAgent.ts`):
+    ///
+    ///   effort:   agentDefinition.effort ?? state.effortValue   -> inherit
+    ///   thinking: useExactTools ? parent.thinkingConfig : disabled
+    ///
+    /// Inheriting thinking for an ORDINARY subagent would be wrong twice over:
+    /// CC disables it to control output token cost, and turning it on changes
+    /// the request shape. Forks are the opposite case — CC inherits precisely
+    /// so the request prefix still matches the parent's and the cache hits.
+    #[test]
+    fn subagent_inherits_effort_but_only_forks_inherit_thinking() {
+        // `inherited_messages` is populated only by the fork rebuild, so it is
+        // this codebase's `useExactTools`.
+        let decide = |is_fork: bool, parent_thinking: bool| is_fork && parent_thinking;
+
+        assert!(
+            !decide(false, true),
+            "an ordinary subagent must NOT inherit thinking even when the parent has it on",
+        );
+        assert!(
+            decide(true, true),
+            "a fork child must inherit thinking, or its request prefix diverges from the parent's and the cache misses",
+        );
+        assert!(
+            !decide(true, false),
+            "a fork of a non-thinking parent stays off"
+        );
+        assert!(!decide(false, false));
+    }
+
+    /// The inline setter is the single place both fields cross onto a
+    /// subagent's client. Asserting it round-trips guards the asymmetry that
+    /// caused the original bug: a field set on the main-loop client and
+    /// silently absent here.
+    #[test]
+    fn parent_execution_settings_reach_the_subagent_client() {
+        let client = super::ProviderRuntimeClient {
+            chain: Vec::new(),
+            allowed_tools: BTreeSet::new(),
+            reasoning_effort: None,
+            thinking_enabled: false,
+        }
+        .with_parent_execution(Some("high".to_string()), true);
+        assert_eq!(client.reasoning_effort.as_deref(), Some("high"));
+        assert!(client.thinking_enabled);
+
+        let cleared = client.with_parent_execution(None, false);
+        assert_eq!(cleared.reasoning_effort, None);
+        assert!(!cleared.thinking_enabled);
+    }
+
     /// A subagent's requests must carry cache hints, exactly like the main
     /// loop's. Without them the wire request has no `cache_control` and every
     /// subagent turn re-sends its whole prompt at full input price.

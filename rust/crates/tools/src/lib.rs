@@ -8082,7 +8082,8 @@ impl ProviderRuntimeClient {
                 metadata: self.execution.request_metadata(),
             },
         );
-        message_request.tool_choice = (allow_tools && !self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        message_request.tool_choice =
+            (allow_tools && !self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;

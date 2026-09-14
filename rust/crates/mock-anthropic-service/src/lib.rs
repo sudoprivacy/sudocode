@@ -3013,7 +3013,6 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::WriteFileDenied => "req_write_file_denied",
         Scenario::MultiToolTurnRoundtrip => "req_multi_tool_turn_roundtrip",
         Scenario::BashCompactResults => "req_bash_compact_results",
-        },
         Scenario::StepBudget => "req_step_budget",
         Scenario::BashStdoutRoundtrip => "req_bash_stdout_roundtrip",
         Scenario::BashInterruptLongRunning => "req_bash_interrupt_long_running",

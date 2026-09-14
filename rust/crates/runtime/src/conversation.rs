@@ -2105,7 +2105,13 @@ where
             };
 
             let response = self
-                .execute_response(stream, iterations, !final_answer, &mut observer, &mut prompter)
+                .execute_response(
+                    stream,
+                    iterations,
+                    !final_answer,
+                    &mut observer,
+                    &mut prompter,
+                )
                 .await;
             let events = response.events;
             let (mut assistant_message, usage, turn_prompt_cache_events, iter_response_model) =

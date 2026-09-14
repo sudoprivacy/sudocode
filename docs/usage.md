@@ -611,6 +611,23 @@ history. Keep these files to inspect or recover older context; they are not
 subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
 budgets and persistence details.
 
+### Limit execution steps per turn
+
+Set `maxSteps` in `.nexus/sudocode/settings.json` (or user settings):
+
+```json
+{"maxSteps": 5}
+```
+
+Use a positive integer, for example 5 or 10. Omit the setting for unlimited
+execution. One step is one completed model/tool round; several tool calls in
+one model response count as one step. After the last round's results arrive,
+scode sends a final request with no tools and instructs the model to answer
+using existing results, describe unfinished work, and discuss concrete next
+steps with the user. This final answer is an additional model request, outside
+the execution budget. Each new user turn gets a fresh budget. Already-started
+background work is not cancelled by this limit.
+
 ## Images and browser screenshots
 
 The CLI accepts PNG, JPEG, GIF, and WebP references in a user prompt:
@@ -749,3 +766,4 @@ Nexus, and the model server are measured separately when assessing a complete
 deployment. Apple/Spark measurements require workloads on that hardware.
 RSS includes shared pages; unique memory across several processes requires a
 measure such as proportional set size (PSS).
+

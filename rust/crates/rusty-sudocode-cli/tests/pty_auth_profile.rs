@@ -236,6 +236,10 @@ fn exit_cleanly(sess: &mut pty_expect::PtySession) {
 #[test]
 fn account_lists_configured_accounts_and_marks_current() {
     let env = TestEnv::new("account-list");
+    if env.is_live() {
+        eprintln!("SKIP account list: account selection is covered by the mock-backed PTY tests.");
+        return;
+    }
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
@@ -260,6 +264,12 @@ fn account_lists_configured_accounts_and_marks_current() {
 #[test]
 fn account_switch_persists_the_selection() {
     let env = TestEnv::new("account-switch");
+    if env.is_live() {
+        eprintln!(
+            "SKIP account switch: account selection is covered by the mock-backed PTY tests."
+        );
+        return;
+    }
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
@@ -302,6 +312,12 @@ fn account_switch_persists_the_selection() {
 #[test]
 fn account_refuses_a_name_that_is_not_configured() {
     let env = TestEnv::new("account-unknown");
+    if env.is_live() {
+        eprintln!(
+            "SKIP account refusal: account selection is covered by the mock-backed PTY tests."
+        );
+        return;
+    }
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);

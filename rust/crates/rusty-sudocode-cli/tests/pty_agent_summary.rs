@@ -12,7 +12,7 @@
 //!    b. updates the manifest with `resultFullPath`;
 //!    c. spawns a summarizer sub-turn against sudorouter that
 //!       condenses the output to ≤500 words.
-//! 3. Parent's `TaskOutput(agent_id)` returns the SHORT summary.
+//! 3. Parent's `pid_output(agent_id)` returns the SHORT summary.
 //! 4. Parent reports the summary AND the full-result path back.
 //!
 //! Assertion: BOTH a short summary and the `.full.md` sidecar path
@@ -30,12 +30,12 @@ mod common;
 use common::{TestEnv, LIVE_TIMEOUT};
 
 fn require_live(env: &TestEnv, test_name: &str) -> bool {
-    if env.is_live() {
+    if env.is_live() && std::env::var_os("SCODE_LIVE_AGENT_TESTS").is_some() {
         return true;
     }
     eprintln!(
-        "SKIP {test_name}: SCODE_TEST_BACKEND=mock — subagent-spawning \
-         chain blocked by mock scenario-inheritance gap (plan §6.4)."
+        "SKIP {test_name}: requires SCODE_TEST_BACKEND=live and SCODE_LIVE_AGENT_TESTS=1; \
+         live agent orchestration is model- and service-dependent."
     );
     false
 }
@@ -63,11 +63,11 @@ fn long_subagent_output_is_summarized_and_full_text_preserved() {
             prompt=\"Output the digit 7 exactly five hundred times, then stop. No spaces, no newlines, \
              just five hundred 7s in a row.\", \
             run_in_background=true). Record the agent_id you get back. \
-        (2) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker. \
+        (2) Use pid_output with pid=<that agent_id>, block=true to wait for the worker. \
         (3) Summarize what the worker produced.";
     // The prompt deliberately does *not* ask the model to report the sidecar
     // path. Summarizing an over-threshold worker output and recording where the
-    // full text went is `scode`'s own behaviour, and its `TaskOutput` rendering
+    // full text went is `scode`'s own behaviour, and its `pid_output` rendering
     // prints the `.full.md` path — so the assertion reads what the runtime
     // emitted rather than depending on the model to relay it. Earlier phrasings
     // did ask for it, as a numbered "report the value of field X" step, and a

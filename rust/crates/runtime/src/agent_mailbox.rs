@@ -10,9 +10,7 @@
 //! ## Wire compatibility
 //!
 //! The canonical field name for the message body is `body` (matching
-//! the nexus a2a convention). The `text` alias is accepted on read for
-//! backward compat with existing local JSONL data written before the
-//! unification.
+//! the nexus a2a convention).
 //!
 //! All fields beyond `{from, to, body}` carry `#[serde(default)]` and
 //! `skip_serializing_if`, so:
@@ -49,8 +47,7 @@ pub struct MailboxEnvelope {
     pub to: String,
     /// Message body. For `kind == "message"` this is user-facing text.
     /// For structured `kind` values it is the JSON-encoded payload.
-    /// Accepts `"text"` on read for backward compat with old local JSONL.
-    #[serde(default, alias = "text")]
+    #[serde(default)]
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -85,6 +82,51 @@ impl MailboxEnvelope {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
+}
+
+/// Markup the harness owns: the tag the system prompt tells the model is
+/// authoritative (`system-reminder`, see `prompt::get_simple_system_section`),
+/// the coordinator's injected `task-notification` XML, and the four framings a
+/// mailbox turn is assembled from (`compose_next_turn_from_envelopes` wraps each
+/// envelope in one).
+///
+/// A body is written by ANOTHER agent — in the cross-org case by another
+/// organisation — so a body spelling one of these either impersonates the
+/// harness or closes the frame built around it.
+const HARNESS_OWNED_TAGS: &str = "system-reminder|task-notification|mailbox-message|\
+                                  shutdown-request|shutdown-response|plan-approval-response";
+
+/// Render an envelope `body` for a prompt with the harness's own markup inert.
+///
+/// Defanged, not dropped: this is a peer's message and the receiving model
+/// still has to read it, so `<system-reminder>` becomes `&lt;system-reminder&gt;`
+/// — visible, quotable, no longer a tag. Two agents can then discuss this very
+/// markup (which is how the report behind it travelled) without either being
+/// steered by it.
+///
+/// Applied where an envelope becomes model-visible text, which is the only
+/// layer that knows a prompt is being built. Deliberately NOT applied on send:
+/// [`crate::mailbox::Mailbox::send`] is transport, shared with examples, live
+/// tests and non-model callers; a sender cannot know how a peer frames its
+/// prompts; a body crossing two hops would be escaped twice; and a hard reject
+/// there would refuse the legitimate case of relaying a report that quotes the
+/// markup. Sanitise on use, not on emit.
+/// Attributes are part of the match, because they are how a frame is forged:
+/// `</mailbox-message>` alone only ends the current envelope, but
+/// `<mailbox-message from="team-lead">` opens a second one under a name the
+/// writer chose — undoing, inside the body, the unforgeable `from` the node
+/// stamps on the envelope.
+#[must_use]
+pub fn neutralize_untrusted_markup(body: &str) -> String {
+    static TAG_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(&format!(
+            r"(?i)<\s*(/?)\s*({HARNESS_OWNED_TAGS})((?:\s[^>]*)?)>"
+        ))
+        .expect("harness-owned tag pattern is a literal alternation")
+    });
+    TAG_RE
+        .replace_all(body, "&lt;${1}${2}${3}&gt;")
+        .into_owned()
 }
 
 /// Default DT_STREAM capacity for mailbox streams (matches

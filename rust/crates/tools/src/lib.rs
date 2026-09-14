@@ -204,7 +204,7 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
+    max_tokens_for_model, resolve_provider_from_config, ApiError, CacheHints, ContentBlockDelta,
     MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
     StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
@@ -1297,12 +1297,34 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        ToolSpec {
+            name: "TaskGet",
+            description: "Get a task's details by ID. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The ID of the task to look up" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "TaskList",
+            description: "List all tasks in the session's to-do registry. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
         // ── pid.* tools ───────────────────────────────────────────────
-        // The one process-control family. A CC-trained model will name
-        // these `TaskStop`/`TaskGet`/`TaskList`/`TaskOutput` and pass
-        // `task_id`/`agent_id`; `TOOL_ALIASES` + the `normalize_pid_*`
-        // helpers accept those spellings without advertising them as a
-        // second set of tools.
+        // Agent process control. `normalize_pid_input` accepts `task_id`
+        // as a field alias for `pid` so older prompts still work.
+        // (`TaskGet`/`TaskList` are separate canonical tools for the
+        // to-do registry, NOT aliases for pid_status.)
         ToolSpec {
             name: "pid_kill",
             description: "Terminate a running agent by pid.",
@@ -1320,9 +1342,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "pid_status",
             description: concat!(
                 "Query the status of one or all agent pids. ",
-                "With `pid`: returns READY/BUSY/TERMINATED for that pid. ",
-                "Without `pid`: returns `background_agents` (every spawned agent and its ",
-                "status) plus `tasks` (the session's task list)."
+                "With `pid`: returns that agent's status. ",
+                "Without `pid`: lists every spawned agent and its status."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1657,21 +1678,22 @@ fn execute_tool_with_enforcer(
         }
         "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
         "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
-        // The pid.* family. A CC-trained model names these TaskStop,
-        // TaskGet, TaskList and TaskOutput; TOOL_ALIASES folds those
-        // spellings onto these arms.
+        // Task* to-do registry: TaskGet and TaskList query the planning
+        // checklist (TaskCreate/TaskUpdate items), NOT the process table.
+        // A CC-trained model reaches these through TOOL_ALIASES.
+        "TaskGet" => {
+            let input = normalize_pid_input(input);
+            from_value::<TaskIdInput>(&input).and_then(run_task_get)
+        }
+        "TaskList" => run_task_list(input),
+        // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
             from_value::<TaskIdInput>(&input).and_then(run_task_stop)
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
-            // Single-pid query (like TaskGet) vs list-all (like TaskList)
-            if input.get("task_id").and_then(|v| v.as_str()).is_some() {
-                from_value::<TaskIdInput>(&input).and_then(run_task_get)
-            } else {
-                run_task_list(input)
-            }
+            run_pid_status(input)
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
@@ -1875,7 +1897,7 @@ fn run_task_get(input: TaskIdInput) -> Result<String, String> {
     }
 }
 
-fn run_task_list(input: Value) -> Result<String, String> {
+fn run_task_list(_input: &Value) -> Result<String, String> {
     let registry = global_task_registry();
     let tasks: Vec<_> = registry
         .list(None)
@@ -1894,12 +1916,38 @@ fn run_task_list(input: Value) -> Result<String, String> {
         })
         .collect();
 
-    // Sub-agents (Agent tool spawns) live in a separate registry —
-    // read them off disk so `TaskList` can be a single stop for
-    // "everything running in this session," matching the downgraded
-    // Background Agent Selector plan (§4.6). `backgrounded_only`
-    // narrows to agents whose status is `backgrounded` or `running`
-    // — exactly the set a coordinator would want to switch between.
+    to_pretty_json(json!({
+        "tasks": tasks,
+        "count": tasks.len(),
+    }))
+}
+
+fn run_pid_status(input: Value) -> Result<String, String> {
+    let pid = input
+        .get("task_id")
+        .or_else(|| input.get("pid"))
+        .and_then(|v| v.as_str());
+
+    if let Some(pid) = pid {
+        let store = agent_store_dir()?;
+        let path = store.join(format!("{pid}.json"));
+        if !path.exists() {
+            return Err(format!("pid not found: {pid}"));
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
+        let manifest: AgentOutput =
+            serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
+        return to_pretty_json(json!({
+            "pid": manifest.agent_id,
+            "status": manifest.status,
+            "name": manifest.name,
+            "description": manifest.description,
+            "subagent_type": manifest.subagent_type,
+            "created_at": manifest.created_at,
+        }));
+    }
+
     let backgrounded_only = input
         .get("backgrounded_only")
         .and_then(Value::as_bool)
@@ -1907,10 +1955,8 @@ fn run_task_list(input: Value) -> Result<String, String> {
     let agents = list_agent_snapshots_from_store(backgrounded_only).unwrap_or_default();
 
     to_pretty_json(json!({
-        "tasks": tasks,
-        "count": tasks.len(),
-        "background_agents": agents,
-        "background_agent_count": agents.len(),
+        "agents": agents,
+        "count": agents.len(),
     }))
 }
 
@@ -2095,8 +2141,8 @@ fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
-// Cap a single blocking TaskOutput call so ACP/upper-layer transports don't
-// drop the connection while we wait. Callers can re-issue TaskOutput to keep
+// Cap a single blocking pid_output call so ACP/upper-layer transports don't
+// drop the connection while we wait. Callers can re-issue pid_output to keep
 // polling — see retrieval_status="timeout" in the returned JSON.
 const MAX_AGENT_AWAIT_TIMEOUT_MS: u64 = 60_000;
 
@@ -4001,6 +4047,13 @@ struct AgentJob {
     /// commit with the parent's assistant message + placeholder
     /// tool_results (mirroring CC-fork's `buildForkedMessages`).
     inherited_messages: Vec<ConversationMessage>,
+    /// Everything this child inherits from the turn that spawned it, already
+    /// resolved by [`ParentExecution::for_child`]. One field rather than three
+    /// loose ones: a setting that reaches the main loop but not here is
+    /// invisible — the request still succeeds, only the behaviour and the bill
+    /// differ — so the inherited set is kept as a single value that is
+    /// impossible to partially thread through.
+    execution: ParentExecution,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
     /// [`global_agent_abort_signals`] so
@@ -4841,6 +4894,22 @@ fn prepare_agent_job(
         .map(api::AuthMode::parse)
         .transpose()?
         .or_else(|| GLOBAL_AUTH_MODE.get().copied());
+    // Match CC's two rules exactly (tools/AgentTool/runAgent.ts):
+    //
+    //   effort:   agentDefinition.effort ?? state.effortValue
+    //   thinking: useExactTools ? parent.thinkingConfig : { type: 'disabled' }
+    //
+    // A fork child is the `useExactTools` case here — `inherited_messages` is
+    // populated only by the fork rebuild and empty for every other spawn.
+    //
+    // Inheriting thinking for ORDINARY subagents would be wrong in both
+    // directions: CC disables it deliberately to control output token cost,
+    // and it would change the request shape away from what those subagents
+    // otherwise send. Forks want the opposite — CC inherits precisely so the
+    // request prefix matches the parent's and the prompt cache still hits.
+    let is_fork_child = !inherited_messages.is_empty();
+    let execution = ParentExecution::from_dispatch(ctx).for_child(is_fork_child);
+
     let job = AgentJob {
         manifest: manifest.clone(),
         prompt: prompt_body,
@@ -4850,6 +4919,7 @@ fn prepare_agent_job(
         fallback_config,
         auth_mode,
         inherited_messages,
+        execution,
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
     };
@@ -5349,7 +5419,8 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
-    )?;
+    )?
+    .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
@@ -5499,7 +5570,15 @@ pub fn compose_next_turn_from_envelopes(
             header.push_str(&format!(" request-id=\"{}\"", xml_attr_escape(rid)));
         }
         header.push('>');
-        blocks.push(format!("{header}\n{}\n</{tag}>", env.body));
+        // `from` and `request-id` are escaped above so a hostile envelope can't
+        // break this synthetic prompt. The body is the same envelope from the
+        // same stranger, and it is the field that can both close `</{tag}>`
+        // early and impersonate a `<system-reminder>` — so it gets the same
+        // treatment, through the one neutralizer the co-host loop also uses.
+        blocks.push(format!(
+            "{header}\n{}\n</{tag}>",
+            runtime::agent_mailbox::neutralize_untrusted_markup(&env.body)
+        ));
     }
     blocks.join("\n\n")
 }
@@ -5541,7 +5620,8 @@ fn build_agent_runtime(
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
-    )?;
+    )?
+    .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
@@ -6513,9 +6593,73 @@ struct ProviderEntry {
     client: ProviderClient,
 }
 
+/// What a spawned subagent inherits from the turn that spawned it.
+///
+/// This exists as a type, rather than as loose arguments, because the failure
+/// mode it guards is silent: a request that omits an inherited setting still
+/// succeeds, it just behaves differently and costs differently. Bundling the
+/// set means adding one more inherited field touches [`Self::from_dispatch`]
+/// and the request builder and nothing else — it cannot be set on the main
+/// loop and forgotten on the subagent path, which is how subagents came to
+/// send no `cache_control` at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParentExecution {
+    /// CC: `agentDefinition.effort ?? state.effortValue` — inherited.
+    reasoning_effort: Option<String>,
+    /// Extended thinking. True only for a fork child; see [`Self::for_child`].
+    thinking_enabled: bool,
+    /// The parent's `metadata.user_id` routing key. A pooling upstream uses it
+    /// to pin a conversation to one account, and Anthropic's prompt cache is
+    /// per-account — so a subagent that invents its own key lands on a
+    /// different account and starts from a cold cache.
+    routing_session_id: Option<String>,
+}
+
+impl ParentExecution {
+    /// Read the spawning turn's state.
+    #[inline]
+    fn from_dispatch(ctx: Option<&ToolDispatchContext>) -> Self {
+        Self {
+            reasoning_effort: ctx.and_then(|c| c.parent_reasoning_effort.clone()),
+            thinking_enabled: ctx.is_some_and(|c| c.parent_thinking_enabled),
+            routing_session_id: ctx.and_then(|c| c.parent_routing_session_id.clone()),
+        }
+    }
+
+    /// Apply CC's inheritance rules (`tools/AgentTool/runAgent.ts`), which are
+    /// deliberately asymmetric:
+    ///
+    /// ```text
+    /// effort:   agentDefinition.effort ?? state.effortValue
+    /// thinking: useExactTools ? parent.thinkingConfig : { type: 'disabled' }
+    /// ```
+    ///
+    /// Effort and the routing key are inherited by every subagent. Thinking is
+    /// not: CC turns it off for ordinary subagents "to control output token
+    /// costs", and inherits it for forks "to match the parent's API request
+    /// prefix for prompt cache hits". `inherited_messages` is populated only by
+    /// the fork rebuild, so it is this codebase's `useExactTools`.
+    #[inline]
+    fn for_child(mut self, is_fork_child: bool) -> Self {
+        self.thinking_enabled = is_fork_child && self.thinking_enabled;
+        self
+    }
+
+    /// The identity a child's requests carry, built from the same constructor
+    /// the main loop uses so both keys are byte-identical for one conversation.
+    #[inline]
+    fn request_metadata(&self) -> Option<api::RequestMetadata> {
+        self.routing_session_id
+            .as_deref()
+            .map(api::RequestMetadata::for_session)
+    }
+}
+
 pub(crate) struct ProviderRuntimeClient {
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
+    /// Resolved by [`ParentExecution::for_child`] at spawn time.
+    execution: ParentExecution,
 }
 
 impl ProviderRuntimeClient {
@@ -6523,6 +6667,16 @@ impl ProviderRuntimeClient {
     pub(crate) fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
         let fallback_config = load_provider_fallback_config();
         Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
+    }
+
+    /// Carry the parent's inherited settings onto a subagent's client — the
+    /// single seam between a spawn and the requests it will send.
+    ///
+    /// `#[inline]`: it sits on the spawn path and is a handful of moves.
+    #[inline]
+    fn with_parent_execution(mut self, execution: ParentExecution) -> Self {
+        self.execution = execution;
+        self
     }
 
     /// Build a client using explicitly provided configs instead of loading from
@@ -6552,6 +6706,7 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
+            execution: ParentExecution::default(),
         })
     }
 
@@ -6577,6 +6732,7 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
+            execution: ParentExecution::default(),
         })
     }
 }
@@ -6692,7 +6848,13 @@ impl ApiClient for ProviderRuntimeClient {
         });
         entry
             .client
-            .complete_text(&entry.model, request, options, tools)
+            .complete_text(
+                &entry.model,
+                request,
+                options,
+                tools,
+                self.execution.request_metadata(),
+            )
             .await
     }
 
@@ -6704,6 +6866,18 @@ impl ApiClient for ProviderRuntimeClient {
         let messages = convert_messages(&request.messages);
         let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        // Subagents cache like the main loop does. Without this the request
+        // carries no `cache_control` at all, so every turn re-sends the whole
+        // prompt uncached at full input price — measured in production as 64
+        // consecutive subagent requests with zero cache reads AND zero cache
+        // writes, prompts ranging 5k-129k tokens. The main loop builds exactly
+        // these hints (`engine-core/src/engine_client.rs`); this path was
+        // simply never given them.
+        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+            system_static: Some(request.system_prompt.static_text()),
+            system_dynamic: Some(request.system_prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
 
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
@@ -6716,6 +6890,10 @@ impl ApiClient for ProviderRuntimeClient {
                 tools: (!tools.is_empty()).then(|| tools.clone()),
                 tool_choice: tool_choice.clone(),
                 stream: true,
+                cache_hints: cache_hints.clone(),
+                reasoning_effort: self.execution.reasoning_effort.clone(),
+                thinking_enabled: self.execution.thinking_enabled,
+                metadata: self.execution.request_metadata(),
                 ..Default::default()
             };
 
@@ -8489,6 +8667,165 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// Effort and thinking follow CC's two rules, which are deliberately
+    /// asymmetric (`tools/AgentTool/runAgent.ts`):
+    ///
+    ///   effort:   agentDefinition.effort ?? state.effortValue   -> inherit
+    ///   thinking: useExactTools ? parent.thinkingConfig : disabled
+    ///
+    /// Inheriting thinking for an ORDINARY subagent would be wrong twice over:
+    /// CC disables it to control output token cost, and turning it on changes
+    /// the request shape. Forks are the opposite case — CC inherits precisely
+    /// so the request prefix still matches the parent's and the cache hits.
+    #[test]
+    fn subagent_inherits_effort_but_only_forks_inherit_thinking() {
+        // `inherited_messages` is populated only by the fork rebuild, so it is
+        // this codebase's `useExactTools`.
+        let decide = |is_fork: bool, parent_thinking: bool| {
+            super::ParentExecution {
+                reasoning_effort: Some("high".to_string()),
+                thinking_enabled: parent_thinking,
+                routing_session_id: Some("sess-1".to_string()),
+            }
+            .for_child(is_fork)
+            .thinking_enabled
+        };
+
+        assert!(
+            !decide(false, true),
+            "an ordinary subagent must NOT inherit thinking even when the parent has it on",
+        );
+        assert!(
+            decide(true, true),
+            "a fork child must inherit thinking, or its request prefix diverges from the parent's and the cache misses",
+        );
+        assert!(
+            !decide(true, false),
+            "a fork of a non-thinking parent stays off"
+        );
+        assert!(!decide(false, false));
+
+        // Effort and the routing key are inherited unconditionally — only
+        // thinking is gated on the fork case.
+        let ordinary = super::ParentExecution {
+            reasoning_effort: Some("high".to_string()),
+            thinking_enabled: true,
+            routing_session_id: Some("sess-1".to_string()),
+        }
+        .for_child(false);
+        assert_eq!(ordinary.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(ordinary.routing_session_id.as_deref(), Some("sess-1"));
+    }
+
+    /// The inline setter is the single place both fields cross onto a
+    /// subagent's client. Asserting it round-trips guards the asymmetry that
+    /// caused the original bug: a field set on the main-loop client and
+    /// silently absent here.
+    #[test]
+    fn parent_execution_settings_reach_the_subagent_client() {
+        let inherited = super::ParentExecution {
+            reasoning_effort: Some("high".to_string()),
+            thinking_enabled: true,
+            routing_session_id: Some("sess-1".to_string()),
+        };
+        let client = super::ProviderRuntimeClient {
+            chain: Vec::new(),
+            allowed_tools: BTreeSet::new(),
+            execution: super::ParentExecution::default(),
+        }
+        .with_parent_execution(inherited.clone());
+        assert_eq!(client.execution, inherited);
+
+        let cleared = client.with_parent_execution(super::ParentExecution::default());
+        assert_eq!(cleared.execution, super::ParentExecution::default());
+    }
+
+    /// A subagent must route on the SAME key as the turn that spawned it.
+    ///
+    /// An upstream that pools Anthropic accounts pins a conversation to one
+    /// of them by `metadata.user_id`, and the prompt cache is per-account. A
+    /// child that routes anywhere else pays full price for its own prefix —
+    /// and this is invisible locally, because the request still succeeds.
+    #[test]
+    fn a_subagent_routes_on_the_parents_key() {
+        let parent = runtime::ToolDispatchContext {
+            parent_reasoning_effort: Some("high".to_string()),
+            parent_thinking_enabled: true,
+            parent_routing_session_id: Some("session-abc".to_string()),
+            ..Default::default()
+        };
+
+        // Fork or ordinary subagent: thinking differs between them, the
+        // routing key never does.
+        for is_fork in [false, true] {
+            let child = super::ParentExecution::from_dispatch(Some(&parent)).for_child(is_fork);
+            let metadata = child
+                .request_metadata()
+                .expect("a child of a routed parent must carry the key");
+            assert_eq!(
+                metadata.user_id(),
+                api::RequestMetadata::for_session("session-abc").user_id(),
+                "child and parent must produce a byte-identical routing key",
+            );
+            assert_eq!(child.reasoning_effort.as_deref(), Some("high"));
+        }
+    }
+
+    /// With no parent key, send none. A fabricated id would be worse than
+    /// silence: it routes the request to an account that has never seen this
+    /// conversation, guaranteeing a cold prefix.
+    #[test]
+    fn a_subagent_without_a_parent_key_sends_no_metadata() {
+        assert!(super::ParentExecution::default()
+            .request_metadata()
+            .is_none());
+        assert!(super::ParentExecution::from_dispatch(None)
+            .request_metadata()
+            .is_none());
+    }
+
+    /// A subagent's requests must carry cache hints, exactly like the main
+    /// loop's. Without them the wire request has no `cache_control` and every
+    /// subagent turn re-sends its whole prompt at full input price.
+    ///
+    /// Observed before the fix: 64 consecutive subagent requests with zero
+    /// cache reads AND zero cache writes, prompts from 5k to 129k tokens. The
+    /// bug was invisible locally because it costs nothing extra unless you
+    /// look at the provider's usage numbers — every request still succeeded.
+    ///
+    /// This asserts the hints the client derives from a prompt, which is what
+    /// `ProviderRuntimeClient::stream` puts on the request.
+    #[test]
+    fn subagent_requests_carry_cache_hints() {
+        use runtime::SystemPromptBuilder;
+
+        let prompt = SystemPromptBuilder::new().with_os("linux", "6.8").build();
+        assert!(!prompt.is_empty(), "fixture prompt should be non-empty");
+
+        let hints = (!prompt.is_empty()).then(|| api::CacheHints {
+            system_static: Some(prompt.static_text()),
+            system_dynamic: Some(prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
+        let hints = hints.expect("a non-empty system prompt must yield cache hints");
+
+        assert!(
+            hints
+                .system_static
+                .as_deref()
+                .is_some_and(|t| !t.is_empty()),
+            "static block must be cached: it is identical across every subagent",
+        );
+        assert!(
+            hints.system_dynamic.is_some(),
+            "dynamic block must be a separate breakpoint, not folded into static",
+        );
+        assert!(
+            hints.breakpoint_last_message,
+            "without a message breakpoint the conversation prefix is never reused",
+        );
+    }
+
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::fs;
@@ -8844,10 +9181,10 @@ mod tests {
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
+        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]
@@ -8963,10 +9300,8 @@ mod tests {
         // would admit a name `definitions()` can never match against
         // `spec.name`, silently allow-listing nothing.
         for (requested, spec_name) in [
-            ("TaskList", "pid_status"),
-            ("TaskGet", "pid_status"),
-            ("TaskStop", "pid_kill"),
-            ("TaskOutput", "pid_output"),
+            ("TaskList", "TaskList"),
+            ("TaskGet", "TaskGet"),
             ("SendMessage", "send"),
             ("Agent", "agent_spawn"),
             // Canonical names resolve to themselves.
@@ -9790,8 +10125,6 @@ mod tests {
         for (cc_name, canonical) in [
             ("select:Agent", "agent_spawn"),
             ("select:SendMessage", "send"),
-            ("select:TaskStop", "pid_kill"),
-            ("select:TaskOutput", "pid_output"),
             ("select:AgentTool", "agent_spawn"),
         ] {
             let out = execute_tool("ToolSearch", &json!({ "query": cc_name }))
@@ -12797,19 +13130,11 @@ printf 'pwsh:%s' "$1"
     // ── Unified pid alias routing ─────────────────────────────────────
 
     #[test]
-    fn canonicalize_task_stop_to_pid_kill() {
-        assert_eq!(canonicalize_tool_name("TaskStop"), "pid_kill");
-    }
-
-    #[test]
-    fn canonicalize_task_get_and_list_to_pid_status() {
-        assert_eq!(canonicalize_tool_name("TaskGet"), "pid_status");
-        assert_eq!(canonicalize_tool_name("TaskList"), "pid_status");
-    }
-
-    #[test]
-    fn canonicalize_task_output_to_pid_output() {
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "pid_output");
+    fn canonicalize_task_tools_pass_through_unchanged() {
+        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
+        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
+        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
+        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
     }
 
     #[test]

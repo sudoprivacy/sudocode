@@ -264,8 +264,9 @@ Main-agent and subagent clients use the same non-streaming text transport in
 and tool schemas; runtime owns compaction prompts, retry policy and validation.
 The shared transport also owns message conversion and cache hints.
 
-Both LLM paths request at most 8,192 output tokens (or the model's smaller
-limit). The preferred path reuses the system prompt, tool schemas and older
+Both LLM paths ask for a summary within 8,000 tokens where possible and request
+at most 12,000 output tokens (or the model's smaller limit). The preferred
+path reuses the system prompt, tool schemas and older
 message prefix; the fallback strips thinking and replaces images with text
 placeholders. Neither path drops the oldest input to recover from overflow.
 Transient failures are retried with bounded backoff.

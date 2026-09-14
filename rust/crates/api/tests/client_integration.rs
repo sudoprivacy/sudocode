@@ -948,6 +948,67 @@ fn http_response_with_headers(
     )
 }
 
+/// The routing key must survive onto the wire on BOTH transports.
+///
+/// `MessageRequest::metadata` is `#[serde(skip)]` — the Anthropic client
+/// injects it — so a regression here produces a body with no `metadata` key
+/// and no error anywhere. That is exactly how this shipped missing: an
+/// upstream that pools Anthropic accounts routes on `metadata.user_id`, and
+/// without it each turn of one conversation can land on a different account.
+/// The prompt cache is per-account, so every hop is a cold prefix. Measured
+/// through such an upstream: 33% reuse, against 67-73% everywhere else.
+#[tokio::test]
+async fn request_metadata_user_id_reaches_the_wire_on_both_transports() {
+    for stream in [false, true] {
+        let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let server = spawn_server(
+            state.clone(),
+            vec![http_response(
+                "200 OK",
+                "application/json",
+                concat!(
+                    "{",
+                    "\"id\":\"msg_meta\",",
+                    "\"type\":\"message\",",
+                    "\"role\":\"assistant\",",
+                    "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],",
+                    "\"model\":\"claude-3-7-sonnet-latest\",",
+                    "\"stop_reason\":\"end_turn\",",
+                    "\"stop_sequence\":null,",
+                    "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}",
+                    "}"
+                ),
+            )],
+        )
+        .await;
+
+        let client = AnthropicClient::new("test-key").with_base_url(server.base_url());
+        let request = MessageRequest {
+            metadata: Some(api::RequestMetadata::for_session("session-abc")),
+            ..sample_request(stream)
+        };
+        if stream {
+            let _ = client.stream_message(&request, None).await;
+        } else {
+            let _ = client.send_message(&request, None).await;
+        }
+
+        let captured = state.lock().await;
+        let sent = captured.first().expect("server should capture request");
+        let body: serde_json::Value =
+            serde_json::from_str(&sent.body).expect("request body should be json");
+        let user_id = body["metadata"]["user_id"]
+            .as_str()
+            .expect("metadata.user_id must be a string on the wire");
+        let decoded: serde_json::Value =
+            serde_json::from_str(user_id).expect("user_id carries a JSON object");
+        assert_eq!(
+            decoded["session_id"], "session-abc",
+            "stream={stream}: the routing key must be the conversation's session id",
+        );
+    }
+}
+
 fn sample_request(stream: bool) -> MessageRequest {
     MessageRequest {
         model: "claude-3-7-sonnet-latest".to_string(),

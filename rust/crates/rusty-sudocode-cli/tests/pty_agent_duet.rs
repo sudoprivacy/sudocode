@@ -289,7 +289,17 @@ fn run_duet(transport: &Transport) {
     let prompt = env.prompt(
         &format!(
             "Send a message to {RECEIVER} saying hello from unified send. \
-             Use summary \"greeting test\"."
+             Use summary \"greeting test\".{}",
+            match transport {
+                // The local receiver and sender intentionally share one
+                // mailbox identity (`team-lead`). Require the optional sender
+                // override so the receiver does not discard the message as its
+                // own write. This also keeps live mode equivalent to the mock
+                // scenario, which supplies the same field.
+                Transport::WorkspaceFile =>
+                    format!(" Set sender to \"{LOCAL_PEER_SENDER}\" (not the default)."),
+                _ => String::new(),
+            }
         ),
         transport.scenario(),
     );
@@ -412,7 +422,11 @@ fn run_duet(transport: &Transport) {
     );
     assert_eq!(
         delivered.body,
-        UNIFIED_SEND_BODY,
+        if env.is_mock() {
+            UNIFIED_SEND_BODY
+        } else {
+            "hello from unified send"
+        },
         "[{}] the body the tool accepted must be the body that crossed",
         transport.label()
     );

@@ -2326,6 +2326,13 @@ mod tests {
         out
     }
 
+    /// Render a completed (`Ok`) tool card and strip ANSI, in one step — the
+    /// shape every card test needs. Collapses the repeated
+    /// `render_tool_card(&x_card(…), ToolStatus::Ok)` + `strip_ansi` pair.
+    fn ok_card_plain(content: ToolCardContent) -> String {
+        strip_ansi(&render_tool_card(&content, ToolStatus::Ok))
+    }
+
     #[test]
     fn render_tool_card_body_line_never_exceeds_terminal_width() {
         // Regression: a body line longer than the terminal used to be wrapped
@@ -2835,9 +2842,7 @@ mod tests {
                 "totalLines": 3
             }
         });
-        let rendered =
-            render_tool_card(&read_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         // Header still present with line count.
         assert!(plain.contains("Read src/main.rs"), "{plain}");
         assert!(plain.contains("(3 lines)"), "{plain}");
@@ -2858,9 +2863,7 @@ mod tests {
                 "totalLines": 137
             }
         });
-        let rendered =
-            render_tool_card(&read_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(137 lines)"), "{plain}");
     }
 
@@ -2875,9 +2878,7 @@ mod tests {
                 "total_lines": 42
             }
         });
-        let rendered =
-            render_tool_card(&read_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(42 lines)"), "{plain}");
     }
 
@@ -2945,9 +2946,7 @@ mod tests {
                 "totalLines": 0
             }
         });
-        let rendered =
-            render_tool_card(&read_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(read_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Read empty.txt"), "{plain}");
         // No content body indented underneath.
         assert!(!plain.contains("\n  "), "{plain}");
@@ -3117,9 +3116,7 @@ mod tests {
             "replaceAll": true,
             "userModified": false,
         });
-        let rendered =
-            render_tool_card(&edit_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(edit_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("(replace all, 3 occurrences)"), "{plain}");
     }
 
@@ -3131,9 +3128,7 @@ mod tests {
             "content": "a\nb\nc\nd\n",
             "originalFile": "a\nx\nc\n",
         });
-        let rendered =
-            render_tool_card(&write_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(write_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Updated src/main.rs"), "{plain}");
         // 4 new lines, was 3, delta +1.
         assert!(plain.contains("(4 lines, was 3 +1)"), "{plain}");
@@ -3149,9 +3144,7 @@ mod tests {
             "filePath": "new.txt",
             "content": "hello\nworld\n",
         });
-        let rendered =
-            render_tool_card(&write_card(&serde_json::Value::Null, &json), ToolStatus::Ok);
-        let plain = strip_ansi(&rendered);
+        let plain = ok_card_plain(write_card(&serde_json::Value::Null, &json));
         assert!(plain.contains("Wrote new.txt"), "{plain}");
         assert!(plain.contains("(2 lines)"), "{plain}");
         assert!(!plain.contains("was"), "{plain}");

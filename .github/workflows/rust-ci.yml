@@ -167,6 +167,20 @@ jobs:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --workspace
 
+      - name: Install standalone sudohand CLI
+        run: cargo install --debug --locked --git https://github.com/sudoprivacy/sudohand --rev c62b244a43d53bb87e1f14e97c5858ce41480745 sudohand-cli
+      - name: Install Chrome for browser integration
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-dependencies: true
+      - name: Run external suh browser PTY test
+        env:
+          AI_DEV_BROWSER_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
+        run: cargo test -p rusty-sudocode-cli --test pty_browser_cli --locked -- --ignored
+
   a2a-live:
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest

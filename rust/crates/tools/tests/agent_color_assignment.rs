@@ -5,7 +5,7 @@
 //! 1. `prepare_agent_job` -> AgentOutput.color populated from
 //!    `runtime::agent_color::assign_agent_color(agent_id)`.
 //! 2. Color survives serde round-trip (matters because the
-//!    manifest is persisted as JSON and re-read on TaskOutput).
+//!    manifest is persisted as JSON and re-read on pid_output).
 //! 3. Different `agent_id`s produce distinguishable colors — at
 //!    least 3 buckets in a 10-sample, matching the runtime unit
 //!    test's spread guarantee.

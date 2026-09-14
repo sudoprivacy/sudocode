@@ -17,7 +17,7 @@
 //!    next drain and processes it as a NEW user turn — the sub-agent
 //!    then completes with a reply that references the follow-up.
 //! 4. Parent inspects the sub-agent's final output via
-//!    `TaskOutput(agent_id, block=true)` and reports it.
+//!    `pid_output(pid, block=true)` and reports it.
 //!
 //! ## Live-only per current convention
 //!
@@ -64,7 +64,7 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
     //   Step 1 (spawn) → agent_id
     //   Step 2 (SendMessage using that agent_id) → envelope
     //   Step 3 (worker resumes, must include our sentinel)
-    //   Step 4 (TaskOutput on the same agent_id) → verifiable output
+    //   Step 4 (pid_output on the same agent_id) → verifiable output
     //
     // Each step's REQUIRED input is a value produced by the prior
     // step, so no assertion here can pass by accident against a
@@ -75,7 +75,7 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
              prompt=\"Reply with the single word READY and stop. Do not run any tools.\", \
              run_in_background=true). Record the agent_id you get back. \
          (2) Use SendMessage with to=<that agent_id>, message=\"Please reply with the sentinel {FOLLOW_UP_SENTINEL} to confirm you received this follow-up.\" \
-         (3) Use TaskOutput with agent_id=<that agent_id>, block=true to wait for the worker's final reply, then report the reply verbatim to the user."
+         (3) Use pid_output with pid=<that agent_id>, block=true to wait for the worker's final reply, then report the reply verbatim to the user."
     );
 
     // danger-full-access because the Agent tool itself requires it —

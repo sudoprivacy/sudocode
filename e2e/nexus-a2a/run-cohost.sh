@@ -47,6 +47,13 @@
 # against the change you are trying to prove, and rebuild from a bumped pin
 # rather than reading the failure as a bug in the code you just wrote.
 #
+# `COHOST_IMAGE` is therefore EXPORTED, so the compose file starts the same tag
+# this script checked. It was read here and hardcoded there, and the two disagreed
+# without saying so: a rebuild tagged `nexusd-cluster-cohost:<pin>` passed the
+# presence check while compose started a `:latest` from three weeks earlier, and
+# every run measured that old binary. The symptom — spawn succeeds, agent never
+# answers — points at the code, which is why it cost a day.
+#
 # Usage:
 #   e2e/nexus-a2a/run-cohost.sh
 #   COHOST_IMAGE=nexusd-cluster-cohost:develop e2e/nexus-a2a/run-cohost.sh
@@ -54,6 +61,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 IMAGE="${COHOST_IMAGE:-nexusd-cluster-cohost:latest}"
+# Exported, not just read: the compose file interpolates `COHOST_IMAGE` to pick
+# which build starts. Checking the tag here and letting compose default to
+# `:latest` is how a rebuilt image sits unused while the run exercises a months
+# -old binary.
+export COHOST_IMAGE="$IMAGE"
 PORT="${NEXUS_A2A_COHOST_PORT:-2126}"
 ENDPOINT="127.0.0.1:${PORT}"
 MOCK_PORT="${NEXUS_A2A_MOCK_PORT:-18080}"
@@ -72,6 +84,12 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "== [skip] $IMAGE is not present — build it in the nexus repo =="
   exit 0
 fi
+# Printed on EVERY run, not only on failure: the agent under test is the
+# sudocode the image carries, and an image built before the change being proved
+# fails in the one way that looks least like a stale image — the agent spawns,
+# answers nothing, and the run times out. Having the build date in the log turns
+# that into a glance.
+echo "== 0. image: $IMAGE (built $(docker image inspect "$IMAGE" --format '{{.Created}}')) =="
 
 COMPOSE="${NEXUS_COHOST_COMPOSE:-}"
 if [ -z "$COMPOSE" ]; then
@@ -185,7 +203,8 @@ if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   "${CARGO_TEST[@]}" live_cohost_reads_its_inbox_and_replies -- --ignored --nocapture; then
   echo "!! the co-host did not reply. Before reading this as a code bug: the" >&2
   echo "!! agent in that image is the sudocode rev the NEXUS Cargo.lock pins," >&2
-  echo "!! not this checkout. \`docker image inspect $IMAGE --format '{{.Created}}'\`" >&2
+  echo "!! not this checkout — compare the build date printed by step 0 against" >&2
+  echo "!! the change you are trying to prove, and rebuild from a bumped pin." >&2
   echo "---- co-host daemon log ----" >&2
   docker compose "${COMPOSE_FILES[@]}" logs --tail 120 >&2 || true
   echo "---- mock provider log ----" >&2

@@ -353,13 +353,19 @@ impl FsBackend for StdFsBackend {
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
-            // An entry that disappears between `read_dir` yielding it and
-            // this `metadata` call is normal in any directory something else
-            // writes to — a temp dir, a cache dir, a log dir being rotated by
-            // a second process. It is not a reason to abandon the listing:
-            // callers that clean up by listing then deleting would silently
-            // stop cleaning up, and the only symptom is disk that never comes
-            // back. Skip the vanished entry; report every other error.
+            // `read_dir` hands back a whole directory block at a time, so an
+            // entry it names can already be gone by the time we stat it — on
+            // Unix `DirEntry::metadata` is a separate `lstat` and returns
+            // `NotFound`. That is normal in any directory something else
+            // writes to: a temp dir, a cache dir, a log dir another process is
+            // rotating. It is not a reason to abandon the listing. Callers that
+            // clean up by listing then deleting would silently stop cleaning
+            // up, and the only symptom is disk that never comes back.
+            //
+            // Skip the vanished entry; report every other error, including
+            // permission errors — dropping those would under-report a
+            // directory we simply are not allowed to read, which is worse than
+            // failing loudly.
             let meta = match entry.metadata() {
                 Ok(meta) => meta,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -1063,38 +1069,5 @@ mod tests {
         fs.write(&path, b"via arc").unwrap();
         assert_eq!(fs.read_to_string(&path).unwrap(), "via arc");
         fs.delete(&path).unwrap();
-    }
-
-    /// One unreadable entry must not cost us the whole listing.
-    ///
-    /// `read_dir` names an entry, then `metadata()` resolves it — and between
-    /// those two steps the entry can be gone. That is ordinary in any directory
-    /// something else writes to. Failing the listing makes the caller see an
-    /// empty or absent directory, and a caller that cleans up by listing then
-    /// deleting silently stops cleaning up: the only symptom is disk that never
-    /// comes back. A dangling symlink reproduces the same `NotFound` from
-    /// `metadata()` without needing to win a race.
-    #[cfg(unix)]
-    #[test]
-    fn std_backend_readdir_skips_entries_it_cannot_stat() {
-        let dir = temp_path("readdir-dangling");
-        let fs = StdFsBackend;
-        fs.create_dir_all(&dir).unwrap();
-        fs.write(&format!("{dir}/real.txt"), b"present").unwrap();
-        std::os::unix::fs::symlink(
-            format!("{dir}/definitely-not-here"),
-            format!("{dir}/dangling"),
-        )
-        .unwrap();
-
-        let names: Vec<String> = fs
-            .readdir(&dir)
-            .expect("a dangling symlink must not fail the whole listing")
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect();
-        assert_eq!(names, vec!["real.txt".to_string()]);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

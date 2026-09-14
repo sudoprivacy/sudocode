@@ -55,6 +55,15 @@ pub struct EngineApiClient {
 }
 
 impl EngineApiClient {
+    /// Identity every request from this client carries, built in one place so
+    /// the main loop and the subagent client cannot disagree about the routing
+    /// key — a conversation split across two keys is split across two upstream
+    /// accounts, and the prompt cache is per-account.
+    #[inline]
+    fn request_metadata(&self) -> api::RequestMetadata {
+        api::RequestMetadata::for_session(&self.session_id)
+    }
+
     /// Build a client for `model`, resolving the provider from config + auth
     /// mode (identical resolution to the old CLI client, minus the render
     /// plumbing).
@@ -347,7 +356,13 @@ impl ApiClient for EngineApiClient {
                 .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
         });
         self.client
-            .complete_text(&self.model, request, options, tools)
+            .complete_text(
+                &self.model,
+                request,
+                options,
+                tools,
+                Some(self.request_metadata()),
+            )
             .await
     }
 
@@ -357,6 +372,10 @@ impl ApiClient for EngineApiClient {
 
     fn thinking_enabled(&self) -> bool {
         self.thinking_enabled
+    }
+
+    fn routing_session_id(&self) -> Option<&str> {
+        Some(self.session_id.as_str())
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
@@ -385,6 +404,7 @@ impl ApiClient for EngineApiClient {
             reasoning_effort: self.reasoning_effort.clone(),
             cache_hints,
             thinking_enabled: self.thinking_enabled,
+            metadata: Some(self.request_metadata()),
             ..Default::default()
         };
 

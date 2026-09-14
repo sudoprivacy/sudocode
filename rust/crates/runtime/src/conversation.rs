@@ -203,6 +203,13 @@ pub trait ApiClient: Send {
         false
     }
 
+    /// The routing key this client sends as `metadata.user_id`. Subagents
+    /// inherit it so a conversation and the agents it spawns stay pinned to
+    /// one upstream account, which is what keeps the prompt cache warm.
+    fn routing_session_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Complete a text request using this client's configured model route.
     /// Request conversion and transport live in the shared API layer.
     async fn complete_text(
@@ -587,6 +594,8 @@ pub struct ToolDispatchContext {
     /// Whether the parent has extended thinking on. Consumed only by the fork
     /// path; ordinary subagents keep thinking off regardless.
     pub parent_thinking_enabled: bool,
+    /// The parent's routing key, inherited verbatim by spawned subagents.
+    pub parent_routing_session_id: Option<String>,
 }
 
 impl ToolDispatchContext {
@@ -1955,6 +1964,7 @@ where
                     .and_then(RuntimeObserver::tool_progress_sink),
                 parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
                 parent_thinking_enabled: self.api_client.thinking_enabled(),
+                parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
             };
 
             let mut batch_start = 0usize;

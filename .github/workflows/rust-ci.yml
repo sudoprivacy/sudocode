@@ -20,6 +20,8 @@ on:
       - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
+      # The a2a-live job RUNS these; without them a harness change ships untested.
+      - e2e/**
   pull_request:
     branches:
       - main
@@ -37,6 +39,8 @@ on:
       - LAST_CCB_REF_VERSION
       - docs/**
       - rust/**
+      # The a2a-live job RUNS these; without them a harness change ships untested.
+      - e2e/**
   workflow_dispatch:
 
 concurrency:
@@ -157,6 +161,10 @@ jobs:
         with:
           workspaces: rust -> target
       - name: Run workspace tests
+        # Keep panic diagnostics visible if a Windows PTY aborts before libtest
+        # can print its captured failure output.
+        env:
+          RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --workspace
 
   a2a-live:
@@ -199,6 +207,14 @@ jobs:
       # federation CI already owns.
       - name: Cross-node A2A against two nodes
         run: e2e/nexus-a2a/run-cross-node.sh
+
+      # Both scripts above boot `--insecure-no-auth`, where the stamp hook is
+      # fail-open and the authored `from` is preserved by design. That proves
+      # delivery and says nothing about identity — and `from` is an address, so
+      # a forgeable one sends a peer's reply wherever the sender chose. Only an
+      # auth-on node decides who a message is from.
+      - name: Auth-on A2A — the node decides who a message is from
+        run: e2e/nexus-a2a/run-auth-on.sh
 
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})

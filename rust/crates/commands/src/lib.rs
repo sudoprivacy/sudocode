@@ -47,8 +47,8 @@ impl AcpSlashCommandSpec {
 }
 
 use runtime::{
-    compact_session_sync, CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig,
-    McpServerConfig, ScopedMcpServerConfig, Session,
+    CompactionConfig, ConfigLoader, ConfigSource, McpOAuthConfig, McpServerConfig,
+    ScopedMcpServerConfig, Session,
 };
 use serde_json::{json, Value};
 
@@ -130,7 +130,7 @@ const ACP_SLASH_COMMANDS: &[AcpSlashCommandSpec] = &[
     },
     AcpSlashCommandSpec {
         name: "compact",
-        description: "Summarise older messages to free context (LLM summary, local fallback)",
+        description: "Summarise older messages to free context (validated LLM checkpoint)",
         input_hint: None,
         holds_cwd_lease: false,
     },
@@ -4907,7 +4907,7 @@ fn mcp_server_json(name: &str, server: &ScopedMcpServerConfig) -> Value {
 pub fn handle_slash_command(
     input: &str,
     session: &Session,
-    compaction: CompactionConfig,
+    _compaction: CompactionConfig,
 ) -> Option<SlashCommandResult> {
     let command = match SlashCommand::parse(input) {
         Ok(Some(command)) => command,
@@ -4921,21 +4921,10 @@ pub fn handle_slash_command(
     };
 
     match command {
-        SlashCommand::Compact => {
-            let result = compact_session_sync(session, compaction);
-            let message = if result.removed_message_count == 0 {
-                "Compaction skipped: session is below the compaction threshold.".to_string()
-            } else {
-                format!(
-                    "Compacted {} messages into a resumable system summary.",
-                    result.removed_message_count
-                )
-            };
-            Some(SlashCommandResult {
-                message,
-                session: result.compacted_session,
-            })
-        }
+        SlashCommand::Compact => Some(SlashCommandResult {
+            message: "Compaction requires a model-backed session; history preserved.".into(),
+            session: session.clone(),
+        }),
         SlashCommand::Help => Some(SlashCommandResult {
             message: render_slash_command_help(),
             session: session.clone(),
@@ -5034,9 +5023,7 @@ mod tests {
         PluginError, PluginKind, PluginLoadFailure, PluginLoadOutcome, PluginManager,
         PluginManagerConfig, PluginMetadata, PluginSummary,
     };
-    use runtime::{
-        CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, MessageRole, Session,
-    };
+    use runtime::{CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage, Session};
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -5705,7 +5692,7 @@ mod tests {
     }
 
     #[test]
-    fn compacts_sessions_via_slash_command() {
+    fn unbound_compact_preserves_history() {
         let mut session = Session::new();
         session.messages = vec![
             ConversationMessage::user_text("a ".repeat(200)),
@@ -5728,15 +5715,8 @@ mod tests {
         )
         .expect("slash command should be handled");
 
-        // With the tool-use/tool-result boundary guard the compaction may
-        // preserve one extra message, so 1 or 2 messages may be removed.
-        assert!(
-            result.message.contains("Compacted 1 messages")
-                || result.message.contains("Compacted 2 messages"),
-            "unexpected compaction message: {}",
-            result.message
-        );
-        assert_eq!(result.session.messages[0].role, MessageRole::System);
+        assert!(result.message.contains("history preserved"));
+        assert_eq!(result.session.messages, session.messages);
     }
 
     #[test]

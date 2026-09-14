@@ -361,6 +361,30 @@ impl Session {
         Ok(())
     }
 
+    /// Archive source history before atomically committing a compacted view.
+    /// Both writes use the session backend, including hosted VFS sessions.
+    pub fn save_compacted_to_path(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+    ) -> Result<(), SessionError> {
+        let path = path.as_ref();
+        let archive = format!(
+            "{}.before-compact-{}",
+            path.display(),
+            current_time_millis()
+        );
+        let snapshot = original.render_jsonl_snapshot()?;
+        write_atomic_with(self.backend(), &archive, &snapshot)?;
+        // Avoid rotation before the atomic replacement: failure must leave the
+        // live transcript at its original path, rather than only in a backup.
+        write_atomic_with(
+            self.backend(),
+            &path.to_string_lossy(),
+            &self.render_jsonl_snapshot()?,
+        )
+    }
+
     /// Rewrite the persisted transcript from the in-memory state.
     ///
     /// `push_message` appends incrementally, so any operation that *replaces*

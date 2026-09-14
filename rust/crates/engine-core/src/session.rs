@@ -410,6 +410,10 @@ impl ObserverAdapter {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn on_notice(&mut self, text: &str) {
+        let _ = self.tx.send(EngineEvent::Notice { text: text.into() });
+    }
+
     fn on_thinking_delta(&mut self, delta: &str) {
         let _ = self
             .tx

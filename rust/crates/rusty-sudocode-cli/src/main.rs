@@ -1454,7 +1454,12 @@ fn run_resume(
                 std::process::exit(2);
             }
         };
-        match run_resume_command(&resolved_path, &session, &command) {
+        let outcome = if matches!(command, SlashCommand::Compact) {
+            run_resumed_compaction(&resolved_path, &model, permission_mode, auth_mode)
+        } else {
+            run_resume_command(&resolved_path, &session, &command)
+        };
+        match outcome {
             Ok(ResumeCommandOutcome {
                 session: next_session,
                 message,
@@ -1501,6 +1506,34 @@ struct ResumeCommandOutcome {
     json: Option<serde_json::Value>,
 }
 
+/// Resumed /compact uses the same model-backed lifecycle as the REPL.
+fn run_resumed_compaction(
+    path: &Path,
+    model: &str,
+    permission_mode: PermissionMode,
+    auth_mode: Option<AuthMode>,
+) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    let cli = LiveCli::new(
+        resolve_repl_model(model.to_string()),
+        true,
+        None,
+        permission_mode,
+        None,
+        auth_mode,
+    )?;
+    cli.lifecycle.resume_session(&path.display().to_string())?;
+    let (removed, kept, skipped, source) = cli.lifecycle.run_compaction()?;
+    Ok(ResumeCommandOutcome {
+        session: cli.lifecycle.session_snapshot(),
+        message: Some(format_compact_report(removed, kept, skipped, &source)),
+        json: Some(serde_json::json!({
+            "kind": "compact", "skipped": skipped,
+            "removed_messages": removed, "kept_messages": kept,
+            "summary_source": source.to_string(),
+        })),
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_resume_command(
     session_path: &Path,
@@ -1514,32 +1547,7 @@ fn run_resume_command(
             json: Some(serde_json::json!({ "kind": "help", "text": render_repl_help() })),
         }),
         SlashCommand::Compact => {
-            let result = runtime::compact_session_sync(
-                session,
-                CompactionConfig {
-                    max_estimated_tokens: 0,
-                    ..CompactionConfig::default()
-                },
-            );
-            let removed = result.removed_message_count;
-            let kept = result.compacted_session.messages.len();
-            let skipped = removed == 0;
-            result.compacted_session.save_to_path(session_path)?;
-            Ok(ResumeCommandOutcome {
-                session: result.compacted_session,
-                message: Some(format_compact_report(
-                    removed,
-                    kept,
-                    skipped,
-                    &result.summary_source,
-                )),
-                json: Some(serde_json::json!({
-                    "kind": "compact",
-                    "skipped": skipped,
-                    "removed_messages": removed,
-                    "kept_messages": kept,
-                })),
-            })
+            Err("Compaction requires a model-backed session; history preserved".into())
         }
         SlashCommand::Clear { confirm } => {
             if !confirm {
@@ -3665,7 +3673,19 @@ impl LiveCli {
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
         // (Done / permission / question) straight from the event kinds.
-        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        // With an iocraft `ui` present, in-flight tool calls show as running
+        // cards in the staging overlay, so the renderer must not also append
+        // the command header (it would appear twice). The finished result card
+        // still appends through the renderer — the single ordered scrollback
+        // sink. Off the overlay (one-shot / `--print`) the header appends.
+        let mut renderer = render.then(|| {
+            let r = EngineEventRenderer::new(spinner_ref, output.cloned());
+            if ui.is_some() {
+                r.with_staging_overlay()
+            } else {
+                r
+            }
+        });
         let blocks = vec![runtime::ContentBlock::Text {
             text: input.to_string(),
         }];
@@ -3689,6 +3709,13 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
+                    // Staging overlay (iocraft REPL only): show a running
+                    // yellow card for this in-flight call. Pure overlay — the
+                    // finished card is committed to scrollback by the renderer
+                    // on the ordered output channel, not from here.
+                    if let Some(ui) = ui {
+                        ui.tool_started(id, name, input);
+                    }
                     // Parity: `--output-format json` emits the tool input as the
                     // raw argument STRING exactly as the model produced it — the
                     // pre-seam `collect_tool_uses` serialized `ToolUse.input`
@@ -3724,6 +3751,12 @@ impl LiveCli {
                         {
                             ui.update_context(tools::global_task_list());
                         }
+                        // Staging overlay: this call is done — clear its running
+                        // yellow card. The finished (green/red) card is written
+                        // to scrollback by the renderer below, on the ordered
+                        // output channel; the overlay only drops the transient
+                        // entry, so the two never race across channels.
+                        ui.tool_finished(id);
                     }
                     outcome.tool_results.push(serde_json::json!({
                         "tool_use_id": id,
@@ -3892,14 +3925,21 @@ impl LiveCli {
         ui: Option<&repl_ui::UiCommandSender>,
     ) {
         let usage_tracker = self.lifecycle.usage_snapshot();
-        let usage = usage_tracker.current_turn_usage();
+        // Two different needs from one turn:
+        //  - context occupancy is the LATEST request's context_tokens (what the
+        //    window currently holds; the metric auto-compaction uses).
+        //  - billed tokens/cost is the SUM of every request this turn issued
+        //    (a tool-loop turn makes several), so the status line reports the
+        //    whole turn, not just the last request.
+        let latest = usage_tracker.current_turn_usage();
+        let usage = usage_tracker.current_turn_total_usage();
         let turns = usage_tracker.turns();
         // Current context-window occupancy (what the provider just processed),
         // the same metric auto-compaction uses — not the session-cumulative
         // total, which never shrinks and overshoots the window. Window is sized
         // off the session model so the percentage and the compaction trigger
         // share one denominator.
-        let context_tokens = usage.context_tokens();
+        let context_tokens = latest.context_tokens();
         let context_window = runtime::model_capabilities::context_window_or_default(model);
         let branch = env::current_dir()
             .ok()

@@ -95,6 +95,15 @@ pub struct Mailbox {
     backend: Arc<dyn FsBackend>,
     self_id: String,
     convention: InboxConvention,
+    /// Recipients whose inbox this mailbox has already created.
+    ///
+    /// Creation is idempotent, so this is a cost decision rather than a
+    /// correctness one: it keeps the steady state at one round trip per send
+    /// instead of two. Safe to remember in a way the framing decision is NOT —
+    /// a stream that exists stays a stream, and an agent inbox is a durable
+    /// identity nothing deletes, whereas `is_append_stream` changes its answer
+    /// the moment a stream is created.
+    provisioned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Mailbox {
@@ -103,7 +112,47 @@ impl Mailbox {
             backend,
             self_id,
             convention,
+            provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Create the recipient's inbox stream if this mailbox has not already.
+    ///
+    /// A send to an agent that has never run has to work — an inbox is durable
+    /// precisely so a message can wait for its reader — and an agent that has
+    /// never run has no stream yet. Nobody else can create it either: the
+    /// recipient is not here to provision its own, and the sender is the only
+    /// party that knows the message exists.
+    ///
+    /// Skipping this was silent, destructive data loss. `is_append_stream` is a
+    /// test of the PATH's shape for the VFS backend — every `…/chat-with-me`
+    /// answers yes — so an append to an unprovisioned inbox did not fail. It
+    /// created a plain entry at the stream's path, returned success to the
+    /// sender, and left a path that can never become a stream again:
+    ///
+    /// ```text
+    /// send    -> Ok                        the sender is told it was delivered
+    /// read    -> StreamNotFound            the recipient can never see it
+    /// ensure  -> entry_type immutable      and can never repair its own inbox
+    /// ```
+    fn ensure_recipient_stream(&self, recipient: &str, path: &str) -> Result<(), String> {
+        {
+            let seen = self
+                .provisioned
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if seen.contains(recipient) {
+                return Ok(());
+            }
+        }
+        self.backend
+            .create_append_log(path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
+            .map_err(|e| format!("provision inbox {path}: {e}"))?;
+        self.provisioned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(recipient.to_string());
+        Ok(())
     }
 
     /// Whether the backend frames appends at `path` itself (a DT_STREAM record
@@ -220,6 +269,7 @@ impl Mailbox {
         let path = self.convention.inbox_path(&envelope.to);
 
         if self.backend_frames(&path) {
+            self.ensure_recipient_stream(&envelope.to, &path)?;
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())

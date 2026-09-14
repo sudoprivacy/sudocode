@@ -93,7 +93,7 @@ pub use compact::{
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
     format_compact_summary, get_compact_continuation_message, should_compact, CompactionConfig,
     CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
-    AUTOCOMPACT_BUFFER_TOKENS, COMPACT_MAX_OUTPUT_TOKENS,
+    AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,

@@ -508,12 +508,10 @@ impl SessionEngine {
         // Reset before publishing Started: a cancel in response to that event
         // must not be cleared when the summarizer begins.
         session.abort_signal.reset();
-        let mut progress = runtime::CompactionProgress::started(
-            "manual",
-            estimate_session_tokens(session.runtime.session()),
-        );
+        let before_tokens = estimate_session_tokens(session.runtime.session());
+        let mut progress = runtime::CompactionProgress::started("manual", before_tokens);
         observer.on_compaction(&progress);
-        let result = self.compact_cancellable_inner(&mut session);
+        let result = self.compact_cancellable_inner(&mut session, before_tokens);
         progress.status = match &result {
             Ok(outcome) if outcome.cancelled => runtime::CompactionStatus::Cancelled,
             Ok(outcome) => {
@@ -523,16 +521,18 @@ impl SessionEngine {
             Err(_) => runtime::CompactionStatus::Failed,
         };
         observer.on_compaction(&progress);
-        result.map_err(|error| format!("Context compaction failed; history preserved: {error}"))
+        // The inner error already names its own class and carries its single
+        // "history preserved" tail — only add the marker upper layers match on.
+        result.map_err(|error| format!("{}: {error}", runtime::COMPACTION_FAILED))
     }
 
     fn compact_cancellable_inner(
         &self,
         session: &mut AcpCliSession,
+        before_tokens: usize,
     ) -> Result<CompactionOutcome, String> {
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let abort_signal = session.abort_signal.clone();
-        let before_tokens = estimate_session_tokens(session.runtime.session());
         let config = CompactionConfig {
             max_estimated_tokens: 0,
             ..CompactionConfig::default()

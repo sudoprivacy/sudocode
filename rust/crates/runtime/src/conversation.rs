@@ -1927,7 +1927,13 @@ where
                                 iterations,
                             ));
                         }
-                        let auto_compaction = merge_auto_compaction(overflow_compaction, attempt?);
+                        let auto_compaction = match attempt {
+                            Ok(event) => merge_auto_compaction(overflow_compaction, event),
+                            Err(error) => {
+                                self.record_turn_failed(iterations, &error);
+                                return Err(error);
+                            }
+                        };
                         self.file_tracker.end_turn();
                         self.current_turn_id = None;
                         self.user_request_intent = None;
@@ -2485,7 +2491,13 @@ where
                 iterations,
             ));
         }
-        let auto_compaction = merge_auto_compaction(overflow_compaction, attempt?);
+        let auto_compaction = match attempt {
+            Ok(event) => merge_auto_compaction(overflow_compaction, event),
+            Err(error) => {
+                self.record_turn_failed(iterations, &error);
+                return Err(error);
+            }
+        };
 
         self.finish_current_turn_tracking();
 
@@ -2820,12 +2832,12 @@ where
         trigger: CompactionTrigger,
         mut observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<Option<AutoCompactionEvent>, CompactionError> {
-        let mut progress =
-            CompactionProgress::started(trigger.as_str(), estimate_session_tokens(&self.session));
+        let before = estimate_session_tokens(&self.session);
+        let mut progress = CompactionProgress::started(trigger.as_str(), before);
         if let Some(observer) = observer.as_deref_mut() {
             observer.on_compaction(&progress);
         }
-        let result = self.compact_in_place_inner(config, trigger).await;
+        let result = self.compact_in_place_inner(config, trigger, before).await;
         progress.status = if self.hook_abort_signal.is_aborted() {
             CompactionStatus::Cancelled
         } else if result.is_ok() {
@@ -2839,19 +2851,15 @@ where
         if let Some(observer) = observer {
             observer.on_compaction(&progress);
         }
-        result.map_err(|error| {
-            CompactionError::ApiError(format!(
-                "Context compaction failed; history preserved: {error}"
-            ))
-        })
+        result.map_err(CompactionError::into_terminal)
     }
 
     async fn compact_in_place_inner(
         &mut self,
         config: CompactionConfig,
         trigger: CompactionTrigger,
+        before: usize,
     ) -> Result<Option<AutoCompactionEvent>, CompactionError> {
-        let before = estimate_session_tokens(&self.session);
         let mut candidate = self.session.clone();
         let pruned = prune_tool_results(&mut candidate);
         let budget = self
@@ -5403,7 +5411,18 @@ mod tests {
 
         std::env::remove_var("CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS");
 
-        assert!(error.to_string().contains("Context compaction failed"));
+        let message = error.to_string();
+        assert!(
+            message.contains(crate::compact::COMPACTION_FAILED),
+            "{message}"
+        );
+        // The turn-level error is what the TUI prints verbatim: one marker and
+        // one "history preserved", not a stack of nested wrappers.
+        assert_eq!(
+            message.matches(crate::compact::COMPACTION_FAILED).count(),
+            1
+        );
+        assert_eq!(message.matches("history preserved").count(), 1, "{message}");
         assert_eq!(runtime.session().messages.len(), 6);
         assert_eq!(runtime.session().messages[0].role, MessageRole::User);
     }

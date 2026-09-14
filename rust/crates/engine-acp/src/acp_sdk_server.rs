@@ -58,6 +58,9 @@ pub enum AcpError {
     Internal(String),
 }
 
+/// What a client shows when context maintenance ends the run.
+const COMPACTION_FAILED_MESSAGE: &str = "上下文压缩失败，本次对话已停止。已有对话历史已保留。";
+
 impl AcpError {
     #[must_use]
     pub fn invalid_params(message: impl Into<String>) -> Self {
@@ -76,8 +79,8 @@ impl AcpError {
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
         };
 
-        if raw_message.contains("Context compaction failed") {
-            return "上下文压缩失败，本次对话已停止。已有对话历史已保留。".to_string();
+        if raw_message.contains(runtime::COMPACTION_FAILED) {
+            return COMPACTION_FAILED_MESSAGE.to_string();
         }
 
         if raw_message.contains("[context_window_exceeded]") {
@@ -1929,9 +1932,17 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
         }
         AcpError::Internal(msg) => {
             let mut error = Error::internal_error().data(serde_json::Value::String(msg.clone()));
-            if msg.contains("Context compaction failed") {
-                // Clients use the JSON-RPC message for the terminal run banner.
-                error.message = e.user_friendly_message();
+            if msg.contains(runtime::COMPACTION_FAILED) {
+                // Clients use the JSON-RPC `message` for the terminal run
+                // banner. Only compaction overrides it because only compaction
+                // ends the run on something the USER is expected to act on;
+                // every other Internal error keeps JSON-RPC's generic message
+                // and carries its detail in `data`, which clients render as a
+                // diagnostic. Blanket-applying `user_friendly_message()` here
+                // is not the alternative: its catch-all truncates the raw
+                // message to 100 chars, which would lose detail for every
+                // unclassified failure.
+                error.message = COMPACTION_FAILED_MESSAGE.to_string();
             }
             error
         }

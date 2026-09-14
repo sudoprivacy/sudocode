@@ -38,9 +38,15 @@ fn write_then_read_back() {
         &prompt,
     ]);
 
-    // Agent trigger: model calls write_file.
-    sess.expect("(?i)write_file")
-        .expect("should see write_file tool call (agent trigger)");
+    // The mock exposes the internal tool name; live iocraft renders a stable
+    // human-facing write card instead.
+    if env.is_mock() {
+        sess.expect("(?i)write_file")
+            .expect("should see write_file tool call (agent trigger)");
+    } else {
+        sess.expect("(?i)(writing|wrote|written|created)")
+            .expect("should see the live write operation");
+    }
 
     // Response confirms the write.
     sess.expect("(?i)(created|wrote|written|succeeded|hello|output)")
@@ -93,9 +99,15 @@ fn edit_then_verify_on_disk() {
         &prompt,
     ]);
 
-    // Agent trigger: model calls edit_file.
-    sess.expect("(?i)edit_file")
-        .expect("should see edit_file tool call (agent trigger)");
+    // The mock exposes the internal tool name; live iocraft renders a stable
+    // human-facing update card instead.
+    if env.is_mock() {
+        sess.expect("(?i)edit_file")
+            .expect("should see edit_file tool call (agent trigger)");
+    } else {
+        sess.expect("(?i)(updating|updated|edited|replaced)")
+            .expect("should see the live edit operation");
+    }
 
     // Response confirms the edit.
     sess.expect("(?i)(omega|replaced|changed|edited|updated|complete)")

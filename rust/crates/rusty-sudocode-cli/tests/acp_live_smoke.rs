@@ -3,12 +3,16 @@
 //! These tests are gated on the `CLAUDE_CODE_OAUTH_TOKEN` environment variable.
 //! When the token is absent or empty the tests silently pass (return early).
 //! On CI they run only on main merges where the GitHub secret is available.
+//! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
+//! defaults to `sonnet` for compatibility with existing live runs.
 //!
 //! Runs on Windows too, for the same reason as `acp_integration.rs`: the ACP
 //! stdio handshake was never Windows-incompatible — `env_clear()` was dropping
 //! `SystemRoot` and killing the child's winsock init. See
 //! `common/isolated_env.rs`.
 
+#[path = "common/mod.rs"]
+mod common;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
 
@@ -241,7 +245,7 @@ fn base_command_with_mode(
         "--auth",
         "subscription",
         "--model",
-        "claude-sonnet",
+        &common::live_model(),
         "--permission-mode",
         permission_mode,
     ]);

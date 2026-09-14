@@ -377,7 +377,7 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
     // the echo of the question that was just submitted, so matching it returns
     // while the turn is still running. `/exit` then lands in the input queue
     // mid-turn and is never submitted, and the session never ends.
-    sess.expect("45[,. ]?201").unwrap_or_else(|e| {
+    sess.expect(r"45(?:[,. ]|\{,\})?201").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("should see the computed answer: {e}\nPTY:\n{screen}");
     });

@@ -2185,8 +2185,11 @@ mod tests {
         let plain = strip_ansi(&render_staging_overlay(&cards, 40));
         // Each running call is a Running L-frame card (╭─ header … ╰─).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
-        assert!(plain.contains("bash"), "{plain}");
-        assert!(plain.contains("read_file"), "{plain}");
+        // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
+        // label the completed scrollback card resolves, so a tool never
+        // changes case when it finishes.
+        assert!(plain.contains("Bash"), "{plain}");
+        assert!(plain.contains("Read"), "{plain}");
     }
 
     #[test]

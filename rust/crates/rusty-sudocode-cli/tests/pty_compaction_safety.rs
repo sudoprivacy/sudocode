@@ -119,7 +119,7 @@ fn serve(
         serve_delegation(&mut socket, &request);
         return;
     }
-    if streaming && (mode == "success" || mode.starts_with("long-summary")) {
+    if streaming && (matches!(mode, "success" | "post-error") || mode.starts_with("long-summary")) {
         serve_success_stream(&mut socket);
         return;
     }
@@ -147,7 +147,7 @@ fn serve(
             "400 Bad Request",
             json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture cache-safe compaction unavailable"}}),
         )
-    } else if mode == "error" {
+    } else if matches!(mode, "error" | "post-error") {
         (
             "400 Bad Request",
             json!({"type":"error", "error":{"type":"invalid_request_error", "message":"fixture summarizer unavailable"}}),
@@ -204,7 +204,7 @@ fn serve_success_stream(socket: &mut TcpStream) {
         ),
         (
             "message_delta",
-            json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1000,"output_tokens":10}}),
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
@@ -960,4 +960,61 @@ fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
             assert!(requests[1]["tools"].is_null());
         }
     }
+}
+
+#[test]
+fn post_turn_compaction_failure_stops_the_cli_turn() {
+    let provider = Provider::new("post-error");
+    let workspace = HarnessWorkspace::new("post-turn-compact-failure");
+    workspace.write_mock_config(&provider.url);
+    let path = fixture(&workspace);
+    let before = Session::load_from_path(&path).unwrap();
+    let mut cli = spawn_scode_in_dir_with_env(
+        &workspace.root,
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "sonnet",
+            "--resume",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(30),
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+            (
+                "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS",
+                std::path::Path::new("100"),
+            ),
+        ],
+    )
+    .unwrap();
+    cli.expect("❯").unwrap();
+    cli.send("Continue PROJECT_ALPHA\r").unwrap();
+    cli.expect("Context compaction failed")
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}\n{}\nrequests: {:?}",
+                cli.render(|screen| screen.contents()),
+                provider
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| request["stream"].clone())
+                    .collect::<Vec<_>>()
+            );
+        });
+    cli.send("/exit\r").unwrap();
+    cli.expect_eof().unwrap();
+    let after = Session::load_from_path(&path).unwrap();
+    assert_eq!(&after.messages[..before.messages.len()], &before.messages);
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().filter(|r| r["stream"] == true).count(),
+        1,
+        "no further task request after compaction fails"
+    );
+    assert!(requests.iter().any(|r| r["stream"] != true));
 }

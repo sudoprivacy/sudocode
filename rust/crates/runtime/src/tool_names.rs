@@ -3,8 +3,8 @@
 //! Every capability is advertised under exactly ONE name (see
 //! `tools::mvp_tool_specs`). What this module owns is narrower and
 //! permanent: a model trained on Claude Code's tool set reaches for `Bash`,
-//! `Agent`, `TaskStop`, `SendMessage` from habit even when it was handed
-//! `bash`, `agent_spawn`, `pid_kill`, `send`, and a call refused for
+//! `Agent`, `SendMessage` from habit even when it was handed
+//! `bash`, `agent_spawn`, `send`, and a call refused for
 //! spelling reads to the user as the model declining to act.
 //!
 //! It lives in `runtime`, below `tools`, because name matching is not only a
@@ -29,7 +29,7 @@
 /// pick the wrong destination for a cross-machine message, so the alias table
 /// and the spec list are kept strictly apart. What it buys is that a model
 /// trained on Claude Code's tool set — which reaches for `Bash`, `Agent`,
-/// `TaskStop`, `SendMessage` from habit — is not refused over spelling, since
+/// `SendMessage` from habit — is not refused over spelling, since
 /// a refusal reads to the user as the model declining to act.
 ///
 /// Keys are the NORMALIZED (lower-cased, `-` → `_`) form. Note that
@@ -44,13 +44,9 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     ("edit", "edit_file"),
     ("glob", "glob_search"),
     ("grep", "grep_search"),
-    ("sendmessage", "send"),      // CC: SendMessage
-    ("send_message", "send"),     // the A2A tool this replaced
-    ("agent", "agent_spawn"),     // CC: Agent
-    ("taskstop", "pid_kill"),     // CC: TaskStop
-    ("taskget", "pid_status"),    // CC: TaskGet
-    ("tasklist", "pid_status"),   // CC: TaskList — both map to pid_status
-    ("taskoutput", "pid_output"), // CC: TaskOutput
+    ("sendmessage", "send"),  // CC: SendMessage
+    ("send_message", "send"), // the A2A tool this replaced
+    ("agent", "agent_spawn"), // CC: Agent
 ];
 
 /// Lower-case and fold `-` to `_` so `Web-Fetch`, `web_fetch` and `WebFetch`

@@ -10,7 +10,7 @@
 //! 2. **Coord-on/off gate** — `render_task_notification_if_enabled`
 //!    only emits when `SUDOCODE_COORDINATOR_MODE` is truthy. Non-coord
 //!    sessions must keep their legacy JSON manifest shape (backwards
-//!    compat with any pre-parity `TaskOutput` consumer).
+//!    compat with any pre-parity `pid_output` consumer).
 //!
 //! Env-touching tests share a process-wide mutex — parallel writers
 //! would race like they do in `coordinator_gate.rs`.

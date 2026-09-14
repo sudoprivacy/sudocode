@@ -90,7 +90,7 @@ fn require_live(env: &TestEnv, test_name: &str) -> bool {
 /// Journey (3 steps, data flows between them):
 ///   1. TaskCreate("say hello") → returns task_id
 ///   2. TaskList → response includes the task from step 1
-///   3. TaskStop(task_id) → stops the background task
+///   3. pid_kill(pid) → stops the background task
 ///
 /// This covers the "delegate work to background agent" workflow that
 /// users rely on for parallelizing coding tasks.

@@ -98,3 +98,21 @@ See [`authentication.md`](./authentication.md).
 ## Permissions and sandbox
 
 See [`permissions-and-sandbox.md`](./permissions-and-sandbox.md).
+
+## Compacting a long conversation
+
+`/compact` in the REPL, ACP, or `scode --resume <id> /compact` uses the same
+model-backed checkpoint pipeline, even below the automatic pressure threshold.
+The configured provider must be available. Older history and any previous
+checkpoint are summarized together; recent messages and complete tool exchanges
+are retained by token budget. Automatic compaction first tries trimming large
+tool outputs to avoid an unnecessary model call.
+
+Failed, empty, truncated, or non-shrinking summaries leave history intact and
+report an error instead of continuing with a statistical or empty history.
+Pre-request failure stops that request. A post-turn maintenance failure keeps
+the already completed response. Successful replacements archive the original
+JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
+history. Keep these files to inspect or recover older context; they are not
+subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
+budgets and persistence details.

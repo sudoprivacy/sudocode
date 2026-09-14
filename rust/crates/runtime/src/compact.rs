@@ -1,7 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use crate::conversation::ApiClient;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
@@ -13,104 +11,39 @@ const COMPACT_RECENT_MESSAGES_NOTE: &str = "Recent messages are preserved verbat
 const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.";
 
 // ---------------------------------------------------------------------------
-// CC-verbatim compaction prompt constants
+// Rolling checkpoint prompt
 // ---------------------------------------------------------------------------
 
 const NO_TOOLS_PREAMBLE: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n\
 - Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.\n\
 - You already have all the context you need in the conversation above.\n\
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.\n\
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.\n\n";
+- Your entire response must be plain text: a <summary> block.\n\n";
 
-const BASE_COMPACT_PROMPT: &str = "Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.\n\
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.\n\n\
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:\n\n\
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:\n\
-   - The user's explicit requests and intents\n\
-   - Your approach to addressing the user's requests\n\
-   - Key decisions, technical concepts and code patterns\n\
-   - Specific details like:\n\
-     - file names\n\
-     - full code snippets\n\
-     - function signatures\n\
-     - file edits\n\
-   - Errors that you ran into and how you fixed them\n\
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.\n\
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.\n\n\
-Your summary should include the following sections:\n\n\
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail\n\
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.\n\
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.\n\
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.\n\
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.\n\
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.\n\
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.\n\
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.\n\
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.\n\
-                       If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.\n\n\
-Here's an example of how your output should be structured:\n\n\
-<example>\n\
-<analysis>\n\
-[Your thought process, ensuring all points are covered thoroughly and accurately]\n\
-</analysis>\n\n\
-<summary>\n\
-1. Primary Request and Intent:\n\
-   [Detailed description]\n\n\
-2. Key Technical Concepts:\n\
-   - [Concept 1]\n\
-   - [Concept 2]\n\
-   - [...]\n\n\
-3. Files and Code Sections:\n\
-   - [File Name 1]\n\
-      - [Summary of why this file is important]\n\
-      - [Summary of the changes made to this file, if any]\n\
-      - [Important Code Snippet]\n\
-   - [File Name 2]\n\
-      - [Important Code Snippet]\n\
-   - [...]\n\n\
-4. Errors and fixes:\n\
-    - [Detailed description of error 1]:\n\
-      - [How you fixed the error]\n\
-      - [User feedback on the error if any]\n\
-    - [...]\n\n\
-5. Problem Solving:\n\
-   [Description of solved problems and ongoing troubleshooting]\n\n\
-6. All user messages: \n\
-    - [Detailed non tool use user message]\n\
-    - [...]\n\n\
-7. Pending Tasks:\n\
-   - [Task 1]\n\
-   - [Task 2]\n\
-   - [...]\n\n\
-8. Current Work:\n\
-   [Precise description of current work]\n\n\
-9. Optional Next Step:\n\
-   [Optional Next step to take]\n\n\
-</summary>\n\
-</example>\n\n\
-Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response. \n\n\
-There may be additional summarization instructions provided in the included context. If so, remember to follow these instructions when creating the above summary. Examples of instructions include:\n\
-<example>\n\
-## Compact Instructions\n\
-When summarizing the conversation focus on typescript code changes and also remember the mistakes you made and how you fixed them.\n\
-</example>\n\n\
-<example>\n\
-# Summary instructions\n\
-When you are using compact - please focus on test output and code changes. Include file reads verbatim.\n\
-</example>";
+const BASE_COMPACT_PROMPT: &str = "Create a concise checkpoint for continuing this coding task. Output only a <summary> block with these sections, using short bullets and (none) for empty sections:
+
+1. Primary Request and Intent
+2. Key Technical Concepts
+3. Files and Code
+4. Errors and Fixes
+5. Pending Tasks
+6. Current Work
+7. Next Step
+8. Critical Context
+
+Preserve exact paths, commands, identifiers, important code fragments, user corrections, constraints and decisions with their rationale. Distinguish completed work from pending work. Keep the latest request and next action precise. If the conversation contains a previous summary, consolidate it with the newer history: retain still-valid facts, remove superseded details, and never copy the previous summary wholesale. Do not perform the task or call tools.";
 
 const NO_TOOLS_TRAILER: &str =
     "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — \
-an <analysis> block followed by a <summary> block. \
+a <summary> block. \
 Tool calls will be rejected and you will fail the task.";
 
 const COMPACTION_SYSTEM_PROMPT: &str =
     "You are a helpful AI assistant tasked with summarizing conversations.";
 
 /// Maximum output tokens requested from the LLM for a compaction summary.
-/// CC uses `min(16384, model_max)` for the API request; the higher ceiling
-/// here covers re-compactions whose input is already a prior summary.
-pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 20_000;
+/// Keep rolling checkpoints bounded; providers may have a smaller ceiling.
+pub const COMPACT_MAX_OUTPUT_TOKENS: u32 = 8_192;
 
 /// Base buffer subtracted from context window when computing the auto-compact
 /// threshold. Scaled by [`autocompact_buffer_tokens`] for large context
@@ -202,131 +135,6 @@ impl ContextBudget {
 }
 
 // ---------------------------------------------------------------------------
-// Post-compact file restore (CC parity)
-// ---------------------------------------------------------------------------
-
-/// Maximum number of recently-read files to re-inject after compaction.
-/// Matches CC's `POST_COMPACT_MAX_FILES_TO_RESTORE`.
-const POST_COMPACT_MAX_FILES: usize = 5;
-
-/// Total token budget for all re-injected file content.
-/// Matches CC's `POST_COMPACT_TOKEN_BUDGET`.
-const POST_COMPACT_TOKEN_BUDGET: usize = 50_000;
-
-/// Per-file token cap. Matches CC's `POST_COMPACT_MAX_TOKENS_PER_FILE`.
-const POST_COMPACT_MAX_TOKENS_PER_FILE: usize = 5_000;
-
-/// Tracks the most recent read_file tool result for each path.
-/// Populated by `ConversationRuntime` each time a `read_file` tool
-/// succeeds; consumed after compaction to restore file context.
-#[derive(Debug, Default)]
-pub struct ReadFileTracker {
-    entries: BTreeMap<PathBuf, Instant>,
-}
-
-impl ReadFileTracker {
-    /// Record that a file was read at the current instant.
-    pub fn record(&mut self, path: PathBuf) {
-        self.entries.insert(path, Instant::now());
-    }
-
-    /// Clear all tracked entries (called after file restore messages are built).
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    /// Build user messages re-injecting recently-read file content.
-    ///
-    /// Files already visible in `preserved_messages` (the tail kept after
-    /// compaction) are skipped — they're already in the model's context.
-    /// Returns messages ordered most-recent-first, constrained by both
-    /// file count and token budget.
-    #[must_use]
-    pub fn build_post_compact_file_messages(
-        &self,
-        preserved_messages: &[ConversationMessage],
-    ) -> Vec<ConversationMessage> {
-        if self.entries.is_empty() {
-            return Vec::new();
-        }
-
-        // Collect read_file paths already in the preserved tail.
-        let preserved_paths = collect_read_file_paths(preserved_messages);
-
-        // Sort by timestamp (most recent first), skip preserved.
-        let mut candidates: Vec<(&PathBuf, &Instant)> = self
-            .entries
-            .iter()
-            .filter(|(path, _)| !preserved_paths.iter().any(|pp| pp == *path))
-            .collect();
-        candidates.sort_by(|a, b| b.1.cmp(a.1));
-        candidates.truncate(POST_COMPACT_MAX_FILES);
-
-        let mut messages = Vec::new();
-        let mut total_tokens = 0usize;
-
-        for (path, _) in candidates {
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            // Estimate tokens and enforce per-file + total budget
-            let token_estimate = content.len() / 4 + 1;
-            let capped = if token_estimate > POST_COMPACT_MAX_TOKENS_PER_FILE {
-                // Truncate to fit the per-file budget (conservative char estimate)
-                let max_chars = POST_COMPACT_MAX_TOKENS_PER_FILE * 4;
-                &content[..content.floor_char_boundary(max_chars.min(content.len()))]
-            } else {
-                content.as_str()
-            };
-
-            let capped_tokens = capped.len() / 4 + 1;
-            if total_tokens + capped_tokens > POST_COMPACT_TOKEN_BUDGET {
-                break;
-            }
-            total_tokens += capped_tokens;
-
-            let display_path = path.display();
-            messages.push(ConversationMessage::user_text(format!(
-                "[Post-compact file restore: {display_path}]\n{capped}"
-            )));
-        }
-
-        messages
-    }
-}
-
-/// Extract `read_file` tool-use paths from a message slice.
-fn collect_read_file_paths(messages: &[ConversationMessage]) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for msg in messages {
-        for block in &msg.blocks {
-            if let ContentBlock::ToolUse { name, input, .. } = block {
-                if name == "read_file" || name == "Read" {
-                    if let Some(p) = extract_file_path_from_tool_input(input) {
-                        paths.push(PathBuf::from(&p));
-                    }
-                }
-            }
-        }
-    }
-    paths
-}
-
-/// Parse the `file_path` field from a tool-use input JSON string.
-/// Public for use by `ConversationRuntime::find_tool_use_file_path`.
-pub fn extract_file_path_from_tool_input(input: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
-    parsed
-        .get("file_path")
-        .or_else(|| parsed.get("filePath"))
-        .or_else(|| parsed.get("path"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -339,6 +147,10 @@ pub enum CompactionError {
     NothingToCompact,
     /// The LLM call failed.
     ApiError(String),
+    /// Empty, incomplete, or non-shrinking replacement.
+    InvalidSummary(String),
+    /// A replacement could not be durably saved.
+    Persistence(String),
 }
 
 impl fmt::Display for CompactionError {
@@ -346,7 +158,13 @@ impl fmt::Display for CompactionError {
         match self {
             Self::NotSupported => write!(f, "compaction not supported by this API client"),
             Self::NothingToCompact => write!(f, "session too small to compact"),
-            Self::ApiError(msg) => write!(f, "compaction API error: {msg}"),
+            Self::ApiError(msg) => write!(f, "compaction API error: {msg}; history preserved"),
+            Self::InvalidSummary(msg) => {
+                write!(f, "invalid compaction summary: {msg}; history preserved")
+            }
+            Self::Persistence(msg) => {
+                write!(f, "compaction persistence failed: {msg}; history preserved")
+            }
         }
     }
 }
@@ -373,12 +191,120 @@ impl Default for CompactionConfig {
     }
 }
 
+impl CompactionConfig {
+    /// Retain a token-priced suffix, with the configured message floor and
+    /// complete tool exchanges. A single large exchange is never split.
+    #[must_use]
+    pub fn with_token_retention(mut self, session: &Session, tokens: usize) -> Self {
+        let mut accumulated = 0;
+        let count = session
+            .messages
+            .iter()
+            .rev()
+            .take_while(|message| {
+                if accumulated >= tokens {
+                    return false;
+                }
+                accumulated += estimate_message_tokens(message);
+                true
+            })
+            .count();
+        self.preserve_recent_messages = self.preserve_recent_messages.max(count);
+        self
+    }
+}
+
+/// A failed or unnecessary attempt must return the original transcript intact.
+#[must_use]
+pub fn unchanged_compaction(session: &Session) -> CompactionResult {
+    CompactionResult {
+        summary: String::new(),
+        formatted_summary: String::new(),
+        compacted_session: session.clone(),
+        removed_message_count: 0,
+        summary_source: CompactionSummarySource::Llm,
+    }
+}
+
+/// Trim only oversized tool text. The caller stages this on a clone and
+/// archives the original before committing. Keep identifiers and error flags.
+pub fn prune_tool_results(session: &mut Session) -> usize {
+    let mut pruned = 0;
+    for message in &mut session.messages {
+        for block in &mut message.blocks {
+            if let ContentBlock::ToolResult {
+                tool_name, output, ..
+            } = block
+            {
+                // ToolSearch JSON is also consumed by deferred-schema routing.
+                if matches!(tool_name.as_str(), "ToolSearch" | "tool_search") {
+                    continue;
+                }
+                let chars: Vec<char> = output.chars().collect();
+                if chars.len() > 8_192 {
+                    *output = chars[..4_096].iter().collect::<String>()
+                        + "\n\n[... tool result middle pruned; original retained in pre-compaction transcript ...]\n\n"
+                        + &chars[chars.len() - 1_024..].iter().collect::<String>();
+                    pruned += 1;
+                }
+            }
+        }
+    }
+    pruned
+}
+
+/// Completion validity belongs to the checkpoint policy, not the transport.
+pub(crate) fn validate_completion(
+    response: crate::conversation::TextCompletion,
+) -> Result<String, crate::conversation::RuntimeError> {
+    use crate::conversation::RuntimeError;
+    if matches!(
+        response.stop_reason.as_deref(),
+        Some("max_tokens" | "length" | "incomplete")
+    ) {
+        return Err(RuntimeError::new(
+            "compaction summary was truncated at the output limit",
+        ));
+    }
+    if response.has_tool_calls {
+        return Err(RuntimeError::new(
+            "compaction returned tool calls instead of a complete checkpoint",
+        ));
+    }
+    if response.text.trim().is_empty() {
+        return Err(RuntimeError::new("compaction returned no summary text"));
+    }
+    Ok(response.text)
+}
+
+/// Validate the actual framed replacement, not just the raw model response.
+fn validate_summary(summary: &str, removed: &[ConversationMessage]) -> Result<(), CompactionError> {
+    let text = format_compact_summary(summary);
+    if text.trim().is_empty() || text.trim() == "Summary:" {
+        return Err(CompactionError::InvalidSummary("empty text".into()));
+    }
+    if summary.contains("<summary>") && !summary.contains("</summary>") {
+        return Err(CompactionError::InvalidSummary("unclosed summary".into()));
+    }
+    let replacement =
+        ConversationMessage::user_text(get_compact_continuation_message(summary, true, true));
+    let before: usize = removed.iter().map(estimate_message_tokens).sum();
+    if estimate_message_tokens(&replacement) >= before {
+        return Err(CompactionError::InvalidSummary(
+            "replacement does not reduce context".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Which path produced a [`CompactionResult`]'s summary.
 ///
 /// The local heuristic summary is much lossier than the LLM one, so callers
 /// surface this to the user instead of reporting a silent downgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionSummarySource {
+    /// Deterministic shortening of tool output, without a summary call.
+    ToolPruning,
     /// The summary came from the LLM compaction call.
     Llm,
     /// The summary came from the local structural heuristic
@@ -390,6 +316,7 @@ pub enum CompactionSummarySource {
 impl fmt::Display for CompactionSummarySource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ToolPruning => write!(f, "tool output pruning"),
             Self::Llm => write!(f, "llm"),
             Self::Local {
                 fallback_reason: None,
@@ -632,10 +559,6 @@ fn build_compaction_messages(
 /// Matches CC's `MAX_COMPACT_STREAMING_RETRIES`.
 const MAX_COMPACT_RETRIES: u32 = 2;
 
-/// Maximum PTL (prompt-too-long) truncation retries.
-/// Matches CC's `MAX_PTL_RETRIES`.
-const MAX_PTL_RETRIES: u32 = 3;
-
 /// Check if an error is retryable (transient failures, not permanent ones).
 fn is_retryable_error(error_msg: &str) -> bool {
     let lower = error_msg.to_lowercase();
@@ -660,36 +583,18 @@ fn is_prompt_too_long(error_msg: &str) -> bool {
         || lower.contains("token limit")
         // The API client's local preflight rejects an oversized compaction
         // request before it leaves the process; treat it like the provider's
-        // own prompt-too-long so the head-truncation retry still applies.
+        // own prompt-too-long so no destructive retry is attempted.
         || lower.contains("context_window_blocked")
         // Anthropic: "input length and `max_tokens` exceed context limit".
         || lower.contains("context limit")
         || lower.contains("context window")
 }
 
-/// Drop the oldest ~20% of message groups from compaction input to make
-/// room for a PTL retry. Returns `None` if nothing can be dropped.
-fn truncate_head_for_ptl(messages: &[ConversationMessage]) -> Option<Vec<ConversationMessage>> {
-    if messages.len() <= 2 {
-        return None;
-    }
-    // Drop ~20% of messages from the front (excluding the final compaction prompt)
-    let drop_count = std::cmp::max(1, (messages.len() - 1) / 5);
-    let remaining = &messages[drop_count..];
-    if remaining.len() < 2 {
-        return None;
-    }
-    Some(remaining.to_vec())
-}
-
 /// Compacts a session using an LLM to produce a high-quality summary.
 ///
 /// Retries transient failures up to [`MAX_COMPACT_RETRIES`] times with
-/// exponential backoff. On prompt-too-long errors, truncates the oldest
-/// messages and retries up to [`MAX_PTL_RETRIES`] times.
-///
-/// Falls back to local heuristic compaction when the API client doesn't
-/// support `send_compaction`.
+/// exponential backoff. Oversized inputs and invalid summaries return an
+/// error without discarding source messages or installing a local fallback.
 pub async fn compact_session<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
@@ -697,15 +602,13 @@ pub async fn compact_session<C: ApiClient>(
     model: &str,
     custom_instructions: Option<&str>,
 ) -> Result<CompactionResult, CompactionError> {
-    if !should_compact(session, config) {
+    if session.messages.len() <= config.preserve_recent_messages
+        || estimate_session_tokens(session) < config.max_estimated_tokens
+    {
         return Err(CompactionError::NothingToCompact);
     }
 
-    let existing_summary = session
-        .messages
-        .first()
-        .and_then(extract_existing_compacted_summary);
-    let compacted_prefix_len = usize::from(existing_summary.is_some());
+    let compacted_prefix_len = 0;
 
     let raw_keep_from = session
         .messages
@@ -735,49 +638,38 @@ pub async fn compact_session<C: ApiClient>(
         crate::model_capabilities::max_output_tokens_or_default(model),
     );
 
-    // Call the LLM with retry logic
-    let mut current_messages = compaction_messages;
-    let mut ptl_attempts = 0u32;
-    let mut last_error = String::new();
-
-    let llm_summary = 'outer: loop {
-        for attempt in 0..=MAX_COMPACT_RETRIES {
-            match api_client
-                .send_compaction(
-                    model,
-                    COMPACTION_SYSTEM_PROMPT,
-                    current_messages.clone(),
-                    max_tokens,
-                )
-                .await
-            {
-                Ok(summary) => break 'outer summary,
-                Err(e) => {
-                    last_error = e.to_string();
-                    if is_prompt_too_long(&last_error) {
-                        ptl_attempts += 1;
-                        if ptl_attempts <= MAX_PTL_RETRIES {
-                            if let Some(truncated) = truncate_head_for_ptl(&current_messages) {
-                                current_messages = truncated;
-                                continue 'outer;
-                            }
-                        }
-                        return Err(CompactionError::ApiError(last_error));
-                    }
-                    if attempt < MAX_COMPACT_RETRIES && is_retryable_error(&last_error) {
-                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-                        continue;
-                    }
-                    return Err(CompactionError::ApiError(last_error));
+    // Retry transient failures without throwing away any source history.
+    let mut attempt = 0;
+    let llm_summary = loop {
+        match api_client
+            .send_compaction(
+                model,
+                COMPACTION_SYSTEM_PROMPT,
+                compaction_messages.clone(),
+                max_tokens,
+            )
+            .await
+        {
+            Ok(summary) => break summary,
+            Err(error) => {
+                let message = error.to_string();
+                if attempt < MAX_COMPACT_RETRIES
+                    && is_retryable_error(&message)
+                    && !is_prompt_too_long(&message)
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                    attempt += 1;
+                } else {
+                    return Err(CompactionError::ApiError(message));
                 }
             }
         }
-        return Err(CompactionError::ApiError(last_error));
     };
 
     let discovered = extract_pre_compact_discovered_tools(session);
 
-    let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
+    validate_summary(&llm_summary, removed)?;
+    let summary = llm_summary;
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
 
@@ -821,15 +713,13 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
     system_prompt: &crate::prompt::SystemPrompt,
     custom_instructions: Option<&str>,
 ) -> Result<CompactionResult, CompactionError> {
-    if !should_compact(session, config) {
+    if session.messages.len() <= config.preserve_recent_messages
+        || estimate_session_tokens(session) < config.max_estimated_tokens
+    {
         return Err(CompactionError::NothingToCompact);
     }
 
-    let existing_summary = session
-        .messages
-        .first()
-        .and_then(extract_existing_compacted_summary);
-    let compacted_prefix_len = usize::from(existing_summary.is_some());
+    let compacted_prefix_len = 0;
 
     let raw_keep_from = session
         .messages
@@ -855,9 +745,9 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
 
     let request = crate::conversation::ApiRequest {
         system_prompt: system_prompt.clone(),
-        messages: session.messages.clone(),
+        messages: session.messages[..keep_from].to_vec(),
         trace_id: None,
-        pre_compact_discovered_tools: Default::default(),
+        pre_compact_discovered_tools: extract_pre_compact_discovered_tools(session),
     };
 
     let llm_summary = api_client
@@ -867,7 +757,8 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
 
     let discovered = extract_pre_compact_discovered_tools(session);
 
-    let summary = merge_compact_summaries(existing_summary.as_deref(), &llm_summary);
+    validate_summary(&llm_summary, removed)?;
+    let summary = llm_summary;
     let formatted_summary = format_compact_summary(&summary);
     let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
 
@@ -897,26 +788,24 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
     })
 }
 
-/// Local fallback for callers whose LLM compaction attempt failed with
-/// `error`; identical to [`compact_session_sync`] except that the result
-/// records why the lossier local summary was used.
+/// Legacy compatibility helper: on LLM failure preserve all messages.
+/// New callers should propagate the error rather than install a replacement.
 #[must_use]
 pub fn compact_session_sync_after_llm_failure(
     session: &Session,
     config: CompactionConfig,
     error: &CompactionError,
 ) -> CompactionResult {
-    let mut result = compact_session_sync(session, config);
+    let _ = config;
+    let mut result = unchanged_compaction(session);
     result.summary_source = CompactionSummarySource::Local {
         fallback_reason: Some(error.to_string()),
     };
     result
 }
 
-/// Synchronous fallback compaction for callers without an async runtime or
-/// API client (e.g. the `run_resume_command` path, overflow recovery).
-///
-/// Uses a simple structural summary instead of an LLM call.
+/// Legacy explicit structural compaction API. Production session paths use
+/// validated LLM compaction; this must never be used for failure recovery.
 #[must_use]
 pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> CompactionResult {
     if !should_compact(session, config) {
@@ -993,31 +882,30 @@ fn find_safe_compaction_boundary(
     raw_keep_from: usize,
     compacted_prefix_len: usize,
 ) -> usize {
-    let mut k = raw_keep_from;
+    let mut boundary = raw_keep_from.min(session.messages.len());
     loop {
-        if k == 0 || k <= compacted_prefix_len {
-            break;
+        let mut pending = std::collections::BTreeMap::new();
+        for (index, message) in session.messages[..boundary].iter().enumerate() {
+            for block in &message.blocks {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        pending.insert(id, index);
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        pending.remove(tool_use_id);
+                    }
+                    _ => {}
+                }
+            }
         }
-        let first_preserved = &session.messages[k];
-        let starts_with_tool_result = first_preserved
-            .blocks
-            .first()
-            .is_some_and(|b| matches!(b, ContentBlock::ToolResult { .. }));
-        if !starts_with_tool_result {
-            break;
+        let Some(start) = pending.values().min().copied() else {
+            return boundary;
+        };
+        if start <= compacted_prefix_len {
+            return compacted_prefix_len;
         }
-        let preceding = &session.messages[k - 1];
-        let preceding_has_tool_use = preceding
-            .blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-        if preceding_has_tool_use {
-            k = k.saturating_sub(1);
-            break;
-        }
-        k = k.saturating_sub(1);
+        boundary = start;
     }
-    k
 }
 
 fn aggregate_compaction_usage(
@@ -1833,7 +1721,7 @@ mod tests {
     fn build_compaction_prompt_includes_cc_constants() {
         let prompt = super::build_compaction_prompt(None);
         assert!(prompt.contains("CRITICAL: Respond with TEXT ONLY"));
-        assert!(prompt.contains("Your task is to create a detailed summary"));
+        assert!(prompt.contains("Create a concise checkpoint"));
         assert!(prompt.contains("REMINDER: Do NOT call any tools"));
     }
 
@@ -2125,18 +2013,16 @@ mod tests {
             .await
             .expect("second compaction");
 
-        assert!(second
+        assert!(!second
             .formatted_summary
             .contains("Previously compacted context:"));
-        assert!(second
+        assert!(!second
             .formatted_summary
             .contains("Newly compacted context:"));
-        assert!(matches!(
-            &second.compacted_session.messages[0].blocks[0],
-            ContentBlock::Text { text }
-                if text.contains("Previously compacted context:")
-                    && text.contains("Newly compacted context:")
-        ));
+        assert!(second.summary.contains("User added regression tests."));
+        assert!(!second
+            .summary
+            .contains("User investigated compaction flow."));
     }
 
     #[tokio::test]
@@ -2322,125 +2208,6 @@ mod tests {
         assert_eq!(usage.cost_units, Some(300));
     }
 
-    #[test]
-    fn extract_file_path_from_tool_input_parses_variants() {
-        assert_eq!(
-            super::extract_file_path_from_tool_input(r#"{"file_path":"/tmp/a.rs"}"#),
-            Some("/tmp/a.rs".to_string()),
-        );
-        assert_eq!(
-            super::extract_file_path_from_tool_input(r#"{"filePath":"/tmp/b.rs"}"#),
-            Some("/tmp/b.rs".to_string()),
-        );
-        assert_eq!(
-            super::extract_file_path_from_tool_input(r#"{"path":"/tmp/c.rs"}"#),
-            Some("/tmp/c.rs".to_string()),
-        );
-        assert_eq!(super::extract_file_path_from_tool_input("not json"), None,);
-    }
-
-    #[test]
-    fn read_file_tracker_builds_post_compact_messages() {
-        use std::io::Write;
-
-        // Create temp files
-        let dir = std::env::temp_dir().join(format!(
-            "scode-compact-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let file_a = dir.join("alpha.rs");
-        let file_b = dir.join("beta.rs");
-        let file_c = dir.join("gamma.rs");
-        std::fs::write(&file_a, "fn alpha() {}").unwrap();
-        std::fs::write(&file_b, "fn beta() {}").unwrap();
-        // gamma is tracked but also in preserved messages — should be skipped
-        std::fs::write(&file_c, "fn gamma() {}").unwrap();
-
-        let mut tracker = super::ReadFileTracker::default();
-        tracker.record(file_a.clone());
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        tracker.record(file_b.clone());
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        tracker.record(file_c.clone());
-
-        // Simulate preserved messages containing a read_file tool use for gamma.
-        // Use serde_json to properly escape backslashes on Windows paths.
-        let gamma_path_json = serde_json::to_string(&file_c.display().to_string()).unwrap();
-        let preserved = vec![ConversationMessage::assistant(vec![
-            ContentBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "read_file".to_string(),
-                input: format!(r#"{{"file_path":{gamma_path_json}}}"#),
-                thought_signature: None,
-            },
-        ])];
-
-        let messages = tracker.build_post_compact_file_messages(&preserved);
-
-        // gamma should be skipped (already in preserved)
-        assert_eq!(
-            messages.len(),
-            2,
-            "should restore alpha and beta, skip gamma"
-        );
-
-        // Most recent first: beta before alpha
-        let first_text = match &messages[0].blocks[0] {
-            ContentBlock::Text { text } => text,
-            _ => panic!("expected text block"),
-        };
-        assert!(first_text.contains("fn beta()"), "most recent file first");
-        assert!(first_text.contains("beta.rs"), "should mention filename");
-
-        let second_text = match &messages[1].blocks[0] {
-            ContentBlock::Text { text } => text,
-            _ => panic!("expected text block"),
-        };
-        assert!(second_text.contains("fn alpha()"), "second file");
-
-        // Clear should empty the tracker
-        let _ = Write::write(&mut std::io::sink(), b"");
-        tracker.clear();
-        assert!(tracker.build_post_compact_file_messages(&[]).is_empty());
-
-        // Cleanup
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn read_file_tracker_respects_file_limit() {
-        let dir = std::env::temp_dir().join(format!(
-            "scode-compact-limit-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut tracker = super::ReadFileTracker::default();
-        for i in 0..10 {
-            let path = dir.join(format!("file{i}.txt"));
-            std::fs::write(&path, format!("content {i}")).unwrap();
-            tracker.record(path);
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-
-        let messages = tracker.build_post_compact_file_messages(&[]);
-        assert!(
-            messages.len() <= super::POST_COMPACT_MAX_FILES,
-            "should respect max files limit, got {}",
-            messages.len()
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     #[tokio::test]
     async fn compact_session_retries_transient_failures() {
         use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
@@ -2509,7 +2276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_session_retries_ptl_with_truncation() {
+    async fn compact_session_preserves_source_on_prompt_too_long() {
         use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
         use async_trait::async_trait;
         use std::sync::atomic::{AtomicU8, Ordering};
@@ -2573,16 +2340,11 @@ mod tests {
         };
 
         let mut client = PtlThenSucceedClient;
-        let result = super::compact_session(&session, config, &mut client, "sonnet", None)
-            .await
-            .expect("should succeed after PTL truncation");
-
-        assert!(result.removed_message_count > 0);
-        assert!(result.formatted_summary.contains("PTL recovered"));
-        assert!(
-            PTL_ATTEMPT.load(Ordering::Relaxed) >= 2,
-            "should have made at least 2 attempts"
-        );
+        let original = session.messages.clone();
+        let result = super::compact_session(&session, config, &mut client, "sonnet", None).await;
+        assert!(result.is_err());
+        assert_eq!(PTL_ATTEMPT.load(Ordering::Relaxed), 1);
+        assert_eq!(session.messages, original);
     }
 
     #[tokio::test]
@@ -2639,36 +2401,6 @@ mod tests {
             }
             other => panic!("expected ApiError, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn truncate_head_for_ptl_drops_oldest_messages() {
-        let messages = vec![
-            ConversationMessage::user_text("a"),
-            ConversationMessage::user_text("b"),
-            ConversationMessage::user_text("c"),
-            ConversationMessage::user_text("d"),
-            ConversationMessage::user_text("e"),
-            ConversationMessage::user_text("prompt"),
-        ];
-
-        let truncated = super::truncate_head_for_ptl(&messages).expect("should truncate");
-        // 6 messages, drop ~20% = 1 → 5 remaining
-        assert_eq!(truncated.len(), 5);
-        // First dropped message was "a"
-        assert!(matches!(
-            &truncated[0].blocks[0],
-            ContentBlock::Text { text } if text == "b"
-        ));
-    }
-
-    #[test]
-    fn truncate_head_for_ptl_returns_none_for_tiny_input() {
-        let messages = vec![
-            ConversationMessage::user_text("only"),
-            ConversationMessage::user_text("two"),
-        ];
-        assert!(super::truncate_head_for_ptl(&messages).is_none());
     }
 
     #[tokio::test]

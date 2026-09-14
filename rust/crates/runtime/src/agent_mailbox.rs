@@ -10,9 +10,7 @@
 //! ## Wire compatibility
 //!
 //! The canonical field name for the message body is `body` (matching
-//! the nexus a2a convention). The `text` alias is accepted on read for
-//! backward compat with existing local JSONL data written before the
-//! unification.
+//! the nexus a2a convention).
 //!
 //! All fields beyond `{from, to, body}` carry `#[serde(default)]` and
 //! `skip_serializing_if`, so:
@@ -49,8 +47,7 @@ pub struct MailboxEnvelope {
     pub to: String,
     /// Message body. For `kind == "message"` this is user-facing text.
     /// For structured `kind` values it is the JSON-encoded payload.
-    /// Accepts `"text"` on read for backward compat with old local JSONL.
-    #[serde(default, alias = "text")]
+    #[serde(default)]
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,

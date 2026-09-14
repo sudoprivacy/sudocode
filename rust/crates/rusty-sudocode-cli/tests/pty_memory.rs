@@ -745,15 +745,23 @@ fn memory_staleness_updates_existing_entry() {
     });
 
     // Tell the model the fact has changed.
-    sess.send("We migrated from PostgreSQL to MySQL last week. Please update your memory about our database.\r")
+    sess.send("We migrated from PostgreSQL to MySQL last week. Update the existing memory entry project_database.md now: replace its PostgreSQL details with MySQL details. Do not only update MEMORY.md.\r")
         .expect("send update request");
 
-    // Wait for tool call (edit_file or write_file on existing entry).
-    sess.expect("(?i)(edit_file|write_file)")
-        .unwrap_or_else(|e| {
+    // The mock exposes internal tool names; the live UI renders the completed
+    // card as “Updated …” and the on-disk assertions below validate its result.
+    if env.is_mock() {
+        sess.expect("(?i)(edit_file|write_file)")
+            .unwrap_or_else(|e| {
+                let screen = sess.render(|s| s.contents());
+                panic!("should see tool call for memory update: {e}\nPTY screen:\n{screen}");
+            });
+    } else {
+        sess.expect("ctx ").unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
-            panic!("should see tool call for memory update: {e}\nPTY screen:\n{screen}");
+            panic!("should see completed live update turn: {e}\nPTY screen:\n{screen}");
         });
+    }
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

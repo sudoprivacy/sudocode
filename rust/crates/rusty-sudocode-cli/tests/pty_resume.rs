@@ -143,8 +143,17 @@ fn resume_renders_history_in_iocraft_queue_mode() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     // Run a turn in queue (iocraft) mode so the session has a distinctive
-    // assistant reply.
-    let prompt = env.prompt("say hello world", "single_turn_text");
+    // assistant reply. The mock has a canned reply; live models are instructed
+    // to emit the same stable sentinel that resume must replay.
+    let prompt = env.prompt(
+        "Reply with exactly: SCODE_RESUME_SENTINEL",
+        "single_turn_text",
+    );
+    let expected_reply = if env.is_mock() {
+        "The answer is 4"
+    } else {
+        "SCODE_RESUME_SENTINEL"
+    };
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
@@ -152,7 +161,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
     sess.set_default_timeout(Duration::from_secs(15));
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    sess.expect("The answer is 4").expect("assistant reply");
+    sess.expect(expected_reply).expect("assistant reply");
     std::thread::sleep(Duration::from_millis(400));
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
@@ -164,7 +173,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
     sess2.set_default_timeout(Duration::from_secs(15));
-    sess2.expect("The answer is 4").unwrap_or_else(|e| {
+    sess2.expect(expected_reply).unwrap_or_else(|e| {
         let screen = sess2.render(|s| s.contents());
         panic!(
             "resumed iocraft REPL must replay history to scrollback: {e}\nPTY screen:\n{screen}"

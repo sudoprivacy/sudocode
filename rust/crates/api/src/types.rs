@@ -72,6 +72,69 @@ pub struct MessageRequest {
     /// into the request body. Other providers ignore this field.
     #[serde(skip)]
     pub thinking_enabled: bool,
+
+    /// Request metadata (Anthropic `metadata.user_id`). `#[serde(skip)]` for
+    /// the same reason as the two fields above: the Anthropic client injects
+    /// it into the body, and providers that have no such field never see it.
+    #[serde(skip)]
+    pub metadata: Option<RequestMetadata>,
+}
+
+/// Identity a request carries so an upstream can route consistently.
+///
+/// This exists for prompt caching, not telemetry. Anthropic's cache is
+/// per-account, and a reseller that pools several accounts needs a stable key
+/// to pin one conversation to one of them. `session_id` is that key: constant
+/// for the life of a conversation, so every turn lands on the account that
+/// already holds the cached prefix.
+///
+/// Measured before this was sent: 33% cache reuse through a pooling reseller
+/// versus 67-73% everywhere else, with the same client and workload. The
+/// vendor routes on `metadata.user_id`; we sent no `metadata` at all.
+///
+/// Shape matches Claude Code (`services/api/claude.ts`), which packs a JSON
+/// object into the `user_id` string.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RequestMetadata {
+    /// Stable for one conversation — the routing key.
+    pub session_id: String,
+    /// OAuth account UUID when authenticating that way; empty otherwise.
+    pub account_uuid: Option<String>,
+}
+
+impl RequestMetadata {
+    /// Build the identity for a conversation from its session id.
+    ///
+    /// Every client that opens a request goes through here, so the main loop
+    /// and a subagent spawned from it cannot end up with differently-shaped
+    /// keys for the same conversation.
+    #[inline]
+    #[must_use]
+    pub fn for_session(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            account_uuid: None,
+        }
+    }
+
+    /// The single place the `user_id` string is built.
+    ///
+    /// One function rather than a literal at each call site: the two clients
+    /// that send requests have already drifted apart once (a subagent's
+    /// requests carried no `cache_control` for exactly that reason), and a
+    /// routing key that differs between them would silently split one
+    /// conversation across upstream accounts — the very thing it prevents.
+    #[inline]
+    #[must_use]
+    pub fn user_id(&self) -> String {
+        // Serialised through serde so field order and escaping are fixed; a
+        // hand-built string would be a second source of truth for the shape.
+        serde_json::json!({
+            "session_id": self.session_id,
+            "account_uuid": self.account_uuid.clone().unwrap_or_default(),
+        })
+        .to_string()
+    }
 }
 
 /// Provider-agnostic description of what to cache in a request.
@@ -377,6 +440,41 @@ pub enum StreamEvent {
 
 #[cfg(test)]
 mod tests {
+    /// The key must be stable for a conversation and distinct between
+    /// conversations — those two properties are the whole mechanism. A
+    /// pooling upstream pins on this string; if it drifts between turns the
+    /// conversation hops accounts and the prompt cache (per-account) is cold
+    /// on arrival.
+    #[test]
+    fn routing_key_is_stable_per_session_and_distinct_across_sessions() {
+        use super::RequestMetadata;
+
+        let a = RequestMetadata::for_session("session-abc");
+        let b = RequestMetadata::for_session("session-abc");
+        assert_eq!(a.user_id(), b.user_id());
+
+        let other = RequestMetadata::for_session("session-xyz");
+        assert_ne!(a.user_id(), other.user_id());
+
+        // The wire shape is a JSON object packed into a string, matching
+        // Claude Code's `services/api/claude.ts`.
+        let decoded: serde_json::Value =
+            serde_json::from_str(&a.user_id()).expect("user_id must be JSON");
+        assert_eq!(decoded["session_id"], "session-abc");
+        assert_eq!(
+            decoded["account_uuid"], "",
+            "absent account must serialise as an empty string, not null",
+        );
+
+        let with_account = RequestMetadata {
+            account_uuid: Some("uuid-1".to_string()),
+            ..a
+        };
+        let decoded: serde_json::Value =
+            serde_json::from_str(&with_account.user_id()).expect("user_id must be JSON");
+        assert_eq!(decoded["account_uuid"], "uuid-1");
+    }
+
     use runtime::{format_usd, UsageCostCurrency};
 
     use super::{MessageResponse, Usage};

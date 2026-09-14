@@ -440,6 +440,7 @@ impl AnthropicClient {
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
         apply_cache_hints(&mut body, request);
+        apply_request_metadata(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
         if diagnose_cache {
@@ -571,6 +572,7 @@ impl AnthropicClient {
         let mut request_body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut request_body, request);
         apply_cache_hints(&mut request_body, request);
+        apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
         let mut builder = self
@@ -1361,6 +1363,32 @@ fn write_request_dump(
     let path = dir.join(format!("{stamp}-{nanos:09}-{kind}.json"));
     std::fs::write(&path, text).ok()?;
     Some(path)
+}
+
+/// Attach `metadata.user_id` when the request carries identity.
+///
+/// Separate from `apply_cache_hints` because it is not a caching *hint* — it
+/// is what lets a pooling upstream route every turn of one conversation to the
+/// same account, which is the precondition for the hints to hit at all.
+fn apply_request_metadata(body: &mut Value, request: &MessageRequest) {
+    let Some(metadata) = &request.metadata else {
+        return;
+    };
+    if metadata.session_id.is_empty() {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    // Never clobber a metadata object the caller built deliberately — a
+    // per-model `extraBody.metadata` in sudocode.json lands here first.
+    if object.contains_key("metadata") {
+        return;
+    }
+    object.insert(
+        "metadata".to_string(),
+        serde_json::json!({ "user_id": metadata.user_id() }),
+    );
 }
 
 /// Translate provider-agnostic [`CacheHints`] into Anthropic-specific
@@ -2364,5 +2392,86 @@ mod tests {
         // Last message's last content block: has cache_control.
         let last_block = &messages[1]["content"][0];
         assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+    }
+
+    /// The routing key has to reach the wire, not just the request struct.
+    /// `metadata` is `#[serde(skip)]`, so if this injection is ever dropped
+    /// the body simply has no `metadata` key and nothing fails — which is
+    /// precisely how we shipped without one and lost half the cache reuse
+    /// on any upstream that pools accounts.
+    #[test]
+    fn request_metadata_reaches_the_wire_body() {
+        use crate::types::{InputMessage, RequestMetadata};
+        use telemetry::AnthropicRequestProfile;
+
+        let request = MessageRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage::user_text("hello")],
+            stream: true,
+            metadata: Some(RequestMetadata::for_session("session-abc")),
+            ..Default::default()
+        };
+
+        let mut body = AnthropicRequestProfile::default()
+            .render_json_body(&request)
+            .expect("render body");
+        assert!(body.get("metadata").is_none(), "serde must skip the field");
+
+        super::apply_request_metadata(&mut body, &request);
+
+        let user_id = body["metadata"]["user_id"]
+            .as_str()
+            .expect("user_id must be a string, as Anthropic requires");
+        let decoded: serde_json::Value =
+            serde_json::from_str(user_id).expect("user_id carries a JSON object, like CC");
+        assert_eq!(decoded["session_id"], "session-abc");
+        assert_eq!(decoded["account_uuid"], "");
+    }
+
+    /// Three ways this must stay quiet. An empty or absent session id would
+    /// route on a constant key — worse than none, since every conversation
+    /// would pile onto one upstream account.
+    #[test]
+    fn request_metadata_is_omitted_rather_than_guessed() {
+        use crate::types::{InputMessage, RequestMetadata};
+        use telemetry::AnthropicRequestProfile;
+
+        let base = MessageRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage::user_text("hello")],
+            stream: true,
+            ..Default::default()
+        };
+        let render = |request: &MessageRequest| {
+            AnthropicRequestProfile::default()
+                .render_json_body(request)
+                .expect("render body")
+        };
+
+        // No identity at all.
+        let mut body = render(&base);
+        super::apply_request_metadata(&mut body, &base);
+        assert!(body.get("metadata").is_none());
+
+        // Identity present but empty — not a usable routing key.
+        let blank = MessageRequest {
+            metadata: Some(RequestMetadata::default()),
+            ..base.clone()
+        };
+        let mut body = render(&blank);
+        super::apply_request_metadata(&mut body, &blank);
+        assert!(body.get("metadata").is_none());
+
+        // A metadata object the caller built deliberately is never clobbered.
+        let explicit = MessageRequest {
+            metadata: Some(RequestMetadata::for_session("session-abc")),
+            ..base
+        };
+        let mut body = render(&explicit);
+        body["metadata"] = serde_json::json!({ "user_id": "caller-supplied" });
+        super::apply_request_metadata(&mut body, &explicit);
+        assert_eq!(body["metadata"]["user_id"], "caller-supplied");
     }
 }

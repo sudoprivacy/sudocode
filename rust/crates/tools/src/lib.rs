@@ -4047,14 +4047,13 @@ struct AgentJob {
     /// commit with the parent's assistant message + placeholder
     /// tool_results (mirroring CC-fork's `buildForkedMessages`).
     inherited_messages: Vec<ConversationMessage>,
-    /// The parent's reasoning effort, inherited unless the agent definition
-    /// overrides it (CC: `agentDefinition.effort ?? state.effortValue`).
-    reasoning_effort: Option<String>,
-    /// Extended thinking. Only ever true for a fork child: CC disables
-    /// thinking for ordinary subagents "to control output token costs" and
-    /// inherits it for forks "to match the parent's API request prefix for
-    /// prompt cache hits".
-    thinking_enabled: bool,
+    /// Everything this child inherits from the turn that spawned it, already
+    /// resolved by [`ParentExecution::for_child`]. One field rather than three
+    /// loose ones: a setting that reaches the main loop but not here is
+    /// invisible — the request still succeeds, only the behaviour and the bill
+    /// differ — so the inherited set is kept as a single value that is
+    /// impossible to partially thread through.
+    execution: ParentExecution,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
     /// [`global_agent_abort_signals`] so
@@ -4909,8 +4908,7 @@ fn prepare_agent_job(
     // otherwise send. Forks want the opposite — CC inherits precisely so the
     // request prefix matches the parent's and the prompt cache still hits.
     let is_fork_child = !inherited_messages.is_empty();
-    let reasoning_effort = ctx.and_then(|c| c.parent_reasoning_effort.clone());
-    let thinking_enabled = is_fork_child && ctx.is_some_and(|c| c.parent_thinking_enabled);
+    let execution = ParentExecution::from_dispatch(ctx).for_child(is_fork_child);
 
     let job = AgentJob {
         manifest: manifest.clone(),
@@ -4921,8 +4919,7 @@ fn prepare_agent_job(
         fallback_config,
         auth_mode,
         inherited_messages,
-        reasoning_effort,
-        thinking_enabled,
+        execution,
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
     };
@@ -5423,7 +5420,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         &job.fallback_config,
         job.auth_mode,
     )?
-    .with_parent_execution(job.reasoning_effort.clone(), job.thinking_enabled);
+    .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
@@ -5616,7 +5613,7 @@ fn build_agent_runtime(
         &job.fallback_config,
         job.auth_mode,
     )?
-    .with_parent_execution(job.reasoning_effort.clone(), job.thinking_enabled);
+    .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy();
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
@@ -6588,13 +6585,73 @@ struct ProviderEntry {
     client: ProviderClient,
 }
 
+/// What a spawned subagent inherits from the turn that spawned it.
+///
+/// This exists as a type, rather than as loose arguments, because the failure
+/// mode it guards is silent: a request that omits an inherited setting still
+/// succeeds, it just behaves differently and costs differently. Bundling the
+/// set means adding one more inherited field touches [`Self::from_dispatch`]
+/// and the request builder and nothing else — it cannot be set on the main
+/// loop and forgotten on the subagent path, which is how subagents came to
+/// send no `cache_control` at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParentExecution {
+    /// CC: `agentDefinition.effort ?? state.effortValue` — inherited.
+    reasoning_effort: Option<String>,
+    /// Extended thinking. True only for a fork child; see [`Self::for_child`].
+    thinking_enabled: bool,
+    /// The parent's `metadata.user_id` routing key. A pooling upstream uses it
+    /// to pin a conversation to one account, and Anthropic's prompt cache is
+    /// per-account — so a subagent that invents its own key lands on a
+    /// different account and starts from a cold cache.
+    routing_session_id: Option<String>,
+}
+
+impl ParentExecution {
+    /// Read the spawning turn's state.
+    #[inline]
+    fn from_dispatch(ctx: Option<&ToolDispatchContext>) -> Self {
+        Self {
+            reasoning_effort: ctx.and_then(|c| c.parent_reasoning_effort.clone()),
+            thinking_enabled: ctx.is_some_and(|c| c.parent_thinking_enabled),
+            routing_session_id: ctx.and_then(|c| c.parent_routing_session_id.clone()),
+        }
+    }
+
+    /// Apply CC's inheritance rules (`tools/AgentTool/runAgent.ts`), which are
+    /// deliberately asymmetric:
+    ///
+    /// ```text
+    /// effort:   agentDefinition.effort ?? state.effortValue
+    /// thinking: useExactTools ? parent.thinkingConfig : { type: 'disabled' }
+    /// ```
+    ///
+    /// Effort and the routing key are inherited by every subagent. Thinking is
+    /// not: CC turns it off for ordinary subagents "to control output token
+    /// costs", and inherits it for forks "to match the parent's API request
+    /// prefix for prompt cache hits". `inherited_messages` is populated only by
+    /// the fork rebuild, so it is this codebase's `useExactTools`.
+    #[inline]
+    fn for_child(mut self, is_fork_child: bool) -> Self {
+        self.thinking_enabled = is_fork_child && self.thinking_enabled;
+        self
+    }
+
+    /// The identity a child's requests carry, built from the same constructor
+    /// the main loop uses so both keys are byte-identical for one conversation.
+    #[inline]
+    fn request_metadata(&self) -> Option<api::RequestMetadata> {
+        self.routing_session_id
+            .as_deref()
+            .map(api::RequestMetadata::for_session)
+    }
+}
+
 pub(crate) struct ProviderRuntimeClient {
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
-    /// Inherited from the parent so a subagent runs at the same effort.
-    reasoning_effort: Option<String>,
-    /// True only for fork children — see `AgentJob::thinking_enabled`.
-    thinking_enabled: bool,
+    /// Resolved by [`ParentExecution::for_child`] at spawn time.
+    execution: ParentExecution,
 }
 
 impl ProviderRuntimeClient {
@@ -6604,27 +6661,20 @@ impl ProviderRuntimeClient {
         Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
     }
 
+    /// Carry the parent's inherited settings onto a subagent's client — the
+    /// single seam between a spawn and the requests it will send.
+    ///
+    /// `#[inline]`: it sits on the spawn path and is a handful of moves.
+    #[inline]
+    fn with_parent_execution(mut self, execution: ParentExecution) -> Self {
+        self.execution = execution;
+        self
+    }
+
     /// Build a client using explicitly provided configs instead of loading from
     /// the current working directory.  Used by subagent threads to inherit the
     /// parent's auth / provider settings.
     #[allow(clippy::needless_pass_by_value)]
-    /// Carry the parent's execution settings onto a subagent's client.
-    ///
-    /// `#[inline]`: this sits on the spawn path, and the whole point of
-    /// funnelling both fields through one place is that a future field cannot
-    /// be set on the main-loop client and forgotten here — that asymmetry is
-    /// exactly how subagents ended up sending no `cache_control` at all.
-    #[inline]
-    fn with_parent_execution(
-        mut self,
-        reasoning_effort: Option<String>,
-        thinking_enabled: bool,
-    ) -> Self {
-        self.reasoning_effort = reasoning_effort;
-        self.thinking_enabled = thinking_enabled;
-        self
-    }
-
     fn new_with_config(
         model: String,
         allowed_tools: BTreeSet<String>,
@@ -6648,8 +6698,7 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
-            reasoning_effort: None,
-            thinking_enabled: false,
+            execution: ParentExecution::default(),
         })
     }
 
@@ -6675,8 +6724,7 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
-            reasoning_effort: None,
-            thinking_enabled: false,
+            execution: ParentExecution::default(),
         })
     }
 }
@@ -6792,7 +6840,13 @@ impl ApiClient for ProviderRuntimeClient {
         });
         entry
             .client
-            .complete_text(&entry.model, request, options, tools)
+            .complete_text(
+                &entry.model,
+                request,
+                options,
+                tools,
+                self.execution.request_metadata(),
+            )
             .await
     }
 
@@ -6829,8 +6883,9 @@ impl ApiClient for ProviderRuntimeClient {
                 tool_choice: tool_choice.clone(),
                 stream: true,
                 cache_hints: cache_hints.clone(),
-                reasoning_effort: self.reasoning_effort.clone(),
-                thinking_enabled: self.thinking_enabled,
+                reasoning_effort: self.execution.reasoning_effort.clone(),
+                thinking_enabled: self.execution.thinking_enabled,
+                metadata: self.execution.request_metadata(),
                 ..Default::default()
             };
 
@@ -8618,7 +8673,15 @@ mod tests {
     fn subagent_inherits_effort_but_only_forks_inherit_thinking() {
         // `inherited_messages` is populated only by the fork rebuild, so it is
         // this codebase's `useExactTools`.
-        let decide = |is_fork: bool, parent_thinking: bool| is_fork && parent_thinking;
+        let decide = |is_fork: bool, parent_thinking: bool| {
+            super::ParentExecution {
+                reasoning_effort: Some("high".to_string()),
+                thinking_enabled: parent_thinking,
+                routing_session_id: Some("sess-1".to_string()),
+            }
+            .for_child(is_fork)
+            .thinking_enabled
+        };
 
         assert!(
             !decide(false, true),
@@ -8633,6 +8696,17 @@ mod tests {
             "a fork of a non-thinking parent stays off"
         );
         assert!(!decide(false, false));
+
+        // Effort and the routing key are inherited unconditionally — only
+        // thinking is gated on the fork case.
+        let ordinary = super::ParentExecution {
+            reasoning_effort: Some("high".to_string()),
+            thinking_enabled: true,
+            routing_session_id: Some("sess-1".to_string()),
+        }
+        .for_child(false);
+        assert_eq!(ordinary.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(ordinary.routing_session_id.as_deref(), Some("sess-1"));
     }
 
     /// The inline setter is the single place both fields cross onto a
@@ -8641,19 +8715,65 @@ mod tests {
     /// silently absent here.
     #[test]
     fn parent_execution_settings_reach_the_subagent_client() {
+        let inherited = super::ParentExecution {
+            reasoning_effort: Some("high".to_string()),
+            thinking_enabled: true,
+            routing_session_id: Some("sess-1".to_string()),
+        };
         let client = super::ProviderRuntimeClient {
             chain: Vec::new(),
             allowed_tools: BTreeSet::new(),
-            reasoning_effort: None,
-            thinking_enabled: false,
+            execution: super::ParentExecution::default(),
         }
-        .with_parent_execution(Some("high".to_string()), true);
-        assert_eq!(client.reasoning_effort.as_deref(), Some("high"));
-        assert!(client.thinking_enabled);
+        .with_parent_execution(inherited.clone());
+        assert_eq!(client.execution, inherited);
 
-        let cleared = client.with_parent_execution(None, false);
-        assert_eq!(cleared.reasoning_effort, None);
-        assert!(!cleared.thinking_enabled);
+        let cleared = client.with_parent_execution(super::ParentExecution::default());
+        assert_eq!(cleared.execution, super::ParentExecution::default());
+    }
+
+    /// A subagent must route on the SAME key as the turn that spawned it.
+    ///
+    /// An upstream that pools Anthropic accounts pins a conversation to one
+    /// of them by `metadata.user_id`, and the prompt cache is per-account. A
+    /// child that routes anywhere else pays full price for its own prefix —
+    /// and this is invisible locally, because the request still succeeds.
+    #[test]
+    fn a_subagent_routes_on_the_parents_key() {
+        let parent = runtime::ToolDispatchContext {
+            parent_reasoning_effort: Some("high".to_string()),
+            parent_thinking_enabled: true,
+            parent_routing_session_id: Some("session-abc".to_string()),
+            ..Default::default()
+        };
+
+        // Fork or ordinary subagent: thinking differs between them, the
+        // routing key never does.
+        for is_fork in [false, true] {
+            let child = super::ParentExecution::from_dispatch(Some(&parent)).for_child(is_fork);
+            let metadata = child
+                .request_metadata()
+                .expect("a child of a routed parent must carry the key");
+            assert_eq!(
+                metadata.user_id(),
+                api::RequestMetadata::for_session("session-abc").user_id(),
+                "child and parent must produce a byte-identical routing key",
+            );
+            assert_eq!(child.reasoning_effort.as_deref(), Some("high"));
+        }
+    }
+
+    /// With no parent key, send none. A fabricated id would be worse than
+    /// silence: it routes the request to an account that has never seen this
+    /// conversation, guaranteeing a cold prefix.
+    #[test]
+    fn a_subagent_without_a_parent_key_sends_no_metadata() {
+        assert!(super::ParentExecution::default()
+            .request_metadata()
+            .is_none());
+        assert!(super::ParentExecution::from_dispatch(None)
+            .request_metadata()
+            .is_none());
     }
 
     /// A subagent's requests must carry cache hints, exactly like the main

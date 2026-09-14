@@ -3,7 +3,7 @@
 
 use crate::{
     CacheHints, InputContentBlock, InputMessage, MessageRequest, OutputContentBlock,
-    ProviderClient, ToolDefinition, ToolResultContentBlock,
+    ProviderClient, RequestMetadata, ToolDefinition, ToolResultContentBlock,
 };
 use runtime::{
     ApiRequest, ContentBlock, ConversationMessage, MessageRole, RuntimeError, TextCompletion,
@@ -13,12 +13,22 @@ use runtime::{
 impl ProviderClient {
     /// Build and send a text-only request with caller-selected model and schemas.
     /// Return completion metadata unchanged so the consumer can validate it.
+    ///
+    /// `metadata` is the caller's routing key, and it is a parameter rather
+    /// than something this function could derive because this transport has
+    /// no session of its own — it serves whichever client calls it. Omitting
+    /// it is the expensive case: compaction goes through here carrying the
+    /// entire conversation, so a compaction request that routes to a
+    /// different upstream account than the turns around it pays a full cold
+    /// write for the whole history, twice — once here, once when the next
+    /// turn lands back on the original account.
     pub async fn complete_text(
         &self,
         model: &str,
         request: ApiRequest,
         options: TextCompletionOptions,
         tools: Option<Vec<ToolDefinition>>,
+        metadata: Option<RequestMetadata>,
     ) -> Result<TextCompletion, RuntimeError> {
         let cache_hints =
             (options.cache_prefix && !request.system_prompt.is_empty()).then(|| CacheHints {
@@ -39,6 +49,7 @@ impl ProviderClient {
             stream: false,
             thinking_enabled: false,
             cache_hints,
+            metadata,
             ..Default::default()
         };
         let response = self

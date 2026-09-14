@@ -1609,7 +1609,7 @@ async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
     );
 
     let before = server.captured_requests().await.len();
-    let (_notifs, resp) = client
+    let (notifs, resp) = client
         .send_request(
             "session/prompt",
             json!({
@@ -1625,6 +1625,8 @@ async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
         resp.get("error").is_none() && resp["result"].get("stopReason").is_some(),
         "prompt on a long history must be answered, not rejected: {resp}"
     );
+
+    assert_compaction_lifecycle(&notifs, "completed");
 
     let requests = server.captured_requests().await;
     let new_requests = &requests[before..];
@@ -2302,6 +2304,12 @@ async fn run_scenario_collect_text(
         resp["result"].get("stopReason").is_some(),
         "{what}: turn should complete normally: {resp}"
     );
+    if matches!(
+        scenario,
+        "tool_loop_context_growth" | "context_limit_then_text"
+    ) {
+        assert_compaction_lifecycle(&notifs, "completed");
+    }
     let text = notifs
         .iter()
         .filter(|m| {

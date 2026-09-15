@@ -446,6 +446,53 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     );
 }
 
+/// TodoWrite is whole-list-replace with no read tool, so the model needs the
+/// exact list back in context after compaction discards the old TodoWrite
+/// messages. Seed a todo store, compact, and assert the compacted history
+/// carries the structured list forward (CC todo-continuity parity).
+#[test]
+fn compaction_carries_the_todo_list_forward() {
+    let provider = Provider::new("success");
+    let workspace = HarnessWorkspace::new("todo-continuity");
+    workspace.write_mock_config(&provider.url);
+
+    // Seed the todo store the running CLI will resolve (`<cwd>/.sudocode-todos.json`).
+    std::fs::write(
+        workspace.root.join(".sudocode-todos.json"),
+        json!([
+            {"content": "Wire the parser", "status": "completed", "activeForm": "Wiring the parser"},
+            {"content": "TODO_SENTINEL_XYZ finish the reducer", "status": "in_progress", "activeForm": "Finishing the reducer"},
+            {"content": "Ship the release", "status": "pending", "activeForm": "Shipping the release"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let path = fixture(&workspace);
+    assert_eq!(compact(&workspace, &path, "Messages removed"), 0);
+
+    let restored = Session::load_from_path(&path).unwrap();
+    let transcript = restored
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        transcript.contains("TODO_SENTINEL_XYZ finish the reducer"),
+        "compacted history must carry the exact todo content forward:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("[in_progress]") && transcript.contains("[completed]"),
+        "todo statuses must survive the compaction boundary:\n{transcript}"
+    );
+}
+
 fn set_small_window(workspace: &HarnessWorkspace) {
     let path = workspace.config_home.join("sudocode.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

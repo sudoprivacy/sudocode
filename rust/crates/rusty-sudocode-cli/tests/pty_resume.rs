@@ -180,6 +180,15 @@ fn resume_renders_history_in_iocraft_queue_mode() {
         );
     });
 
+    // The restored user message must be echoed with the same `❯` prompt glyph
+    // the live input uses — NOT the old `›` style — so resume looks identical
+    // to the pre-exit scrollback.
+    let screen = sess2.render(|s| s.contents());
+    assert!(
+        !screen.contains("› say hello world"),
+        "resumed user message used the `›` echo style instead of `❯`:\n{screen}"
+    );
+
     std::thread::sleep(Duration::from_millis(400));
     sess2.send("/exit\r").expect("send exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {

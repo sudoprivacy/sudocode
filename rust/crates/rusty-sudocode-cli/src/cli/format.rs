@@ -671,22 +671,23 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
     } else {
         trimmed.split('\n').collect()
     };
-    let code_bg = theme().code_bg;
     let mut rendered = String::new();
     for (idx, line) in raw_lines.iter().enumerate() {
-        let prefix = if idx == 0 { " › " } else { "   " };
+        // Prefix the first line with the same `❯` prompt glyph the live input
+        // box uses, so a message echoed here (session-history replay on resume)
+        // is visually identical to how it appeared when you typed it: the plain
+        // `❯ text` prompt line, no styled background. Continuation lines indent
+        // by two spaces to align under the text.
+        let prefix = if idx == 0 {
+            concat!("\u{276f}", " ")
+        } else {
+            "  "
+        };
         let body = format!("{prefix}{line}");
-        let visible = display_width(&body);
-        let pad = term_width.saturating_sub(visible);
         if idx > 0 {
             rendered.push('\n');
         }
-        rendered.push_str(&format!("\x1b[48;5;{code_bg}m"));
         rendered.push_str(&body);
-        if pad > 0 {
-            rendered.push_str(&" ".repeat(pad));
-        }
-        rendered.push_str(RESET);
     }
     (rendered, raw_lines.len())
 }

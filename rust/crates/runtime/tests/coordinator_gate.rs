@@ -77,8 +77,8 @@ fn allowlist_contains_delegation_surface() {
 #[test]
 fn allowlist_holds_canonical_names_only() {
     let allowed = coordinator_allowed_tools();
-    // TaskGet and TaskList are NOT listed here — they are now their own
-    // canonical tools (to-do registry), no longer aliases for pid_status.
+    // The to-do checklist is a single canonical `TodoWrite`; the old
+    // `Task*` aliases are gone and MUST NOT reappear as second entries.
     for cc_name in [
         "Agent",
         "SendMessage",
@@ -187,7 +187,7 @@ fn predicate_allows_delegation_tools_when_env_on() {
     let _guard = env_mutex();
     let _env = EnvGuard::set(COORDINATOR_ENV_VAR, "1");
 
-    for name in ["Agent", "SendMessage", "TaskGet", "TaskList", "read_file"] {
+    for name in ["Agent", "SendMessage", "TodoWrite", "read_file"] {
         assert!(
             is_tool_allowed_in_coordinator_mode(name),
             "coordinator mode MUST allow delegation/read-only tool `{name}`"

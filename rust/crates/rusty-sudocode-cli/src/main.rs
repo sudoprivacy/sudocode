@@ -3846,8 +3846,7 @@ impl LiveCli {
                     // Canonicalize first: this name is whatever the model
                     // spelled, so matching it raw would leave the panel stale.
                     if let Some(ui) = ui {
-                        if !*is_error
-                            && tools::canonicalize_tool_name(name).as_str() == "TodoWrite"
+                        if !*is_error && tools::canonicalize_tool_name(name).as_str() == "TodoWrite"
                         {
                             ui.update_context(tools::global_todo_list());
                         }

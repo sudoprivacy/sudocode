@@ -1,9 +1,8 @@
 //! Integration tests for `pid_status` reporting live sub-agents.
 //!
 //! `pid_status` queries the agent store (`.sudocode-agents/*.json`),
-//! NOT the to-do task registry (`TaskCreate`/`TaskUpdate`). These two
-//! registries were once conflated under `TaskList` — this test suite
-//! locks in the separation.
+//! NOT the to-do checklist (`TodoWrite`). These two were once conflated
+//! under a single `TaskList` — this test suite locks in the separation.
 //!
 //! ## What this locks in (long-workflow, data-flow chained)
 //!
@@ -194,7 +193,7 @@ fn pid_status_response_has_no_tasks_field() {
     let json: serde_json::Value = serde_json::from_str(&out).expect("valid json");
     assert!(
         json.get("tasks").is_none(),
-        "pid_status must NOT return to-do tasks — those belong to TaskList"
+        "pid_status must NOT return to-do items — those belong to TodoWrite"
     );
     assert!(
         json.get("background_agents").is_none(),

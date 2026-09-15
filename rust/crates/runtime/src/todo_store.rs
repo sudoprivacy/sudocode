@@ -151,7 +151,10 @@ mod tests {
     #[test]
     fn set_replaces_the_whole_list() {
         let store = TodoStore::new();
-        store.set(vec![todo("a", TodoStatus::Pending), todo("b", TodoStatus::Pending)]);
+        store.set(vec![
+            todo("a", TodoStatus::Pending),
+            todo("b", TodoStatus::Pending),
+        ]);
         assert_eq!(store.len(), 2);
 
         // A second write replaces, not appends.

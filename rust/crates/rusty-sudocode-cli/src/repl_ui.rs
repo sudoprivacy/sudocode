@@ -1167,9 +1167,10 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
                 format!("{success}\u{2713}{RESET}"),
                 format!("{DIM}\x1b[9m{label}\x1b[29m{RESET}"),
             ),
-            runtime::TodoStatus::InProgress => {
-                (format!("{info}\u{25a0}{RESET}"), format!("{BOLD}{label}{RESET}"))
-            }
+            runtime::TodoStatus::InProgress => (
+                format!("{info}\u{25a0}{RESET}"),
+                format!("{BOLD}{label}{RESET}"),
+            ),
             runtime::TodoStatus::Pending => ("\u{25a1}".to_string(), label.to_string()),
         };
         lines.push(format!("  {icon} {label_fmt}"));

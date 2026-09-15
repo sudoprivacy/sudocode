@@ -76,10 +76,7 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         "glob_search",
         "grep_search",
         // Coordinator's own to-do bookkeeping
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskGet",
-        "TaskList",
+        "TodoWrite",
         "AskUserQuestion",
         "StructuredOutput",
         "ToolSearch",
@@ -213,7 +210,7 @@ You:
 
 When calling agent_spawn, use agent `general-purpose` (or `Explore`/`Plan`/`Verification` for the specialized read-only research / planning / verification subsets). Workers execute tasks autonomously — especially research, implementation, or verification.
 
-Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TaskCreate, TaskUpdate, pid_status, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
+Workers have access to standard tools (bash, read_file, write_file, edit_file, glob_search, grep_search, WebFetch, WebSearch, TodoWrite, pid_status, ToolSearch, Sleep, StructuredOutput, PowerShell, Config) and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.
 
 ## 4. Task Workflow
 

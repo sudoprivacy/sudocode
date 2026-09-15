@@ -498,7 +498,7 @@ fn automatic_compaction_continues_after_a_long_summary() {
     session.save_to_path(&path).unwrap();
 
     let mut cli = resume(&workspace, &path);
-    cli.expect("❯").unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
     cli.send("Continue PROJECT_ALPHA using all earlier decisions.\r")
         .unwrap();
     cli.expect("ALPHA_CONTEXT_OK").unwrap();
@@ -558,7 +558,7 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
         .unwrap();
     original.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
-    cli.expect("❯").unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
     cli.send("Continue PROJECT_ALPHA using all earlier decisions.\r")
         .unwrap();
     cli.expect("history preserved").unwrap();
@@ -610,7 +610,7 @@ fn pressure_prunes_large_tool_output_without_a_summary_call() {
         .unwrap();
     original.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
-    cli.expect("❯").unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
     cli.send("Continue PROJECT_ALPHA.\r").unwrap();
     cli.expect("ALPHA_CONTEXT_OK").unwrap();
     cli.send("/exit\r").unwrap();
@@ -666,7 +666,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
     damaged.record_compaction("legacy checkpoint", 32);
     damaged.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
-    cli.expect("❯").unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
     cli.send("Continue PROJECT_ALPHA.\r").unwrap();
     cli.expect("no active history").unwrap();
     cli.send("/exit\r").unwrap();
@@ -990,7 +990,7 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
         ],
     )
     .unwrap();
-    cli.expect("❯").unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
     cli.send("Continue PROJECT_ALPHA\r").unwrap();
     cli.expect("Context compaction failed")
         .unwrap_or_else(|error| {

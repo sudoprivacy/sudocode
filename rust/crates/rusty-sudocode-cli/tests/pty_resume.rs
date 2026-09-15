@@ -110,10 +110,10 @@ fn resume_latest_renders_messages_after_banner() {
     });
 
     // Should see the REPL prompt (messages rendered between banner and prompt).
-    sess2.expect("❯").unwrap_or_else(|e| {
-        let screen = sess2.render(|s| s.contents());
-        panic!("should see REPL prompt after resume: {e}\nPTY screen:\n{screen}");
-    });
+    // The restored history now echoes user messages with `❯`, so a byte-stream
+    // `expect("❯")` would match a history line; wait for the live input line
+    // (lowest `❯` row) to be empty instead.
+    common::expect_input_line_cleared(&sess2, Duration::from_secs(15), "resume ready");
 
     // Verify no duplicate: "Session resumed" should appear at most once.
     let screen = sess2.render(|s| s.contents());
@@ -124,7 +124,9 @@ fn resume_latest_renders_messages_after_banner() {
          PTY screen:\n{screen}"
     );
 
-    sess2.send("/exit\r").expect("send exit");
+    sess2.send("/exit").expect("type exit");
+    common::expect_input_line(&sess2, "/exit", Duration::from_secs(15), "exit typed");
+    sess2.send("\r").expect("submit exit");
     let exit = sess2.expect_eof().unwrap_or_else(|e| {
         let screen2 = sess2.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen2}");

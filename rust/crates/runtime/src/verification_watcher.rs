@@ -78,7 +78,7 @@ pub fn record_completions(n: usize) {
 /// already been counted for the CURRENT streak. Cleared on
 /// [`reset_streak`]. Persisting the counted set in-memory
 /// prevents re-counting a task whose completion is reported
-/// multiple times (e.g. re-applying the same TaskUpdate).
+/// multiple times (e.g. re-sending the same completed todo via TodoWrite).
 fn counted_ids() -> &'static Mutex<BTreeSet<String>> {
     static SEEN: std::sync::OnceLock<Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(BTreeSet::new()))

@@ -454,6 +454,44 @@ pub fn format_compact_summary(summary: &str) -> String {
     collapse_blank_lines(&formatted).trim().to_string()
 }
 
+/// Render the current todo list as a `<system-reminder>` block to carry across
+/// a compaction boundary, or `None` when the list is empty.
+///
+/// `TodoWrite` is whole-list-replace with no read tool: the model relies on the
+/// list being in its context. Compaction discards the old `TodoWrite` messages,
+/// so without this the model would lose the exact list (content + status) and
+/// could only recover a lossy prose paraphrase from the summary's "Pending
+/// Tasks". Re-injecting the structured list keeps the next `TodoWrite` faithful.
+/// Mirrors Claude Code's todo-continuity on compaction.
+fn render_todo_continuity_block() -> Option<String> {
+    let todos = crate::todo_store::todo_store_path()
+        .ok()
+        .map(|path| crate::todo_store::TodoStore::load(&path).list())
+        .unwrap_or_default();
+    format_todo_continuity_block(&todos)
+}
+
+/// Pure formatter for the todo-continuity block (testable without a store).
+/// Returns `None` for an empty list so callers can skip the section entirely.
+fn format_todo_continuity_block(todos: &[crate::todo_store::Todo]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "<system-reminder>\nYour todo list survived the compaction above. It is the \
+         authoritative working plan — the next TodoWrite must send this full list \
+         (with any updates), since TodoWrite replaces the list wholesale.\n",
+    );
+    for todo in todos {
+        let _ = std::fmt::Write::write_fmt(
+            &mut block,
+            format_args!("- [{}] {}\n", todo.status, todo.content),
+        );
+    }
+    block.push_str("</system-reminder>");
+    Some(block)
+}
+
 /// Builds the synthetic system message used after session compaction.
 #[must_use]
 pub fn get_compact_continuation_message(
@@ -465,6 +503,14 @@ pub fn get_compact_continuation_message(
         "{COMPACT_CONTINUATION_PREAMBLE}{}",
         format_compact_summary(summary)
     );
+
+    // Carry the structured todo list across the compaction boundary (CC parity):
+    // TodoWrite has no read tool, so the model needs the exact list back in
+    // context to re-send it faithfully.
+    if let Some(todo_block) = render_todo_continuity_block() {
+        base.push_str("\n\n");
+        base.push_str(&todo_block);
+    }
 
     if recent_messages_preserved {
         base.push_str("\n\n");
@@ -1229,11 +1275,48 @@ fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_session_sync, format_compact_summary, get_compact_continuation_message,
-        should_compact, CompactionConfig,
+        compact_session_sync, format_compact_summary, format_todo_continuity_block,
+        get_compact_continuation_message, should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+    use crate::todo_store::{Todo, TodoStatus};
     use crate::usage::{TokenUsage, UsageCostCurrency};
+
+    #[test]
+    fn todo_continuity_block_is_none_for_empty_list() {
+        assert!(format_todo_continuity_block(&[]).is_none());
+    }
+
+    #[test]
+    fn todo_continuity_block_lists_every_item_with_status() {
+        let todos = vec![
+            Todo {
+                content: "Write parser".to_string(),
+                status: TodoStatus::Completed,
+                active_form: "Writing parser".to_string(),
+            },
+            Todo {
+                content: "Run tests".to_string(),
+                status: TodoStatus::InProgress,
+                active_form: "Running tests".to_string(),
+            },
+            Todo {
+                content: "Ship it".to_string(),
+                status: TodoStatus::Pending,
+                active_form: "Shipping it".to_string(),
+            },
+        ];
+        let block = format_todo_continuity_block(&todos).expect("non-empty list yields a block");
+        // Wrapped as a system-reminder so the model treats it as a systemic hint.
+        assert!(block.starts_with("<system-reminder>"), "{block}");
+        assert!(block.ends_with("</system-reminder>"), "{block}");
+        // Every item survives verbatim, with its status.
+        assert!(block.contains("- [completed] Write parser"), "{block}");
+        assert!(block.contains("- [in_progress] Run tests"), "{block}");
+        assert!(block.contains("- [pending] Ship it"), "{block}");
+        // Names the whole-list-replace contract so the next TodoWrite is faithful.
+        assert!(block.contains("TodoWrite"), "{block}");
+    }
 
     #[test]
     fn autocompact_buffer_scales_with_context_window() {

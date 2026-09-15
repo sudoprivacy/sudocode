@@ -35,7 +35,7 @@
 /// Keys are the NORMALIZED (lower-cased, `-` → `_`) form. Note that
 /// `SendMessage` and `send_message` normalize to DIFFERENT keys, so both are
 /// listed. Tools whose canonical name IS the CC name (`Skill`, `WebFetch`,
-/// `TaskCreate`, `AskUserQuestion`, …) need no entry —
+/// `TodoWrite`, `AskUserQuestion`, …) need no entry —
 /// [`canonicalize_tool_name`] passes them through unchanged.
 const TOOL_ALIASES: &[(&str, &str)] = &[
     ("bash", "bash"),

@@ -1992,7 +1992,6 @@ fn run_pid_output(input: TaskOutputInput) -> Result<String, String> {
     Ok(result)
 }
 
-
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
 // Cap a single blocking pid_output call so ACP/upper-layer transports don't
 // drop the connection while we wait. Callers can re-issue pid_output to keep
@@ -8927,8 +8926,7 @@ mod tests {
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"WebFetch"));
         assert!(names.contains(&"WebSearch"));
-        assert!(names.contains(&"TaskCreate"));
-        assert!(names.contains(&"TaskUpdate"));
+        assert!(names.contains(&"TodoWrite"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"send"));
@@ -9000,8 +8998,7 @@ mod tests {
             "WebFetch",
             "WebSearch",
             "Skill",
-            "TaskCreate",
-            "TaskUpdate",
+            "TodoWrite",
             "StructuredOutput",
         ] {
             assert_eq!(
@@ -9018,10 +9015,7 @@ mod tests {
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
-        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
+        assert_eq!(canonicalize_tool_name("TodoWrite"), "TodoWrite");
     }
 
     #[test]
@@ -9137,8 +9131,7 @@ mod tests {
         // would admit a name `definitions()` can never match against
         // `spec.name`, silently allow-listing nothing.
         for (requested, spec_name) in [
-            ("TaskList", "TaskList"),
-            ("TaskGet", "TaskGet"),
+            ("TodoWrite", "TodoWrite"),
             ("SendMessage", "send"),
             ("Agent", "agent_spawn"),
             // Canonical names resolve to themselves.
@@ -9559,65 +9552,57 @@ mod tests {
     }
 
     #[test]
-    fn task_create_returns_subject_and_pending_status() {
+    fn todo_write_replaces_the_whole_list() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("tasks-create.json");
-        std::env::set_var("SUDOCODE_TASK_STORE", &path);
+        let path = temp_path("todos-write.json");
+        std::env::set_var("SUDOCODE_TODO_STORE", &path);
 
+        // First write: two todos.
         let result = execute_tool(
-            "TaskCreate",
+            "TodoWrite",
             &json!({
-                "subject": "Write parser",
-                "description": "Build the AST parser module",
-                "activeForm": "Writing parser"
+                "todos": [
+                    { "content": "Write parser", "status": "in_progress", "activeForm": "Writing parser" },
+                    { "content": "Run tests", "status": "pending", "activeForm": "Running tests" }
+                ]
             }),
         )
-        .expect("TaskCreate should succeed");
-        std::env::remove_var("SUDOCODE_TASK_STORE");
-        let _ = std::fs::remove_file(&path);
-
+        .expect("TodoWrite should succeed");
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert_eq!(output["subject"], "Write parser");
-        assert_eq!(output["status"], "pending");
-        assert!(output["task_id"].as_str().is_some());
-    }
+        let todos = output["todos"].as_array().expect("todos array");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0]["content"], "Write parser");
+        assert_eq!(todos[0]["status"], "in_progress");
+        assert_eq!(todos[0]["activeForm"], "Writing parser");
 
-    #[test]
-    fn task_update_status_transitions() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("tasks-update.json");
-        std::env::set_var("SUDOCODE_TASK_STORE", &path);
-
-        let create_result = execute_tool(
-            "TaskCreate",
-            &json!({ "subject": "Run tests", "description": "Execute test suite" }),
+        // Second write replaces (not appends): one todo, completed.
+        let result = execute_tool(
+            "TodoWrite",
+            &json!({
+                "todos": [
+                    { "content": "Write parser", "status": "completed", "activeForm": "Writing parser" }
+                ]
+            }),
         )
-        .expect("TaskCreate should succeed");
-        let created: serde_json::Value = serde_json::from_str(&create_result).expect("valid json");
-        let task_id = created["task_id"].as_str().unwrap();
+        .expect("TodoWrite should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let todos = output["todos"].as_array().expect("todos array");
+        assert_eq!(
+            todos.len(),
+            1,
+            "second write replaces the list, not appends"
+        );
+        assert_eq!(todos[0]["status"], "completed");
 
-        let update_result = execute_tool(
-            "TaskUpdate",
-            &json!({ "taskId": task_id, "status": "in_progress" }),
-        )
-        .expect("TaskUpdate should succeed");
-        let updated: serde_json::Value = serde_json::from_str(&update_result).expect("valid json");
-        assert_eq!(updated["status"], "in_progress");
+        // Empty list wipes the store.
+        let result =
+            execute_tool("TodoWrite", &json!({ "todos": [] })).expect("TodoWrite should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert!(output["todos"].as_array().expect("todos array").is_empty());
 
-        let complete_result = execute_tool(
-            "TaskUpdate",
-            &json!({ "taskId": task_id, "status": "completed" }),
-        )
-        .expect("TaskUpdate should succeed");
-        let completed: serde_json::Value =
-            serde_json::from_str(&complete_result).expect("valid json");
-        assert_eq!(completed["status"], "completed");
-
-        std::env::remove_var("SUDOCODE_TASK_STORE");
+        std::env::remove_var("SUDOCODE_TODO_STORE");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -10095,9 +10080,9 @@ mod tests {
             "WebSearch should be deferred"
         );
         assert_eq!(
-            core_tools.get("TaskCreate"),
+            core_tools.get("TodoWrite"),
             Some(&true),
-            "TaskCreate should be deferred"
+            "TodoWrite should be deferred"
         );
     }
 
@@ -10115,7 +10100,7 @@ mod tests {
             names.contains("WebSearch"),
             "WebSearch should be deferred (CC parity)"
         );
-        assert!(names.contains("TaskCreate"));
+        assert!(names.contains("TodoWrite"));
         assert!(!names.contains("bash"), "bash is core");
         assert!(!names.contains("Sleep"), "Sleep is core (CC parity)");
         assert!(!names.contains("ToolSearch"), "ToolSearch is core");
@@ -11014,7 +10999,7 @@ mod tests {
         assert!(!explore.contains("bash"));
 
         let plan = allowed_tools_for_subagent("Plan");
-        assert!(plan.contains("TaskCreate"));
+        assert!(plan.contains("TodoWrite"));
         assert!(plan.contains("StructuredOutput"));
         assert!(!plan.contains("Agent"));
 
@@ -12965,14 +12950,6 @@ printf 'pwsh:%s' "$1"
     }
 
     // ── Unified pid alias routing ─────────────────────────────────────
-
-    #[test]
-    fn canonicalize_task_tools_pass_through_unchanged() {
-        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
-        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
-    }
 
     #[test]
     fn canonicalize_agent_to_agent_spawn() {

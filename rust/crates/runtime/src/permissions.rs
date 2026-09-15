@@ -251,10 +251,10 @@ impl PermissionPolicy {
     /// The table is keyed by SPEC name while `tool_name` is whatever the model
     /// spelled, so an unresolved CC spelling does not read as "unknown tool" —
     /// it reads as `DangerFullAccess`, and the call is refused under any mode
-    /// short of full access. That is how `--allowedTools TaskList` came to
-    /// dispatch nothing at all once `TaskList` stopped being a spec of its own:
-    /// the gate let it through and the permission layer, one lookup later,
-    /// silently required more than the session had. Try the name as given
+    /// short of full access. That is how a `--allowedTools <alias>` for a name
+    /// that is no longer a spec of its own comes to dispatch nothing at all:
+    /// the gate lets it through and the permission layer, one lookup later,
+    /// silently requires more than the session had. Try the name as given
     /// first — a plugin may register a literal name that also happens to be an
     /// alias key — then the canonical tool it names.
     #[must_use]
@@ -613,19 +613,19 @@ mod tests {
         let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
             .with_tool_requirement("pid_status", PermissionMode::ReadOnly)
             .with_tool_requirement("send", PermissionMode::WorkspaceWrite)
-            .with_tool_requirement("TaskGet", PermissionMode::ReadOnly)
-            .with_tool_requirement("TaskList", PermissionMode::ReadOnly);
+            .with_tool_requirement("TodoWrite", PermissionMode::WorkspaceWrite);
 
-        // TaskGet/TaskList are their own tools now (to-do registry),
-        // separate from pid_status (agent process table).
-        for name in ["TaskList", "TaskGet"] {
-            assert_eq!(
-                policy.required_mode_for(name),
-                PermissionMode::ReadOnly,
-                "`{name}` should be ReadOnly"
-            );
-            assert_eq!(policy.authorize(name, "{}", None), PermissionOutcome::Allow);
-        }
+        // TodoWrite is a write (whole-list replace of the to-do checklist).
+        assert_eq!(
+            policy.required_mode_for("TodoWrite"),
+            PermissionMode::WorkspaceWrite,
+            "`TodoWrite` should require WorkspaceWrite"
+        );
+        assert_eq!(
+            policy.required_mode_for("pid_status"),
+            PermissionMode::ReadOnly,
+            "`pid_status` should be ReadOnly"
+        );
         assert_eq!(
             policy.required_mode_for("SendMessage"),
             PermissionMode::WorkspaceWrite

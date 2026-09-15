@@ -3837,23 +3837,18 @@ impl LiveCli {
                     output,
                     is_error,
                 } => {
-                    // A successful task mutation changes the shared task list.
+                    // A successful TodoWrite replaces the shared todo list.
                     // The iocraft REPL's context panel derives live from the
                     // tool-result stream it already receives across the seam —
                     // NOT from an engine-side side-channel into the executor
                     // (that was a boundary leak, removed with `set_ui_sender`).
                     //
                     // Canonicalize first: this name is whatever the model
-                    // spelled, and matching it raw is how the `Task*` → `pid_*`
-                    // rename would leave the panel stale on every `pid_kill`.
+                    // spelled, so matching it raw would leave the panel stale.
                     if let Some(ui) = ui {
-                        if !*is_error
-                            && matches!(
-                                tools::canonicalize_tool_name(name).as_str(),
-                                "TaskCreate" | "TaskUpdate" | "pid_status" | "pid_kill"
-                            )
+                        if !*is_error && tools::canonicalize_tool_name(name).as_str() == "TodoWrite"
                         {
-                            ui.update_context(tools::global_task_list());
+                            ui.update_context(tools::global_todo_list());
                         }
                         // Staging overlay: this call is done — clear its running
                         // yellow card. The finished (green/red) card is written

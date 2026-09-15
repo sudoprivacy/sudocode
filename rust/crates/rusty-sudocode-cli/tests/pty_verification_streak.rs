@@ -1,13 +1,14 @@
 //! PTY live e2e — auto-verification streak nudge fires after 3
-//! TaskUpdate(status=completed) calls and gets reset by a
+//! todos are marked completed via TodoWrite and gets reset by a
 //! Verification spawn.
 //!
 //! Roadmap coverage: sub-agent CC-fork parity §4.4 Commit 10.
 //!
 //! ## Long-workflow (5-step chain, data-flow linked)
 //!
-//! 1. Parent LLM creates three tasks via TaskCreate.
-//! 2. Marks each one completed via TaskUpdate(status=completed).
+//! 1. Parent LLM opens a todo list of three items via TodoWrite.
+//! 2. Marks each completed by re-sending the whole list via TodoWrite
+//!    (whole-list replace), one more completed each call.
 //! 3. After the third completion, the tool's JSON return value
 //!    contains the `<system-reminder>` nudge substring. The parent
 //!    sees it in the tool_use result on its next turn.
@@ -55,11 +56,12 @@ fn three_task_completions_nudge_verification_spawn() {
 
     let prompt = format!(
         "Follow this multi-step workflow: \
-         (1) Use TaskCreate to create three tasks: \
-             subject='implement A', subject='implement B', subject='implement C'. \
-         (2) Use TaskUpdate to mark 'implement A' as completed (status='completed'). \
-         (3) Use TaskUpdate to mark 'implement B' as completed. \
-         (4) Use TaskUpdate to mark 'implement C' as completed. \
+         (1) Use TodoWrite to create a todo list of three items: \
+             'implement A', 'implement B', 'implement C' (all pending). \
+         (2) Use TodoWrite to mark 'implement A' as completed — re-send the \
+             whole list with 'implement A' status='completed'. \
+         (3) Use TodoWrite again to also mark 'implement B' as completed. \
+         (4) Use TodoWrite again to also mark 'implement C' as completed. \
              You should now see a system-reminder about running a Verification pass. \
          (5) In response to that reminder, spawn a Verification sub-agent: \
              Agent(subagent_type=\"Verification\", description=\"final verification\", \
@@ -73,7 +75,7 @@ fn three_task_completions_nudge_verification_spawn() {
     sess.set_default_timeout(long);
 
     // Success = the sentinel surfaces. Only possible if:
-    //   - The model created tasks and completed them via TaskUpdate.
+    //   - The model opened a todo list and completed each item via TodoWrite.
     //   - The verification_watcher fired a nudge after 3 completions.
     //   - The model interpreted the nudge and dispatched the Verification agent.
     //   - The Verification agent ran and emitted the sentinel.

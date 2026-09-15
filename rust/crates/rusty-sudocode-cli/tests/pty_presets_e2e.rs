@@ -180,9 +180,9 @@ fn preset_plan_e2e() {
     run_preset(
         "Plan",
         "one-step plan",
-        "Draft a two-item task plan for adding a README section \
-         titled 'Quickstart'. Use TaskCreate to create the tasks, then report \
-         the task list only.",
+        "Draft a two-item todo plan for adding a README section \
+         titled 'Quickstart'. Use TodoWrite to create the todos, then report \
+         the todo list only.",
     );
 }
 

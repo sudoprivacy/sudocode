@@ -1,5 +1,5 @@
 //! Integration tests for the auto-verification streak nudge
-//! (`runtime::verification_watcher` + wiring in `run_task_update`
+//! (`runtime::verification_watcher` + wiring in `run_todo_write`
 //! and `prepare_agent_job`).
 //!
 //! ## What this file locks in (long-workflow, data-flow chained)
@@ -8,19 +8,19 @@
 //! The counter is process-global so tests serialise on a mutex —
 //! parallel writes would race the atomic and confuse the assertions.
 //!
-//! 1. **Streak → nudge → reset → streak → nudge** — three
-//!    TaskUpdate(status=completed) calls each mark a new task done.
-//!    After the third, the tool result MUST include the
-//!    `<system-reminder>` nudge. Following that, a fresh streak
-//!    fires the nudge AGAIN because it was consumed after firing.
+//! 1. **Streak → nudge → reset → streak → nudge** — each TodoWrite
+//!    marks one more todo `completed` (whole-list replace). After the
+//!    third distinct completion, the tool result MUST include the
+//!    `<system-reminder>` nudge. Following that, a fresh streak fires
+//!    the nudge AGAIN because it was consumed after firing.
 //! 2. **Verification spawn resets the counter mid-streak** —
 //!    accumulate 2 completions, dispatch an
 //!    `Agent(subagent_type="Verification")`, then accumulate 2 more:
 //!    total is 4 but no nudge fires because the reset zeroed us.
 //! 3. **Env override disables the feature** — with threshold `0`
 //!    even a 10-completion streak yields NO nudge.
-//! 4. **Same-content re-completion is NOT re-counted** — completing
-//!    a task that was already completed must NOT re-increment.
+//! 4. **Same-content re-completion is NOT re-counted** — re-sending a
+//!    list whose completed items are unchanged must NOT re-increment.
 //!
 //! Data-flow contract: each scenario carries state THROUGH tests
 //! via the `runtime::verification_watcher` counter — reading its
@@ -38,13 +38,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn temp_task_store(label: &str) -> std::path::PathBuf {
+fn temp_todo_store(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     std::env::temp_dir().join(format!(
-        "sudocode-task-store-{label}-{nanos}-{}",
+        "sudocode-todo-store-{label}-{nanos}-{}",
         std::process::id()
     ))
 }
@@ -55,33 +55,49 @@ fn reset_all() {
     std::env::remove_var(VERIFICATION_STREAK_ENV);
 }
 
-/// Helper: create a task via the tool dispatch and return its task_id.
-fn create_task(subject: &str) -> String {
-    let result = tools::execute_tool(
-        "TaskCreate",
-        &serde_json::json!({
-            "subject": subject,
-            "description": format!("Test task: {subject}"),
-        }),
-    )
-    .expect("TaskCreate should succeed");
-    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    output["task_id"]
-        .as_str()
-        .expect("task_id should be a string")
-        .to_string()
+/// A tracked todo list the test mutates and re-sends whole on each write —
+/// exactly how a model drives `TodoWrite`. `mark_completed` flips one item to
+/// `completed` and returns the tool's JSON output for the resulting write.
+struct TodoList {
+    contents: Vec<String>,
+    completed: std::collections::BTreeSet<String>,
 }
 
-/// Helper: complete a task via TaskUpdate and return the JSON output.
-fn complete_task(task_id: &str) -> String {
-    tools::execute_tool(
-        "TaskUpdate",
-        &serde_json::json!({
-            "taskId": task_id,
-            "status": "completed",
-        }),
-    )
-    .expect("TaskUpdate should succeed")
+impl TodoList {
+    fn new(contents: &[&str]) -> Self {
+        Self {
+            contents: contents.iter().map(|s| (*s).to_string()).collect(),
+            completed: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Re-send the whole list, marking `content` completed, and return the
+    /// tool's JSON output string.
+    fn mark_completed(&mut self, content: &str) -> String {
+        self.completed.insert(content.to_string());
+        self.write()
+    }
+
+    fn write(&self) -> String {
+        let todos: Vec<serde_json::Value> = self
+            .contents
+            .iter()
+            .map(|c| {
+                let status = if self.completed.contains(c) {
+                    "completed"
+                } else {
+                    "pending"
+                };
+                serde_json::json!({
+                    "content": c,
+                    "status": status,
+                    "activeForm": format!("Doing {c}"),
+                })
+            })
+            .collect();
+        tools::execute_tool("TodoWrite", &serde_json::json!({ "todos": todos }))
+            .expect("TodoWrite should succeed")
+    }
 }
 
 #[test]
@@ -99,22 +115,20 @@ fn threshold_default_is_three() {
 fn streak_then_nudge_then_reset_then_second_streak_fires_again() {
     let _guard = env_lock();
     reset_all();
-    let store = temp_task_store("streak-nudge-restreak");
-    std::env::set_var("SUDOCODE_TASK_STORE", store.to_str().unwrap());
+    let store = temp_todo_store("streak-nudge-restreak");
+    std::env::set_var("SUDOCODE_TODO_STORE", store.to_str().unwrap());
 
-    // Create 6 tasks — we'll complete them in two batches of 3.
-    let ids: Vec<String> = (b'a'..=b'f')
-        .map(|c| create_task(&format!("task_{}", c as char)))
-        .collect();
+    // One list of 6 todos — we'll complete them in two batches of 3.
+    let mut list = TodoList::new(&["a", "b", "c", "d", "e", "f"]);
 
     // Complete first 3 — streak should reach threshold on the third.
-    let r1 = complete_task(&ids[0]);
+    let r1 = list.mark_completed("a");
     assert!(!r1.contains("system-reminder"), "no nudge at 1 completion");
 
-    let r2 = complete_task(&ids[1]);
+    let r2 = list.mark_completed("b");
     assert!(!r2.contains("system-reminder"), "no nudge at 2 completions");
 
-    let r3 = complete_task(&ids[2]);
+    let r3 = list.mark_completed("c");
     assert!(
         r3.contains("<system-reminder>"),
         "3-completion streak MUST emit nudge; got: {r3}"
@@ -126,22 +140,22 @@ fn streak_then_nudge_then_reset_then_second_streak_fires_again() {
     );
 
     // After reset, 2 more completions still under threshold → no nudge.
-    let r4 = complete_task(&ids[3]);
+    let r4 = list.mark_completed("d");
     assert!(
         !r4.contains("<system-reminder>"),
         "streak reset after nudge"
     );
-    let r5 = complete_task(&ids[4]);
+    let r5 = list.mark_completed("e");
     assert!(!r5.contains("<system-reminder>"), "still under threshold");
 
     // Third fresh completion -> streak 3 again -> nudge fires again.
-    let r6 = complete_task(&ids[5]);
+    let r6 = list.mark_completed("f");
     assert!(
         r6.contains("<system-reminder>"),
         "second streak MUST re-fire nudge"
     );
 
-    std::env::remove_var("SUDOCODE_TASK_STORE");
+    std::env::remove_var("SUDOCODE_TODO_STORE");
     let _ = std::fs::remove_file(&store);
     reset_all();
 }
@@ -150,15 +164,15 @@ fn streak_then_nudge_then_reset_then_second_streak_fires_again() {
 fn dispatching_verification_agent_resets_streak_mid_way() {
     let _guard = env_lock();
     reset_all();
-    let store = temp_task_store("verif-mid-reset");
-    std::env::set_var("SUDOCODE_TASK_STORE", store.to_str().unwrap());
+    let store = temp_todo_store("verif-mid-reset");
+    std::env::set_var("SUDOCODE_TODO_STORE", store.to_str().unwrap());
+
+    let mut list = TodoList::new(&["x", "y", "z", "w", "v"]);
 
     // Two completions → streak = 2.
-    let id1 = create_task("x");
-    let id2 = create_task("y");
-    let r1 = complete_task(&id1);
+    let r1 = list.mark_completed("x");
     assert!(!r1.contains("<system-reminder>"));
-    let r2 = complete_task(&id2);
+    let r2 = list.mark_completed("y");
     assert!(!r2.contains("<system-reminder>"));
     assert_eq!(verification_watcher::current_streak(), 2);
 
@@ -171,22 +185,19 @@ fn dispatching_verification_agent_resets_streak_mid_way() {
     );
 
     // 2 more completions AFTER the reset → still under threshold.
-    let id3 = create_task("z");
-    let id4 = create_task("w");
-    let r3 = complete_task(&id3);
+    let r3 = list.mark_completed("z");
     assert!(
         !r3.contains("<system-reminder>"),
         "streak reset means we should NOT nudge yet — got: {r3}"
     );
-    let r4 = complete_task(&id4);
+    let r4 = list.mark_completed("w");
     assert!(!r4.contains("<system-reminder>"));
 
     // Third fresh completion after reset -> nudge fires.
-    let id5 = create_task("v");
-    let r5 = complete_task(&id5);
+    let r5 = list.mark_completed("v");
     assert!(r5.contains("<system-reminder>"), "post-reset streak nudges");
 
-    std::env::remove_var("SUDOCODE_TASK_STORE");
+    std::env::remove_var("SUDOCODE_TODO_STORE");
     let _ = std::fs::remove_file(&store);
     reset_all();
 }
@@ -196,50 +207,50 @@ fn env_override_zero_disables_nudge_entirely() {
     let _guard = env_lock();
     reset_all();
     std::env::set_var(VERIFICATION_STREAK_ENV, "0");
-    let store = temp_task_store("streak-disabled");
-    std::env::set_var("SUDOCODE_TASK_STORE", store.to_str().unwrap());
+    let store = temp_todo_store("streak-disabled");
+    std::env::set_var("SUDOCODE_TODO_STORE", store.to_str().unwrap());
 
-    for i in 0..10 {
-        let id = create_task(&format!("t{i}"));
-        let out = complete_task(&id);
+    let contents: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
+    let refs: Vec<&str> = contents.iter().map(String::as_str).collect();
+    let mut list = TodoList::new(&refs);
+    for (i, c) in contents.iter().enumerate() {
+        let out = list.mark_completed(c);
         assert!(
             !out.contains("<system-reminder>"),
             "disabled feature MUST never nudge (iter {i})"
         );
     }
 
-    std::env::remove_var("SUDOCODE_TASK_STORE");
+    std::env::remove_var("SUDOCODE_TODO_STORE");
     let _ = std::fs::remove_file(&store);
     reset_all();
 }
 
 #[test]
-fn already_completed_task_does_not_re_increment_on_second_update() {
+fn already_completed_todo_does_not_re_increment_on_second_write() {
     let _guard = env_lock();
     reset_all();
-    let store = temp_task_store("no-recount");
-    std::env::set_var("SUDOCODE_TASK_STORE", store.to_str().unwrap());
+    let store = temp_todo_store("no-recount");
+    std::env::set_var("SUDOCODE_TODO_STORE", store.to_str().unwrap());
 
-    // Create 3 tasks and complete them all → nudge fires (streak=3).
-    let id1 = create_task("a");
-    let id2 = create_task("b");
-    let id3 = create_task("c");
-    complete_task(&id1);
-    complete_task(&id2);
-    let r3 = complete_task(&id3);
+    // Complete 3 distinct todos → nudge fires (streak=3).
+    let mut list = TodoList::new(&["a", "b", "c"]);
+    list.mark_completed("a");
+    list.mark_completed("b");
+    let r3 = list.mark_completed("c");
     assert!(r3.contains("<system-reminder>"));
 
-    // Streak reset. Now re-complete the same task (already completed).
-    // Delta must be 0 — same subject string, previously completed.
-    let r4 = complete_task(&id1);
+    // Streak reset. Re-send the same list (a already completed). Its
+    // completion was already counted, so the counter must NOT move.
+    let r4 = list.write();
     assert_eq!(
         verification_watcher::current_streak(),
         0,
-        "re-completing same task must NOT re-increment"
+        "re-sending an already-completed todo must NOT re-increment"
     );
     assert!(!r4.contains("<system-reminder>"), "no re-fire");
 
-    std::env::remove_var("SUDOCODE_TASK_STORE");
+    std::env::remove_var("SUDOCODE_TODO_STORE");
     let _ = std::fs::remove_file(&store);
     reset_all();
 }

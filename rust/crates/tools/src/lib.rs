@@ -218,7 +218,7 @@ use runtime::{
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     read_file,
     summary_compression::compress_summary_text,
-    task_registry::TaskRegistry,
+    todo_store::TodoStore,
     write_file, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, BashCommandInput,
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
     ConversationRuntime, FsBackend, GrepSearchInput, HookAbortSignal, LaneCommitProvenance,
@@ -246,14 +246,14 @@ fn global_cron_registry() -> &'static CronRegistry {
     })
 }
 
-fn global_task_registry() -> &'static TaskRegistry {
+fn global_todo_store() -> &'static TodoStore {
     use std::sync::OnceLock;
-    static REGISTRY: OnceLock<TaskRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        if let Ok(path) = runtime::task_registry::task_store_path() {
-            TaskRegistry::load(&path)
+    static STORE: OnceLock<TodoStore> = OnceLock::new();
+    STORE.get_or_init(|| {
+        if let Ok(path) = runtime::todo_store::todo_store_path() {
+            TodoStore::load(&path)
         } else {
-            TaskRegistry::new()
+            TodoStore::new()
         }
     })
 }
@@ -262,10 +262,10 @@ fn global_task_registry() -> &'static TaskRegistry {
 /// use the same credential path as the main agent.
 static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
 
-/// Return all tasks from the global registry. Used by the CLI to push
-/// task state to the ContextSlot after TaskCreate/TaskUpdate.
-pub fn global_task_list() -> Vec<runtime::Task> {
-    global_task_registry().list(None)
+/// Return the current todo list from the global store. Used by the CLI to push
+/// todo state to the ContextSlot after a TodoWrite.
+pub fn global_todo_list() -> Vec<runtime::Todo> {
+    global_todo_store().list()
 }
 
 /// Called by the CLI at startup to set the auth mode for the entire process.
@@ -538,7 +538,7 @@ impl GlobalToolRegistry {
             // Don't overwrite a spec-name mapping: a spec whose own name
             // normalizes to an alias key (`bash`) must keep resolving to the
             // spec name so `definitions()` can match `spec.name`. Aliases with
-            // no spec of their own (`TaskList`, `SendMessage`) fall through to
+            // no spec of their own (`send_message`, `Agent`) fall through to
             // the canonical tool they name.
             name_map
                 .entry(alias.to_string())
@@ -1248,83 +1248,42 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
-            name: "TaskCreate",
-            description: "Create a structured task to track progress in the current session.",
+            name: "TodoWrite",
+            description: concat!(
+                "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n",
+                "- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n",
+                "- Send the full list each call; it replaces the previous one.\n",
+                "- Keep one item `in_progress` at a time and mark it `completed` when done."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "subject": { "type": "string", "description": "A brief title for the task" },
-                    "description": { "type": "string", "description": "What needs to be done" },
-                    "activeForm": { "type": "string", "description": "Present continuous form shown in spinner when in_progress (e.g. 'Running tests')" },
-                    "prompt": { "type": "string", "description": "Alias for subject (backward compat)" },
-                    "metadata": { "type": "object" },
-                    "dependencies": {
+                    "todos": {
                         "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Task IDs this task depends on (must complete before this task can start)"
+                        "description": "The updated todo list (replaces the previous one)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": { "type": "string", "description": "Imperative description of the work" },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"]
+                                },
+                                "activeForm": { "type": "string", "description": "Present-continuous label shown while in_progress" }
+                            },
+                            "required": ["content", "status", "activeForm"],
+                            "additionalProperties": false
+                        }
                     }
                 },
-                "required": ["subject", "description"],
+                "required": ["todos"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "TaskUpdate",
-            description: "Update a task's status, subject, or other fields. The task must exist first — TaskCreate returns its id.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "taskId": { "type": "string", "description": "The ID of the task to update" },
-                    "task_id": { "type": "string", "description": "Alias for taskId (backward compat)" },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed"],
-                        "description": "New status for the task"
-                    },
-                    "subject": { "type": "string", "description": "New subject for the task" },
-                    "description": { "type": "string", "description": "New description" },
-                    "activeForm": { "type": "string", "description": "Present continuous form for spinner" },
-                    "message": { "type": "string", "description": "Append a message to the task (backward compat)" },
-                    "dependencies": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "New dependency list (replaces existing dependencies)"
-                    }
-                },
-                "required": ["taskId"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "TaskGet",
-            description: "Get a task's details by ID. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "The ID of the task to look up" }
-                },
-                "required": ["task_id"],
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
-        },
-        ToolSpec {
-            name: "TaskList",
-            description: "List all tasks in the session's to-do registry. Tasks are planning items from TaskCreate/TaskUpdate, not agent processes — use pid_status for those.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::ReadOnly,
         },
         // ── pid.* tools ───────────────────────────────────────────────
         // Agent process control. `normalize_pid_input` accepts `task_id`
         // as a field alias for `pid` so older prompts still work.
-        // (`TaskGet`/`TaskList` are separate canonical tools for the
-        // to-do registry, NOT aliases for pid_status.)
         ToolSpec {
             name: "pid_kill",
             description: "Terminate a running agent by pid.",
@@ -1676,20 +1635,11 @@ fn execute_tool_with_enforcer(
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
-        "TaskCreate" => from_value::<TaskCreateInput>(input).and_then(run_task_create),
-        "TaskUpdate" => from_value::<TaskUpdateInput>(input).and_then(run_task_update),
-        // Task* to-do registry: TaskGet and TaskList query the planning
-        // checklist (TaskCreate/TaskUpdate items), NOT the process table.
-        // A CC-trained model reaches these through TOOL_ALIASES.
-        "TaskGet" => {
-            let input = normalize_pid_input(input);
-            from_value::<TaskIdInput>(&input).and_then(run_task_get)
-        }
-        "TaskList" => run_task_list(input),
+        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
-            from_value::<TaskIdInput>(&input).and_then(run_task_stop)
+            from_value::<TaskIdInput>(&input).and_then(run_pid_kill)
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
@@ -1697,7 +1647,7 @@ fn execute_tool_with_enforcer(
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
-            from_value::<TaskOutputInput>(&input).and_then(run_task_output)
+            from_value::<TaskOutputInput>(&input).and_then(run_pid_output)
         }
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
@@ -1852,74 +1802,29 @@ fn run_ask_user_question_v2(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_task_create(input: TaskCreateInput) -> Result<String, String> {
-    let subject = input
-        .subject
-        .or(input.prompt)
-        .ok_or_else(|| "subject is required".to_string())?;
-    let registry = global_task_registry();
-    // Validate dependencies exist
-    if !input.dependencies.is_empty() {
-        registry.validate_dependencies(&input.dependencies)?;
+fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
+    use runtime::todo_store::TodoStatus;
+
+    let todos: Vec<runtime::Todo> = input.todos.into_iter().map(Into::into).collect();
+
+    // Verification watcher: count newly-completed todos. The watcher dedups by
+    // content string, so re-sending a list whose completed items are unchanged
+    // does not re-increment — which is exactly the "whole list re-sent every
+    // call" contract. No need to diff the persisted store (that made the count
+    // depend on process-global store state and raced across tests).
+    for todo in &todos {
+        if todo.status == TodoStatus::Completed {
+            runtime::verification_watcher::record_completion_by_id(&todo.content);
+        }
     }
-    let task = registry.create_with_subject(
-        &subject,
-        input.description.as_deref(),
-        input.active_form.as_deref(),
-        input.dependencies,
-    );
-    to_pretty_json(json!({
-        "task_id": task.task_id,
-        "status": task.status,
-        "subject": task.subject,
-        "description": task.description,
-        "dependencies": task.dependencies,
-        "created_at": task.created_at
-    }))
-}
+    let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-#[allow(clippy::needless_pass_by_value)]
-fn run_task_get(input: TaskIdInput) -> Result<String, String> {
-    let registry = global_task_registry();
-    match registry.get(&input.task_id) {
-        Some(task) => to_pretty_json(json!({
-            "task_id": task.task_id,
-            "status": task.status,
-            "subject": task.subject,
-            "description": task.description,
-            "dependencies": task.dependencies,
-            "task_packet": task.task_packet,
-            "created_at": task.created_at,
-            "updated_at": task.updated_at,
-            "messages": task.messages
-        })),
-        None => Err(format!("task not found: {}", input.task_id)),
+    let saved = global_todo_store().set(todos);
+    let mut result = json!({ "todos": saved });
+    if let Some(nudge) = verification_streak_nudge {
+        result["verificationStreakNudge"] = json!(nudge);
     }
-}
-
-fn run_task_list(_input: &Value) -> Result<String, String> {
-    let registry = global_task_registry();
-    let tasks: Vec<_> = registry
-        .list(None)
-        .into_iter()
-        .map(|t| {
-            json!({
-                "task_id": t.task_id,
-                "status": t.status,
-                "subject": t.subject,
-                "description": t.description,
-                "dependencies": t.dependencies,
-                "task_packet": t.task_packet,
-                "created_at": t.created_at,
-                "updated_at": t.updated_at
-            })
-        })
-        .collect();
-
-    to_pretty_json(json!({
-        "tasks": tasks,
-        "count": tasks.len(),
-    }))
+    to_pretty_json(result)
 }
 
 fn run_pid_status(input: Value) -> Result<String, String> {
@@ -1960,7 +1865,7 @@ fn run_pid_status(input: Value) -> Result<String, String> {
     }))
 }
 
-/// Sub-agent snapshot suitable for `TaskList` output + a future
+/// Sub-agent snapshot suitable for `pid_status` output + a future
 /// `/tasks list --backgrounded` slash-command view. Compact JSON
 /// shape so the coordinator LLM can scan it without paying a large
 /// context cost.
@@ -2028,116 +1933,56 @@ pub fn list_agent_snapshots_from_store(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_task_stop(input: TaskIdInput) -> Result<String, String> {
-    let registry = global_task_registry();
-    match registry.stop(&input.task_id) {
-        Ok(task) => to_pretty_json(json!({
-            "task_id": task.task_id,
-            "status": task.status,
-            "message": "Task stopped"
-        })),
-        Err(e) => Err(e),
+fn run_pid_kill(input: TaskIdInput) -> Result<String, String> {
+    // Terminate a backgrounded agent by pid, marking its manifest stopped in
+    // the agent store (the same store pid_status / pid_output read from).
+    let store = agent_store_dir()?;
+    let path = store.join(format!("{}.json", input.task_id));
+    if !path.exists() {
+        return Err(format!("pid not found: {}", input.task_id));
     }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
+    let mut manifest: AgentOutput =
+        serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
+    manifest.status = "stopped".to_string();
+    if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
+        let _ = std::fs::write(&path, serialized);
+    }
+    to_pretty_json(json!({
+        "pid": manifest.agent_id,
+        "status": manifest.status,
+        "message": "Agent stopped"
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_task_update(input: TaskUpdateInput) -> Result<String, String> {
-    use runtime::task_registry::TaskStatus;
-
-    let task_id = input.resolved_task_id()?;
-    let registry = global_task_registry();
-
-    // Parse status string → TaskStatus
-    let new_status = input
-        .status
+fn run_pid_output(input: TaskOutputInput) -> Result<String, String> {
+    let agent_id = input
+        .agent_id
         .as_deref()
-        .map(|s| match s {
-            "pending" => Ok(TaskStatus::Pending),
-            "in_progress" => Ok(TaskStatus::InProgress),
-            "completed" => Ok(TaskStatus::Completed),
-            other => Err(format!("invalid status: {other}")),
-        })
-        .transpose()?;
-
-    // Validate dependencies if updating them
-    if let Some(deps) = &input.dependencies {
-        if !deps.is_empty() {
-            registry.validate_dependencies(deps)?;
-        }
-    }
-
-    // Append legacy message if provided
-    if let Some(msg) = &input.message {
-        registry.update(&task_id, msg)?;
-    }
-
-    // Apply structured field updates
-    let task = registry.update_fields(
-        &task_id,
-        input.subject.as_deref(),
-        input.description.as_deref(),
-        input.active_form.as_deref(),
-        new_status,
-        input.dependencies,
-    )?;
-
-    // Verification watcher: record completion + check for streak nudge
-    let verification_streak_nudge = if new_status == Some(TaskStatus::Completed) {
-        runtime::verification_watcher::record_completion_by_id(&task.subject);
-        runtime::verification_watcher::should_nudge_and_consume()
-    } else {
-        None
-    };
-
-    let mut result = json!({
-        "task_id": task.task_id,
-        "status": task.status,
-        "subject": task.subject,
-        "dependencies": task.dependencies,
-    });
-    if let Some(nudge) = verification_streak_nudge {
-        result["verificationStreakNudge"] = json!(nudge);
-    }
-    to_pretty_json(result)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn run_task_output(input: TaskOutputInput) -> Result<String, String> {
-    if let Some(agent_id) = &input.agent_id {
-        let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
-        if input.merge {
-            if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
-                if let Some(obj) = parsed.as_object_mut() {
-                    obj.insert("merge".to_string(), json!(true));
-                    let store = agent_store_dir().ok();
-                    if let Some(store) = store {
-                        let session_path = agent_session_path(&store, agent_id.trim());
-                        if session_path.exists() {
-                            obj.insert(
-                                "session_path".to_string(),
-                                json!(session_path.display().to_string()),
-                            );
-                        }
+        .or(input.task_id.as_deref())
+        .ok_or_else(|| String::from("pid is required"))?;
+    let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
+    if input.merge {
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
+            if let Some(obj) = parsed.as_object_mut() {
+                obj.insert("merge".to_string(), json!(true));
+                let store = agent_store_dir().ok();
+                if let Some(store) = store {
+                    let session_path = agent_session_path(&store, agent_id.trim());
+                    if session_path.exists() {
+                        obj.insert(
+                            "session_path".to_string(),
+                            json!(session_path.display().to_string()),
+                        );
                     }
                 }
-                result = serde_json::to_string_pretty(&parsed).unwrap_or(result);
             }
+            result = serde_json::to_string_pretty(&parsed).unwrap_or(result);
         }
-        return Ok(result);
     }
-    let task_id = input
-        .task_id
-        .as_deref()
-        .ok_or_else(|| String::from("either task_id or agent_id is required"))?;
-    let registry = global_task_registry();
-    match registry.output(task_id) {
-        Ok(output) => to_pretty_json(json!({
-            "task_id": task_id,
-            "output": output,
-            "has_output": !output.is_empty()
-        })),
-        Err(e) => Err(e),
-    }
+    Ok(result)
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
@@ -3810,47 +3655,31 @@ fn normalize_ask_user_question_input(
 }
 
 #[derive(Debug, Deserialize)]
-struct TaskCreateInput {
-    subject: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
+struct TodoWriteInput {
+    todos: Vec<TodoInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoInput {
+    content: String,
+    status: runtime::TodoStatus,
     #[serde(rename = "activeForm")]
-    active_form: Option<String>,
-    /// Backward compat alias for `subject`.
-    prompt: Option<String>,
-    #[serde(default)]
-    dependencies: Vec<String>,
+    active_form: String,
+}
+
+impl From<TodoInput> for runtime::Todo {
+    fn from(input: TodoInput) -> Self {
+        Self {
+            content: input.content,
+            status: input.status,
+            active_form: input.active_form,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct TaskIdInput {
     task_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TaskUpdateInput {
-    /// Primary field (camelCase).
-    #[serde(rename = "taskId")]
-    task_id_camel: Option<String>,
-    /// Backward compat (snake_case).
-    task_id: Option<String>,
-    status: Option<String>,
-    subject: Option<String>,
-    description: Option<String>,
-    #[serde(rename = "activeForm")]
-    active_form: Option<String>,
-    message: Option<String>,
-    #[serde(default)]
-    dependencies: Option<Vec<String>>,
-}
-
-impl TaskUpdateInput {
-    fn resolved_task_id(&self) -> Result<String, String> {
-        self.task_id_camel
-            .clone()
-            .or_else(|| self.task_id.clone())
-            .ok_or_else(|| "taskId is required".to_string())
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -9090,8 +8919,7 @@ mod tests {
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"WebFetch"));
         assert!(names.contains(&"WebSearch"));
-        assert!(names.contains(&"TaskCreate"));
-        assert!(names.contains(&"TaskUpdate"));
+        assert!(names.contains(&"TodoWrite"));
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"send"));
@@ -9163,8 +8991,7 @@ mod tests {
             "WebFetch",
             "WebSearch",
             "Skill",
-            "TaskCreate",
-            "TaskUpdate",
+            "TodoWrite",
             "StructuredOutput",
         ] {
             assert_eq!(
@@ -9181,10 +9008,7 @@ mod tests {
         assert_eq!(canonicalize_tool_name("SendMessage"), "send");
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
-        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
-        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
+        assert_eq!(canonicalize_tool_name("TodoWrite"), "TodoWrite");
     }
 
     #[test]
@@ -9300,8 +9124,7 @@ mod tests {
         // would admit a name `definitions()` can never match against
         // `spec.name`, silently allow-listing nothing.
         for (requested, spec_name) in [
-            ("TaskList", "TaskList"),
-            ("TaskGet", "TaskGet"),
+            ("TodoWrite", "TodoWrite"),
             ("SendMessage", "send"),
             ("Agent", "agent_spawn"),
             // Canonical names resolve to themselves.
@@ -9722,65 +9545,57 @@ mod tests {
     }
 
     #[test]
-    fn task_create_returns_subject_and_pending_status() {
+    fn todo_write_replaces_the_whole_list() {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("tasks-create.json");
-        std::env::set_var("SUDOCODE_TASK_STORE", &path);
+        let path = temp_path("todos-write.json");
+        std::env::set_var("SUDOCODE_TODO_STORE", &path);
 
+        // First write: two todos.
         let result = execute_tool(
-            "TaskCreate",
+            "TodoWrite",
             &json!({
-                "subject": "Write parser",
-                "description": "Build the AST parser module",
-                "activeForm": "Writing parser"
+                "todos": [
+                    { "content": "Write parser", "status": "in_progress", "activeForm": "Writing parser" },
+                    { "content": "Run tests", "status": "pending", "activeForm": "Running tests" }
+                ]
             }),
         )
-        .expect("TaskCreate should succeed");
-        std::env::remove_var("SUDOCODE_TASK_STORE");
-        let _ = std::fs::remove_file(&path);
-
+        .expect("TodoWrite should succeed");
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert_eq!(output["subject"], "Write parser");
-        assert_eq!(output["status"], "pending");
-        assert!(output["task_id"].as_str().is_some());
-    }
+        let todos = output["todos"].as_array().expect("todos array");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0]["content"], "Write parser");
+        assert_eq!(todos[0]["status"], "in_progress");
+        assert_eq!(todos[0]["activeForm"], "Writing parser");
 
-    #[test]
-    fn task_update_status_transitions() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = temp_path("tasks-update.json");
-        std::env::set_var("SUDOCODE_TASK_STORE", &path);
-
-        let create_result = execute_tool(
-            "TaskCreate",
-            &json!({ "subject": "Run tests", "description": "Execute test suite" }),
+        // Second write replaces (not appends): one todo, completed.
+        let result = execute_tool(
+            "TodoWrite",
+            &json!({
+                "todos": [
+                    { "content": "Write parser", "status": "completed", "activeForm": "Writing parser" }
+                ]
+            }),
         )
-        .expect("TaskCreate should succeed");
-        let created: serde_json::Value = serde_json::from_str(&create_result).expect("valid json");
-        let task_id = created["task_id"].as_str().unwrap();
+        .expect("TodoWrite should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let todos = output["todos"].as_array().expect("todos array");
+        assert_eq!(
+            todos.len(),
+            1,
+            "second write replaces the list, not appends"
+        );
+        assert_eq!(todos[0]["status"], "completed");
 
-        let update_result = execute_tool(
-            "TaskUpdate",
-            &json!({ "taskId": task_id, "status": "in_progress" }),
-        )
-        .expect("TaskUpdate should succeed");
-        let updated: serde_json::Value = serde_json::from_str(&update_result).expect("valid json");
-        assert_eq!(updated["status"], "in_progress");
+        // Empty list wipes the store.
+        let result =
+            execute_tool("TodoWrite", &json!({ "todos": [] })).expect("TodoWrite should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert!(output["todos"].as_array().expect("todos array").is_empty());
 
-        let complete_result = execute_tool(
-            "TaskUpdate",
-            &json!({ "taskId": task_id, "status": "completed" }),
-        )
-        .expect("TaskUpdate should succeed");
-        let completed: serde_json::Value =
-            serde_json::from_str(&complete_result).expect("valid json");
-        assert_eq!(completed["status"], "completed");
-
-        std::env::remove_var("SUDOCODE_TASK_STORE");
+        std::env::remove_var("SUDOCODE_TODO_STORE");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -10258,9 +10073,9 @@ mod tests {
             "WebSearch should be deferred"
         );
         assert_eq!(
-            core_tools.get("TaskCreate"),
+            core_tools.get("TodoWrite"),
             Some(&true),
-            "TaskCreate should be deferred"
+            "TodoWrite should be deferred"
         );
     }
 
@@ -10278,7 +10093,7 @@ mod tests {
             names.contains("WebSearch"),
             "WebSearch should be deferred (CC parity)"
         );
-        assert!(names.contains("TaskCreate"));
+        assert!(names.contains("TodoWrite"));
         assert!(!names.contains("bash"), "bash is core");
         assert!(!names.contains("Sleep"), "Sleep is core (CC parity)");
         assert!(!names.contains("ToolSearch"), "ToolSearch is core");
@@ -11177,7 +10992,7 @@ mod tests {
         assert!(!explore.contains("bash"));
 
         let plan = allowed_tools_for_subagent("Plan");
-        assert!(plan.contains("TaskCreate"));
+        assert!(plan.contains("TodoWrite"));
         assert!(plan.contains("StructuredOutput"));
         assert!(!plan.contains("Agent"));
 
@@ -13128,14 +12943,6 @@ printf 'pwsh:%s' "$1"
     }
 
     // ── Unified pid alias routing ─────────────────────────────────────
-
-    #[test]
-    fn canonicalize_task_tools_pass_through_unchanged() {
-        assert_eq!(canonicalize_tool_name("TaskStop"), "TaskStop");
-        assert_eq!(canonicalize_tool_name("TaskGet"), "TaskGet");
-        assert_eq!(canonicalize_tool_name("TaskList"), "TaskList");
-        assert_eq!(canonicalize_tool_name("TaskOutput"), "TaskOutput");
-    }
 
     #[test]
     fn canonicalize_agent_to_agent_spawn() {

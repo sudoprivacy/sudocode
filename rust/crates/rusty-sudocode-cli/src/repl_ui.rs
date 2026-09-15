@@ -538,8 +538,8 @@ pub enum UiCommand {
     ClearQuestion,
     SetTurnResult(String),
     ShowInputHint(String),
-    /// Update the ContextSlot's task panel with the current task list.
-    UpdateContext(Vec<runtime::Task>),
+    /// Update the ContextSlot's todo panel with the current todo list.
+    UpdateContext(Vec<runtime::Todo>),
     /// A tool call started — add a running (yellow) card to the staging
     /// overlay.
     ToolStarted {
@@ -578,8 +578,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
     }
 
-    pub fn update_context(&self, tasks: Vec<runtime::Task>) {
-        let _ = self.tx.send(UiCommand::UpdateContext(tasks));
+    pub fn update_context(&self, todos: Vec<runtime::Todo>) {
+        let _ = self.tx.send(UiCommand::UpdateContext(todos));
     }
 
     pub fn tool_started(&self, id: &str, name: &str, input: &str) {
@@ -1034,20 +1034,20 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-// ── ContextSlot — persistent area for TaskPanel (+ future sections) ──
+// ── ContextSlot — persistent area for TodoPanel (+ future sections) ──
 
-/// Render the task panel matching CC's `TaskListV2` layout:
+/// Render the todo panel matching CC's `TodoWrite` layout:
 ///
 /// ```text
-/// 5 tasks (2 done, 1 in progress, 2 open)
+/// 5 todos (2 done, 1 in progress, 2 open)
 ///   ✓ Update docs
-///   ■ Write unit tests
+///   ■ Writing unit tests
 ///   □ Fix login bug
 ///   … +2 pending, 1 completed
 /// ```
 ///
 /// - Header: count summary with done/in_progress/open breakdown
-/// - Each visible task: icon + subject (completed = strikethrough+dim, in_progress = bold)
+/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
 /// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
 /// - Priority order: in_progress > pending > completed; hidden summary
 /// Render the staging overlay: the in-flight tool calls as running (yellow)
@@ -1063,7 +1063,7 @@ fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
     if cards.is_empty() {
         return String::new();
     }
-    // Same budget family as render_task_panel; hide on a very short terminal
+    // Same budget family as render_todo_panel; hide on a very short terminal
     // rather than crowding out the prompt.
     if term_rows <= 10 {
         return String::new();
@@ -1098,121 +1098,97 @@ fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
     lines.join("\n")
 }
 
-fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
+fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
-    if tasks.is_empty() {
+    if todos.is_empty() {
         return String::new();
     }
 
     // Dynamic max display: CC uses min(10, max(3, rows - 14)).
     // When terminal is very short (≤10 rows), hide entirely.
-    let max_display = if term_rows <= 10 {
+    if term_rows <= 10 {
         return String::new();
-    } else {
-        10usize.min(3usize.max(term_rows.saturating_sub(14)))
-    };
+    }
+    let max_display = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
 
     let t = theme();
     let success = ansi_fg(t.success);
     let info = ansi_fg(t.info);
 
-    let completed_count = tasks
+    let completed_count = todos
         .iter()
-        .filter(|t| t.status == runtime::TaskStatus::Completed)
+        .filter(|t| t.status == runtime::TodoStatus::Completed)
         .count();
-    let in_progress_count = tasks
+    let in_progress_count = todos
         .iter()
-        .filter(|t| {
-            matches!(
-                t.status,
-                runtime::TaskStatus::InProgress | runtime::TaskStatus::Running
-            )
-        })
+        .filter(|t| t.status == runtime::TodoStatus::InProgress)
         .count();
-    let open_count = tasks.len() - completed_count;
+    let open_count = todos.len() - completed_count;
 
     // Header summary line
-    let mut header_parts = Vec::new();
-    header_parts.push(format!("{BOLD}{completed_count}{RESET} done"));
+    let mut header_parts = vec![format!("{BOLD}{completed_count}{RESET} done")];
     if in_progress_count > 0 {
         header_parts.push(format!("{BOLD}{in_progress_count}{RESET} in progress"));
     }
     header_parts.push(format!("{BOLD}{open_count}{RESET} open"));
     let header = format!(
-        "{DIM}{BOLD}{}{RESET}{DIM} tasks ({}){}",
-        tasks.len(),
+        "{DIM}{BOLD}{}{RESET}{DIM} todos ({}){}",
+        todos.len(),
         header_parts.join(", "),
         RESET
     );
 
-    let mut lines = Vec::with_capacity(tasks.len() + 2);
+    let mut lines = Vec::with_capacity(todos.len() + 2);
     lines.push(header);
 
-    // Sort by priority: in_progress first, then pending, then completed
-    let mut sorted: Vec<&runtime::Task> = tasks.iter().collect();
+    // Sort by priority: in_progress first, then pending, then completed.
+    let mut sorted: Vec<&runtime::Todo> = todos.iter().collect();
     sorted.sort_by_key(|t| match t.status {
-        runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => 0,
-        runtime::TaskStatus::Pending | runtime::TaskStatus::Created => 1,
-        runtime::TaskStatus::Completed => 2,
-        _ => 3,
+        runtime::TodoStatus::InProgress => 0,
+        runtime::TodoStatus::Pending => 1,
+        runtime::TodoStatus::Completed => 2,
     });
 
     let display_count = sorted.len().min(max_display);
     let visible = &sorted[..display_count];
     let hidden = &sorted[display_count..];
 
-    for task in visible {
-        let (icon, subject_fmt) = match task.status {
-            runtime::TaskStatus::Completed => (
-                format!("{success}\u{2713}{RESET}"),
-                format!("{DIM}\x1b[9m{}\x1b[29m{RESET}", task.subject),
-            ),
-            runtime::TaskStatus::InProgress | runtime::TaskStatus::Running => (
-                format!("{info}\u{25a0}{RESET}"),
-                format!("{BOLD}{}{RESET}", task.subject),
-            ),
-            runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped => (
-                format!("{}\u{2717}{RESET}", ansi_fg(t.error)),
-                format!("{DIM}{}{RESET}", task.subject),
-            ),
-            _ => ("\u{25a1}".to_string(), task.subject.clone()),
+    for todo in visible {
+        // While in progress, show the present-continuous `activeForm`; otherwise
+        // the imperative `content`.
+        let label = if todo.status == runtime::TodoStatus::InProgress {
+            todo.active_form.as_str()
+        } else {
+            todo.content.as_str()
         };
-        lines.push(format!("  {icon} {subject_fmt}"));
+        let (icon, label_fmt) = match todo.status {
+            runtime::TodoStatus::Completed => (
+                format!("{success}\u{2713}{RESET}"),
+                format!("{DIM}\x1b[9m{label}\x1b[29m{RESET}"),
+            ),
+            runtime::TodoStatus::InProgress => (
+                format!("{info}\u{25a0}{RESET}"),
+                format!("{BOLD}{label}{RESET}"),
+            ),
+            runtime::TodoStatus::Pending => ("\u{25a1}".to_string(), label.to_string()),
+        };
+        lines.push(format!("  {icon} {label_fmt}"));
     }
 
     if !hidden.is_empty() {
         let mut parts = Vec::new();
-        let hp = hidden
-            .iter()
-            .filter(|t| {
-                matches!(
-                    t.status,
-                    runtime::TaskStatus::Pending | runtime::TaskStatus::Created
-                )
-            })
-            .count();
         let hi = hidden
             .iter()
-            .filter(|t| {
-                matches!(
-                    t.status,
-                    runtime::TaskStatus::InProgress | runtime::TaskStatus::Running
-                )
-            })
+            .filter(|t| t.status == runtime::TodoStatus::InProgress)
+            .count();
+        let hp = hidden
+            .iter()
+            .filter(|t| t.status == runtime::TodoStatus::Pending)
             .count();
         let hc = hidden
             .iter()
-            .filter(|t| t.status == runtime::TaskStatus::Completed)
-            .count();
-        let hs = hidden
-            .iter()
-            .filter(|t| {
-                matches!(
-                    t.status,
-                    runtime::TaskStatus::Failed | runtime::TaskStatus::Stopped
-                )
-            })
+            .filter(|t| t.status == runtime::TodoStatus::Completed)
             .count();
         if hi > 0 {
             parts.push(format!("{hi} in progress"));
@@ -1222,9 +1198,6 @@ fn render_task_panel(tasks: &[runtime::Task], term_rows: usize) -> String {
         }
         if hc > 0 {
             parts.push(format!("{hc} completed"));
-        }
-        if hs > 0 {
-            parts.push(format!("{hs} stopped"));
         }
         lines.push(format!("{DIM}  \u{2026} +{}{RESET}", parts.join(", ")));
     }
@@ -1241,13 +1214,13 @@ struct ReplContext {
     permission_mode: String,
     tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
-    /// Task items for the ContextSlot. Updated by `UiCommand::UpdateContext`
+    /// Todo items for the ContextSlot. Updated by `UiCommand::UpdateContext`
     /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
     /// instead of a `use_state` hook to avoid shifting hook indices.
-    context_tasks: Arc<Mutex<Vec<runtime::Task>>>,
+    context_todos: Arc<Mutex<Vec<runtime::Todo>>>,
     /// Running tool cards for the StagingSlot overlay, in insertion order.
     /// `ToolStarted` appends; `ToolFinished` removes by id. Same `Arc<Mutex>`
-    /// rationale as `context_tasks` — avoids shifting hook indices.
+    /// rationale as `context_todos` — avoids shifting hook indices.
     staging_cards: Arc<Mutex<Vec<ToolCard>>>,
 }
 
@@ -1261,8 +1234,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let tips_text = ctx.tips_line.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
-    let context_tasks = Arc::clone(&ctx.context_tasks);
-    let context_tasks_for_future = Arc::clone(&ctx.context_tasks);
+    let context_todos = Arc::clone(&ctx.context_todos);
+    let context_todos_for_future = Arc::clone(&ctx.context_todos);
     let staging_cards = Arc::clone(&ctx.staging_cards);
     let staging_cards_for_future = Arc::clone(&ctx.staging_cards);
     drop(ctx);
@@ -1385,31 +1358,26 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(UiCommand::ShowInputHint(text)) => {
                             input_slot.set(InputSlot::Hint(text));
                         }
-                        Ok(UiCommand::UpdateContext(tasks)) => {
-                            if let Ok(mut items) = context_tasks_for_future.lock() {
-                                let has_incomplete = tasks.iter().any(|t| {
-                                    !matches!(
-                                        t.status,
-                                        runtime::TaskStatus::Completed
-                                            | runtime::TaskStatus::Failed
-                                            | runtime::TaskStatus::Stopped
-                                    )
-                                });
-                                if tasks.is_empty() {
+                        Ok(UiCommand::UpdateContext(todos)) => {
+                            if let Ok(mut items) = context_todos_for_future.lock() {
+                                let has_incomplete = todos
+                                    .iter()
+                                    .any(|t| t.status != runtime::TodoStatus::Completed);
+                                if todos.is_empty() {
                                     // Empty list → hide immediately
                                     items.clear();
                                     task_hide_deadline = None;
                                 } else if has_incomplete {
-                                    // Has open tasks → show, cancel any hide timer
-                                    *items = tasks;
+                                    // Has open todos → show, cancel any hide timer
+                                    *items = todos;
                                     task_hide_deadline = None;
                                 } else if task_hide_deadline.is_none() {
                                     // All terminal → start 5s hide timer
-                                    *items = tasks;
+                                    *items = todos;
                                     task_hide_deadline =
                                         Some(Instant::now() + Duration::from_secs(5));
                                 } else {
-                                    *items = tasks;
+                                    *items = todos;
                                 }
                             }
                         }
@@ -1437,7 +1405,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Auto-hide task panel 5s after all tasks reach terminal state.
             if let Some(deadline) = task_hide_deadline {
                 if Instant::now() >= deadline {
-                    if let Ok(mut items) = context_tasks_for_future.lock() {
+                    if let Ok(mut items) = context_todos_for_future.lock() {
                         items.clear();
                     }
                     task_hide_deadline = None;
@@ -1948,15 +1916,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Merge ContextSlot into the upper separator as a single
     // multi-line Text element so the element tree structure stays
     // identical (avoids iocraft hook-index shifts).
-    let task_line = context_tasks
+    let todo_line = context_todos
         .lock()
         .ok()
-        .map(|items| render_task_panel(&items, term_height as usize))
+        .map(|items| render_todo_panel(&items, term_height as usize))
         .unwrap_or_default();
-    let upper_sep = if task_line.is_empty() {
+    let upper_sep = if todo_line.is_empty() {
         sep.clone()
     } else {
-        format!("{task_line}\n{sep}")
+        format!("{todo_line}\n{sep}")
     };
 
     // StagingSlot: running tool cards (yellow), rendered via the same SSOT as
@@ -2091,7 +2059,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
-        context_tasks: Arc::new(Mutex::new(tools::global_task_list())),
+        context_todos: Arc::new(Mutex::new(tools::global_todo_list())),
         staging_cards: Arc::new(Mutex::new(Vec::new())),
     };
 

@@ -499,8 +499,15 @@ fn automatic_compaction_continues_after_a_long_summary() {
 
     let mut cli = resume(&workspace, &path);
     common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
-    cli.send("Continue PROJECT_ALPHA using all earlier decisions.\r")
+    cli.send("Continue PROJECT_ALPHA using all earlier decisions.")
         .unwrap();
+    common::expect_input_line(
+        &cli,
+        "Continue PROJECT_ALPHA",
+        Duration::from_secs(30),
+        "typed turn landed",
+    );
+    cli.send("\r").unwrap();
     cli.expect("ALPHA_CONTEXT_OK").unwrap();
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
@@ -559,8 +566,15 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     original.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
     common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
-    cli.send("Continue PROJECT_ALPHA using all earlier decisions.\r")
+    cli.send("Continue PROJECT_ALPHA using all earlier decisions.")
         .unwrap();
+    common::expect_input_line(
+        &cli,
+        "Continue PROJECT_ALPHA",
+        Duration::from_secs(30),
+        "typed turn landed",
+    );
+    cli.send("\r").unwrap();
     cli.expect("history preserved").unwrap();
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
@@ -611,7 +625,14 @@ fn pressure_prunes_large_tool_output_without_a_summary_call() {
     original.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
     common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
-    cli.send("Continue PROJECT_ALPHA.\r").unwrap();
+    cli.send("Continue PROJECT_ALPHA.").unwrap();
+    common::expect_input_line(
+        &cli,
+        "Continue PROJECT_ALPHA",
+        Duration::from_secs(30),
+        "typed turn landed",
+    );
+    cli.send("\r").unwrap();
     cli.expect("ALPHA_CONTEXT_OK").unwrap();
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
@@ -667,7 +688,14 @@ fn empty_compacted_history_cannot_continue_a_task() {
     damaged.save_to_path(&path).unwrap();
     let mut cli = resume(&workspace, &path);
     common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
-    cli.send("Continue PROJECT_ALPHA.\r").unwrap();
+    cli.send("Continue PROJECT_ALPHA.").unwrap();
+    common::expect_input_line(
+        &cli,
+        "Continue PROJECT_ALPHA",
+        Duration::from_secs(30),
+        "typed turn landed",
+    );
+    cli.send("\r").unwrap();
     cli.expect("no active history").unwrap();
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
@@ -991,7 +1019,14 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
     )
     .unwrap();
     common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
-    cli.send("Continue PROJECT_ALPHA\r").unwrap();
+    cli.send("Continue PROJECT_ALPHA").unwrap();
+    common::expect_input_line(
+        &cli,
+        "Continue PROJECT_ALPHA",
+        Duration::from_secs(30),
+        "typed turn landed",
+    );
+    cli.send("\r").unwrap();
     cli.expect("Context compaction failed")
         .unwrap_or_else(|error| {
             panic!(

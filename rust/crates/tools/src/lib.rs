@@ -1805,28 +1805,21 @@ fn run_ask_user_question_v2(
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     use runtime::todo_store::TodoStatus;
 
-    // Which items were already completed before this write, so we only count a
-    // completion once — the model re-sends the whole list every call.
-    let store = global_todo_store();
-    let previously_completed: std::collections::BTreeSet<String> = store
-        .list()
-        .into_iter()
-        .filter(|t| t.status == TodoStatus::Completed)
-        .map(|t| t.content)
-        .collect();
-
     let todos: Vec<runtime::Todo> = input.todos.into_iter().map(Into::into).collect();
 
-    // Verification watcher: count each todo that transitioned INTO completed by
-    // this write (dedup by content survives the all-done-clears-store cycle).
+    // Verification watcher: count newly-completed todos. The watcher dedups by
+    // content string, so re-sending a list whose completed items are unchanged
+    // does not re-increment — which is exactly the "whole list re-sent every
+    // call" contract. No need to diff the persisted store (that made the count
+    // depend on process-global store state and raced across tests).
     for todo in &todos {
-        if todo.status == TodoStatus::Completed && !previously_completed.contains(&todo.content) {
+        if todo.status == TodoStatus::Completed {
             runtime::verification_watcher::record_completion_by_id(&todo.content);
         }
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-    let saved = store.set(todos);
+    let saved = global_todo_store().set(todos);
     let mut result = json!({ "todos": saved });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);

@@ -581,7 +581,23 @@ pub fn spawn_inbox_poller(
         .name(format!("{label}-inbox-poller"))
         .spawn(move || {
             let mut cursor = match cursor_store.load() {
-                Some(saved) => saved,
+                // A saved position PAST the stream's end cannot describe this
+                // stream: the cursor outlived the inbox it was recording — a
+                // rebuilt cluster, a fresh data dir, a reused agent name. Left
+                // alone the poller parks on an offset the stream will not reach
+                // for a long time, and the symptom is silence: no error, no
+                // message, nothing to grep for. Clamp to the tail and say so.
+                Some(saved) => match mailbox.poll(0, 0) {
+                    Ok((_history, tail)) if saved > tail => {
+                        eprintln!(
+                            "[{label}] saved read position {saved} is past this inbox's tail \
+                             {tail} — the cursor predates this stream; resuming at {tail}"
+                        );
+                        cursor_store.save(tail);
+                        tail
+                    }
+                    _ => saved,
+                },
                 // Never read before: seek to the tail rather than replay.
                 //
                 // The accepted cost is that a send landing DURING this seek is

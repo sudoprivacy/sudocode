@@ -25,7 +25,7 @@ pub(crate) use engine_host::config::{
     config_model_for_current_dir, default_permission_mode, load_sudocode_config_for_current_dir,
     load_sudocode_config_for_cwd, permission_mode_from_label, require_sudocode_config_for_cwd,
     resolve_config_model_alias, resolve_model_alias, resolve_model_alias_with_config,
-    resolve_repl_model, AllowedToolSet,
+    resolve_repl_model, set_cli_account_override, AllowedToolSet,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,15 @@ struct Cli {
     /// Authentication mode
     #[arg(long, global = true, value_parser = parse_auth_mode)]
     auth: Option<AuthMode>,
+
+    /// Account to bill this run to, overriding `auth_profile` from settings
+    ///
+    /// For ONE invocation — nothing is written. `scode config account <name>`
+    /// is the persistent form; this is what a test harness or a throwaway
+    /// session wants when the machine's config home is shared by other
+    /// sessions and must not be repointed under them.
+    #[arg(long, global = true)]
+    account: Option<String>,
 
     /// Output format
     #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Text)]
@@ -546,6 +555,11 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
         None => DEFAULT_MODEL.to_string(),
     };
     let auth_mode = cli.auth;
+    // Before anything resolves a config: `--account` is process-wide and every
+    // entry point loads through `engine_host::config`, so recording it here is
+    // what makes the flag reach a `--print` run, a REPL session and a subagent
+    // alike. Nothing is written to disk — see `set_cli_account_override`.
+    set_cli_account_override(cli.account.clone());
     let permission_mode_override = if cli.dangerously_skip_permissions {
         Some(PermissionMode::DangerFullAccess)
     } else {

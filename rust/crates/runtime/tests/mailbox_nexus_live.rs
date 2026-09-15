@@ -54,27 +54,20 @@ fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
 /// the posture from the environment lets the SAME body assert the SAME property
 /// against both daemons.
 fn dial(endpoint: &str) -> Arc<NexusVfsClient> {
-    let Some(dir) = std::env::var("NEXUS_A2A_TEST_CERT_DIR")
-        .ok()
-        .filter(|d| !d.is_empty())
-    else {
-        return Arc::new(NexusVfsClient::connect(endpoint).expect("dial daemon"));
-    };
-    let dir = std::path::PathBuf::from(dir);
-    let read = |name: &str| {
-        std::fs::read(dir.join(name))
-            .unwrap_or_else(|e| panic!("read {}/{name}: {e}", dir.display()))
-    };
-    Arc::new(
-        NexusVfsClient::connect_tls(
-            endpoint,
-            read("ca.pem"),
-            read("agent.pem"),
-            read("agent-key.pem"),
-            "nexus-node",
-        )
-        .unwrap_or_else(|e| panic!("dial {endpoint} over mTLS: {e}")),
-    )
+    runtime::nexus_mailbox::Config {
+        endpoint: endpoint.to_string(),
+        // Dial-only: `connect` does not read the agent name. The identity that
+        // matters here is the CERT's, which the node reads off the handshake.
+        agent: String::new(),
+        peers: Vec::new(),
+        api_key: String::new(),
+        tls: std::env::var("NEXUS_A2A_TEST_CERT_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(|dir| runtime::nexus_mailbox::TlsPaths::from_bundle_dir(&dir)),
+    }
+    .connect()
+    .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn send_to(

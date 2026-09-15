@@ -38,6 +38,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 use pty_expect::{PtySession, Result};
+// The harness must resolve the config home exactly as the binary it spawns
+// does. It used to carry its own copy, which omitted the Windows
+// `USERPROFILE` fallback — so with `HOME` unset the two disagreed and the
+// harness seeded credentials into a directory the child never read.
+use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -828,15 +833,6 @@ pub fn spawn_scode_in_dir_with_env(
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn default_config_home() -> PathBuf {
-    std::env::var_os("SUDO_CODE_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

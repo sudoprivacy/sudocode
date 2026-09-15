@@ -1,24 +1,24 @@
 //! Process-wide streak counter that nudges the assistant to spawn a
-//! Verification sub-agent when it has closed several tasks/todos in a
-//! row without proving the changes work.
+//! Verification sub-agent when it has closed several todos in a row
+//! without proving the changes work.
 //!
 //! Ported from CC-fork's task-closure telemetry: after 3+ consecutive
-//! task closures without a Verification spawn, the coordinator/model
+//! todo closures without a Verification spawn, the coordinator/model
 //! is nudged with a `<system-reminder>` hint. Once nudged, the
 //! counter resets so the next nudge only fires after another streak.
 //!
 //! ## Wiring points (in the `tools` crate)
 //!
 //! - **Increment**: [`record_completion_by_id`] called from
-//!   `run_task_update` when status transitions to `Completed`.
+//!   `run_todo_write` for each todo that transitions to `Completed`.
 //! - **Reset**: [`reset_streak`] called from `prepare_agent_job`
 //!   when the spawned sub-agent is `subagent_type = "Verification"`.
 //!   Assumes the model DID follow the nudge and started a real
 //!   verifier — resetting keeps the counter honest.
 //! - **Read + consume**: [`should_nudge_and_consume`] called at the
-//!   end of `run_task_update` (when completing a task);
-//!   returns `Some(&str)` exactly once per streak-hitting-threshold,
-//!   then resets the counter atomically so the nudge doesn't repeat.
+//!   end of `run_todo_write`; returns `Some(&str)` exactly once per
+//!   streak-hitting-threshold, then resets the counter atomically so
+//!   the nudge doesn't repeat.
 //!
 //! ## Threshold
 //!

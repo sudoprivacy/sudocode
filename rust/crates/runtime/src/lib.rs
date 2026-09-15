@@ -71,7 +71,7 @@ pub mod stale_base;
 pub mod stale_branch;
 pub mod summary_compression;
 pub mod task_packet;
-pub mod task_registry;
+pub mod todo_store;
 mod time;
 pub mod tool_names;
 #[cfg(test)]
@@ -228,7 +228,7 @@ pub use stale_branch::{
     StaleBranchPolicy,
 };
 pub use task_packet::{validate_packet, TaskPacket, TaskPacketValidationError, ValidatedPacket};
-pub use task_registry::{Task, TaskRegistry, TaskStatus};
+pub use todo_store::{todo_store_path, Todo, TodoStatus, TodoStore};
 pub use time::today_local;
 #[cfg(test)]
 pub use trust_resolver::{TrustConfig, TrustDecision, TrustEvent, TrustPolicy, TrustResolver};

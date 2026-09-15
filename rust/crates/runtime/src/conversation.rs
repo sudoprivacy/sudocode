@@ -3484,7 +3484,7 @@ fn push_thinking_block(
 ///
 /// Names are sudocode's actual tool ids; membership mirrors Claude Code's
 /// `isReadOnly() == true` set (GlobTool / GrepTool / FileReadTool /
-/// ToolSearchTool / ListMcpResourcesTool / ReadMcpResourceTool / TaskGetTool).
+/// ToolSearchTool / ListMcpResourcesTool / ReadMcpResourceTool).
 /// `AgentTool` is read-only in CC (it delegates permission to its children) but
 /// is kept serial here for now — concurrent sub-agent spawns are a separate,
 /// larger step. Extend cautiously (e.g. same-class writes on distinct paths)
@@ -3504,9 +3504,6 @@ fn is_concurrency_safe_tool(tool_name: &str) -> bool {
             // Process-status reads
             | "pid_status"
             | "pid_output"
-            // To-do registry reads
-            | "TaskGet"
-            | "TaskList"
     )
 }
 

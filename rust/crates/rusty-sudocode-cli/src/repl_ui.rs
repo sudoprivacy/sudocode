@@ -1548,7 +1548,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             }
                                             let mut lines = display.split('\n');
                                             if let Some(first) = lines.next() {
-                                                stdout_for_events.println(format!("{}\u{276f}{} {first}", crate::render::BOLD, crate::render::RESET));
+                                                stdout_for_events.println(format!("{}{}{} {first}", crate::render::BOLD, crate::render::PROMPT_GLYPH, crate::render::RESET));
                                                 for line in lines {
                                                     stdout_for_events.println(format!("  {line}"));
                                                 }
@@ -1900,7 +1900,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
-        InputSlot::Hint(_) | InputSlot::TextInput => (None, "\u{276f} "),
+        InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
         InputSlot::DialPad(q) => (
             Some(format_question_panel(q, dialpad_cursor.get())),
             "\u{2753} ",

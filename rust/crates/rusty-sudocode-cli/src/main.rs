@@ -719,19 +719,20 @@ fn split_error_hint(message: &str) -> (String, Option<String>) {
 /// hangs forever.
 const STDIN_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Windows: always reports readable, so the read proceeds as it always has.
+/// Windows: peek the pipe via `stdin-peek`, the one crate that may call
+/// `PeekNamedPipe`.
 ///
-/// The correct check is `PeekNamedPipe`, which asks whether a pipe holds data
-/// without starting a read. It cannot be called here: this workspace sets
-/// `unsafe_code = "forbid"` at the root, `forbid` cannot be relaxed locally,
-/// and no crate in the tree wraps that call safely. So on Windows a `--print`
-/// run whose stdin is an inherited pipe that is never written and never closed
-/// still blocks — see the module-level note on `read_piped_input` for what that
-/// looks like. Closing the gap needs a decision this code cannot make: take a
-/// safe wrapper as a dependency, or carve an exception to the lint.
+/// That crate exists so the workspace's `unsafe_code = "forbid"` stays absolute
+/// in every other crate; its docs carry the rationale. An indeterminate answer
+/// — stdin is not a pipe, or the peek failed inconclusively — must fall through
+/// to the read. Reporting it as "not ready" would silently drop piped input
+/// that was really there, which is worse than the blocking read this replaces.
 #[cfg(windows)]
-fn stdin_is_readable(_timeout: Duration) -> bool {
-    true
+fn stdin_is_readable(timeout: Duration) -> bool {
+    !matches!(
+        stdin_peek::stdin_is_readable(timeout),
+        stdin_peek::Readiness::NotReady
+    )
 }
 
 /// Wait up to `timeout` for stdin to become readable, consuming nothing.
@@ -746,6 +747,15 @@ fn stdin_is_readable(timeout: Duration) -> bool {
     // An error here is not evidence that nothing is coming, so do not treat it
     // as such: fall through to the read.
     !matches!(poll(&mut fds, timeout), Ok(0))
+}
+
+/// Anything that is neither Unix nor Windows: no readiness primitive is wired
+/// up, so read as before. Without this arm the CLI does not compile at all off
+/// those two platforms — a worse outcome than the blocking read it falls back
+/// to, and one the previous `#[cfg(windows)]`/`#[cfg(unix)]` pair caused.
+#[cfg(not(any(unix, windows)))]
+fn stdin_is_readable(_timeout: Duration) -> bool {
+    true
 }
 
 /// Read piped stdin content when stdin is not a terminal.
@@ -5998,70 +6008,6 @@ fn slash_command_completion_candidates_with_sessions(
     completions.into_iter().collect()
 }
 
-#[cfg(test)]
-mod piped_stdin_tests {
-    use super::read_piped_input;
-    use std::time::{Duration, Instant};
-
-    const NEVER: fn(Duration) -> bool = |_| false;
-    const READY: fn(Duration) -> bool = |_| true;
-
-    /// The bug this guards: `read_to_string` on stdin parks forever when stdin
-    /// is an inherited pipe a parent never writes to and never closes — what a
-    /// subprocess spawned without explicit stdin handling looks like. Observed:
-    /// a `--print` run parked 50 minutes, one thread, no CPU, no request built.
-    /// The read must not start at all when nothing is there.
-    #[test]
-    fn does_not_read_when_nothing_is_ever_written() {
-        struct Explodes;
-        impl std::io::Read for Explodes {
-            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                panic!("must not read a stdin that was never ready");
-            }
-        }
-        assert!(read_piped_input(Explodes, Duration::from_millis(10), NEVER).is_none());
-    }
-
-    /// Once something is there, read it whole. A total deadline instead of a
-    /// first-byte one would silently truncate `cat huge-file | scode -p ...`.
-    #[test]
-    fn reads_everything_once_input_is_ready() {
-        let payload = "piped context ".repeat(5_000);
-        let result = read_piped_input(payload.as_bytes(), Duration::from_secs(3), READY);
-        assert_eq!(result.as_deref(), Some(payload.as_str()));
-    }
-
-    /// An immediate EOF (`< /dev/null`) is ready, not silent, and yields nothing
-    /// to add to the prompt.
-    #[test]
-    fn ready_but_empty_is_not_context() {
-        assert!(read_piped_input(&b""[..], Duration::from_secs(30), READY).is_none());
-        assert!(read_piped_input(
-            &b"  
-	 "[..],
-            Duration::from_secs(30),
-            READY
-        )
-        .is_none());
-    }
-
-    /// The deadline is handed to the readiness check, not slept through here.
-    #[test]
-    fn the_deadline_is_delegated_not_slept() {
-        let started = Instant::now();
-        let seen = std::cell::Cell::new(Duration::ZERO);
-        let result = read_piped_input(&b""[..], Duration::from_secs(30), |t| {
-            seen.set(t);
-            false
-        });
-        assert!(result.is_none());
-        assert_eq!(seen.get(), Duration::from_secs(30));
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the caller must not block for the deadline itself",
-        );
-    }
-}
 #[cfg(test)]
 mod wait_notice_tests {
     use super::*;

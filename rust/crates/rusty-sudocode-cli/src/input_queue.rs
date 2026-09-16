@@ -21,6 +21,15 @@
 //! joins them with `\n\n` and issues ONE `run_turn` — not N. This matches
 //! "I'll queue up what I want to say, send it all together when you finish".
 //!
+//! ## Echo timing
+//!
+//! Only the coordinator knows whether a submit runs now (idle) or waits (queued
+//! during a turn), so it — not the UI thread — owns writing the `❯ text` echo to
+//! scrollback: immediately for an idle submit, and at the turn boundary for a
+//! queued one (via [`NextTurn::echoes`]). Until then a queued input lives only
+//! in the transient queue overlay, so pressing Enter mid-turn no longer looks
+//! like the input was sent.
+//!
 //! ## Environment override
 //!
 //! Reads `SUDOCODE_INTERRUPT_QUEUE_MODE`:
@@ -83,16 +92,35 @@ impl QueueMode {
     }
 }
 
-/// A single queued user input (the text the user typed at the prompt, already
-/// trimmed and stripped of slash-command chrome by whatever caller stores it).
+/// A single queued user input.
+///
+/// `text` is the full content sent to the model (paste placeholders expanded).
+/// `display` is the compact form shown in the queue overlay and echoed to
+/// scrollback when the item flushes (paste collapsed to a placeholder chip).
+/// `echo_on_flush` is true for human input — its `❯ display` line is written to
+/// scrollback at the turn boundary, mirroring an idle submit — and false for
+/// A2A peer messages, which already printed their own banner on receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub text: String,
+    pub display: String,
+    pub echo_on_flush: bool,
 }
 
 impl QueuedInput {
-    pub fn normal(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+    pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            display: display.into(),
+            echo_on_flush: true,
+        }
+    }
+    pub fn peer(text: impl Into<String>, display: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            display: display.into(),
+            echo_on_flush: false,
+        }
     }
 }
 
@@ -113,6 +141,10 @@ pub struct NextTurn {
     /// The prompt text to hand to `run_turn`. When multiple items were batched,
     /// this is their `text` fields joined with `\n\n` in submission order.
     pub prompt: String,
+    /// The `❯ display` lines to echo to scrollback for this run, in submission
+    /// order — only the items whose `echo_on_flush` is set (human input). Empty
+    /// for an idle submit, whose echo the coordinator prints directly.
+    pub echoes: Vec<String>,
     /// How many queued items this run consumed.
     pub consumed: usize,
 }
@@ -163,31 +195,32 @@ impl TurnInputCoordinator {
         self.queue.len()
     }
 
-    /// Snapshot of pending texts, oldest first. Used to render the terminal
-    /// queue chips and for the Up-arrow dequeue candidate ("give me the last
-    /// thing I queued back").
+    /// Snapshot of pending display texts, oldest first. Drives the queue
+    /// overlay so it reflects the coordinator's queue exactly.
     #[must_use]
-    pub fn peek(&self) -> Vec<&str> {
-        self.queue.iter().map(|q| q.text.as_str()).collect()
+    pub fn peek_display(&self) -> Vec<String> {
+        self.queue.iter().map(|q| q.display.clone()).collect()
     }
 
     /// Called on the FIRST submit when the REPL is idle. No decision — just run
     /// the input as a normal turn immediately. Kept as a distinct method so
     /// callers don't accidentally route idle submits through the during-turn
-    /// path.
+    /// path. `echoes` is empty: an idle submit's echo is printed by the caller
+    /// right away, not deferred to a turn boundary.
     #[must_use]
     pub fn submit_when_idle(&mut self, text: String) -> NextTurn {
         NextTurn {
             prompt: text,
+            echoes: Vec::new(),
             consumed: 1,
         }
     }
 
     /// Called when a submit lands WHILE a turn is running. Returns what the
     /// caller must do next.
-    pub fn submit_during_turn(&mut self, text: String, mode: QueueMode) -> SubmitOutcome {
+    pub fn submit_during_turn(&mut self, input: QueuedInput, mode: QueueMode) -> SubmitOutcome {
         if mode.queue_enabled() {
-            self.queue.push_back(QueuedInput::normal(text));
+            self.queue.push_back(input);
             return SubmitOutcome::Queued;
         }
         // Queue off — sudocode's historical behavior: reject and let the caller
@@ -196,20 +229,29 @@ impl TurnInputCoordinator {
     }
 
     /// Called on turn end. Consumes all queued items and joins their text with
-    /// `\n\n` for a single batched turn.
+    /// `\n\n` for a single batched turn. `echoes` collects the `display` text of
+    /// items marked `echo_on_flush` (human input) so the caller can write them
+    /// to scrollback now, at the moment they actually run.
     ///
     /// Returns `None` when the queue is empty — the caller reverts to the
     /// idle prompt.
     pub fn drain_next(&mut self) -> Option<NextTurn> {
-        let head = self.queue.pop_front()?;
-        let mut parts = vec![head.text];
-        let mut consumed = 1_usize;
-        while let Some(taken) = self.queue.pop_front() {
-            parts.push(taken.text);
+        if self.queue.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        let mut echoes = Vec::new();
+        let mut consumed = 0_usize;
+        while let Some(item) = self.queue.pop_front() {
+            if item.echo_on_flush {
+                echoes.push(item.display);
+            }
+            parts.push(item.text);
             consumed += 1;
         }
         Some(NextTurn {
             prompt: parts.join("\n\n"),
+            echoes,
             consumed,
         })
     }
@@ -241,45 +283,65 @@ impl TurnInputCoordinator {
 mod queue_docs {
     use super::*;
 
+    fn human(text: &str) -> QueuedInput {
+        QueuedInput::human(text, text)
+    }
+
     #[test]
-    fn idle_submit_runs_alone() {
+    fn idle_submit_runs_alone_without_deferred_echo() {
         let mut c = TurnInputCoordinator::new();
         let next = c.submit_when_idle("hello".to_string());
         assert_eq!(next.prompt, "hello");
+        assert!(next.echoes.is_empty());
         assert_eq!(next.consumed, 1);
         assert_eq!(c.pending(), 0);
     }
 
     #[test]
-    fn queue_mode_batches_on_turn_end() {
+    fn queue_mode_batches_and_echoes_on_turn_end() {
         // queue ON. Three inputs during a turn should flush as ONE batched turn
-        // joined with "\n\n".
+        // joined with "\n\n", echoing each queued display line in order.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
         assert_eq!(
-            c.submit_during_turn("B".into(), mode),
+            c.submit_during_turn(human("B"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(
-            c.submit_during_turn("C".into(), mode),
+            c.submit_during_turn(human("C"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(
-            c.submit_during_turn("D".into(), mode),
+            c.submit_during_turn(human("D"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(c.pending(), 3);
+        assert_eq!(c.peek_display(), vec!["B", "C", "D"]);
         let next = c.drain_next().expect("batched turn present");
         assert_eq!(next.prompt, "B\n\nC\n\nD");
+        assert_eq!(next.echoes, vec!["B", "C", "D"]);
         assert_eq!(next.consumed, 3);
         assert!(c.drain_next().is_none(), "queue drained");
+    }
+
+    #[test]
+    fn peer_input_batches_but_does_not_echo() {
+        // A2A peer messages already printed their own banner on receipt, so
+        // they run but do not add a `❯` echo line at flush time.
+        let mut c = TurnInputCoordinator::new();
+        let mode = QueueMode::Queue;
+        c.submit_during_turn(human("human"), mode);
+        c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
+        let next = c.drain_next().expect("batched turn present");
+        assert_eq!(next.prompt, "human\n\npeer-text");
+        assert_eq!(next.echoes, vec!["human"], "only human input echoes");
     }
 
     #[test]
     fn off_mode_rejects_during_turn() {
         let mut c = TurnInputCoordinator::new();
         assert_eq!(
-            c.submit_during_turn("B".into(), QueueMode::Off),
+            c.submit_during_turn(human("B"), QueueMode::Off),
             SubmitOutcome::Rejected
         );
         assert_eq!(c.pending(), 0);
@@ -289,12 +351,12 @@ mod queue_docs {
     fn dequeue_last_pops_newest_for_up_arrow_refill() {
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
-        c.submit_during_turn("first".into(), mode);
-        c.submit_during_turn("second".into(), mode);
-        c.submit_during_turn("third".into(), mode);
+        c.submit_during_turn(human("first"), mode);
+        c.submit_during_turn(human("second"), mode);
+        c.submit_during_turn(human("third"), mode);
         assert_eq!(c.dequeue_last(), Some("third".to_string()));
         assert_eq!(c.dequeue_last(), Some("second".to_string()));
-        assert_eq!(c.peek(), vec!["first"]);
+        assert_eq!(c.peek_display(), vec!["first"]);
     }
 
     #[test]

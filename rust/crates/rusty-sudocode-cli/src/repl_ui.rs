@@ -554,6 +554,12 @@ pub enum UiCommand {
     ToolFinished {
         id: String,
     },
+    /// Replace the queued-input overlay with the coordinator's current queue
+    /// (compact display texts, oldest first). Empty clears the overlay. This is
+    /// a pure projection of the coordinator's queue — the coordinator sends it
+    /// whenever the queue changes (enqueue on submit-during-turn, clear on
+    /// drain).
+    SetQueue(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -592,6 +598,10 @@ impl UiCommandSender {
 
     pub fn tool_finished(&self, id: &str) {
         let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
+    }
+
+    pub fn set_queue(&self, display_texts: Vec<String>) {
+        let _ = self.tx.send(UiCommand::SetQueue(display_texts));
     }
 }
 
@@ -750,7 +760,10 @@ fn enter_key_event_for_value(
     if trimmed == "/exit" || trimmed == "/quit" {
         Some(InputEvent::Exit)
     } else {
-        Some(InputEvent::Submit(value.to_string()))
+        Some(InputEvent::Submit {
+            text: value.to_string(),
+            display: value.to_string(),
+        })
     }
 }
 
@@ -943,7 +956,14 @@ impl Write for OutputSender {
 /// Events from the iocraft UI to the coordinator thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
-    Submit(String),
+    /// A submitted line. `text` is the full content (paste placeholders
+    /// expanded) sent to the model; `display` is the compact echo form (paste
+    /// collapsed). The coordinator — not the UI — writes the `❯ display` echo to
+    /// scrollback, so it can defer it when the input is queued behind a turn.
+    Submit {
+        text: String,
+        display: String,
+    },
     QuestionAnswer(String),
     /// ESC pressed — cancel the running turn.
     Abort,
@@ -1098,6 +1118,45 @@ fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
     lines.join("\n")
 }
 
+/// Render the queue overlay: user inputs queued behind the running turn, one
+/// compact `↳ queued: <text>` line each (DIM), joined into one multi-line
+/// string. Capped to a height budget like the staging overlay; overflow
+/// collapses to a `… +N more queued` line. Hidden on a very short terminal.
+///
+/// A pure projection of the queued display texts — it holds nothing itself and
+/// never commits to scrollback (the coordinator echoes `❯ text` there when the
+/// item actually flushes).
+fn render_queue_overlay(items: &[String], term_rows: usize) -> String {
+    use crate::render::{DIM, RESET};
+
+    if items.is_empty() {
+        return String::new();
+    }
+    if term_rows <= 10 {
+        return String::new();
+    }
+    let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+
+    let mut lines: Vec<String> = Vec::new();
+    for item in items {
+        if lines.len() >= max_lines {
+            break;
+        }
+        // Collapse to the first line so a multi-line queued input stays one row.
+        let first = item.lines().next().unwrap_or("");
+        lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
+    }
+
+    let hidden = items.len() - lines.len();
+    if hidden > 0 {
+        // Replace the last shown line with the overflow marker so the total
+        // never exceeds the budget.
+        lines.pop();
+        lines.push(format!("{DIM}… +{} more queued{RESET}", hidden + 1));
+    }
+    lines.join("\n")
+}
+
 fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
@@ -1222,6 +1281,10 @@ struct ReplContext {
     /// `ToolStarted` appends; `ToolFinished` removes by id. Same `Arc<Mutex>`
     /// rationale as `context_todos` — avoids shifting hook indices.
     staging_cards: Arc<Mutex<Vec<ToolCard>>>,
+    /// Queued-input display texts for the queue overlay (between StagingSlot and
+    /// StatusSlot), oldest first. Replaced wholesale by `UiCommand::SetQueue`.
+    /// Same `Arc<Mutex>` rationale as `staging_cards`.
+    queued_inputs: Arc<Mutex<Vec<String>>>,
 }
 
 #[component]
@@ -1238,6 +1301,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let context_todos_for_future = Arc::clone(&ctx.context_todos);
     let staging_cards = Arc::clone(&ctx.staging_cards);
     let staging_cards_for_future = Arc::clone(&ctx.staging_cards);
+    let queued_inputs = Arc::clone(&ctx.queued_inputs);
+    let queued_inputs_for_future = Arc::clone(&ctx.queued_inputs);
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -1396,6 +1461,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 cards.retain(|c| c.id != id);
                             }
                         }
+                        Ok(UiCommand::SetQueue(items)) => {
+                            // Pure projection of the coordinator's queue; the
+                            // coordinator resends the full list on every change.
+                            if let Ok(mut q) = queued_inputs_for_future.lock() {
+                                *q = items;
+                            }
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
@@ -1533,7 +1605,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             should_exit.set(true);
                                             let _ = input_tx_for_events.send(InputEvent::Exit);
                                         }
-                                        InputEvent::Submit(text) => {
+                                        InputEvent::Submit { text, .. } => {
                                             let store_snap = paste_store.read().clone();
                                             let expanded = expand_paste_placeholders(&text, &store_snap);
                                             let display = expand_paste_for_display(&text, &store_snap);
@@ -1546,14 +1618,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                                     h.push(trimmed.to_string());
                                                 }
                                             }
-                                            let mut lines = display.split('\n');
-                                            if let Some(first) = lines.next() {
-                                                stdout_for_events.println(format!("{}{}{} {first}", crate::render::BOLD, crate::render::PROMPT_GLYPH, crate::render::RESET));
-                                                for line in lines {
-                                                    stdout_for_events.println(format!("  {line}"));
-                                                }
-                                            }
-                                            let _ = input_tx_for_events.send(InputEvent::Submit(expanded));
+                                            // The coordinator owns the `❯` echo to scrollback: it
+                                            // alone knows whether this runs now (idle) or waits in
+                                            // the queue overlay behind a running turn. Echoing here
+                                            // would make a queued input look sent.
+                                            let _ = input_tx_for_events.send(InputEvent::Submit { text: expanded, display });
                                         }
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
                                     }
@@ -1939,11 +2008,24 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .map(|cards| render_staging_overlay(&cards, term_height as usize))
         .unwrap_or_default();
 
+    // QueueSlot: user inputs queued behind the running turn (DIM), between the
+    // StagingSlot and StatusSlot. Same pure-overlay / fixed-element-shape
+    // rationale as the staging overlay — a queued input lives here (never in
+    // scrollback) until the coordinator flushes it at the turn boundary.
+    let queue_text = queued_inputs
+        .lock()
+        .ok()
+        .map(|items| render_queue_overlay(&items, term_height as usize))
+        .unwrap_or_default();
+
     element! {
         View(flex_direction: FlexDirection::Column) {
             // StagingSlot: in-flight tool cards (yellow). Empty string renders
             // nothing; the element is always present to keep hook order.
             Text(content: staging_text)
+            // QueueSlot: inputs queued behind the running turn (DIM). Empty
+            // string renders nothing; element always present for hook order.
+            Text(content: queue_text)
             // StatusSlot
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
@@ -2061,6 +2143,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         stderr_redir: Arc::clone(&stderr_redir),
         context_todos: Arc::new(Mutex::new(tools::global_todo_list())),
         staging_cards: Arc::new(Mutex::new(Vec::new())),
+        queued_inputs: Arc::new(Mutex::new(Vec::new())),
     };
 
     let banner = startup_banner.to_string();
@@ -2230,7 +2313,10 @@ mod tests {
     fn enter_in_normal_mode_routes_submit() {
         assert_eq!(
             enter_key_event_for_value(None, 0, "hello"),
-            Some(InputEvent::Submit("hello".to_string()))
+            Some(InputEvent::Submit {
+                text: "hello".to_string(),
+                display: "hello".to_string(),
+            })
         );
     }
 
@@ -2275,11 +2361,17 @@ mod tests {
     fn slash_commands_route_as_submit() {
         assert_eq!(
             enter_key_event_for_value(None, 0, "/status"),
-            Some(InputEvent::Submit("/status".to_string()))
+            Some(InputEvent::Submit {
+                text: "/status".to_string(),
+                display: "/status".to_string(),
+            })
         );
         assert_eq!(
             enter_key_event_for_value(None, 0, "/cost"),
-            Some(InputEvent::Submit("/cost".to_string()))
+            Some(InputEvent::Submit {
+                text: "/cost".to_string(),
+                display: "/cost".to_string(),
+            })
         );
     }
 

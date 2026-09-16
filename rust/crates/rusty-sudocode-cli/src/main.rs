@@ -749,6 +749,15 @@ fn stdin_is_readable(timeout: Duration) -> bool {
     !matches!(poll(&mut fds, timeout), Ok(0))
 }
 
+/// Anything that is neither Unix nor Windows: no readiness primitive is wired
+/// up, so read as before. Without this arm the CLI does not compile at all off
+/// those two platforms — a worse outcome than the blocking read it falls back
+/// to, and one the previous `#[cfg(windows)]`/`#[cfg(unix)]` pair caused.
+#[cfg(not(any(unix, windows)))]
+fn stdin_is_readable(_timeout: Duration) -> bool {
+    true
+}
+
 /// Read piped stdin content when stdin is not a terminal.
 ///
 /// Returns `None` when stdin is attached to a terminal (interactive REPL use),

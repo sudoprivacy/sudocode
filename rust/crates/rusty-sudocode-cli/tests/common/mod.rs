@@ -581,6 +581,22 @@ impl TestEnv {
         }
     }
 
+    /// Raw JSON bodies of every `/v1/messages` request the mock captured,
+    /// in arrival order. Panics in live mode — capture is mock-only.
+    pub fn captured_message_bodies(&self) -> Vec<String> {
+        match &self.backend {
+            Backend::Mock {
+                _runtime, server, ..
+            } => _runtime
+                .block_on(server.captured_requests())
+                .iter()
+                .filter(|r| r.path == "/v1/messages")
+                .map(|r| r.raw_body.clone())
+                .collect(),
+            Backend::Live { .. } => panic!("captured_message_bodies is mock-only"),
+        }
+    }
+
     /// Appropriate `expect` timeout for the backend.
     #[must_use]
     pub fn timeout(&self) -> Duration {

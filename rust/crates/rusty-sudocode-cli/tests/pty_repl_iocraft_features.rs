@@ -633,9 +633,25 @@ fn config_tree_navigate_back_and_toggle() {
     // Seed settings.json with sandbox.enabled = false for toggle test.
     let config_home = env.config_home().to_path_buf();
     let settings_path = config_home.join("settings.json");
+    // Merge, never overwrite. `copy_live_credentials` writes `auth_profile`
+    // into this same file, and clobbering it leaves the spawned `scode` with
+    // several proxy accounts and no selection — it exits before drawing a
+    // prompt, so the failure reads as "❯ never appeared" and points at the
+    // REPL rather than at the line above that deleted its credentials.
+    let mut settings: serde_json::Value = fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = settings.as_object_mut() {
+        object.insert("model".to_string(), serde_json::json!("sonnet"));
+        object.insert(
+            "sandbox".to_string(),
+            serde_json::json!({ "enabled": false }),
+        );
+    }
     fs::write(
         &settings_path,
-        r#"{"model": "sonnet", "sandbox": {"enabled": false}}"#,
+        serde_json::to_string_pretty(&settings).expect("settings.json should serialize"),
     )
     .expect("seed settings.json");
 

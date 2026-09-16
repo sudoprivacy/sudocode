@@ -648,7 +648,10 @@ fn spawn_with_workspace(
 /// are copied. Deliberately not the rest of the directory: `scode.exe` and its
 /// backups are tens of megabytes each, and `crons.json` / `plugins/` are
 /// exactly the developer state a hermetic run should start without.
-fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &std::path::Path) {
+pub fn copy_live_credentials(
+    real_config_home: &std::path::Path,
+    test_config_home: &std::path::Path,
+) {
     for relative in ["sudocode.json", "settings.json"] {
         let source = real_config_home.join(relative);
         if source.exists() {

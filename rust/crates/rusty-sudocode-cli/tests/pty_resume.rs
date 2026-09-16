@@ -93,8 +93,20 @@ fn resume_latest_renders_messages_after_banner() {
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
     common::expect_turn_complete(&sess, Duration::from_secs(30), "initial turn");
+    // TEMPORARY EVIDENCE, not a fix: this wait returns early on Linux CI and
+    // the bare expect below reported only a timeout with no screen, so the
+    // failure has never been observable. Print the screen at both points.
+    eprintln!(
+        "EVIDENCE-AFTER-WAIT >>>\n{}\n<<< EVIDENCE-AFTER-WAIT",
+        sess.render(|s| s.contents())
+    );
     sess.send("/exit\r").expect("send exit");
-    sess.expect_eof().expect("clean exit");
+    if let Err(e) = sess.expect_eof() {
+        panic!(
+            "clean exit: {e}\nEVIDENCE-AT-FAILURE >>>\n{}\n<<< EVIDENCE-AT-FAILURE",
+            sess.render(|s| s.contents())
+        );
+    }
 
     // Resume latest session.
     let mut sess2 = env.spawn_with_env(

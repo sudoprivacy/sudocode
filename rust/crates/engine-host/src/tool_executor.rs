@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use runtime::{
-    ContentBlock, PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
+    PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
     QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor, WorkspaceRootHandoff,
 };
 use serde::Deserialize;
@@ -281,20 +281,20 @@ impl ToolExecutor for CliToolExecutor {
         {
             return self.execute_ask_user_question(value);
         }
-        // Intercept ExitPlanMode to ask the user (across the seam) how to
+        // Intercept write_plan to ask the user (across the seam) how to
         // proceed. The confirmation crosses via `question_prompter` — the pump's
         // QuestionAdapter emits a QuestionRequest the renderer answers — so it
         // works on every renderer (REPL dialog, iocraft, ACP client) and on
-        // Windows (no raw stdin read_line). `handle_exit_plan_mode` itself falls
+        // Windows (no raw stdin read_line). `handle_write_plan` itself falls
         // back to "execute normally" for non-interactive / no-prompter contexts.
-        if tool_name == "ExitPlanMode"
+        if tool_name == "write_plan"
             && self
                 .question_prompter
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         {
-            return self.handle_exit_plan_mode(&value, ctx);
+            return self.handle_write_plan(&value, ctx);
         }
 
         let is_mcp_tool = self.tool_registry.has_runtime_tool(&tool_name);
@@ -536,44 +536,37 @@ impl CliToolExecutor {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    /// Intercept `ExitPlanMode` to present a confirmation dialog before
-    /// transitioning out of plan mode. The user chooses between:
-    ///   1. Clear context & execute the plan as a fresh prompt
-    ///   2. Keep context & exit plan mode (current behavior)
-    ///   3. Stay in plan mode and refine the plan
-    fn handle_exit_plan_mode(
+    /// Intercept `write_plan` to present a confirmation dialog after the plan
+    /// is written to the plan file. The plan text comes from the tool `content`
+    /// (the file is the SSOT), never scraped from chat. The user chooses:
+    ///   1. Clear context & execute the plan as a fresh prompt (default)
+    ///   2. Keep context & execute
+    ///   3. Comment (free text) — fed back so the model revises the plan
+    ///   4. Exit plan — stop, do not execute
+    fn handle_write_plan(
         &self,
         value: &serde_json::Value,
         ctx: &runtime::ToolDispatchContext,
     ) -> Result<String, ToolError> {
-        // Extract the plan text from the assistant message that emitted this
-        // tool call. This is the model's plan output.
-        let plan_text = ctx
-            .parent_assistant_message
-            .as_ref()
-            .map(|msg| {
-                msg.blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
+        // The plan is the `content` argument of this write_plan call — the file
+        // is the source of truth, not the surrounding chat message.
+        let plan_text = value
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
 
-        let plan_display = if plan_text.is_empty() {
+        let plan_display = if plan_text.trim().is_empty() {
             "(no plan text available)".to_string()
         } else {
             plan_text.clone()
         };
 
-        // Execute ExitPlanMode normally (restores the previous permission mode).
+        // Run write_plan normally (writes the plan file, returns confirmation).
         let execute_normally = || {
             self.tool_registry
                 .execute_with_abort_and_context(
-                    "ExitPlanMode",
+                    "write_plan",
                     value,
                     self.abort_signal.as_ref(),
                     Some(ctx),
@@ -617,24 +610,30 @@ impl CliToolExecutor {
                 prompt: "Choose an action".to_string(),
                 kind: QuestionKind::SingleSelect,
                 required: true,
-                allow_custom_input: false,
-                custom_input_hint: None,
+                allow_custom_input: true,
+                custom_input_hint: Some("type a comment to revise the plan".to_string()),
                 options: vec![
                     QuestionOption {
                         label: "Clear context & execute plan".to_string(),
                         value: "1".to_string(),
                         description: None,
-                        recommended: false,
+                        recommended: true,
                     },
                     QuestionOption {
                         label: "Keep context & execute".to_string(),
                         value: "2".to_string(),
                         description: None,
-                        recommended: true,
+                        recommended: false,
                     },
                     QuestionOption {
                         label: "Keep planning (provide feedback)".to_string(),
                         value: "3".to_string(),
+                        description: None,
+                        recommended: false,
+                    },
+                    QuestionOption {
+                        label: "Exit plan (don't execute)".to_string(),
+                        value: "4".to_string(),
                         description: None,
                         recommended: false,
                     },
@@ -661,8 +660,9 @@ impl CliToolExecutor {
             "1" => {
                 let result = execute_normally()?;
                 // Store the plan for LiveCli::run_turn to pick up: it clears the
-                // session and re-runs with the plan as the new prompt.
-                let plan_for_execution = if plan_text.is_empty() {
+                // session and re-runs with the plan (the file's content) as the
+                // new prompt.
+                let plan_for_execution = if plan_text.trim().is_empty() {
                     plan_display
                 } else {
                     plan_text
@@ -670,11 +670,29 @@ impl CliToolExecutor {
                 set_pending_plan_execution(plan_for_execution);
                 Ok(result)
             }
-            "3" => Err(ToolError::new(
-                "User chose to continue planning. Please ask the user for feedback and refine the plan based on their input.",
-            )),
-            // "2" or any unrecognized answer: keep context & execute.
-            _ => execute_normally(),
+            // Keep context & execute: the plan file is written, the model proceeds.
+            "2" => execute_normally(),
+            // Exit plan: the plan file is written for reference, but nothing runs.
+            "4" => {
+                let _ = execute_normally()?;
+                Err(ToolError::new(
+                    "User chose to exit plan mode without executing. The plan is saved; do not implement it now — wait for further instructions.",
+                ))
+            }
+            // "3" (Keep planning) or any free-text answer is treated as a comment:
+            // feed it back so the model revises the plan and calls write_plan again.
+            other => {
+                let feedback = if other == "3" || other.trim().is_empty() {
+                    "User chose to keep planning. Ask what to change, then revise the plan and call write_plan again.".to_string()
+                } else {
+                    format!(
+                        "User feedback on the plan: {other}\nRevise the plan accordingly and call write_plan again."
+                    )
+                };
+                // Persist the plan draft so the revision builds on it.
+                let _ = execute_normally();
+                Err(ToolError::new(feedback))
+            }
         }
     }
 }

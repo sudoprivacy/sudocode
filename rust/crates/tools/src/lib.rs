@@ -1153,21 +1153,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
-            name: "EnterPlanMode",
-            description: "Enable a worktree-local planning mode override and remember the previous local setting for ExitPlanMode.",
+            name: "write_plan",
+            description: concat!(
+                "Write an implementation plan and present it to the user for approval before you start changing code.\n\n",
+                "Use this proactively before a non-trivial implementation task — getting sign-off on the approach first prevents wasted effort. Prefer it when ANY of these apply: a new feature, several valid approaches, changes to existing behavior, an architectural choice, edits spanning more than 2-3 files, unclear scope you must explore first, or when the approach could reasonably go multiple ways (if you'd ask a clarifying question about the approach, write a plan instead).\n\n",
+                "Skip it for simple work: one-line or obvious fixes, a single function with clear requirements, tasks the user already specified in detail, or pure research/read-only exploration.\n\n",
+                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary."
+            ),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            required_permission: PermissionMode::WorkspaceWrite,
-        },
-        ToolSpec {
-            name: "ExitPlanMode",
-            description: "Restore or clear the worktree-local planning mode override created by EnterPlanMode.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The full implementation plan, in markdown."
+                    }
+                },
+                "required": ["content"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -1620,8 +1621,7 @@ fn execute_tool_with_enforcer(
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
-        "EnterPlanMode" => from_value::<EnterPlanModeInput>(input).and_then(run_enter_plan_mode),
-        "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
+        "write_plan" => from_value::<WritePlanInput>(input).and_then(run_write_plan),
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
@@ -3293,12 +3293,19 @@ fn run_config(input: ConfigInput) -> Result<String, String> {
     to_pretty_json(execute_config(input)?)
 }
 
-fn run_enter_plan_mode(input: EnterPlanModeInput) -> Result<String, String> {
-    to_pretty_json(execute_enter_plan_mode(input)?)
-}
-
-fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
-    to_pretty_json(execute_exit_plan_mode(input)?)
+fn run_write_plan(input: WritePlanInput) -> Result<String, String> {
+    let content = input.content.trim();
+    if content.is_empty() {
+        return Err(String::from(
+            "write_plan requires a non-empty `content`: write the full plan before presenting it.",
+        ));
+    }
+    let path = runtime::plan_store::write_plan(&input.content)?;
+    to_pretty_json(json!({
+        "ok": true,
+        "planFile": path.display().to_string(),
+        "message": "Plan written and presented to the user for approval.",
+    }))
 }
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {
@@ -3513,13 +3520,10 @@ struct ConfigInput {
     value: Option<ConfigValue>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct EnterPlanModeInput {}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ExitPlanModeInput {}
+#[derive(Debug, Deserialize)]
+struct WritePlanInput {
+    content: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -3928,33 +3932,6 @@ struct ConfigOutput {
     #[serde(rename = "newValue")]
     new_value: Option<Value>,
     error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PlanModeState {
-    #[serde(rename = "hadLocalOverride")]
-    had_local_override: bool,
-    #[serde(rename = "previousLocalMode")]
-    previous_local_mode: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[allow(clippy::struct_excessive_bools)]
-struct PlanModeOutput {
-    success: bool,
-    operation: String,
-    changed: bool,
-    active: bool,
-    managed: bool,
-    message: String,
-    #[serde(rename = "settingsPath")]
-    settings_path: String,
-    #[serde(rename = "statePath")]
-    state_path: String,
-    #[serde(rename = "previousLocalMode")]
-    previous_local_mode: Option<Value>,
-    #[serde(rename = "currentLocalMode")]
-    current_local_mode: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -7068,6 +7045,10 @@ const CORE_TOOLS: &[&str] = &[
     "pid_fork",
     "ToolSearch",
     "AskUserQuestion",
+    // Plan-before-implement is a proactive default: keep it always-visible so the
+    // model reaches for it without a ToolSearch round-trip first (deferring it
+    // would suppress exactly the proactivity we want).
+    "write_plan",
 ];
 
 pub fn is_core_tool(name: &str) -> bool {
@@ -7612,148 +7593,6 @@ fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
     }
 }
 
-const PERMISSION_DEFAULT_MODE_PATH: &[&str] = &["permissions", "defaultMode"];
-
-fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOutput, String> {
-    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
-    let state_path = plan_mode_state_file()?;
-    let mut document = read_json_object(&settings_path)?;
-    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
-    let current_is_plan =
-        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
-
-    if let Some(state) = read_plan_mode_state(&state_path)? {
-        if current_is_plan {
-            return Ok(PlanModeOutput {
-                success: true,
-                operation: String::from("enter"),
-                changed: false,
-                active: true,
-                managed: true,
-                message: String::from("Plan mode override is already active for this worktree."),
-                settings_path: settings_path.display().to_string(),
-                state_path: state_path.display().to_string(),
-                previous_local_mode: state.previous_local_mode,
-                current_local_mode,
-            });
-        }
-        clear_plan_mode_state(&state_path)?;
-    }
-
-    if current_is_plan {
-        return Ok(PlanModeOutput {
-            success: true,
-            operation: String::from("enter"),
-            changed: false,
-            active: true,
-            managed: false,
-            message: String::from(
-                "Worktree-local plan mode is already enabled outside EnterPlanMode; leaving it unchanged.",
-            ),
-            settings_path: settings_path.display().to_string(),
-            state_path: state_path.display().to_string(),
-            previous_local_mode: None,
-            current_local_mode,
-        });
-    }
-
-    let state = PlanModeState {
-        had_local_override: current_local_mode.is_some(),
-        previous_local_mode: current_local_mode.clone(),
-    };
-    write_plan_mode_state(&state_path, &state)?;
-    set_nested_value(
-        &mut document,
-        PERMISSION_DEFAULT_MODE_PATH,
-        Value::String(String::from("plan")),
-    );
-    write_json_object(&settings_path, &document)?;
-
-    Ok(PlanModeOutput {
-        success: true,
-        operation: String::from("enter"),
-        changed: true,
-        active: true,
-        managed: true,
-        message: String::from("Enabled worktree-local plan mode override."),
-        settings_path: settings_path.display().to_string(),
-        state_path: state_path.display().to_string(),
-        previous_local_mode: state.previous_local_mode,
-        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
-    })
-}
-
-fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
-    let settings_path = config_file_for_scope(ConfigScope::Settings)?;
-    let state_path = plan_mode_state_file()?;
-    let mut document = read_json_object(&settings_path)?;
-    let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
-    let current_is_plan =
-        matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
-
-    let Some(state) = read_plan_mode_state(&state_path)? else {
-        return Ok(PlanModeOutput {
-            success: true,
-            operation: String::from("exit"),
-            changed: false,
-            active: current_is_plan,
-            managed: false,
-            message: String::from("No EnterPlanMode override is active for this worktree."),
-            settings_path: settings_path.display().to_string(),
-            state_path: state_path.display().to_string(),
-            previous_local_mode: None,
-            current_local_mode,
-        });
-    };
-
-    if !current_is_plan {
-        clear_plan_mode_state(&state_path)?;
-        return Ok(PlanModeOutput {
-            success: true,
-            operation: String::from("exit"),
-            changed: false,
-            active: false,
-            managed: false,
-            message: String::from(
-                "Cleared stale EnterPlanMode state because plan mode was already changed outside the tool.",
-            ),
-            settings_path: settings_path.display().to_string(),
-            state_path: state_path.display().to_string(),
-            previous_local_mode: state.previous_local_mode,
-            current_local_mode,
-        });
-    }
-
-    if state.had_local_override {
-        if let Some(previous_local_mode) = state.previous_local_mode.clone() {
-            set_nested_value(
-                &mut document,
-                PERMISSION_DEFAULT_MODE_PATH,
-                previous_local_mode,
-            );
-        } else {
-            remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
-        }
-    } else {
-        remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
-    }
-    write_json_object(&settings_path, &document)?;
-    clear_plan_mode_state(&state_path)?;
-
-    Ok(PlanModeOutput {
-        success: true,
-        operation: String::from("exit"),
-        changed: true,
-        active: false,
-        managed: false,
-        message: String::from("Restored the prior worktree-local plan mode setting."),
-        settings_path: settings_path.display().to_string(),
-        state_path: state_path.display().to_string(),
-        previous_local_mode: state.previous_local_mode,
-        current_local_mode: get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned(),
-    })
-}
-
 fn execute_structured_output(
     input: StructuredOutputInput,
 ) -> Result<StructuredOutputResult, String> {
@@ -8030,48 +7869,6 @@ fn remove_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str])
     }
 
     removed
-}
-
-fn plan_mode_state_file() -> Result<PathBuf, String> {
-    Ok(config_file_for_scope(ConfigScope::Settings)?
-        .parent()
-        .ok_or_else(|| String::from("settings.local.json has no parent directory"))?
-        .join("tool-state")
-        .join("plan-mode.json"))
-}
-
-fn read_plan_mode_state(path: &Path) -> Result<Option<PlanModeState>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            if contents.trim().is_empty() {
-                return Ok(None);
-            }
-            serde_json::from_str(&contents)
-                .map(Some)
-                .map_err(|error| error.to_string())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn write_plan_mode_state(path: &Path, state: &PlanModeState) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(state).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn clear_plan_mode_state(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

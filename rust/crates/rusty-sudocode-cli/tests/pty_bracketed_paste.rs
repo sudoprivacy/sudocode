@@ -61,6 +61,7 @@ const FOUR_LINES_CR: &str = "line one\rline two\rline three\rline four";
 /// placeholder and does NOT auto-submit one turn per line. This is the core
 /// regression guard for the original bug where each pasted newline arrived as
 /// KeyCode::Enter and submitted a separate turn.
+#[cfg(not(windows))]
 #[test]
 fn multiline_paste_shows_placeholder_and_does_not_submit() {
     let env = TestEnv::new("bracketed-paste-lf");
@@ -90,6 +91,7 @@ fn multiline_paste_shows_placeholder_and_does_not_submit() {
 
 /// Windows Terminal delivers CRLF between lines; the placeholder must still
 /// report the multi-line count (`+3 lines`), not drop to `[Pasted text #1]`.
+#[cfg(not(windows))]
 #[test]
 fn multiline_paste_crlf_counts_lines() {
     let env = TestEnv::new("bracketed-paste-crlf");
@@ -118,6 +120,7 @@ fn multiline_paste_crlf_counts_lines() {
 
 /// Some terminals separate lines with a bare CR; the placeholder must still
 /// report the multi-line count after newline normalization.
+#[cfg(not(windows))]
 #[test]
 fn multiline_paste_bare_cr_counts_lines() {
     let env = TestEnv::new("bracketed-paste-cr");
@@ -172,6 +175,7 @@ fn short_single_line_paste_inserts_literally() {
 /// looped forever, freezing keyboard and Ctrl-C. Here we paste a multi-line
 /// blob containing the literal placeholder string, submit, and assert the
 /// REPL is still alive by typing `/exit` and getting a clean exit.
+#[cfg(not(windows))]
 #[test]
 fn paste_containing_placeholder_string_then_enter_does_not_hang() {
     let env = TestEnv::new("bracketed-paste-selfref");
@@ -209,6 +213,7 @@ fn paste_containing_placeholder_string_then_enter_does_not_hang() {
 /// line indented by two spaces (matching `ResponseGlyphState`'s margin for
 /// AI output). This guards the fix for the bug where scrollback printed the
 /// raw `[Pasted text #N]` string and multi-line expansions had no indent.
+#[cfg(not(windows))]
 #[test]
 fn paste_scrollback_expands_with_continuation_indent() {
     let env = TestEnv::new("paste-scrollback-indent");

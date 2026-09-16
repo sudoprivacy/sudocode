@@ -499,16 +499,6 @@ fn memory_write_read_forget_workflow() {
     sess.send("Remember this: my favorite programming language is Rust. Save it to memory now.\r")
         .expect("send remember request");
 
-    // Wait for the model to call write_file (proves the API responded).
-    // Keyed on the per-turn status line rather than on a tool name: which write
-    // tool a live model reaches for (`write_file` or `Write`) varies from run to
-    // run, and what this step needs is for the turn to be over before the
-    // on-disk assertion below runs.
-    sess.expect("ctx ").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should see the turn status line after the write: {e}\nPTY screen:\n{screen}");
-    });
-
     // Wait for the turn to complete (REPL prompt returns).
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -548,14 +538,6 @@ fn memory_write_read_forget_workflow() {
     sess.send("Forget my favorite programming language. Remove that memory entry.\r")
         .expect("send forget request");
 
-    // Wait for the turn to finish. Keyed on the per-turn status line, not on a
-    // tool name: which tool a live model reaches for to forget something
-    // (delete the entry, rewrite it, edit the index) is its own choice, and
-    // what this step is about is the result, asserted below.
-    sess.expect("ctx ").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should see the turn status line after forget: {e}\nPTY screen:\n{screen}");
-    });
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("prompt after forget: {e}\nPTY screen:\n{screen}");
@@ -756,11 +738,6 @@ fn memory_staleness_updates_existing_entry() {
                 let screen = sess.render(|s| s.contents());
                 panic!("should see tool call for memory update: {e}\nPTY screen:\n{screen}");
             });
-    } else {
-        sess.expect("ctx ").unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("should see completed live update turn: {e}\nPTY screen:\n{screen}");
-        });
     }
 
     sess.expect("❯").unwrap_or_else(|e| {

@@ -194,6 +194,28 @@ pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &
     }
 }
 
+/// `true` if the rendered screen contains `text`, ignoring terminal line wraps
+/// and ordinary whitespace differences.
+#[must_use]
+pub fn screen_contains(screen: &str, text: &str) -> bool {
+    let compact = |value: &str| value.split_whitespace().collect::<String>();
+    compact(screen).contains(&compact(text))
+}
+
+pub fn expect_turn_complete(sess: &PtySession, budget: Duration, context: &str) {
+    let deadline = Instant::now() + budget;
+    loop {
+        let screen = sess.render(|screen| screen.contents());
+        if screen_contains(&screen, "ctx") {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("{context}: turn did not complete within {budget:?}\nPTY:\n{screen}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Locate the compiled `scode` binary for the current test run.
 #[must_use]
 pub fn scode_bin() -> PathBuf {

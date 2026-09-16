@@ -2085,6 +2085,32 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
     println!("{}", cli.startup_banner());
 
+    // The A2A receiver lives on the coordinator loop, and that loop exists only
+    // in the async REPL. Reaching the SYNC one with an endpoint configured
+    // means the session dialled the broker and provisioned its inbox, and then
+    // nothing ever polls it — peer messages cannot arrive. An inbox nobody
+    // reads looks exactly like an inbox nobody has written to, so this says
+    // which one it is.
+    //
+    // `SUDOCODE_INTERRUPT_QUEUE_MODE` is about input queueing and has no
+    // business deciding whether A2A works. Until the sync REPL can carry a
+    // receiver the coupling stands, but it should at least be visible rather
+    // than silent. Switching modes automatically is the wrong fix: the sync
+    // REPL is the one that reprints `❯` after each turn, which is what the PTY
+    // harness matches on.
+    //
+    // Both `off` and the EMPTY string land here — see `QueueMode::from_str`.
+    let a2a_configured = std::env::var("NEXUS_A2A_ENDPOINT")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if a2a_configured {
+        eprintln!(
+            "warning: NEXUS_A2A_ENDPOINT is set, but this REPL mode cannot RECEIVE A2A \
+             messages (sending still works). Unset SUDOCODE_INTERRUPT_QUEUE_MODE, or set it \
+             to `queue`, for the REPL that carries the receiver."
+        );
+    }
+
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
     // sessions (messages present → render + populate history).

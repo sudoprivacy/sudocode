@@ -1364,6 +1364,7 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
                     "messages": s.message_count,
                     "modified_ms": s.modified_epoch_millis as u64,
                     "branch": s.branch_name,
+                    "summary": s.summary.as_deref().map(cli::session::format_session_summary),
                     "path": s.path.display().to_string(),
                 })
             })
@@ -1381,8 +1382,15 @@ fn list_sessions_cli(output_format: CliOutputFormat) -> Result<(), Box<dyn std::
             .map(|b| format!("  branch={b}"))
             .unwrap_or_default();
         let latest = if i == 0 { "  (latest)" } else { "" };
+        let summary = session
+            .summary
+            .as_deref()
+            .map(cli::session::format_session_summary)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| format!("  summary={summary}"))
+            .unwrap_or_default();
         println!(
-            "  {id}  {msgs} msgs  {age}{branch}{latest}",
+            "  {id}  {msgs} msgs  {age}{branch}{summary}{latest}",
             id = session.id,
             msgs = session.message_count,
         );

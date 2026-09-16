@@ -15,6 +15,7 @@ pub(crate) struct ManagedSessionSummary {
     pub(crate) updated_at_ms: u64,
     pub(crate) modified_epoch_millis: u128,
     pub(crate) message_count: usize,
+    pub(crate) summary: Option<String>,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) branch_name: Option<String>,
     pub(crate) lifecycle: SessionLifecycleSummary,
@@ -38,6 +39,7 @@ pub(crate) fn list_managed_sessions(
             updated_at_ms: session.updated_at_ms,
             modified_epoch_millis: session.modified_epoch_millis,
             message_count: session.message_count,
+            summary: session.summary,
             parent_session_id: session.parent_session_id,
             branch_name: session.branch_name,
             lifecycle: lifecycle.clone(),
@@ -84,8 +86,15 @@ pub(crate) fn render_session_list(
             (Some(branch_name), None) => format!(" branch={branch_name}"),
             (None, None) => String::new(),
         };
+        let summary = session
+            .summary
+            .as_deref()
+            .map(format_session_summary)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| format!(" summary={summary}"))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {id:<20} {marker:<10} lifecycle={lifecycle} msgs={msgs:<4} modified={modified}{lineage} path={path}",
+            "  {id:<20} {marker:<10} lifecycle={lifecycle} msgs={msgs:<4} modified={modified}{lineage}{summary} path={path}",
             id = session.id,
             lifecycle = session.lifecycle.signal(),
             msgs = session.message_count,
@@ -121,13 +130,44 @@ pub(crate) fn format_session_picker_entry(
         (Some(branch_name), None) => format!(" branch={branch_name}"),
         (None, None) => String::new(),
     };
+    let summary = session
+        .summary
+        .as_deref()
+        .map(format_session_summary)
+        .filter(|summary| !summary.is_empty())
+        .map(|summary| format!("  summary={summary}"))
+        .unwrap_or_default();
     format!(
-        "{marker} {id:<20}  msgs={msgs:<4}  modified={modified}  lifecycle={lifecycle}{lineage}",
+        "{marker} {id:<20}  msgs={msgs:<4}  modified={modified}  lifecycle={lifecycle}{lineage}{summary}",
         id = session.id,
         msgs = session.message_count,
         modified = format_session_modified_age(session.modified_epoch_millis),
         lifecycle = session.lifecycle.signal(),
     )
+}
+
+pub(crate) fn format_session_summary(summary: &str) -> String {
+    let summary = summary
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !matches!(
+                    *line,
+                    "<summary>" | "</summary>" | "Summary:" | "Conversation summary:"
+                )
+        })
+        .unwrap_or("")
+        .trim_start_matches(['-', '*', ' ']);
+    let mut end = summary.len();
+    for (index, _) in summary.char_indices().nth(96).into_iter() {
+        end = index;
+    }
+    if end < summary.len() {
+        format!("{}…", &summary[..end])
+    } else {
+        summary.to_string()
+    }
 }
 
 pub(crate) fn format_session_modified_age(modified_epoch_millis: u128) -> String {

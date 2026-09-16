@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
-use crate::session::{Session, SessionError};
+use crate::session::{ContentBlock, MessageRole, Session, SessionError};
 use crate::workspace_root::current_workspace_root;
 
 /// Per-worktree session store that namespaces on-disk session files by
@@ -344,12 +344,18 @@ impl SessionStore {
                     if self.validate_loaded_session(&path, &session).is_err() {
                         continue;
                     }
+                    let summary = session
+                        .compaction
+                        .as_ref()
+                        .map(|compaction| compaction.summary.clone())
+                        .or_else(|| session_summary(&session));
                     ManagedSessionSummary {
                         id: session.session_id,
                         path,
                         updated_at_ms: session.updated_at_ms,
                         modified_epoch_millis,
                         message_count: session.messages.len(),
+                        summary,
                         parent_session_id: session
                             .fork
                             .as_ref()
@@ -370,6 +376,7 @@ impl SessionStore {
                     updated_at_ms: 0,
                     modified_epoch_millis,
                     message_count: 0,
+                    summary: None,
                     parent_session_id: None,
                     branch_name: None,
                 },
@@ -441,6 +448,7 @@ pub struct ManagedSessionSummary {
     pub updated_at_ms: u64,
     pub modified_epoch_millis: u128,
     pub message_count: usize,
+    pub summary: Option<String>,
     pub parent_session_id: Option<String>,
     pub branch_name: Option<String>,
 }
@@ -460,6 +468,24 @@ fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
             .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
             .then_with(|| right.id.cmp(&left.id))
     });
+}
+
+fn session_summary(session: &Session) -> Option<String> {
+    session
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .and_then(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text }
+                    if !text.trim_start().starts_with("<system-reminder>") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+        })
+        .map(|text| text.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -867,6 +893,7 @@ mod tests {
                 updated_at_ms: 200,
                 modified_epoch_millis: 100,
                 message_count: 2,
+                summary: None,
                 parent_session_id: None,
                 branch_name: None,
             },
@@ -876,6 +903,7 @@ mod tests {
                 updated_at_ms: 100,
                 modified_epoch_millis: 200,
                 message_count: 1,
+                summary: None,
                 parent_session_id: None,
                 branch_name: None,
             },

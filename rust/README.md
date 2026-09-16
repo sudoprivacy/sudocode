@@ -23,6 +23,7 @@ rust/
     ├── plugins/            # Plugin metadata, install/enable/disable surfaces
     ├── runtime/            # Session, config, permissions, MCP, prompts, auth loop
     ├── rusty-sudocode-cli/ # The `scode` binary
+    ├── stdin-peek/         # The workspace's only `unsafe`: a stdin readiness peek
     ├── telemetry/          # Session trace events + usage telemetry types
     └── tools/              # Built-in tools, skill resolution, tool search
 ```
@@ -47,6 +48,13 @@ rust/
 - **rusty-sudocode-cli** — REPL, one-shot prompt, direct CLI
   subcommands, streaming display, tool call rendering, CLI argument
   parsing.
+- **stdin-peek** — asks whether stdin has data waiting, without
+  starting a read. Deliberately the only crate that does not opt into
+  the workspace lints, so `unsafe_code = "forbid"` stays absolute
+  everywhere else: Windows needs `PeekNamedPipe` (FFI) to tell an
+  empty-but-open pipe from a closed one, and `forbid` cannot be
+  relaxed from inside a crate that inherits it. Nothing else belongs
+  here — policy lives in callers, where the lint still applies.
 - **telemetry** — session trace events and supporting telemetry payloads.
 - **tools** — tool specs and execution: Bash, ReadFile, WriteFile,
   EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent,

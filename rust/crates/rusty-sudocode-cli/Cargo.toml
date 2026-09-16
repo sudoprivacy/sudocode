@@ -60,6 +60,11 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-tungstenite = "0.29"
 
+[target.'cfg(windows)'.dependencies]
+# The one crate allowed to contain `unsafe` — see its docs for why the
+# workspace's `unsafe_code = "forbid"` is kept absolute everywhere else.
+stdin-peek = { path = "../stdin-peek" }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["term", "poll", "signal", "fs"] }
 

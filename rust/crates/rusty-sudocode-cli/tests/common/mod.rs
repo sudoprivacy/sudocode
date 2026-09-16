@@ -741,6 +741,12 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "ETIMEDOUT",
         "ECONNREFUSED",
         "connection refused",
+        // Deliberately NOT here: `scode`'s own "still waiting on <host>" notice.
+        // It is emitted once a turn passes `WAIT_NOTICE_FIRST` and then on an
+        // interval, so every slow-but-successful live turn prints it. Treating
+        // it as unavailability turns any assertion that outlasts its budget into
+        // a skip — including a genuine miss, which a mutation test caught doing
+        // exactly that. Slowness is answered by a bigger budget, not by a skip.
         // The proxy gateway has no channel for this model in the routing group
         // the request landed in. Arrives as a 500 rather than a 404, and repeats
         // on every retry until the routing config changes, so it is a statement

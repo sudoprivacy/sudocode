@@ -13,9 +13,10 @@
 //! - `Explore/`  — carries a sentinel `EXPLORE_ONLY_SENTINEL_QWERTY`
 //! - `Plan/`     — carries a sentinel `PLAN_ONLY_SENTINEL_ZXCV`
 //!
-//! Then the parent spawns TWO sub-agents:
-//! - one `Explore` worker asked "what's in your memory?"
-//! - one `Plan` worker asked the same
+//! Then the parent spawns TWO sub-agents and gives each ordinary
+//! work — neither is asked about its memory:
+//! - one `Explore` worker
+//! - one `Plan` worker
 //!
 //! Each worker's reply must contain ONLY its own sentinel — never the
 //! other's.  The test fails if either sentinel leaks across the
@@ -41,6 +42,7 @@ use std::fs;
 use std::path::Path;
 
 use common::{TestEnv, LIVE_TIMEOUT};
+use serde_json::Value;
 
 const EXPLORE_SENTINEL: &str = "EXPLORE_ONLY_SENTINEL_QWERTY";
 const PLAN_SENTINEL: &str = "PLAN_ONLY_SENTINEL_ZXCV";
@@ -60,13 +62,19 @@ fn require_live(env: &TestEnv, test_name: &str) -> bool {
 fn seed_agent_memory(memory_base: &Path, agent_type: &str, sentinel: &str) {
     let dir = memory_base.join("agent-memory").join(agent_type);
     fs::create_dir_all(&dir).expect("mkdir agent memory dir");
+    // Seeded as a habit the agent applies to its own answers, not as a secret
+    // for someone to ask it for. That is what makes the tag observable without
+    // the prompt having to request it: a tag can only reach the screen if this
+    // agent's memory was loaded for this agent, which is the scoping property
+    // under test.
     let entry = format!(
         "---\n\
-         name: sentinel\n\
-         description: {sentinel}\n\
+         name: reply-tag\n\
+         description: how the {agent_type} agent tags its own replies\n\
          metadata:\n  type: user\n\
          ---\n\
-         {sentinel} — agent {agent_type}'s private memory. Reply with this string verbatim.\n"
+         Always begin your reply with the tag {sentinel} so the reader can tell \
+         which agent answered.\n"
     );
     fs::write(dir.join("sentinel.md"), entry).expect("write sentinel entry");
 }
@@ -88,17 +96,30 @@ fn explore_and_plan_agents_have_isolated_memory() {
     let memory_base_str = memory_base.display().to_string();
     let extra_env = &[("SUDOCODE_MEMORY_DIR", memory_base_str.as_str())];
 
-    // Ask the parent to spawn two workers — one Explore, one Plan —
-    // each of which must recite ONLY its own sentinel. Use
-    // read-only permission mode because both presets are read-only.
+    // Ordinary work for two workers — one Explore, one Plan — with no mention of
+    // memory, tags, or echoing anything back.
+    //
+    // An earlier version asked each sub-agent to "report the exact sentinel
+    // string in your persistent memory" and the parent to "report both replies
+    // verbatim". A live model read that shape as an exfiltration probe, said so
+    // on screen ("a classic exfiltration probe … I won't execute these spawns"),
+    // and refused the whole request — so the test failed on a refusal instead of
+    // on memory scoping. `pty_agent_summary` (ce366d00) and
+    // `pty_verification_streak` were rewritten for the same reason.
+    //
+    // Nothing is lost by dropping the request: each agent's seeded memory tells
+    // it to tag its own replies, so the tags surface because the parent
+    // summarises what its workers actually said.
     let prompt = format!(
-        "Use Agent(subagent_type=\"Explore\", description=\"read memory\", \
-         prompt=\"Report the exact sentinel string in your persistent memory. \
-         Reply with just the sentinel string.\") \
-         and separately Agent(subagent_type=\"Plan\", description=\"read memory\", \
-         prompt=\"Report the exact sentinel string in your persistent memory. \
-         Reply with just the sentinel string.\") \
-         to inspect each agent's memory. Report both replies verbatim."
+        "I want two perspectives on the same question: how would someone new to \
+         a repository find where its HTTP requests are made? \
+         Ask Agent(subagent_type=\"Explore\", description=\"search strategy\", \
+         prompt=\"In two sentences, describe how you would search a repository \
+         to find where HTTP requests are made.\") and, separately, \
+         Agent(subagent_type=\"Plan\", description=\"approach\", \
+         prompt=\"In two sentences, outline a plan for locating where HTTP \
+         requests are made in a repository.\"). Then summarise what each of them \
+         told you."
     );
 
     let mut sess = env.spawn_with_env(
@@ -112,8 +133,9 @@ fn explore_and_plan_agents_have_isolated_memory() {
     let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
-    // Both sentinels should eventually surface (the parent reports both
-    // replies verbatim). Order isn't guaranteed — expect them separately.
+    // Both tags should eventually surface: each worker opens its own reply with
+    // its own tag, and the parent's summary carries them through. Order isn't
+    // guaranteed — expect them separately.
     sess.expect(EXPLORE_SENTINEL).unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!(
@@ -163,22 +185,65 @@ fn explore_and_plan_agents_have_isolated_memory() {
     });
     assert_eq!(exit, 0, "scode should exit 0; got {exit}");
 
-    // Cross-contamination check: neither sentinel should appear in
-    // the OTHER agent's answer. We approximate this by looking at
-    // the final screen — the parent's summary quotes both replies,
-    // and each reply must sit in its own segment.
-    let screen = sess.render(|s| s.contents());
-    // Count occurrences of each sentinel — Explore & Plan each appear
-    // AT LEAST once (in their own agent's reply). If either appears
-    // more than reasonable, that's a leak signal.
-    let explore_count = screen.matches(EXPLORE_SENTINEL).count();
-    let plan_count = screen.matches(PLAN_SENTINEL).count();
+    // Cross-contamination check, read off each worker's own persisted manifest
+    // rather than off the rendered screen.
+    //
+    // The screen is an 80×24 viewport and it scrolls. Each tag reaches it when
+    // that worker answers, early in a long transcript, and by the time the run
+    // ends neither is visible any more — so counting occurrences there measured
+    // what happened to still be on screen, not what each agent said. That is
+    // what this assertion failed on even though both tags had demonstrably
+    // arrived (the two waits above consumed them from the stream).
+    //
+    // `.sudocode-agents/<agent_id>.json` keeps each worker's final text in
+    // `result` for as long as the workspace lives, which is also how
+    // `pty_agent_model_inheritance` reads a child's outcome.
+    //
+    // Asserted per agent, which is strictly stronger than the old total: a leak
+    // is one agent's tag appearing in the OTHER agent's result, and that is now
+    // named directly instead of inferred from a count.
+    let manifests: Vec<Value> = fs::read_dir(env.workspace_root().join(".sudocode-agents"))
+        .expect("read .sudocode-agents")
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|entry| {
+            serde_json::from_slice(&fs::read(entry.path()).expect("read manifest"))
+                .expect("manifest must be JSON")
+        })
+        .collect();
+
+    let result_of = |agent_type: &str| -> String {
+        let manifest = manifests
+            .iter()
+            // `subagentType`, not `subagent_type`: the manifest is
+            // `AgentOutput` with per-field `#[serde(rename = …)]` camelCase, so
+            // the snake_case key reads as absent and every lookup misses.
+            .find(|m| m["subagentType"] == agent_type)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {agent_type} manifest among the {} spawned",
+                    manifests.len()
+                )
+            });
+        manifest["result"].as_str().unwrap_or_default().to_string()
+    };
+
+    let explore_result = result_of("Explore");
+    let plan_result = result_of("Plan");
     assert!(
-        explore_count >= 1 && explore_count <= 3,
-        "Explore sentinel appears {explore_count}× (expected 1..=3 — one per agent quote)"
+        explore_result.contains(EXPLORE_SENTINEL),
+        "Explore's own memory tag must open its reply; got: {explore_result}"
     );
     assert!(
-        plan_count >= 1 && plan_count <= 3,
-        "Plan sentinel appears {plan_count}× (expected 1..=3 — one per agent quote)"
+        !explore_result.contains(PLAN_SENTINEL),
+        "Plan's tag leaked into Explore's reply: {explore_result}"
+    );
+    assert!(
+        plan_result.contains(PLAN_SENTINEL),
+        "Plan's own memory tag must open its reply; got: {plan_result}"
+    );
+    assert!(
+        !plan_result.contains(EXPLORE_SENTINEL),
+        "Explore's tag leaked into Plan's reply: {plan_result}"
     );
 }

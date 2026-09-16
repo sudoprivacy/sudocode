@@ -310,6 +310,15 @@ pub const DIM: &str = "\x1b[2m";
 /// ANSI bold.
 pub const BOLD: &str = "\x1b[1m";
 
+/// The REPL prompt glyph (`❯`). Single source of truth: the live input line,
+/// the resumed-history echo, and any other prompt reprint all reference this so
+/// they can never drift (a past bug rendered resumed messages with `›` while
+/// the live prompt used `❯`).
+pub const PROMPT_GLYPH: &str = "\u{276f}";
+/// The prompt glyph followed by one space — the exact prefix a prompt line
+/// starts with.
+pub const PROMPT_PREFIX: &str = "\u{276f} ";
+
 /// Process-wide theme, detected once at startup.
 static THEME: std::sync::OnceLock<ColorTheme> = std::sync::OnceLock::new();
 

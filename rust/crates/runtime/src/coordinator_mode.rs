@@ -36,8 +36,7 @@ pub const COORDINATOR_ENV_VAR: &str = "SUDOCODE_COORDINATOR_MODE";
 /// Mirrors CC-fork's `INTERNAL_WORKER_TOOLS` restriction — the
 /// coordinator's job is to orchestrate workers, not to execute
 /// write-side work itself. Every write tool (`bash`, `write_file`,
-/// `edit_file`, `PowerShell`, `EnterPlanMode`,
-/// `ExitPlanMode`) is intentionally excluded so a
+/// `edit_file`, `PowerShell`, `write_plan`) is intentionally excluded so a
 /// non-compliant model that tries them gets an instructive error
 /// pointing back to `agent_spawn(...)`. Read-only tools (`read_file`,
 /// `glob_search`, `grep_search`, `WebSearch`, `WebFetch`) remain
@@ -148,7 +147,7 @@ Every message you send is to the user. Worker results and system notifications a
 - **pid_output** - Read a running or completed worker's output by `pid`
 - **pid_fork** - Fork the current session into a background worker
 
-Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `EnterPlanMode`, `ExitPlanMode`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
+Write tools (`bash`, `write_file`, `edit_file`, `PowerShell`, `write_plan`) are DELIBERATELY unavailable to you — always delegate write-side work to a worker via `agent_spawn(...)`. Read-only tools (`read_file`, `glob_search`, `grep_search`, `WebSearch`, `WebFetch`, `Skill`) remain available for lightweight lookups that don't need a full worker turn.
 
 When calling agent_spawn:
 - Do not use one worker to check on another. Workers will notify you when they are done.

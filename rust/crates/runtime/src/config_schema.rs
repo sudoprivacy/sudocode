@@ -154,8 +154,7 @@ const HOOKS_CHILDREN: &[FieldSchema] = &[
     ),
 ];
 
-const PERMISSION_MODE_OPTIONS: &[&str] =
-    &["plan", "read-only", "workspace-write", "danger-full-access"];
+const PERMISSION_MODE_OPTIONS: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
 
 const PERMISSIONS_CHILDREN: &[FieldSchema] = &[
     FieldSchema::enumerated(

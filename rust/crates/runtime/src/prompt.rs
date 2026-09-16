@@ -738,7 +738,8 @@ fn get_using_tools_section() -> String {
     "# Tools\n\
      - Prefer dedicated tools over bash: read_file (not cat/head/sed), edit_file and write_file (not sed/heredoc), glob_search (not find/ls), grep_search (not grep/rg). Keep bash for real shell work.\n\
      - Make independent tool calls in parallel; dependent ones sequentially.\n\
-     - Use AskUserQuestion for structured choices from the user, and TodoWrite to track multi-step work.\n\n\
+     - Use AskUserQuestion for structured choices from the user, and TodoWrite to track multi-step work.\n\
+     - Before a non-trivial implementation (a feature, a multi-file or architectural change, or anything with several reasonable approaches), call write_plan to design the approach and get the user's approval first; skip it for small, well-specified, or read-only tasks.\n\n\
      # Git\n\
      - Commit only when asked, and never amend unless asked: after a failed pre-commit hook the commit did not happen — fix the issue and make a new commit. Stage specific files (not git add -A); skip files that likely hold secrets. Messages say why, not what, passed via a quoted heredoc. Never edit git config, skip hooks, or force-push to main.\n\
      - Use gh for GitHub. For a PR, review every commit on the branch (not just the last), then gh pr create with a title under 70 chars and a body with ## Summary and ## Test plan."

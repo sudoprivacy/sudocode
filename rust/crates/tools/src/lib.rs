@@ -7713,7 +7713,7 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["permissions", "defaultMode"],
-            options: Some(&["default", "plan", "acceptEdits", "dontAsk", "auto"]),
+            options: Some(&["default", "acceptEdits", "dontAsk", "auto"]),
         },
         "language" => ConfigSettingSpec {
             scope: ConfigScope::Settings,

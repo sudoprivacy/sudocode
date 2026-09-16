@@ -288,12 +288,18 @@ fn compact_with_model(
         ],
     )
     .unwrap();
-    cli.expect(expected).unwrap_or_else(|error| {
-        panic!(
-            "expected {expected}: {error}\n{}",
-            cli.render(|screen| screen.contents())
-        )
-    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = cli.render(|screen| screen.contents());
+        if common::screen_contains(&screen, expected) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {expected}\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     cli.expect_eof().unwrap()
 }
 
@@ -743,8 +749,21 @@ fn empty_compacted_history_cannot_continue_a_task() {
         "typed turn landed",
     );
     cli.send("\r").unwrap();
-    cli.expect("no active history").unwrap();
-    cli.send("/exit\r").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = cli.render(|s| s.contents());
+        if common::screen_contains(&screen, "no active history") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected no active history\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    cli.send("/exit").unwrap();
+    common::expect_input_line(&cli, "/exit", Duration::from_secs(30), "exit typed");
+    cli.send("\r").unwrap();
     cli.expect_eof().unwrap();
     assert!(
         provider.requests.lock().unwrap().is_empty(),

@@ -52,13 +52,8 @@ fn up_arrow_moves_cursor_to_beginning_before_history() {
     std::thread::sleep(Duration::from_millis(100));
     // Clear the line and exit instead of submitting to LLM.
     sess.send("\x15").expect("Ctrl-U to clear line");
-    std::thread::sleep(Duration::from_millis(100));
-    sess.send("/exit\r").expect("send /exit");
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen2 = sess.render(|s| s.contents());
-        panic!("exit: {e}\nPTY screen:\n{screen2}");
-    });
-    assert_eq!(exit, 0);
+    common::expect_input_line_cleared(&sess, Duration::from_secs(10), "line cleared");
+    exit_cleanly(&mut sess);
 }
 
 /// On empty prompt, ↑ should navigate history (not get stuck).
@@ -101,13 +96,8 @@ fn up_arrow_navigates_history_on_empty_buffer() {
 
     // Clear and exit.
     sess.send("\x15").expect("Ctrl-U");
-    std::thread::sleep(Duration::from_millis(100));
-    sess.send("/exit\r").expect("send /exit");
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen2 = sess.render(|s| s.contents());
-        panic!("exit: {e}\nPTY screen:\n{screen2}");
-    });
-    assert_eq!(exit, 0);
+    common::expect_input_line_cleared(&sess, Duration::from_secs(15), "history line cleared");
+    exit_cleanly(&mut sess);
 }
 
 /// ↓ on non-empty buffer should move cursor to end of line.
@@ -370,6 +360,10 @@ fn up_arrow_moves_to_start_before_recalling_history() {
 
 /// Up inside a multi-line buffer moves between logical lines first; only once
 /// the cursor is on the first line does it jump to the start.
+/// Multi-line keyboard input needs real terminal event semantics that the
+/// Windows ConPTY harness cannot synthesize reliably. Bracketed-paste behavior
+/// remains covered by the dedicated paste suite.
+#[cfg(not(windows))]
 #[test]
 fn up_arrow_moves_between_logical_lines_before_jumping_to_start() {
     let env = common::TestEnv::new("arrow-up-multiline");

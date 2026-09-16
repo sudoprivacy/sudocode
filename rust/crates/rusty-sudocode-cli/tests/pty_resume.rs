@@ -92,7 +92,7 @@ fn resume_latest_renders_messages_after_banner() {
     sess.set_default_timeout(Duration::from_secs(15));
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    sess.expect("❯").expect("second prompt after turn");
+    common::expect_turn_complete(&sess, Duration::from_secs(30), "initial turn");
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
 

@@ -1,51 +1,52 @@
-//! REPL input queue + interrupt coordinator for the interactive shell.
+//! REPL input queue for the interactive shell.
 //!
-//! Mirrors the semantics of sudowork's `turnInputCoordinator` (see
-//! [design](https://s.shareone.vip/s/sudowork-interrupt-queue) §3.2 matrix) so
-//! users get the same behavior whether they're in the sudocode CLI or driving it
-//! through sudowork's ACP server. The two products are runtime-exclusive — one
+//! When a turn is running, user (and A2A peer) inputs are queued rather than
+//! blocked, and flushed as one batched turn when the turn ends. This mirrors
+//! the queue half of sudowork's `turnInputCoordinator`; sudocode's REPL does
+//! not auto-interrupt a running turn — the human uses ESC / Ctrl-C to cancel
+//! explicitly (see `EscCancelHandler` and the `abort_hook` in `LineEditor`),
+//! and A2A peers never interrupt. The two products are runtime-exclusive: one
 //! sudocode process is either a REPL for a human at a terminal OR an ACP server
-//! for sudowork; behavior parity is on the interaction semantics, not on a shared
-//! runtime queue.
+//! for sudowork.
 //!
-//! ## Matrix (§3.2)
+//! ## Behavior
 //!
-//! |                        | queue OFF                  | queue ON                                        |
-//! |------------------------|----------------------------|--------------------------------------------------|
-//! | **auto-interrupt OFF** | current behavior (blocked) | queued during turn; batched flush on turn end   |
-//! | **auto-interrupt ON**  | send-immediately-interrupt | interrupter runs solo, rest queued + batched    |
+//! |                | queue OFF                  | queue ON (default)                            |
+//! |----------------|----------------------------|-----------------------------------------------|
+//! | during a turn  | rejected (blocked)         | queued during turn; batched flush on turn end |
 //!
 //! ## Batched flush
 //!
 //! When N inputs are queued while a turn is running, on turn end the coordinator
 //! joins them with `\n\n` and issues ONE `run_turn` — not N. This matches
 //! "I'll queue up what I want to say, send it all together when you finish".
-//! The auto-interrupter, if any, always runs alone as a fresh solo turn (§3.2
-//! row 2: "第一条立即打断并单独作为新轮启动") — its follow-ups then batch normally.
+//!
+//! ## Echo timing
+//!
+//! Only the coordinator knows whether a submit runs now (idle) or waits (queued
+//! during a turn), so it — not the UI thread — owns writing the `❯ text` echo to
+//! scrollback: immediately for an idle submit, and at the turn boundary for a
+//! queued one (via [`NextTurn::echoes`]). Until then a queued input lives only
+//! in the transient queue overlay, so pressing Enter mid-turn no longer looks
+//! like the input was sent.
 //!
 //! ## Environment override
 //!
 //! Reads `SUDOCODE_INTERRUPT_QUEUE_MODE`:
 //! - unset — defaults to `queue` (CC parity)
-//! - `off` — sync behavior, no queue, no interrupt
-//! - `queue` — queue ON, auto-interrupt OFF (default)
-//! - `interrupt` — auto-interrupt ON, queue OFF (interrupt-then-send)
-//! - `both` — both ON (sudowork-parity default)
+//! - `off` — sync behavior, no queue
+//! - `queue` — queue ON (default)
 //!
-//! Wiring (input-thread + main coordinator + tokio worker) lives in
-//! `main.rs`'s interactive REPL and is only activated when this env var is set,
-//! so the default sync REPL path is untouched. See
-//! `notes/plans/conversation-interrupt-queue-sudocode.md` for the full plan.
+//! Wiring (input-thread + main coordinator + tokio worker) lives in `main.rs`'s
+//! interactive REPL.
 
 use std::collections::VecDeque;
 
-/// Which parts of the interrupt+queue matrix are active.
+/// Whether the REPL queues inputs that land while a turn is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueMode {
     Off,
     Queue,
-    Interrupt,
-    Both,
 }
 
 impl QueueMode {
@@ -65,8 +66,6 @@ impl QueueMode {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" | "" => Some(Self::Off),
             "queue" => Some(Self::Queue),
-            "interrupt" => Some(Self::Interrupt),
-            "both" => Some(Self::Both),
             _ => None,
         }
     }
@@ -76,8 +75,6 @@ impl QueueMode {
         match self {
             Self::Off => 0,
             Self::Queue => 1,
-            Self::Interrupt => 2,
-            Self::Both => 3,
         }
     }
 
@@ -85,46 +82,44 @@ impl QueueMode {
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Off,
-            1 => Self::Queue,
-            2 => Self::Interrupt,
-            3 => Self::Both,
             _ => Self::Queue,
         }
     }
 
     #[must_use]
     pub fn queue_enabled(self) -> bool {
-        matches!(self, Self::Queue | Self::Both)
-    }
-
-    #[must_use]
-    pub fn interrupt_enabled(self) -> bool {
-        matches!(self, Self::Interrupt | Self::Both)
+        matches!(self, Self::Queue)
     }
 }
 
-/// A single queued user input (the text the user typed at the prompt, already
-/// trimmed and stripped of slash-command chrome by whatever caller stores it).
+/// A single queued user input.
+///
+/// `text` is the full content sent to the model (paste placeholders expanded).
+/// `display` is the compact form shown in the queue overlay and echoed to
+/// scrollback when the item flushes (paste collapsed to a placeholder chip).
+/// `echo_on_flush` is true for human input — its `❯ display` line is written to
+/// scrollback at the turn boundary, mirroring an idle submit — and false for
+/// A2A peer messages, which already printed their own banner on receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub text: String,
-    /// When true, this input MUST run as its own solo turn — it does NOT join
-    /// a batched flush. Set by the auto-interrupt path so an interrupter is a
-    /// fresh turn per §3.2 row 2.
-    pub solo: bool,
+    pub display: String,
+    pub echo_on_flush: bool,
 }
 
 impl QueuedInput {
-    pub fn normal(text: impl Into<String>) -> Self {
+    pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            solo: false,
+            display: display.into(),
+            echo_on_flush: true,
         }
     }
-    pub fn solo(text: impl Into<String>) -> Self {
+    pub fn peer(text: impl Into<String>, display: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            solo: true,
+            display: display.into(),
+            echo_on_flush: false,
         }
     }
 }
@@ -132,38 +127,32 @@ impl QueuedInput {
 /// The decision returned by `submit_during_turn` — what the caller must do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitOutcome {
-    /// Input added to the queue; no interrupt. On turn end, it will flush.
+    /// Input added to the queue; on turn end, it will flush.
     Queued,
-    /// Auto-interrupt fires. Caller MUST call the abort signal to cancel the
-    /// current turn; the interrupter has been placed at the queue head and
-    /// will run solo on the next drain iteration.
-    Interrupt,
-    /// Both toggles are off — the current sync behavior. Caller should print
-    /// a "wait for reply" tip and drop the input.
+    /// Queue is off — the current sync behavior. Caller should print a
+    /// "wait for reply" tip and drop the input.
     Rejected,
 }
 
-/// The next batch to run after a turn ends (or after an interrupt fires and
-/// the current turn cancels). `None` = queue is empty, sit at the prompt.
+/// The next batch to run after a turn ends. `None` = queue is empty, sit at
+/// the prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextTurn {
-    /// The prompt text to hand to `run_turn`. When multiple non-solo items were
-    /// batched, this is their `text` fields joined with `\n\n` in submission order.
+    /// The prompt text to hand to `run_turn`. When multiple items were batched,
+    /// this is their `text` fields joined with `\n\n` in submission order.
     pub prompt: String,
-    /// True when this run corresponds to a single solo item (an auto-interrupter).
-    /// Callers can use this for UI (e.g. "🔀 running interrupter" vs "▶ flushing
-    /// queued batch of N").
-    pub solo: bool,
-    /// How many queued items this run consumed. Solo runs always report 1;
-    /// batched runs report the batch size.
+    /// The `❯ display` lines to echo to scrollback for this run, in submission
+    /// order — only the items whose `echo_on_flush` is set (human input). Empty
+    /// for an idle submit, whose echo the coordinator prints directly.
+    pub echoes: Vec<String>,
+    /// How many queued items this run consumed.
     pub consumed: usize,
 }
 
 /// The active [`QueueMode`], shared with whatever reads it mid-session.
 ///
-/// `/config set auto-interrupt on|off` writes here and the REPL reads it at
-/// each turn boundary, so the mode is a live setting rather than a value fixed
-/// at startup.
+/// `/config set queue on|off` writes here and the REPL reads it at each turn
+/// boundary, so the mode is a live setting rather than a value fixed at startup.
 pub type SharedQueueMode = std::sync::Arc<std::sync::atomic::AtomicU8>;
 
 /// Create a shared queue mode from the initial value.
@@ -179,9 +168,10 @@ pub fn load_queue_mode(shared: &SharedQueueMode) -> QueueMode {
 }
 
 /// SSOT for "what does the REPL do with each new line the user types". Mirrors
-/// sudowork's `turnInputCoordinator` (`src/process/task/turnInputCoordinator.ts`)
-/// but the state model is simpler because sudocode has ONE conversation per REPL
-/// instance (sudowork multiplexes many by `conversationId`).
+/// the queue half of sudowork's `turnInputCoordinator`
+/// (`src/process/task/turnInputCoordinator.ts`) but the state model is simpler
+/// because sudocode has ONE conversation per REPL instance (sudowork
+/// multiplexes many by `conversationId`).
 ///
 /// The coordinator itself is pure sync — no threads, no channels. Wiring it to
 /// the async input-thread + tokio worker lives in `main.rs`.
@@ -205,82 +195,63 @@ impl TurnInputCoordinator {
         self.queue.len()
     }
 
-    /// Snapshot of pending texts, oldest first. Used to render the terminal
-    /// queue chips and for the Up-arrow dequeue candidate ("give me the last
-    /// thing I queued back").
+    /// Snapshot of pending display texts, oldest first. Drives the queue
+    /// overlay so it reflects the coordinator's queue exactly.
     #[must_use]
-    pub fn peek(&self) -> Vec<&str> {
-        self.queue.iter().map(|q| q.text.as_str()).collect()
+    pub fn peek_display(&self) -> Vec<String> {
+        self.queue.iter().map(|q| q.display.clone()).collect()
     }
 
-    /// Called on the FIRST submit when the REPL is idle. No matrix decision —
-    /// just run the input as a normal turn immediately. Kept as a distinct
-    /// method so callers don't accidentally route idle submits through the
-    /// during-turn matrix.
+    /// Called on the FIRST submit when the REPL is idle. No decision — just run
+    /// the input as a normal turn immediately. Kept as a distinct method so
+    /// callers don't accidentally route idle submits through the during-turn
+    /// path. `echoes` is empty: an idle submit's echo is printed by the caller
+    /// right away, not deferred to a turn boundary.
     #[must_use]
     pub fn submit_when_idle(&mut self, text: String) -> NextTurn {
         NextTurn {
             prompt: text,
-            solo: false,
+            echoes: Vec::new(),
             consumed: 1,
         }
     }
 
-    /// Called when a submit lands WHILE a turn is running. Applies the matrix
-    /// and mutates the queue in place. Returns what the caller must do next.
-    pub fn submit_during_turn(&mut self, text: String, mode: QueueMode) -> SubmitOutcome {
-        if mode.interrupt_enabled() {
-            // Auto-interrupt: the new input becomes a solo run at the head. If
-            // queue is also off, drop everything else — matches sudowork
-            // "auto-interrupt + queue off = pending items are dropped".
-            if !mode.queue_enabled() {
-                self.queue.clear();
-            }
-            self.queue.push_front(QueuedInput::solo(text));
-            return SubmitOutcome::Interrupt;
-        }
+    /// Called when a submit lands WHILE a turn is running. Returns what the
+    /// caller must do next.
+    pub fn submit_during_turn(&mut self, input: QueuedInput, mode: QueueMode) -> SubmitOutcome {
         if mode.queue_enabled() {
-            self.queue.push_back(QueuedInput::normal(text));
+            self.queue.push_back(input);
             return SubmitOutcome::Queued;
         }
-        // Both toggles off — sudocode's historical behavior: reject and let
-        // the caller print "still running, wait" (or ignore).
+        // Queue off — sudocode's historical behavior: reject and let the caller
+        // print "still running, wait" (or ignore).
         SubmitOutcome::Rejected
     }
 
-    /// Called on turn end (natural completion OR after `abort_signal.abort()`
-    /// during an auto-interrupt). Consumes items off the head:
-    /// - if the head is `solo`, take ONLY it (auto-interrupter runs alone)
-    /// - else, take the head + all successive non-solo items and join their
-    ///   text with `\n\n` for a single batched turn
+    /// Called on turn end. Consumes all queued items and joins their text with
+    /// `\n\n` for a single batched turn. `echoes` collects the `display` text of
+    /// items marked `echo_on_flush` (human input) so the caller can write them
+    /// to scrollback now, at the moment they actually run.
     ///
     /// Returns `None` when the queue is empty — the caller reverts to the
     /// idle prompt.
     pub fn drain_next(&mut self) -> Option<NextTurn> {
-        let head = self.queue.pop_front()?;
-        if head.solo {
-            return Some(NextTurn {
-                prompt: head.text,
-                solo: true,
-                consumed: 1,
-            });
+        if self.queue.is_empty() {
+            return None;
         }
-        let mut parts = vec![head.text];
-        let mut consumed = 1_usize;
-        while let Some(front) = self.queue.front() {
-            if front.solo {
-                break;
+        let mut parts = Vec::new();
+        let mut echoes = Vec::new();
+        let mut consumed = 0_usize;
+        while let Some(item) = self.queue.pop_front() {
+            if item.echo_on_flush {
+                echoes.push(item.display);
             }
-            let taken = self
-                .queue
-                .pop_front()
-                .expect("front peek proved item exists");
-            parts.push(taken.text);
+            parts.push(item.text);
             consumed += 1;
         }
         Some(NextTurn {
             prompt: parts.join("\n\n"),
-            solo: false,
+            echoes,
             consumed,
         })
     }
@@ -302,108 +273,75 @@ impl TurnInputCoordinator {
 // Unit tests below are gated so that release builds skip them entirely,
 // per the sudocode "no unit tests" convention (memory
 // feedback_no_unit_tests_sudocode) — the tests exist purely as executable
-// documentation of the §3.2 matrix and are the ONLY unit tests in this
-// crate. If the matrix ever grows, extend the doc tests below rather
-// than adding a Cargo test target.
+// documentation of the queue behavior and are the ONLY unit tests in this
+// crate.
 //
-// Real behavioral coverage lands in a PTY integration test (Phase 2 of
-// notes/plans/conversation-interrupt-queue-sudocode.md).
+// Real behavioral coverage lands in a PTY integration test.
 // -------------------------------------------------------------------
 
 #[cfg(test)]
-mod matrix_docs {
+mod queue_docs {
     use super::*;
 
+    fn human(text: &str) -> QueuedInput {
+        QueuedInput::human(text, text)
+    }
+
     #[test]
-    fn idle_submit_runs_alone_no_matrix() {
+    fn idle_submit_runs_alone_without_deferred_echo() {
         let mut c = TurnInputCoordinator::new();
         let next = c.submit_when_idle("hello".to_string());
         assert_eq!(next.prompt, "hello");
-        assert!(!next.solo);
+        assert!(next.echoes.is_empty());
         assert_eq!(next.consumed, 1);
         assert_eq!(c.pending(), 0);
     }
 
     #[test]
-    fn queue_mode_batches_on_turn_end() {
-        // §3.2: queue ON, auto-interrupt OFF. Three inputs during a turn should
-        // flush as ONE batched turn joined with "\n\n".
+    fn queue_mode_batches_and_echoes_on_turn_end() {
+        // queue ON. Three inputs during a turn should flush as ONE batched turn
+        // joined with "\n\n", echoing each queued display line in order.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
         assert_eq!(
-            c.submit_during_turn("B".into(), mode),
+            c.submit_during_turn(human("B"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(
-            c.submit_during_turn("C".into(), mode),
+            c.submit_during_turn(human("C"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(
-            c.submit_during_turn("D".into(), mode),
+            c.submit_during_turn(human("D"), mode),
             SubmitOutcome::Queued
         );
         assert_eq!(c.pending(), 3);
+        assert_eq!(c.peek_display(), vec!["B", "C", "D"]);
         let next = c.drain_next().expect("batched turn present");
         assert_eq!(next.prompt, "B\n\nC\n\nD");
+        assert_eq!(next.echoes, vec!["B", "C", "D"]);
         assert_eq!(next.consumed, 3);
-        assert!(!next.solo);
         assert!(c.drain_next().is_none(), "queue drained");
     }
 
     #[test]
-    fn interrupt_mode_forces_solo_and_drops_queue_when_queue_off() {
-        // §3.2: auto-interrupt ON, queue OFF. Any pending items are dropped;
-        // the interrupter runs alone.
+    fn peer_input_batches_but_does_not_echo() {
+        // A2A peer messages already printed their own banner on receipt, so
+        // they run but do not add a `❯` echo line at flush time.
         let mut c = TurnInputCoordinator::new();
-        // Prime the queue with one item that queue-mode had put there earlier.
-        c.queue.push_back(QueuedInput::normal("stale-B"));
-        assert_eq!(
-            c.submit_during_turn("C".into(), QueueMode::Interrupt),
-            SubmitOutcome::Interrupt
-        );
-        // stale-B dropped; C is the solo head.
-        let next = c.drain_next().expect("interrupter present");
-        assert_eq!(next.prompt, "C");
-        assert!(next.solo);
-        assert_eq!(next.consumed, 1);
-        assert!(c.drain_next().is_none());
-    }
-
-    #[test]
-    fn both_mode_interrupter_solo_then_batched_rest() {
-        // §3.2: both ON. Interrupter runs solo; anything queued behind it
-        // batches together on the next drain.
-        let mut c = TurnInputCoordinator::new();
-        assert_eq!(
-            c.submit_during_turn("B".into(), QueueMode::Queue),
-            SubmitOutcome::Queued
-        );
-        // C interrupts — solo, goes to head; B is pushed back one slot.
-        assert_eq!(
-            c.submit_during_turn("C".into(), QueueMode::Both),
-            SubmitOutcome::Interrupt
-        );
-        // D queued after the interrupt in Queue-only mode — goes to tail.
-        assert_eq!(
-            c.submit_during_turn("D".into(), QueueMode::Queue),
-            SubmitOutcome::Queued
-        );
-        // First drain: solo C.
-        let next = c.drain_next().unwrap();
-        assert_eq!(next.prompt, "C");
-        assert!(next.solo);
-        // Second drain: B + D batched.
-        let next = c.drain_next().unwrap();
-        assert_eq!(next.prompt, "B\n\nD");
-        assert!(!next.solo);
-        assert_eq!(next.consumed, 2);
+        let mode = QueueMode::Queue;
+        c.submit_during_turn(human("human"), mode);
+        c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
+        let next = c.drain_next().expect("batched turn present");
+        assert_eq!(next.prompt, "human\n\npeer-text");
+        assert_eq!(next.echoes, vec!["human"], "only human input echoes");
     }
 
     #[test]
     fn off_mode_rejects_during_turn() {
         let mut c = TurnInputCoordinator::new();
         assert_eq!(
-            c.submit_during_turn("B".into(), QueueMode::Off),
+            c.submit_during_turn(human("B"), QueueMode::Off),
             SubmitOutcome::Rejected
         );
         assert_eq!(c.pending(), 0);
@@ -413,24 +351,21 @@ mod matrix_docs {
     fn dequeue_last_pops_newest_for_up_arrow_refill() {
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
-        c.submit_during_turn("first".into(), mode);
-        c.submit_during_turn("second".into(), mode);
-        c.submit_during_turn("third".into(), mode);
+        c.submit_during_turn(human("first"), mode);
+        c.submit_during_turn(human("second"), mode);
+        c.submit_during_turn(human("third"), mode);
         assert_eq!(c.dequeue_last(), Some("third".to_string()));
         assert_eq!(c.dequeue_last(), Some("second".to_string()));
-        assert_eq!(c.peek(), vec!["first"]);
+        assert_eq!(c.peek_display(), vec!["first"]);
     }
 
     #[test]
-    fn queue_mode_env_var_parses_all_variants() {
-        // Executable spec of the env-var contract — bump if the enum changes.
+    fn queue_mode_env_var_parses_variants() {
+        // Executable spec of the env-var contract.
         assert_eq!(QueueMode::from_str("off"), Some(QueueMode::Off));
         assert_eq!(QueueMode::from_str("QUEUE"), Some(QueueMode::Queue));
-        assert_eq!(
-            QueueMode::from_str(" interrupt "),
-            Some(QueueMode::Interrupt)
-        );
-        assert_eq!(QueueMode::from_str("Both"), Some(QueueMode::Both));
+        assert_eq!(QueueMode::from_str(" queue "), Some(QueueMode::Queue));
+        assert_eq!(QueueMode::from_str("interrupt"), None);
         assert_eq!(QueueMode::from_str("nonsense"), None);
     }
 }

@@ -2856,6 +2856,26 @@ impl Drop for ReplTurnCancelMonitor {
     }
 }
 
+/// Write a submitted user input to scrollback as the `❯ text` echo, matching
+/// the format the idle path has always used. Called by the coordinator — the
+/// only place that knows whether an input runs now or was queued — so a queued
+/// input is echoed when it actually flushes, not when it was typed. Multi-line
+/// input keeps the `❯` on the first line and indents the rest.
+fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
+    let mut lines = display.split('\n');
+    if let Some(first) = lines.next() {
+        output.println(&format!(
+            "{}{}{} {first}",
+            render::BOLD,
+            render::PROMPT_GLYPH,
+            RESET
+        ));
+        for line in lines {
+            output.println(&format!("  {line}"));
+        }
+    }
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -2975,6 +2995,14 @@ fn run_repl_iocraft_dispatch(
                 }
                 let next = coord.lock().unwrap().drain_next();
                 if let Some(next) = next {
+                    // Echo the queued human inputs to scrollback now, as they
+                    // actually run — the coordinator deferred these from submit
+                    // time so a queued input never looked sent. Then clear the
+                    // queue overlay: these items are leaving the queue.
+                    for echo in &next.echoes {
+                        echo_submit_to_scrollback(&repl_output, echo);
+                    }
+                    repl_ui_cmd.set_queue(Vec::new());
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -2990,6 +3018,7 @@ fn run_repl_iocraft_dispatch(
             }
             CoordinatorEvent::PeerMessage(msg, ack) => {
                 repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+                let peer_from = msg.from.clone();
                 let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
                 if !turn_active {
                     turn_active = true;
@@ -3003,10 +3032,12 @@ fn run_repl_iocraft_dispatch(
                         coord_tx.clone(),
                     ));
                 } else {
-                    coord
-                        .lock()
-                        .unwrap()
-                        .submit_during_turn(prompt, input_queue::QueueMode::Queue);
+                    let mut coord_lock = coord.lock().unwrap();
+                    coord_lock.submit_during_turn(
+                        input_queue::QueuedInput::peer(prompt, format!("A2A from {peer_from}")),
+                        input_queue::QueueMode::Queue,
+                    );
+                    repl_ui_cmd.set_queue(coord_lock.peek_display());
                 }
                 // Taken: the message is this process's responsibility now, so
                 // the receiver may advance its cursor. What remains — the
@@ -3036,7 +3067,7 @@ fn run_repl_iocraft_dispatch(
                         let _ = commands.send(EngineCommand::Cancel);
                     }
                 }
-                repl_ui::InputEvent::Submit(text) => {
+                repl_ui::InputEvent::Submit { text, display } => {
                     if text.trim() == "/exit" || text.trim() == "/quit" {
                         cancel_pending_question_answer(&pending_question_answer);
                         repl_ui_cmd.clear_question();
@@ -3165,8 +3196,13 @@ fn run_repl_iocraft_dispatch(
                         continue;
                     }
 
-                    // Route to turn.
+                    // Route to turn. The coordinator owns the `❯` echo to
+                    // scrollback so a queued input isn't shown as sent: an idle
+                    // submit echoes now and runs; a during-turn submit is held
+                    // in the queue overlay and echoed at the turn boundary when
+                    // it actually flushes (see `drain_next`'s `echoes`).
                     if !turn_active {
+                        echo_submit_to_scrollback(&repl_output, &display);
                         let next = coord.lock().unwrap().submit_when_idle(text);
                         turn_active = true;
                         runner_handle = Some(spawn_iocraft_turn(
@@ -3179,14 +3215,14 @@ fn run_repl_iocraft_dispatch(
                             coord_tx.clone(),
                         ));
                     } else {
-                        let outcome = coord
-                            .lock()
-                            .unwrap()
-                            .submit_during_turn(text, input_queue::load_queue_mode(&shared_mode));
+                        let mut coord_lock = coord.lock().unwrap();
+                        let outcome = coord_lock.submit_during_turn(
+                            input_queue::QueuedInput::human(text, display),
+                            input_queue::load_queue_mode(&shared_mode),
+                        );
                         match outcome {
-                            input_queue::SubmitOutcome::Queued => {}
-                            input_queue::SubmitOutcome::Interrupt => {
-                                let _ = commands.send(EngineCommand::Cancel);
+                            input_queue::SubmitOutcome::Queued => {
+                                repl_ui_cmd.set_queue(coord_lock.peek_display());
                             }
                             input_queue::SubmitOutcome::Rejected => {
                                 repl_output.println(
@@ -3303,7 +3339,7 @@ struct LiveCli {
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
-    /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
+    /// Shared atomic queue mode for the async REPL. `/config set queue`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     /// `Some` ⇔ async REPL mode is active.
     shared_queue_mode: Option<input_queue::SharedQueueMode>,
@@ -4823,35 +4859,6 @@ impl LiveCli {
         value: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match key {
-            "auto-interrupt" | "autoInterrupt" => {
-                let Some(on) = parse_on_off(value) else {
-                    self.out_println("Usage: /config set auto-interrupt on|off");
-                    return Ok(());
-                };
-                if let Some(shared) = &self.shared_queue_mode {
-                    use std::sync::atomic::Ordering;
-                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
-                    let new_mode = if on {
-                        if current.queue_enabled() {
-                            input_queue::QueueMode::Both
-                        } else {
-                            input_queue::QueueMode::Interrupt
-                        }
-                    } else if current.queue_enabled() {
-                        input_queue::QueueMode::Queue
-                    } else {
-                        input_queue::QueueMode::Off
-                    };
-                    shared.store(new_mode.to_u8(), Ordering::Relaxed);
-                    self.out_println(format!(
-                        "{DIM}auto-interrupt: {}{RESET}",
-                        if on { "on" } else { "off" }
-                    ));
-                } else {
-                    eprintln!("auto-interrupt is only available in async REPL mode");
-                }
-                Ok(())
-            }
             "queue" | "messageQueue" => {
                 let Some(on) = parse_on_off(value) else {
                     eprintln!("Usage: /config set queue on|off");
@@ -4859,15 +4866,8 @@ impl LiveCli {
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;
-                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
                     let new_mode = if on {
-                        if current.interrupt_enabled() {
-                            input_queue::QueueMode::Both
-                        } else {
-                            input_queue::QueueMode::Queue
-                        }
-                    } else if current.interrupt_enabled() {
-                        input_queue::QueueMode::Interrupt
+                        input_queue::QueueMode::Queue
                     } else {
                         input_queue::QueueMode::Off
                     };
@@ -4885,8 +4885,8 @@ impl LiveCli {
                 // Everything else routes through the single SSOT config writer
                 // (`tools::set_config_setting`) so `/config set` persists to the
                 // scope-appropriate settings file instead of a session-only,
-                // divergent in-memory copy. `auto-interrupt`/`queue` above stay
-                // session toggles by design (no on-disk representation).
+                // divergent in-memory copy. `queue` above stays a
+                // session toggle by design (no on-disk representation).
                 match tools::set_config_setting(key, value) {
                     Ok(msg) => self.out_println(format!("{DIM}{msg}{RESET}")),
                     Err(err) => eprintln!("Error: {err}"),

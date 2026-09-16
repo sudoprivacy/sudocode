@@ -42,7 +42,7 @@ fn strip_ansi_codes(input: &str) -> String {
     output
 }
 
-use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, RESET};
+use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
@@ -108,13 +108,14 @@ pub(crate) fn render_message(
             if text.is_empty() {
                 return None;
             }
-            let sep = format!("{DIM}{}{RESET}", "─".repeat(term_width));
-            out.push_str(&sep);
-            out.push('\n');
+            // Render exactly the plain `❯ text` prompt echo — no surrounding
+            // horizontal rules. The rules were added in the original resume
+            // work to "match live output", but the live iocraft REPL never
+            // commits a ruled box to scrollback (the input widget is a canvas
+            // that redraws away); the rules only made a resumed message look
+            // like the live input box below it.
             let (echo, _) = format_input_echo(&text, term_width);
             out.push_str(&echo);
-            out.push('\n');
-            out.push_str(&sep);
         }
         runtime::MessageRole::Assistant => {
             for block in &msg.blocks {
@@ -678,11 +679,7 @@ pub(crate) fn format_input_echo(input: &str, term_width: usize) -> (String, usiz
         // is visually identical to how it appeared when you typed it: the plain
         // `❯ text` prompt line, no styled background. Continuation lines indent
         // by two spaces to align under the text.
-        let prefix = if idx == 0 {
-            concat!("\u{276f}", " ")
-        } else {
-            "  "
-        };
+        let prefix = if idx == 0 { PROMPT_PREFIX } else { "  " };
         let body = format!("{prefix}{line}");
         if idx > 0 {
             rendered.push('\n');
@@ -2623,6 +2620,41 @@ mod tests {
         assert!(
             plain.contains("Bash(cargo test --workspace)"),
             "replay must show the command from the call input: {plain}"
+        );
+    }
+
+    #[test]
+    fn resumed_user_echo_uses_the_shared_prompt_prefix() {
+        // DRY guard: the resumed-history echo and the live input line must
+        // share the same prompt glyph. Both reference render::PROMPT_PREFIX, so
+        // this asserts the echo starts with it — if someone hardcodes a
+        // different glyph again (the old `›` bug), this fails.
+        let (echo, _) = format_input_echo("hi", 80);
+        assert!(
+            echo.starts_with(crate::render::PROMPT_PREFIX),
+            "echo must start with the shared prompt prefix: {echo:?}"
+        );
+    }
+
+    #[test]
+    fn resumed_user_message_has_no_horizontal_rules() {
+        // Regression: a restored user message used to be wrapped in `─`×width
+        // rules above and below, making it look like the live input box. It
+        // must render as the plain `❯ text` echo — no rules.
+        let renderer = crate::render::TerminalRenderer::new();
+        let messages = vec![runtime::ConversationMessage {
+            role: runtime::MessageRole::User,
+            blocks: vec![runtime::ContentBlock::Text {
+                text: "hello there".to_string(),
+            }],
+            usage: None,
+            model: None,
+        }];
+        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
+        assert!(plain.contains("hello there"), "{plain}");
+        assert!(
+            !plain.contains('─'),
+            "resumed user message must not draw horizontal rules: {plain:?}"
         );
     }
 

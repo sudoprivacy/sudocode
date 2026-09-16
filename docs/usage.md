@@ -99,6 +99,20 @@ See [`authentication.md`](./authentication.md).
 
 See [`permissions-and-sandbox.md`](./permissions-and-sandbox.md).
 
+## Inspecting context usage
+
+`/context` in the REPL draws the context window as a grid of squares, one
+color per category (system prompt, system tools, MCP tools, agent types,
+memory files, skills, messages), with free space in `⛶` and the buffer
+auto-compaction keeps in reserve in `⛝`. The legend lists each category's
+estimated tokens and share of the window; the headline total is the
+provider-reported occupancy of the latest response once a turn has completed,
+and a local estimate before that. The footer summarises each source with a
+count and a token total; `/context all` expands it to one line per tool,
+agent type, memory file, and skill. Tool definitions are counted exactly as
+the next request would carry them: a deferred tool the model has not yet
+discovered through ToolSearch is listed but costs no tokens.
+
 ## Compacting a long conversation
 
 `/compact` in the REPL, ACP, or `scode --resume <id> /compact` uses the same

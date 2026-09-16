@@ -719,19 +719,20 @@ fn split_error_hint(message: &str) -> (String, Option<String>) {
 /// hangs forever.
 const STDIN_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Windows: always reports readable, so the read proceeds as it always has.
+/// Windows: peek the pipe via `stdin-peek`, the one crate that may call
+/// `PeekNamedPipe`.
 ///
-/// The correct check is `PeekNamedPipe`, which asks whether a pipe holds data
-/// without starting a read. It cannot be called here: this workspace sets
-/// `unsafe_code = "forbid"` at the root, `forbid` cannot be relaxed locally,
-/// and no crate in the tree wraps that call safely. So on Windows a `--print`
-/// run whose stdin is an inherited pipe that is never written and never closed
-/// still blocks — see the module-level note on `read_piped_input` for what that
-/// looks like. Closing the gap needs a decision this code cannot make: take a
-/// safe wrapper as a dependency, or carve an exception to the lint.
+/// That crate exists so the workspace's `unsafe_code = "forbid"` stays absolute
+/// in every other crate; its docs carry the rationale. An indeterminate answer
+/// — stdin is not a pipe, or the peek failed inconclusively — must fall through
+/// to the read. Reporting it as "not ready" would silently drop piped input
+/// that was really there, which is worse than the blocking read this replaces.
 #[cfg(windows)]
-fn stdin_is_readable(_timeout: Duration) -> bool {
-    true
+fn stdin_is_readable(timeout: Duration) -> bool {
+    !matches!(
+        stdin_peek::stdin_is_readable(timeout),
+        stdin_peek::Readiness::NotReady
+    )
 }
 
 /// Wait up to `timeout` for stdin to become readable, consuming nothing.

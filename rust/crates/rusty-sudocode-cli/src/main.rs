@@ -3185,9 +3185,6 @@ fn run_repl_iocraft_dispatch(
                             .submit_during_turn(text, input_queue::load_queue_mode(&shared_mode));
                         match outcome {
                             input_queue::SubmitOutcome::Queued => {}
-                            input_queue::SubmitOutcome::Interrupt => {
-                                let _ = commands.send(EngineCommand::Cancel);
-                            }
                             input_queue::SubmitOutcome::Rejected => {
                                 repl_output.println(
                                     &format!("{DIM}(a turn is running; set SUDOCODE_INTERRUPT_QUEUE_MODE=queue to queue instead){RESET}"),
@@ -3303,7 +3300,7 @@ struct LiveCli {
     /// Tool-use ids already restored by `/undo`. Used to make repeated
     /// `/undo` calls step further back rather than re-undoing the same edit.
     undone_tool_use_ids: std::collections::HashSet<String>,
-    /// Shared atomic queue mode for the async REPL. `/config set auto-interrupt`
+    /// Shared atomic queue mode for the async REPL. `/config set queue`
     /// writes to this; the coordinator reads it each `submit_during_turn`.
     /// `Some` ⇔ async REPL mode is active.
     shared_queue_mode: Option<input_queue::SharedQueueMode>,
@@ -4823,35 +4820,6 @@ impl LiveCli {
         value: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match key {
-            "auto-interrupt" | "autoInterrupt" => {
-                let Some(on) = parse_on_off(value) else {
-                    self.out_println("Usage: /config set auto-interrupt on|off");
-                    return Ok(());
-                };
-                if let Some(shared) = &self.shared_queue_mode {
-                    use std::sync::atomic::Ordering;
-                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
-                    let new_mode = if on {
-                        if current.queue_enabled() {
-                            input_queue::QueueMode::Both
-                        } else {
-                            input_queue::QueueMode::Interrupt
-                        }
-                    } else if current.queue_enabled() {
-                        input_queue::QueueMode::Queue
-                    } else {
-                        input_queue::QueueMode::Off
-                    };
-                    shared.store(new_mode.to_u8(), Ordering::Relaxed);
-                    self.out_println(format!(
-                        "{DIM}auto-interrupt: {}{RESET}",
-                        if on { "on" } else { "off" }
-                    ));
-                } else {
-                    eprintln!("auto-interrupt is only available in async REPL mode");
-                }
-                Ok(())
-            }
             "queue" | "messageQueue" => {
                 let Some(on) = parse_on_off(value) else {
                     eprintln!("Usage: /config set queue on|off");
@@ -4859,15 +4827,8 @@ impl LiveCli {
                 };
                 if let Some(shared) = &self.shared_queue_mode {
                     use std::sync::atomic::Ordering;
-                    let current = input_queue::QueueMode::from_u8(shared.load(Ordering::Relaxed));
                     let new_mode = if on {
-                        if current.interrupt_enabled() {
-                            input_queue::QueueMode::Both
-                        } else {
-                            input_queue::QueueMode::Queue
-                        }
-                    } else if current.interrupt_enabled() {
-                        input_queue::QueueMode::Interrupt
+                        input_queue::QueueMode::Queue
                     } else {
                         input_queue::QueueMode::Off
                     };
@@ -4885,8 +4846,8 @@ impl LiveCli {
                 // Everything else routes through the single SSOT config writer
                 // (`tools::set_config_setting`) so `/config set` persists to the
                 // scope-appropriate settings file instead of a session-only,
-                // divergent in-memory copy. `auto-interrupt`/`queue` above stay
-                // session toggles by design (no on-disk representation).
+                // divergent in-memory copy. `queue` above stays a
+                // session toggle by design (no on-disk representation).
                 match tools::set_config_setting(key, value) {
                     Ok(msg) => self.out_println(format!("{DIM}{msg}{RESET}")),
                     Err(err) => eprintln!("Error: {err}"),

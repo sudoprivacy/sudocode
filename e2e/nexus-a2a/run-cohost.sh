@@ -81,7 +81,15 @@ MANIFEST=("--manifest-path" "$RUST_DIR/Cargo.toml")
 CARGO_TEST=(cargo test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "== [skip] $IMAGE is not present — build it in the nexus repo =="
+  # Loud, because a skip that scrolls past reads like a pass. This harness is
+  # the only cover for the co-host receive loop, so "it did not run" and "it
+  # passed" must not look alike at a glance.
+  echo "!! ================================================================"
+  echo "!! SKIPPED — NOTHING WAS VERIFIED"
+  echo "!! $IMAGE is not present."
+  echo "!! Build it in the nexus repo (dockerfiles/Dockerfile.nexusd-cohost),"
+  echo "!! or set COHOST_IMAGE to a tag that exists."
+  echo "!! ================================================================"
   exit 0
 fi
 # Printed on EVERY run, not only on failure: the agent under test is the

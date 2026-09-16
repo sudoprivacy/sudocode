@@ -136,16 +136,54 @@ pub fn load_sudocode_config_for_current_dir() -> engine_core::SudoCodeConfig {
     load_sudocode_config_for_cwd(&cwd)
 }
 
+/// Process-wide `--account`, set once at startup and applied to every config
+/// this pair loads.
+///
+/// The persistent form is `scode config account <name>`, which writes
+/// `auth_profile` into the settings file that owns the scope. That is the wrong
+/// tool when the config home is shared — on this machine roughly a dozen
+/// sessions read one `~/.nexus/sudocode`, and repointing it for a single run
+/// bills someone else's work to the account you picked, silently, until they
+/// notice a routing group they cannot reach.
+///
+/// So the override lives in memory for the life of the process and touches no
+/// file. First-write-wins, mirroring `prompt::set_cli_prompt_overrides`.
+static CLI_ACCOUNT_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the process-wide `--account`. `None` leaves the settings' own
+/// `auth_profile` in charge.
+pub fn set_cli_account_override(account: Option<String>) {
+    if let Some(name) = account
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+    {
+        let _ = CLI_ACCOUNT_OVERRIDE.set(name);
+    }
+}
+
+/// Apply the `--account` override, if one was given.
+///
+/// Applied here rather than at each call site: this pair is the one place every
+/// entry point — REPL, `--print`, acp, subagents — resolves the config, so an
+/// override applied here cannot be forgotten by a path added later.
+fn apply_cli_account_override(config: &mut engine_core::SudoCodeConfig) {
+    if let Some(account) = CLI_ACCOUNT_OVERRIDE.get() {
+        config.selected_account = Some(account.clone());
+    }
+}
+
 pub fn load_sudocode_config_for_cwd(cwd: &Path) -> engine_core::SudoCodeConfig {
     let loader = ConfigLoader::default_for(cwd);
-    let config = loader.load_sudocode_config().unwrap_or_default();
+    let mut config = loader.load_sudocode_config().unwrap_or_default();
+    apply_cli_account_override(&mut config);
     runtime::model_capabilities::apply_config_limits(&config);
     config
 }
 
 pub fn require_sudocode_config_for_cwd(cwd: &Path) -> Result<engine_core::SudoCodeConfig, String> {
     let loader = ConfigLoader::default_for(cwd);
-    let config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
+    let mut config = loader.load_sudocode_config().map_err(|e| e.to_string())?;
+    apply_cli_account_override(&mut config);
     // Seed the capability overrides here rather than at each startup site:
     // every entry point (REPL, --print, acp, subagents) reaches the config
     // through this pair, and a forgotten seeding call is invisible until a

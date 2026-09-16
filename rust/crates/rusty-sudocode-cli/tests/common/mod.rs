@@ -38,6 +38,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 use pty_expect::{PtySession, Result};
+// The harness must resolve the config home exactly as the binary it spawns
+// does. It used to carry its own copy, which omitted the Windows
+// `USERPROFILE` fallback — so with `HOME` unset the two disagreed and the
+// harness seeded credentials into a directory the child never read.
+use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -202,15 +207,46 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
     compact(screen).contains(&compact(text))
 }
 
+/// Block until a turn has finished AND the REPL is ready for input again.
+///
+/// Two conditions, because the status line alone is not enough. `ctx …` is
+/// printed when a turn ends, but the REPL has not necessarily re-armed its
+/// input line by then — the submitted text can still be sitting on the prompt
+/// row. A caller that sends the next thing in that window loses the
+/// keystrokes, and the damage surfaces far away: `/exit` never registers, the
+/// child never exits, and the test dies as
+/// `clean exit: Timeout(15s, "<child exit>")`. That was observed four times
+/// with identical wording — `pty_cancel.rs:129` and `pty_resume.rs:97`, on
+/// ubuntu and on macos, including on the commit that added this helper — which
+/// is why it waits for readiness and not just for the status line. The
+/// readiness test reuses the same parse as [`expect_input_line_cleared`]:
+/// the prompt row is back and holds nothing.
+///
+/// Ordered deliberately: the turn must be seen FIRST. An input line can read
+/// empty before the turn even starts, so the reverse order would return
+/// immediately and prove nothing.
+///
+/// # Panics
+/// When no turn completed, or the input line never came back empty, within
+/// `budget`. The message says which of the two it was and carries the screen.
 pub fn expect_turn_complete(sess: &PtySession, budget: Duration, context: &str) {
     let deadline = Instant::now() + budget;
+    let mut saw_turn = false;
     loop {
         let screen = sess.render(|screen| screen.contents());
-        if screen_contains(&screen, "ctx") {
+        if !saw_turn && screen_contains(&screen, "ctx") {
+            saw_turn = true;
+        }
+        if saw_turn && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("{context}: turn did not complete within {budget:?}\nPTY:\n{screen}");
+            let unmet = if saw_turn {
+                "the turn finished but the input line never came back empty"
+            } else {
+                "no per-turn status line appeared"
+            };
+            panic!("{context}: {unmet} within {budget:?}\nPTY:\n{screen}");
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -643,7 +679,10 @@ fn spawn_with_workspace(
 /// are copied. Deliberately not the rest of the directory: `scode.exe` and its
 /// backups are tens of megabytes each, and `crons.json` / `plugins/` are
 /// exactly the developer state a hermetic run should start without.
-fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &std::path::Path) {
+pub fn copy_live_credentials(
+    real_config_home: &std::path::Path,
+    test_config_home: &std::path::Path,
+) {
     for relative in ["sudocode.json", "settings.json"] {
         let source = real_config_home.join(relative);
         if source.exists() {
@@ -733,6 +772,12 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "ETIMEDOUT",
         "ECONNREFUSED",
         "connection refused",
+        // Deliberately NOT here: `scode`'s own "still waiting on <host>" notice.
+        // It is emitted once a turn passes `WAIT_NOTICE_FIRST` and then on an
+        // interval, so every slow-but-successful live turn prints it. Treating
+        // it as unavailability turns any assertion that outlasts its budget into
+        // a skip — including a genuine miss, which a mutation test caught doing
+        // exactly that. Slowness is answered by a bigger budget, not by a skip.
         // The proxy gateway has no channel for this model in the routing group
         // the request landed in. Arrives as a 500 rather than a 404, and repeats
         // on every retry until the routing config changes, so it is a statement
@@ -828,15 +873,6 @@ pub fn spawn_scode_in_dir_with_env(
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn default_config_home() -> PathBuf {
-    std::env::var_os("SUDO_CODE_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

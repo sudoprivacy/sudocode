@@ -40,6 +40,23 @@ SUDOROUTER_API_KEY=sk-…funded… SCODE_BIN=$(pwd)/rust/target/debug/scode \
 
 ## Notes / gotchas
 
+**Driving a live `scode` needs a PTY, not a pipe.** `printf 'prompt\n' | scode`
+answers and exits — fine for one shot, and `--print` is the supported form of
+it. A *persistent* receiver is the other half of a duet, and feeding it through
+a pipe or a FIFO does not work: the REPL reads keys from the terminal, so the
+line is never consumed, while the process stays alive looking idle. The A2A
+receiver in that process still runs — its cursor advances — so the session looks
+healthy and simply ignores you. Drive it through a PTY (`pty-expect`, as
+`tests/pty_agent_duet.rs` does).
+
+**A receive cursor can outlive the stream it recorded.** `a2a-cursor-<agent>`
+lives in the config home and survives a rebuilt cluster or a fresh data dir. A
+saved offset ahead of the new stream's tail used to park the receiver forever on
+an offset that would not arrive for a long time — no error, nothing to grep.
+The poller now clamps to the tail and says so on stderr, but if you want a
+receiver to start clean, give it its own `SUDO_CODE_CONFIG_HOME`.
+
+
 - **`--identity-dir` fresh each run.** The compose passes fresh
   `--data-dir`/`--identity-dir` so the founder boots as a clean single voter
   (quorum = 1). A stale identity (or a *coexisting* host `nexusd-cluster` on a

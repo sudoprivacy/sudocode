@@ -207,15 +207,46 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
     compact(screen).contains(&compact(text))
 }
 
+/// Block until a turn has finished AND the REPL is ready for input again.
+///
+/// Two conditions, because the status line alone is not enough. `ctx …` is
+/// printed when a turn ends, but the REPL has not necessarily re-armed its
+/// input line by then — the submitted text can still be sitting on the prompt
+/// row. A caller that sends the next thing in that window loses the
+/// keystrokes, and the damage surfaces far away: `/exit` never registers, the
+/// child never exits, and the test dies as
+/// `clean exit: Timeout(15s, "<child exit>")`. That was observed four times
+/// with identical wording — `pty_cancel.rs:129` and `pty_resume.rs:97`, on
+/// ubuntu and on macos, including on the commit that added this helper — which
+/// is why it waits for readiness and not just for the status line. The
+/// readiness test reuses the same parse as [`expect_input_line_cleared`]:
+/// the prompt row is back and holds nothing.
+///
+/// Ordered deliberately: the turn must be seen FIRST. An input line can read
+/// empty before the turn even starts, so the reverse order would return
+/// immediately and prove nothing.
+///
+/// # Panics
+/// When no turn completed, or the input line never came back empty, within
+/// `budget`. The message says which of the two it was and carries the screen.
 pub fn expect_turn_complete(sess: &PtySession, budget: Duration, context: &str) {
     let deadline = Instant::now() + budget;
+    let mut saw_turn = false;
     loop {
         let screen = sess.render(|screen| screen.contents());
-        if screen_contains(&screen, "ctx") {
+        if !saw_turn && screen_contains(&screen, "ctx") {
+            saw_turn = true;
+        }
+        if saw_turn && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("{context}: turn did not complete within {budget:?}\nPTY:\n{screen}");
+            let unmet = if saw_turn {
+                "the turn finished but the input line never came back empty"
+            } else {
+                "no per-turn status line appeared"
+            };
+            panic!("{context}: {unmet} within {budget:?}\nPTY:\n{screen}");
         }
         std::thread::sleep(Duration::from_millis(25));
     }

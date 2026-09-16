@@ -186,8 +186,7 @@ enum Scenario {
     MultiTurnContext,
     EditFileRoundtrip,
     GlobSearchRoundtrip,
-    EnterPlanModeRoundtrip,
-    ExitPlanModeRoundtrip,
+    WritePlanRoundtrip,
     TodoWriteRoundtrip,
     TodoWriteEmptyRoundtrip,
     TodoWriteLifecycleRoundtrip,
@@ -265,8 +264,7 @@ impl Scenario {
             "multi_turn_context" => Some(Self::MultiTurnContext),
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
-            "enter_plan_mode_roundtrip" => Some(Self::EnterPlanModeRoundtrip),
-            "exit_plan_mode_roundtrip" => Some(Self::ExitPlanModeRoundtrip),
+            "write_plan_roundtrip" => Some(Self::WritePlanRoundtrip),
             "todo_write_roundtrip" => Some(Self::TodoWriteRoundtrip),
             "todo_write_empty_roundtrip" => Some(Self::TodoWriteEmptyRoundtrip),
             "todo_write_lifecycle_roundtrip" => Some(Self::TodoWriteLifecycleRoundtrip),
@@ -313,8 +311,7 @@ impl Scenario {
             Self::MultiTurnContext => "multi_turn_context",
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
-            Self::EnterPlanModeRoundtrip => "enter_plan_mode_roundtrip",
-            Self::ExitPlanModeRoundtrip => "exit_plan_mode_roundtrip",
+            Self::WritePlanRoundtrip => "write_plan_roundtrip",
             Self::TodoWriteRoundtrip => "todo_write_roundtrip",
             Self::TodoWriteEmptyRoundtrip => "todo_write_empty_roundtrip",
             Self::TodoWriteLifecycleRoundtrip => "todo_write_lifecycle_roundtrip",
@@ -999,17 +996,15 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"pattern":"*.txt"}"#],
             ),
         },
-        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "enter_plan_mode roundtrip complete: {tool_output}"
-            )),
-            None => tool_use_sse("toolu_enter_plan_mode", "EnterPlanMode", &[r#"{}"#]),
-        },
-        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
+        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
-                final_text_sse(&format!("exit_plan_mode roundtrip complete: {tool_output}"))
+                final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
             }
-            None => tool_use_sse("toolu_exit_plan_mode", "ExitPlanMode", &[r#"{}"#]),
+            None => tool_use_sse(
+                "toolu_write_plan",
+                "write_plan",
+                &[r##"{"content":"# Plan\n1. First step\n2. Second step"}"##],
+            ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
@@ -1478,28 +1473,16 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "*.txt"}),
             ),
         },
-        Scenario::EnterPlanModeRoundtrip => match latest_tool_result(request) {
+        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
-                "msg_enter_plan_mode_final",
-                &format!("enter_plan_mode roundtrip complete: {tool_output}"),
+                "msg_write_plan_final",
+                &format!("write_plan roundtrip complete: {tool_output}"),
             ),
             None => tool_message_response(
-                "msg_enter_plan_mode_tool",
-                "toolu_enter_plan_mode",
-                "EnterPlanMode",
-                json!({}),
-            ),
-        },
-        Scenario::ExitPlanModeRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_exit_plan_mode_final",
-                &format!("exit_plan_mode roundtrip complete: {tool_output}"),
-            ),
-            None => tool_message_response(
-                "msg_exit_plan_mode_tool",
-                "toolu_exit_plan_mode",
-                "ExitPlanMode",
-                json!({}),
+                "msg_write_plan_tool",
+                "toolu_write_plan",
+                "write_plan",
+                json!({"content": "# Plan\n1. First step\n2. Second step"}),
             ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
@@ -1772,8 +1755,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::MultiTurnContext => "req_multi_turn_context",
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
-        Scenario::EnterPlanModeRoundtrip => "req_enter_plan_mode_roundtrip",
-        Scenario::ExitPlanModeRoundtrip => "req_exit_plan_mode_roundtrip",
+        Scenario::WritePlanRoundtrip => "req_write_plan_roundtrip",
         Scenario::TodoWriteRoundtrip => "req_todo_write_roundtrip",
         Scenario::TodoWriteEmptyRoundtrip => "req_todo_write_empty_roundtrip",
         Scenario::TodoWriteLifecycleRoundtrip => "req_todo_write_lifecycle_roundtrip",

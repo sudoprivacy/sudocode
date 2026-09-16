@@ -1,14 +1,14 @@
-//! PTY tests for the plan mode confirmation dialog.
+//! PTY tests for the write_plan approval dialog.
 //!
-//! When the model calls `ExitPlanMode` in REPL mode, the CLI shows a
-//! 3-choice dialog. These tests verify:
-//! 1. The dialog appears with the expected options
-//! 2. Choice 2 (keep context) executes normally
-//! 3. Choice 3 (keep planning) rejects the tool call
+//! When the model calls `write_plan` in REPL mode, the CLI writes the plan
+//! file and shows a 4-choice dialog. These tests verify:
+//! 1. The dialog appears
+//! 2. Choice 2 (keep context & execute) completes the turn normally
+//! 3. Choice 4 (exit plan) rejects execution
 //!
-//! Choice 1 (clear context & execute) is harder to test in mock mode
-//! because it triggers a recursive `run_turn` which needs a second
-//! mock response. Live mode covers it end-to-end.
+//! Choice 1 (clear context & execute) triggers a recursive `run_turn` needing a
+//! second mock response, so it's covered end-to-end in live mode. Choice 3 and
+//! free-text comments feed the plan back for revision (also live-covered).
 //!
 //! ```bash
 //! cargo test --test pty_plan_confirm                          # mock (CI)
@@ -20,42 +20,34 @@ use std::time::Duration;
 
 use common::TestEnv;
 
-/// When the model calls ExitPlanMode in REPL mode, the user should
-/// see a confirmation dialog with 3 choices.
-///
-/// Mock mode: deterministic — the mock scenario always calls ExitPlanMode.
-/// Live mode: the model may not reliably call ExitPlanMode from a prompt
-/// alone (no plan context), so we skip if the dialog doesn't appear.
+/// When the model calls write_plan in REPL mode, the user should see a
+/// confirmation dialog. Choosing "keep context & execute" completes the turn.
 //
-// Runs on Windows too: the confirmation now crosses the engine↔renderer seam
-// as a QuestionRequest answered above the seam by CliQuestionPrompter (rustyline),
-// replacing the old raw stdin `read_line` that ConPTY didn't reliably feed.
+// Runs on Windows too: the confirmation crosses the engine↔renderer seam as a
+// QuestionRequest answered above the seam by CliQuestionPrompter (rustyline).
 #[test]
-fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
+fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     let env = TestEnv::new("plan-confirm");
 
     let mut sess = env.spawn(&[
         "--permission-mode",
         "workspace-write",
         "--allowedTools",
-        "ExitPlanMode",
+        "write_plan",
     ]);
     sess.expect("❯").expect("should see REPL prompt");
 
     let prompt = env.prompt(
-        "Call the ExitPlanMode tool right now. Do not explain anything, just call ExitPlanMode with empty arguments {}.",
-        "exit_plan_mode_roundtrip",
+        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
+        "write_plan_roundtrip",
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    // Wait for the confirmation dialog
     sess.set_default_timeout(Duration::from_secs(30));
     let dialog_appeared = sess.expect("Choose an action").is_ok();
 
     if !dialog_appeared && env.is_live() {
-        // Live model didn't call ExitPlanMode — skip gracefully.
-        // The dialog is thoroughly tested in mock mode.
-        eprintln!("SKIP: live model did not call ExitPlanMode (no plan context)");
+        eprintln!("SKIP: live model did not call write_plan");
         return;
     }
     assert!(dialog_appeared, "should see confirmation dialog");
@@ -63,11 +55,9 @@ fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
     // Choose option 2: keep context & execute
     sess.send("2\r").expect("send choice 2");
 
-    // Turn should complete normally
     sess.expect("tokens")
         .expect("should see post-turn status line");
 
-    // Exit cleanly
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
@@ -77,23 +67,23 @@ fn exit_plan_mode_shows_confirm_dialog_and_accepts_keep_context() {
     );
 }
 
-/// Choice 3 (keep planning) should reject the tool call and let
-/// the model continue in plan mode.
+/// Choice 4 (exit plan) should reject execution and let the model continue
+/// without implementing the plan.
 #[test]
-fn exit_plan_mode_choice_keep_planning_rejects_tool() {
-    let env = TestEnv::new("plan-keep");
+fn write_plan_choice_exit_rejects_execution() {
+    let env = TestEnv::new("plan-exit");
 
     let mut sess = env.spawn(&[
         "--permission-mode",
         "workspace-write",
         "--allowedTools",
-        "ExitPlanMode",
+        "write_plan",
     ]);
     sess.expect("❯").expect("should see REPL prompt");
 
     let prompt = env.prompt(
-        "Call the ExitPlanMode tool right now. Do not explain anything, just call ExitPlanMode with empty arguments {}.",
-        "exit_plan_mode_roundtrip",
+        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
+        "write_plan_roundtrip",
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
@@ -101,17 +91,16 @@ fn exit_plan_mode_choice_keep_planning_rejects_tool() {
     let dialog_appeared = sess.expect("Choose an action").is_ok();
 
     if !dialog_appeared && env.is_live() {
-        eprintln!("SKIP: live model did not call ExitPlanMode (no plan context)");
+        eprintln!("SKIP: live model did not call write_plan");
         return;
     }
     assert!(dialog_appeared, "should see confirmation dialog");
 
-    // Choose option 3: keep planning
-    sess.send("3\r").expect("send choice 3");
+    // Choose option 4: exit plan (don't execute)
+    sess.send("4\r").expect("send choice 4");
 
-    // The model should get an error result and continue
     sess.expect("tokens")
-        .expect("should see status line after rejected tool");
+        .expect("should see status line after exit-plan choice");
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));

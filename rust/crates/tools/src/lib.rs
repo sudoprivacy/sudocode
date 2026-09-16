@@ -8723,8 +8723,7 @@ mod tests {
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"Sleep"));
         assert!(names.contains(&"Config"));
-        assert!(names.contains(&"EnterPlanMode"));
-        assert!(names.contains(&"ExitPlanMode"));
+        assert!(names.contains(&"write_plan"));
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"PowerShell"));
     }
@@ -8783,8 +8782,6 @@ mod tests {
         // them turns every one into `unsupported tool` (the pty_plan_mode
         // regression). Guard the whole PascalCase-arm family.
         for tool in [
-            "EnterPlanMode",
-            "ExitPlanMode",
             "WebFetch",
             "WebSearch",
             "Skill",
@@ -12170,12 +12167,12 @@ mod tests {
 
         let set = execute_tool(
             "Config",
-            &json!({"setting": "permissions.defaultMode", "value": "plan"}),
+            &json!({"setting": "permissions.defaultMode", "value": "acceptEdits"}),
         )
         .expect("set config");
         let set_output: serde_json::Value = serde_json::from_str(&set).expect("json");
         assert_eq!(set_output["operation"], "set");
-        assert_eq!(set_output["newValue"], "plan");
+        assert_eq!(set_output["newValue"], "acceptEdits");
 
         let invalid = execute_tool(
             "Config",
@@ -12200,161 +12197,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(root);
     }
-
-    #[test]
-    fn enter_and_exit_plan_mode_round_trip_existing_local_override() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = std::env::temp_dir().join(format!(
-            "sudocode-plan-mode-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        let home = root.join("home");
-        let cwd = root.join("cwd");
-        std::fs::create_dir_all(home.join(".nexus").join("sudocode")).expect("home dir");
-        std::fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("cwd dir");
-        std::fs::write(
-            cwd.join(".nexus")
-                .join("sudocode")
-                .join("settings.local.json"),
-            r#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
-        )
-        .expect("write local settings");
-
-        let original_home = std::env::var("HOME").ok();
-        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
-        let original_dir = std::env::current_dir().expect("cwd");
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
-        std::env::set_current_dir(&cwd).expect("set cwd");
-
-        let enter = execute_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
-        let enter_output: serde_json::Value = serde_json::from_str(&enter).expect("json");
-        assert_eq!(enter_output["changed"], true);
-        assert_eq!(enter_output["managed"], true);
-        assert_eq!(enter_output["previousLocalMode"], "acceptEdits");
-        assert_eq!(enter_output["currentLocalMode"], "plan");
-
-        let local_settings = std::fs::read_to_string(
-            cwd.join(".nexus")
-                .join("sudocode")
-                .join("settings.local.json"),
-        )
-        .expect("local settings after enter");
-        assert!(local_settings.contains(r#""defaultMode": "plan""#));
-        let state = std::fs::read_to_string(
-            cwd.join(".nexus")
-                .join("sudocode")
-                .join("tool-state")
-                .join("plan-mode.json"),
-        )
-        .expect("plan mode state");
-        assert!(state.contains(r#""hadLocalOverride": true"#));
-        assert!(state.contains(r#""previousLocalMode": "acceptEdits""#));
-
-        let exit = execute_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
-        let exit_output: serde_json::Value = serde_json::from_str(&exit).expect("json");
-        assert_eq!(exit_output["changed"], true);
-        assert_eq!(exit_output["managed"], false);
-        assert_eq!(exit_output["previousLocalMode"], "acceptEdits");
-        assert_eq!(exit_output["currentLocalMode"], "acceptEdits");
-
-        let local_settings = std::fs::read_to_string(
-            cwd.join(".nexus")
-                .join("sudocode")
-                .join("settings.local.json"),
-        )
-        .expect("local settings after exit");
-        assert!(local_settings.contains(r#""defaultMode": "acceptEdits""#));
-        assert!(!cwd
-            .join(".nexus")
-            .join("sudocode")
-            .join("tool-state")
-            .join("plan-mode.json")
-            .exists());
-
-        std::env::set_current_dir(&original_dir).expect("restore cwd");
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match original_config_home {
-            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
-            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn exit_plan_mode_clears_override_when_enter_created_it_from_empty_local_state() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = std::env::temp_dir().join(format!(
-            "sudocode-plan-mode-empty-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        let home = root.join("home");
-        let cwd = root.join("cwd");
-        std::fs::create_dir_all(home.join(".nexus").join("sudocode")).expect("home dir");
-        std::fs::create_dir_all(cwd.join(".nexus").join("sudocode")).expect("cwd dir");
-
-        let original_home = std::env::var("HOME").ok();
-        let original_config_home = std::env::var("SUDO_CODE_CONFIG_HOME").ok();
-        let original_dir = std::env::current_dir().expect("cwd");
-        std::env::set_var("HOME", &home);
-        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
-        std::env::set_current_dir(&cwd).expect("set cwd");
-
-        let enter = execute_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
-        let enter_output: serde_json::Value = serde_json::from_str(&enter).expect("json");
-        assert_eq!(enter_output["previousLocalMode"], serde_json::Value::Null);
-        assert_eq!(enter_output["currentLocalMode"], "plan");
-
-        let exit = execute_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
-        let exit_output: serde_json::Value = serde_json::from_str(&exit).expect("json");
-        assert_eq!(exit_output["changed"], true);
-        assert_eq!(exit_output["currentLocalMode"], serde_json::Value::Null);
-
-        let local_settings = std::fs::read_to_string(
-            cwd.join(".nexus")
-                .join("sudocode")
-                .join("settings.local.json"),
-        )
-        .expect("local settings after exit");
-        let local_settings_json: serde_json::Value =
-            serde_json::from_str(&local_settings).expect("valid settings json");
-        assert_eq!(
-            local_settings_json.get("permissions"),
-            None,
-            "permissions override should be removed on exit"
-        );
-        assert!(!cwd
-            .join(".nexus")
-            .join("sudocode")
-            .join("tool-state")
-            .join("plan-mode.json")
-            .exists());
-
-        std::env::set_current_dir(&original_dir).expect("restore cwd");
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match original_config_home {
-            Some(value) => std::env::set_var("SUDO_CODE_CONFIG_HOME", value),
-            None => std::env::remove_var("SUDO_CODE_CONFIG_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(root);
-    }
-
     #[test]
     fn structured_output_echoes_input_payload() {
         let result = execute_tool("StructuredOutput", &json!({"ok": true, "items": [1, 2, 3]}))
@@ -12711,7 +12553,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn canonicalize_preserves_unknown_tool_name() {
         assert_eq!(canonicalize_tool_name("bash"), "bash");
-        assert_eq!(canonicalize_tool_name("EnterPlanMode"), "EnterPlanMode");
+        assert_eq!(canonicalize_tool_name("write_plan"), "write_plan");
     }
 
     #[test]

@@ -3584,7 +3584,7 @@ mod tests {
     fn permission_mode_aliases_resolve_to_expected_modes() {
         // given / when / then
         assert_eq!(
-            parse_permission_mode_label("plan", "test").expect("plan should resolve"),
+            parse_permission_mode_label("default", "test").expect("default should resolve"),
             ResolvedPermissionMode::ReadOnly
         );
         assert_eq!(

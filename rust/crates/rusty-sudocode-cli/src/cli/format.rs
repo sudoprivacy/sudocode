@@ -1983,12 +1983,15 @@ pub(crate) fn format_context_usage_segment(context_tokens: u32, window: u32) -> 
 /// Compact token count with one decimal (`1.2k`, `3.4M`).
 #[inline]
 fn format_token_count(n: u32) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", f64::from(n) / 1_000_000.0)
-    } else if n >= 1000 {
-        format!("{:.1}k", f64::from(n) / 1000.0)
+    let n = f64::from(n);
+    if n >= 1_000_000_000.0 {
+        format!("{:.1}B", n / 1_000_000_000.0)
+    } else if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1000.0 {
+        format!("{:.1}k", n / 1000.0)
     } else {
-        n.to_string()
+        format!("{n:.0}")
     }
 }
 
@@ -2183,14 +2186,31 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
 #[inline]
 fn cost_for(usage: &TokenUsage, model: &str) -> Option<String> {
     if let Some(real) = usage.real_cost_usd() {
-        (real > 0.0).then(|| format!("${real:.2}"))
+        (real > 0.0).then(|| format_usd_compact(real))
     } else {
         let pricing = runtime::pricing_for_model(model)
             .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
         let est = usage
             .estimate_cost_usd_with_pricing(pricing)
             .total_cost_usd();
-        (est > 0.0).then(|| format!("~${est:.2}"))
+        (est > 0.0).then(|| format!("~{}", format_usd_compact(est)))
+    }
+}
+
+/// A compact USD amount for the status line: cents below `$1000`
+/// (`$0.48`, `$42.10`), then `k`/`M`/`B` with two decimals
+/// (`$5.05k`, `$1.23M`) so a long-running session's total does not grow
+/// without bound.
+#[inline]
+fn format_usd_compact(usd: f64) -> String {
+    if usd >= 1_000_000_000.0 {
+        format!("${:.2}B", usd / 1_000_000_000.0)
+    } else if usd >= 1_000_000.0 {
+        format!("${:.2}M", usd / 1_000_000.0)
+    } else if usd >= 1000.0 {
+        format!("${:.2}k", usd / 1000.0)
+    } else {
+        format!("${usd:.2}")
     }
 }
 
@@ -3013,6 +3033,18 @@ mod tests {
         });
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("acct fujitoken"), "{plain}");
+    }
+
+    #[test]
+    fn compact_units_keep_long_totals_short() {
+        // Cost gains k/M/B above $1000; cents kept below it.
+        assert_eq!(format_usd_compact(0.48), "$0.48");
+        assert_eq!(format_usd_compact(42.1), "$42.10");
+        assert_eq!(format_usd_compact(5_052.43), "$5.05k");
+        assert_eq!(format_usd_compact(1_230_000.0), "$1.23M");
+        // Tokens gain a B tier above 1e9 (a long session's Σ crosses it).
+        assert_eq!(format_token_count(908_400), "908.4k");
+        assert_eq!(format_token_count(1_400_000_000), "1.4B");
     }
 
     #[test]

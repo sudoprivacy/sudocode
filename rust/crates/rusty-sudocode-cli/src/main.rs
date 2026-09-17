@@ -2886,7 +2886,9 @@ impl Drop for ReplTurnCancelMonitor {
 /// the format the idle path has always used. Called by the coordinator — the
 /// only place that knows whether an input runs now or was queued — so a queued
 /// input is echoed when it actually flushes, not when it was typed. Multi-line
-/// input keeps the `❯` on the first line and indents the rest.
+/// input keeps the `❯` on the first line and indents the rest. A trailing blank
+/// line separates the echo from the turn output that follows, matching the
+/// spacing between other scrollback blocks.
 fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
     let mut lines = display.split('\n');
     if let Some(first) = lines.next() {
@@ -2899,6 +2901,7 @@ fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
         for line in lines {
             output.println(&format!("  {line}"));
         }
+        output.println("");
     }
 }
 
@@ -2906,7 +2909,9 @@ fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
 /// [`echo_submit_to_scrollback`] but the `display` already carries its own
 /// `📨 A2A from X: …` marker, so it is printed verbatim (bold, first line) with
 /// continuation lines indented — the peer counterpart of the human `❯` echo,
-/// committed at the moment the message is actually handed to a turn.
+/// committed at the moment the message is actually handed to a turn. Same
+/// trailing blank line so the peer message doesn't butt up against the turn
+/// output it triggers.
 fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
     let mut lines = display.split('\n');
     if let Some(first) = lines.next() {
@@ -2914,6 +2919,7 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
         for line in lines {
             output.println(&format!("  {line}"));
         }
+        output.println("");
     }
 }
 

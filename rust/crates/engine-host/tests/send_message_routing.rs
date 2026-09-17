@@ -127,7 +127,9 @@ fn nexus_executor() -> (CliToolExecutor, Appends, Provisions) {
             provisions: Arc::clone(&provisions),
         }),
         "win-ai".to_string(),
-        InboxConvention::NexusA2a,
+        InboxConvention::PerRecipient {
+            root: String::new(),
+        },
     )));
     (executor, appends, provisions)
 }
@@ -324,7 +326,7 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
     std::env::set_current_dir(previous).expect("restore cwd");
     let result = result.expect("workspace delivery must succeed");
     assert!(
-        result.contains(runtime::mailbox::LOCAL_INBOX_DIR),
+        result.contains("chat-with-me"),
         "with no session mailbox the tool must write the workspace, got: {result}"
     );
     // Assert the envelope landed in THIS workspace, not just that the answer
@@ -333,10 +335,7 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
     // the dispatch thread, resolved to the ambient workspace and wrote real
     // envelopes into the crate directory while reporting success. A string check
     // alone is satisfied by that.
-    let delivered = workspace
-        .path()
-        .join(runtime::mailbox::LOCAL_INBOX_DIR)
-        .join("worker.jsonl");
+    let delivered = runtime::agent_mailbox::inbox_path_under(workspace.path(), "worker");
     assert!(
         delivered.is_file(),
         "the envelope must be in the workspace that was current, expected {}",

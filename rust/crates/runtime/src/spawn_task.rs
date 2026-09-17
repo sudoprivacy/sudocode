@@ -112,7 +112,9 @@ impl Mailbox {
     pub fn a2a_inbox(self_name: impl Into<String>) -> Self {
         Self {
             self_id: self_name.into(),
-            convention: InboxConvention::NexusA2a,
+            convention: InboxConvention::PerRecipient {
+                root: String::new(),
+            },
         }
     }
 

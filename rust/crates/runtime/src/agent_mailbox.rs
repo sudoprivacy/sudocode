@@ -178,14 +178,24 @@ pub fn mailbox_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(LOCAL_INBOX_DIR)
 }
 
-/// Resolve the mailbox file for a recipient. The recipient string is
-/// used verbatim as the filename stem — callers must sanitize
-/// forbidden filesystem characters if the recipient name might contain
-/// path separators. In practice recipient names come from agent
-/// registries whose IDs are already `[a-zA-Z0-9_-]+`.
+/// Resolve the mailbox file for a recipient — the unified
+/// `{workspace}/agents/{recipient}/chat-with-me` shape. Retained as the
+/// workspace-rooted convenience over [`inbox_path_under`]; `append_envelope`
+/// and `read_all` build on it so the legacy `(workspace, recipient)` API and
+/// the path-based API resolve to the same file.
 #[must_use]
 pub fn mailbox_path(workspace_root: &Path, recipient: &str) -> PathBuf {
-    mailbox_dir(workspace_root).join(format!("{recipient}.jsonl"))
+    inbox_path_under(workspace_root, recipient)
+}
+
+/// The unified per-recipient inbox path under a root:
+/// `{root}/agents/{recipient}/chat-with-me`. The host-FS SSOT for the shape
+/// [`crate::mailbox::InboxConvention::PerRecipient`] resolves — used by the
+/// coordinator queue (root = workspace) so it builds the same path a `Mailbox`
+/// would, rather than re-spelling it.
+#[must_use]
+pub fn inbox_path_under(root: &Path, recipient: &str) -> PathBuf {
+    root.join("agents").join(recipient).join("chat-with-me")
 }
 
 /// Append one envelope to the recipient's mailbox. Creates the parent
@@ -202,15 +212,37 @@ pub fn append_envelope(
     recipient: &str,
     mut envelope: MailboxEnvelope,
 ) -> Result<PathBuf, String> {
-    if envelope.timestamp == 0 {
-        envelope.timestamp = now_secs();
-    }
     if envelope.to.is_empty() {
         envelope.to = recipient.to_string();
     }
-    let dir = mailbox_dir(workspace_root);
-    fs::create_dir_all(&dir).map_err(|e| format!("create mailbox dir: {e}"))?;
     let path = mailbox_path(workspace_root, recipient);
+    append_envelope_to_path(&path.to_string_lossy(), envelope)
+}
+
+/// Append one envelope as a JSONL line at an explicit inbox path. The one
+/// writer of the local JSONL format — [`append_envelope`] (workspace + name)
+/// and the unified [`crate::mailbox::Mailbox::send`] (path from the convention)
+/// both funnel here, so the line format and the append-lock have one definition.
+///
+/// Creates the parent directory and file as needed.
+///
+/// # Errors
+///
+/// Returns a `String` error when the parent directory can't be created, the
+/// file can't be opened for append, or the JSON encoding / write fails. The
+/// critical section is guarded by [`WRITE_LOCK`] so concurrent calls to the
+/// same file cannot produce partial lines.
+pub fn append_envelope_to_path(
+    path: &str,
+    mut envelope: MailboxEnvelope,
+) -> Result<PathBuf, String> {
+    if envelope.timestamp == 0 {
+        envelope.timestamp = now_secs();
+    }
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create mailbox dir: {e}"))?;
+    }
     let mut line =
         serde_json::to_string(&envelope).map_err(|e| format!("serialize envelope: {e}"))?;
     line.push('\n');
@@ -284,18 +316,29 @@ pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
 /// Returns a `String` error when the mailbox dir exists but can't be
 /// read. A missing dir is treated as no recipients (fresh workspace).
 pub fn list_recipients(workspace_root: &Path) -> Result<Vec<String>, String> {
-    let dir = mailbox_dir(workspace_root);
-    if !dir.exists() {
+    list_recipients_under(workspace_root)
+}
+
+/// Enumerate recipients under a unified per-recipient root by listing
+/// `{root}/agents/<name>/chat-with-me`. The new-shape counterpart of
+/// [`list_recipients`] (which scanned the legacy `.sudocode-inbox/*.jsonl`).
+///
+/// # Errors
+///
+/// Returns a `String` error when the `agents` dir exists but can't be read. A
+/// missing dir is treated as no recipients (nothing has been sent yet).
+pub fn list_recipients_under(root: &Path) -> Result<Vec<String>, String> {
+    let agents_dir = root.join("agents");
+    if !agents_dir.exists() {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|e| format!("read mailbox dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("read mailbox dir entry: {e}"))?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                out.push(stem.to_string());
-            }
+    for entry in fs::read_dir(&agents_dir).map_err(|e| format!("read agents dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("read agents dir entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A recipient is a dir whose `chat-with-me` inbox exists.
+        if entry.path().join("chat-with-me").exists() {
+            out.push(name);
         }
     }
     out.sort();

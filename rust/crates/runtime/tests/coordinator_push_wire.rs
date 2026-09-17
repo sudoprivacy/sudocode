@@ -3,16 +3,16 @@
 //! api-request user message of the NEXT `ConversationRuntime::run_turn`.
 //!
 //! The wiring lives inside `run_turn_with_blocks` in `conversation.rs`
-//! (moved there from the CLI's own `run_turn` so every entry point —
+//! (moved there from the CLI's own `run_turn` so every entry point 鈥?
 //! CLI REPL, one-shot print, ACP stdio, ACP WebSocket, ACP SDK, MCP
-//! servers — inherits it automatically).  This test drives the runtime
+//! servers 鈥?inherits it automatically).  This test drives the runtime
 //! directly, mimicking what any ACP-hosting server does when sudowork
 //! sends a user turn: build a `ConversationRuntime`, call `run_turn`.
 //!
 //! ## Long-workflow, data-flow chained
 //!
 //! 1. Set `SUDOCODE_COORDINATOR_MODE=1` for this test (env-mutex
-//!    serialised — the coord flag is process-global).
+//!    serialised 鈥?the coord flag is process-global).
 //! 2. `chdir` into a temp workspace so `coordinator_notification::drain`
 //!    reads its inbox from there (not the developer's cwd).
 //! 3. Emit a synthetic `<task-notification>` envelope via
@@ -24,7 +24,7 @@
 //! 5. Call `runtime.run_turn("hello")`.
 //! 6. **Assert**: the first captured request's LAST user message is a
 //!    Text block whose text begins with the emitted XML block AND
-//!    contains "hello" at the tail — i.e. drained notifications are
+//!    contains "hello" at the tail 鈥?i.e. drained notifications are
 //!    prepended to (not silently substituted for) the incoming user
 //!    input.
 //!
@@ -34,7 +34,7 @@
 //! drain only fired for `CodeCli::run_turn`.  ACP paths (which is what
 //! sudowork uses to talk to sudocode) called `runtime.run_turn`
 //! directly, bypassing the CLI wrapper.  Under the pre-fix code the
-//! captured request WOULD NOT have the XML prefix — the model would
+//! captured request WOULD NOT have the XML prefix 鈥?the model would
 //! never see the notification.  The wiring fix makes this assertion pass;
 //! a regression that moves the drain back out would fail it loudly.
 
@@ -49,7 +49,7 @@ use runtime::{
     StaticToolExecutor, SystemPrompt,
 };
 
-/// Process-wide env-lock — `COORDINATOR_ENV_VAR` is process-global,
+/// Process-wide env-lock 鈥?`COORDINATOR_ENV_VAR` is process-global,
 /// so parallel tests that set it would race each other.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -107,7 +107,7 @@ async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
     let prior_cwd = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&ws).expect("chdir");
 
-    // Emit — same call the production `persist_agent_terminal_state`
+    // Emit 鈥?same call the production `persist_agent_terminal_state`
     // makes when a sub-agent completes under coord mode.
     let xml = "<task-notification>\n\
         <task-id>agent-abc</task-id>\n\
@@ -118,7 +118,7 @@ async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
     coordinator_notification::emit(&ws, "agent-abc", xml).expect("emit ok");
 
     // Drop a stray sanity file so the mailbox path is verifiable.
-    let mailbox = runtime::agent_mailbox::mailbox_path(&ws, COORDINATOR_INBOX_RECIPIENT);
+    let mailbox = runtime::agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
     assert!(
         mailbox.exists(),
         "envelope should be on disk before run_turn"
@@ -244,7 +244,7 @@ async fn run_turn_does_not_touch_user_input_when_coord_mode_off() {
     assert!(joined.contains("hello world"));
 
     // Sanity: no mailbox file should have been created.
-    let mailbox = runtime::agent_mailbox::mailbox_path(&ws, COORDINATOR_INBOX_RECIPIENT);
+    let mailbox = runtime::agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
     assert!(!mailbox.exists());
 
     let _ = std::fs::remove_dir_all(&ws);

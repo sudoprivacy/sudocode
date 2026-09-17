@@ -146,8 +146,15 @@ impl NexusVfsClient {
                     .build()
                     .expect("nexus-vfs tokio runtime");
                 rt.block_on(async move {
+                    // `connect_timeout` before the posture split, so it covers
+                    // plaintext and mTLS alike. Without it a lazily-connected
+                    // channel to an address that blackholes packets never fails
+                    // at connect — it yields a request future that never
+                    // resolves, and the symptom lands on whichever op happened
+                    // to be first rather than on the dial.
                     let builder = tonic::transport::Channel::from_shared(endpoint)
-                        .expect("invalid vfs endpoint URI");
+                        .expect("invalid vfs endpoint URI")
+                        .connect_timeout(CONNECT_DEADLINE);
                     let ch = match tls {
                         None => builder.connect_lazy(),
                         Some(t) => {
@@ -176,6 +183,22 @@ impl NexusVfsClient {
                         // channel, so a caller can't issue its next op until
                         // this one returns; only cross-thread use concurs.
                         let mut client = client.clone();
+                        // Every arm below ends in exactly one `resp.send`, and
+                        // that is the invariant callers depend on: `await_reply`
+                        // turns a missing reply into an error, so an arm that
+                        // returned without sending would surface as a timeout
+                        // rather than as the failure it was. It holds by
+                        // inspection today — no `?`, no early `return`, no
+                        // panic path (`grpc_result` is a total match over
+                        // `Result`) — and an eighth arm must keep it. A guard
+                        // object was considered and rejected: `resp` is bound
+                        // inside each variant's pattern, so enforcing it
+                        // structurally means reshaping `VfsOp` to hoist the
+                        // sender out, which is a bigger change to the op type
+                        // than the unreachable branch it would protect.
+                        // `let _ =` on each send is deliberate: a receiver that
+                        // hung up is legitimate, and the caller already sees
+                        // that as `Disconnected` -> `BrokenPipe`.
                         tokio::spawn(async move {
                             match op {
                                 VfsOp::Read {
@@ -184,13 +207,16 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .read(ReadRequest {
-                                            path,
-                                            auth_token,
-                                            content_id: String::new(),
-                                            timeout_ms: 0,
-                                            offset: 0,
-                                        })
+                                        .read(deadlined(
+                                            ReadRequest {
+                                                path,
+                                                auth_token,
+                                                content_id: String::new(),
+                                                timeout_ms: 0,
+                                                offset: 0,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -207,11 +233,14 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .write(WriteRequest {
-                                            path,
-                                            content,
-                                            auth_token,
-                                        })
+                                        .write(deadlined(
+                                            WriteRequest {
+                                                path,
+                                                content,
+                                                auth_token,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -227,11 +256,14 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .delete(DeleteRequest {
-                                            path,
-                                            auth_token,
-                                            recursive: false,
-                                        })
+                                        .delete(deadlined(
+                                            DeleteRequest {
+                                                path,
+                                                auth_token,
+                                                recursive: false,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -248,11 +280,14 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .call(CallRequest {
-                                            method,
-                                            payload,
-                                            auth_token,
-                                        })
+                                        .call(deadlined(
+                                            CallRequest {
+                                                method,
+                                                payload,
+                                                auth_token,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -269,11 +304,14 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .stream_write_nowait(StreamWriteRequest {
-                                            path,
-                                            data,
-                                            auth_token,
-                                        })
+                                        .stream_write_nowait(deadlined(
+                                            StreamWriteRequest {
+                                                path,
+                                                data,
+                                                auth_token,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -291,14 +329,26 @@ impl NexusVfsClient {
                                     auth_token,
                                     resp,
                                 } => {
+                                    // The one op designed to wait: its deadline
+                                    // is the wait it asked for plus a grace, so
+                                    // the server's own `eof` at `timeout_ms` is
+                                    // a normal return rather than a race.
+                                    let deadline = if blocking {
+                                        Duration::from_millis(timeout_ms) + TAIL_GRACE
+                                    } else {
+                                        OP_DEADLINE
+                                    };
                                     let r = client
-                                        .stream_read_at(StreamReadAtRequest {
-                                            path,
-                                            offset,
-                                            blocking,
-                                            timeout_ms,
-                                            auth_token,
-                                        })
+                                        .stream_read_at(deadlined(
+                                            StreamReadAtRequest {
+                                                path,
+                                                offset,
+                                                blocking,
+                                                timeout_ms,
+                                                auth_token,
+                                            },
+                                            deadline,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -316,14 +366,17 @@ impl NexusVfsClient {
                                     resp,
                                 } => {
                                     let r = client
-                                        .setattr(SetattrRequest {
-                                            path,
-                                            auth_token,
-                                            entry_type: DT_STREAM,
-                                            io_profile,
-                                            capacity,
-                                            ..Default::default()
-                                        })
+                                        .setattr(deadlined(
+                                            SetattrRequest {
+                                                path,
+                                                auth_token,
+                                                entry_type: DT_STREAM,
+                                                io_profile,
+                                                capacity,
+                                                ..Default::default()
+                                            },
+                                            OP_DEADLINE,
+                                        ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
@@ -352,7 +405,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
@@ -365,7 +418,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     pub fn delete(&self, path: &str, auth_token: &str) -> io::Result<()> {
@@ -377,7 +430,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     /// Append one frame to a DT_STREAM at `path`; returns the byte offset
@@ -394,7 +447,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     /// Non-blocking read of a DT_STREAM at `offset`. Returns
@@ -431,9 +484,9 @@ impl NexusVfsClient {
         // and answers `eof`, and only a reply that never comes at all should trip
         // the bound.
         let budget = if blocking {
-            Duration::from_millis(timeout_ms) + TAIL_MARGIN
+            Duration::from_millis(timeout_ms) + TAIL_GRACE
         } else {
-            OP_BUDGET
+            OP_DEADLINE
         };
         await_reply(&resp_rx, budget)
     }
@@ -461,7 +514,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the
@@ -476,7 +529,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_BUDGET)
+        await_reply(&resp_rx, OP_DEADLINE)
     }
 
     /// Stat a path via the generic Call RPC.
@@ -548,30 +601,68 @@ fn broken_pipe() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "vfs worker gone")
 }
 
-/// Ceiling for an ordinary op's reply. Generous on purpose: it is a stuck-detector,
-/// not a latency budget, so it must never fire on a slow-but-working call.
-const OP_BUDGET: Duration = Duration::from_secs(60);
+/// Deadline for an ordinary op, carried ON the request.
+///
+/// A deadline is a property of the request, so it is expressed once, in the
+/// transport: [`tonic::Request::set_timeout`] writes the `grpc-timeout` header
+/// and tonic's own client-side timeout layer enforces it (the layer is always
+/// installed and reads the header even when the endpoint sets no timeout of its
+/// own). One clock, and the error says the RPC exceeded its deadline rather than
+/// blaming the worker that was waiting on it.
+///
+/// Generous on purpose: a stuck-detector, not a latency budget, so it must never
+/// fire on a slow-but-working call.
+const OP_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Added on top of a blocking tail's own `timeout_ms`, so the ceiling always sits
-/// *after* the server's own deadline and a normal `eof` return wins the race.
-const TAIL_MARGIN: Duration = Duration::from_secs(10);
+/// How much later than a blocking tail's own `timeout_ms` its deadline sits.
+///
+/// The tail has TWO deadlines by design and the application-level one must win:
+/// the server parks up to `timeout_ms` and answers `eof`, which is a normal
+/// return the caller acts on. The transport deadline exists only for a reply
+/// that never comes at all, so it is placed after the server's — small, because
+/// with one enforcing mechanism there is no second clock to out-run.
+const TAIL_GRACE: Duration = Duration::from_secs(5);
+
+/// Bound on establishing the connection.
+///
+/// The channel is lazy, so without this a dial to an address that blackholes
+/// packets never fails — it produces a request future that never resolves, and
+/// the symptom surfaces much later as "no reply" from whatever op happened to be
+/// first. Naming the connect failure at the connect is what makes it
+/// attributable.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Attach `deadline` to `msg` as a gRPC request deadline.
+///
+/// Every op goes through here rather than passing bare messages, so "a request
+/// carries a deadline" is one call shape instead of a rule each of the seven
+/// arms has to remember.
+fn deadlined<T>(msg: T, deadline: Duration) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(msg);
+    req.set_timeout(deadline);
+    req
+}
 
 /// Wait for the worker task's reply, bounded.
 ///
-/// Every public method here hands its op to a `tokio::spawn`ed task and waits on a
-/// reply channel. `recv()` returns `Err` only when the sender is **dropped** — not
-/// when the task is alive and never answers, which is what an RPC that never
-/// resolves on a lazily-connected channel produces. So an unbounded `recv()` parks
-/// the calling thread with no error, no log line, and a socket that still reads
-/// `Established`.
+/// The guarantee: **a caller never parks without an error.** That is what this
+/// exists for, and it is not hypothetical — a standing A2A receiver stopped
+/// consuming its inbox and was indistinguishable from an idle one for four hours
+/// (process alive, CPU flat, cursor frozen while the stream advanced, zero output
+/// in 160 KB of log — sudocode #696). Its poller thread was parked exactly here.
+/// Converting that silence into an `io::Error` is what lets
+/// `runtime::mailbox::spawn_inbox_poller` log `inbox poll failed`, back off and
+/// retry, so the receive loop is self-healing rather than permanently deaf.
 ///
-/// That is not hypothetical: a standing A2A receiver stopped consuming its inbox
-/// and was indistinguishable from an idle one for four hours — process alive, CPU
-/// flat, cursor frozen while the stream advanced, and zero output in 160 KB of log
-/// (sudocode #696). Its poller thread was parked exactly here. A ceiling converts
-/// that silence into an `io::Error`, which `runtime::mailbox::spawn_inbox_poller`
-/// already logs as `inbox poll failed` before backing off and retrying — so the
-/// receive loop becomes self-healing instead of permanently deaf.
+/// Since the request itself now carries a deadline (see [`deadlined`]), the RPC
+/// resolves either way and the reply arrives, so on every path that reaches a
+/// server this bound is not the thing that fires — the gRPC deadline is, and it
+/// says so in the error. What is left for this bound is the handoff the deadline
+/// cannot cover: the op crosses an unbounded channel to the worker and the reply
+/// comes back over a `sync_channel`, so a worker that never polls its receiver,
+/// or a task dropped at runtime teardown, still has to end as an error rather
+/// than as silence. A dropped sender is already `Disconnected`; this covers the
+/// rest.
 ///
 /// Timing out is NOT the same as knowing the op failed: the task may still be in
 /// flight and may still complete. The error says "no answer within `budget`", and

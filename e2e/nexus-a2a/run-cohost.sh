@@ -66,7 +66,11 @@ IMAGE="${COHOST_IMAGE:-nexusd-cluster-cohost:latest}"
 # `:latest` is how a rebuilt image sits unused while the run exercises a months
 # -old binary.
 export COHOST_IMAGE="$IMAGE"
-PORT="${NEXUS_A2A_COHOST_PORT:-2126}"
+# NOT 2126: this value is exported as `NEXUS_A2A_HOST_PORT` for compose, so the
+# container publishes on it, and a developer's own `serve-local` daemon is
+# already there — the publish then fails, or the cargo assertions below reach
+# that daemon rather than the co-host this script started. Override freely.
+PORT="${NEXUS_A2A_COHOST_PORT:-2144}"
 ENDPOINT="127.0.0.1:${PORT}"
 MOCK_PORT="${NEXUS_A2A_MOCK_PORT:-18080}"
 AGENT="${NEXUS_A2A_COHOST_AGENT:-cohost-bot}"

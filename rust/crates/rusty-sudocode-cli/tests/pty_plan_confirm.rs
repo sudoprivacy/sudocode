@@ -18,7 +18,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::TestEnv;
+use common::{expect_turn_complete_after, turn_status_marker, TestEnv, LIVE_TURN_BUDGET};
 
 /// When the model calls write_plan in REPL mode, the user should see a
 /// confirmation dialog. Choosing "keep context & execute" completes the turn.
@@ -53,10 +53,18 @@ fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     assert!(dialog_appeared, "should see confirmation dialog");
 
     // Choose option 2: keep context & execute
+    let marker = turn_status_marker(&sess);
     sess.send("2\r").expect("send choice 2");
-
-    sess.expect("tokens")
-        .expect("should see post-turn status line");
+    expect_turn_complete_after(
+        &sess,
+        &marker,
+        if env.is_live() {
+            LIVE_TURN_BUDGET
+        } else {
+            env.timeout()
+        },
+        "keep-context plan turn should complete",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
@@ -97,10 +105,18 @@ fn write_plan_choice_exit_rejects_execution() {
     assert!(dialog_appeared, "should see confirmation dialog");
 
     // Choose option 4: exit plan (don't execute)
+    let marker = turn_status_marker(&sess);
     sess.send("4\r").expect("send choice 4");
-
-    sess.expect("tokens")
-        .expect("should see status line after exit-plan choice");
+    expect_turn_complete_after(
+        &sess,
+        &marker,
+        if env.is_live() {
+            LIVE_TURN_BUDGET
+        } else {
+            env.timeout()
+        },
+        "exit-plan turn should complete",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));

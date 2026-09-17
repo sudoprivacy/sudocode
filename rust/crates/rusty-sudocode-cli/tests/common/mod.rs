@@ -245,19 +245,20 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
 /// condition — a permissive gate turns a real miss into a green run.
 pub const LIVE_TURN_BUDGET: Duration = Duration::from_secs(180);
 
-/// The per-turn status line as `screen` currently reads it, or `""` when no
+/// The per-turn result line as `screen` currently reads it, or `""` when no
 /// turn has completed yet.
 ///
-/// `ctx <used>/<window> (<pct>%)` (`cli::format::format_context_usage_segment`)
-/// occupies iocraft's `StatusSlot`, whose priority is `Spinner > TurnResult`:
-/// while a turn runs the spinner owns the slot and the REPL clears the previous
-/// turn's result the moment that happens. So this line is the turn's own edge.
+/// The `ctx` segment alone is not a turn identity: two short turns can use the
+/// same context-token count, so comparing it misclassifies a completed second
+/// turn as the first. The result line's `turn N` counter advances for every
+/// completed turn and is therefore the stable marker.
 #[must_use]
 pub fn turn_status_line(screen: &str) -> String {
     screen
         .lines()
+        .rev()
         .map(str::trim)
-        .find(|line| line.contains("ctx "))
+        .find(|line| line.contains("· turn "))
         .unwrap_or_default()
         .to_string()
 }

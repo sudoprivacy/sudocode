@@ -17,7 +17,10 @@ mod common;
 
 use std::time::Duration;
 
-use common::TestEnv;
+use common::{
+    expect_input_line_cleared, expect_turn_complete_after, turn_status_marker, TestEnv,
+    LIVE_TURN_BUDGET,
+};
 
 // ──────────────────────────────────────────────────────────────────────
 // 1. Single-turn prompt — `scode "prompt"` → response → exit 0
@@ -59,21 +62,28 @@ fn multi_turn_references_prior() {
     sess.expect("Alice")
         .expect("first response should mention Alice");
 
-    sess.expect("❯")
-        .expect("should see prompt after first turn");
+    expect_input_line_cleared(&sess, env.timeout(), "first turn should re-arm input");
 
     // Second turn: ask for the name back.
     let second = env.prompt(
         "What is my name? Reply in one sentence.",
         "multi_turn_context",
     );
+    let second_marker = turn_status_marker(&sess);
     sess.send(&format!("{second}\r")).expect("send second msg");
     sess.expect("Alice")
         .expect("second response should recall Alice");
 
-    // Exit cleanly.
-    sess.expect("❯")
-        .expect("should see prompt after second turn");
+    expect_turn_complete_after(
+        &sess,
+        &second_marker,
+        if env.is_live() {
+            LIVE_TURN_BUDGET
+        } else {
+            env.timeout()
+        },
+        "second turn should complete before exiting",
+    );
     sess.send("/exit\r").expect("send /exit");
 
     sess.set_default_timeout(Duration::from_secs(15));

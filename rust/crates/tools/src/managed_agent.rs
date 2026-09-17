@@ -18,7 +18,7 @@ use std::sync::Arc;
 use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::spawn_task::{
     cohost_a2a_prompt_section, handle_send_message, mailbox_sender, AgentDescriptor, AgentState,
-    KernelSyscall, Mailbox, MailboxSender, SpawnHandle,
+    CohostMailbox, KernelSyscall, MailboxSender, SpawnHandle,
 };
 use runtime::{
     FsBackend, KernelFsBackend, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
@@ -43,17 +43,17 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 ///
 /// # Arguments
 ///
-/// * `kernel` — shared kernel handle (in-process, monomorphised)
-/// * `desc` — agent descriptor planted by `ManagedAgentService`
-/// * `mailbox` — where the loop reads inbound + writes replies: a
+/// * `kernel` 鈥?shared kernel handle (in-process, monomorphised)
+/// * `desc` 鈥?agent descriptor planted by `ManagedAgentService`
+/// * `mailbox` 鈥?where the loop reads inbound + writes replies: a
 ///   node-local `/proc/{pid}` stream, or a raft-replicated A2A
 ///   `/agents/<name>` per-recipient inbox for cross-machine conversation
-/// * `state_callback` — called on every state transition so the caller
+/// * `state_callback` 鈥?called on every state transition so the caller
 ///   can forward to `AgentRegistry::update_state`
 pub fn spawn_managed_agent<K, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
-    mailbox: Mailbox,
+    mailbox: CohostMailbox,
     state_callback: F,
 ) -> SpawnHandle
 where
@@ -69,7 +69,7 @@ where
 
     // -- ApiClient: provider chain from model id --
     // The co-hosted agent is A2A-capable, so its tool set includes
-    // `send` (its ONLY, deliberate reply path — see the ping-pong fix).
+    // `send` (its ONLY, deliberate reply path 鈥?see the ping-pong fix).
     // The full tool set (file ops, etc.) is gated behind the agent-profile work;
     // the duet needs only `send`.
     let allowed_tools: BTreeSet<String> = ["send"].iter().map(|s| s.to_string()).collect();
@@ -106,7 +106,7 @@ where
     // -- SystemPrompt: base managed-agent prompt + the A2A reply contract, so
     // the co-hosted model addresses its reply to the message's `<sender>` via
     // `send` instead of guessing a recipient from the message text. The
-    // contract text lives in `spawn_task` next to the `[message from …]` framing
+    // contract text lives in `spawn_task` next to the `[message from 鈥` framing
     // and the `send` reply path it describes. --
     let system_prompt = SystemPromptBuilder::new()
         .append_section(cohost_a2a_prompt_section(&desc.name))
@@ -138,7 +138,7 @@ where
 struct ManagedToolExecutor {
     fs: Arc<dyn FsBackend>,
     /// The co-hosted agent's outbound-message capability. `send` is the
-    /// ONLY way this agent replies to a peer — the poll loop no longer
+    /// ONLY way this agent replies to a peer 鈥?the poll loop no longer
     /// auto-forwards turn output (the ping-pong fix), so a reply happens ONLY
     /// when the agent deliberately calls the tool.
     send: MailboxSender,
@@ -149,7 +149,7 @@ impl ToolExecutor for ManagedToolExecutor {
         let input_value: serde_json::Value =
             serde_json::from_str(input).map_err(|e| ToolError::new(e.to_string()))?;
 
-        // `send` is the deliberate-reply path — an in-process mailbox
+        // `send` is the deliberate-reply path 鈥?an in-process mailbox
         // write bound to THIS agent's identity, not a file op. Routed through
         // the SHARED handler the standalone CLI executor also uses; only the
         // sender differs (this is the in-process kernel sender, standalone is
@@ -164,7 +164,7 @@ impl ToolExecutor for ManagedToolExecutor {
         // Offload the blocking in-process syscall to the blocking pool so a
         // concurrency-safe batch of read-only tools overlaps (I/O
         // interleaving, not thread parallelism): only the `Arc<fs>` clone and
-        // owned args cross the thread boundary — the dispatcher never leaves
+        // owned args cross the thread boundary 鈥?the dispatcher never leaves
         // its thread, so it needs no `Sync`.
         let fs = Arc::clone(&self.fs);
         let tool_name = tool_name.to_string();
@@ -177,7 +177,7 @@ impl ToolExecutor for ManagedToolExecutor {
 }
 
 /// The `SpawnTask` provider that hosts a `sudocode` agent loop as a nexus
-/// managed-agent runtime body — the co-host seam.
+/// managed-agent runtime body 鈥?the co-host seam.
 ///
 /// `ManagedAgentService` (nexus-vfs) calls [`SpawnTask::spawn`] after planting
 /// the per-pid procfs subtree; this impl builds the sudocode
@@ -186,7 +186,7 @@ impl ToolExecutor for ManagedToolExecutor {
 /// when federated), so two co-hosted agents on different hosts converse over
 /// A2A with no bridge/relay.
 ///
-/// Lives here — next to [`spawn_managed_agent`], the loop it wraps — rather
+/// Lives here 鈥?next to [`spawn_managed_agent`], the loop it wraps 鈥?rather
 /// than at the nexus binary edge: the adapter IS sudocode's. nexus only injects
 /// `Arc::new(SudoCodeSpawnAdapter)` at boot via
 /// `managed_agent::install_managed_agent_with_spawn`. There is NO enum map:
@@ -207,7 +207,7 @@ where
         // The co-host agent's mailbox is its persistent, cross-machine A2A
         // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
         // host addresses it by name; raft replicates the reply back.
-        let mailbox = Mailbox::a2a_inbox(desc.name.clone());
+        let mailbox = CohostMailbox::a2a_inbox(desc.name.clone());
         let handle = spawn_managed_agent(kernel, desc, mailbox, move |state, reason| {
             state_observer(state, reason)
         });
@@ -218,7 +218,7 @@ where
 /// Wraps sudocode's [`SpawnHandle`] so the managed-agent service sees only the
 /// abort capability its `on_terminate` observer needs. `abort` signals the
 /// loop's shared `HookAbortSignal`; the worker thread observes it and exits on
-/// its next poll (idempotent — the observer may fire concurrently with an
+/// its next poll (idempotent 鈥?the observer may fire concurrently with an
 /// in-flight `cancel(Session)`).
 struct SudoCodeSpawnHandle {
     inner: SpawnHandle,

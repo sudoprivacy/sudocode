@@ -70,8 +70,12 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
         kind: kinds::TASK_NOTIFICATION.to_string(),
         request_id: None,
     };
-    agent_mailbox::append_envelope(workspace_root, COORDINATOR_INBOX_RECIPIENT, envelope)
-        .map(|_| ())
+    agent_mailbox::append_envelope_to_path(
+        &agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT)
+            .to_string_lossy(),
+        envelope,
+    )
+    .map(|_| ())
 }
 
 /// Drain all `<task-notification>` envelopes that arrived since the
@@ -101,7 +105,8 @@ pub fn drain(workspace_root: &Path) -> Result<Vec<String>, String> {
     if !crate::coordinator_mode::is_coordinator_mode() {
         return Ok(Vec::new());
     }
-    let envelopes = agent_mailbox::read_all(workspace_root, COORDINATOR_INBOX_RECIPIENT)?;
+    let inbox = agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT);
+    let envelopes = agent_mailbox::read_all_from_path(&inbox.to_string_lossy())?;
     let consumed = read_consumed_offset(workspace_root);
     if envelopes.len() <= consumed {
         return Ok(Vec::new());
@@ -116,7 +121,10 @@ pub fn drain(workspace_root: &Path) -> Result<Vec<String>, String> {
 }
 
 fn consumed_offset_path(workspace_root: &Path) -> std::path::PathBuf {
-    agent_mailbox::mailbox_dir(workspace_root).join(CONSUMED_OFFSET_FILE)
+    // Beside the unified inbox (`{ws}/agents/coordinator/chat-with-me`), so the
+    // read position is swept with the inbox it tracks.
+    agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT)
+        .with_file_name(CONSUMED_OFFSET_FILE)
 }
 
 fn read_consumed_offset(workspace_root: &Path) -> usize {
@@ -200,7 +208,7 @@ mod tests {
         let ws = unique_ws("emit-noop");
         emit(&ws, "agent-x", "<task-notification>x</task-notification>").expect("ok");
         assert!(
-            !agent_mailbox::mailbox_path(&ws, COORDINATOR_INBOX_RECIPIENT).exists(),
+            !agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT).exists(),
             "no file created when coord mode is off"
         );
         let _ = std::fs::remove_dir_all(&ws);
@@ -250,10 +258,10 @@ mod tests {
         let ws = unique_ws("drain-mixed");
 
         // Direct low-level append to inject a non-task-notification
-        // envelope alongside a task-notification.
-        agent_mailbox::append_envelope(
-            &ws,
-            COORDINATOR_INBOX_RECIPIENT,
+        // envelope alongside a task-notification, at the unified inbox path
+        // `drain` reads.
+        agent_mailbox::append_envelope_to_path(
+            &agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT).to_string_lossy(),
             MailboxEnvelope {
                 from: "team-lead".to_string(),
                 to: COORDINATOR_INBOX_RECIPIENT.to_string(),

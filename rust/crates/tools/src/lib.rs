@@ -7889,6 +7889,17 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             path: &["teammateMode"],
             options: Some(&["tmux", "in-process", "auto"]),
         },
+        // This process's mailbox identity — the name peers address and the
+        // inbox the receiver polls. Settings scope (per-project settings file):
+        // a sub-agent belongs to its parent scode, so the name is project-scoped
+        // rather than machine-wide. Unset → `runtime::mailbox::local_agent_name`
+        // derives one from the workspace path.
+        "agentName" => ConfigSettingSpec {
+            scope: ConfigScope::Settings,
+            kind: ConfigKind::String,
+            path: &["agentName"],
+            options: None,
+        },
         _ => return None,
     })
 }

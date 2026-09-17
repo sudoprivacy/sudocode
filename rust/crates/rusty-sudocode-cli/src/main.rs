@@ -2979,16 +2979,28 @@ fn run_repl_iocraft_dispatch(
         );
     }
 
-    // Local JSONL inbox poller: picks up messages that sub-agents
-    // write to `.sudocode-inbox/team-lead.jsonl` via the `send` tool.
-    // Complements the nexus A2A poller above — together they close the
-    // receive loop for both local and cross-machine messaging.
+    // Local same-machine mailbox poller: picks up messages that a peer scode
+    // (or a sub-agent) writes to this process's inbox via the `send` tool.
+    // Rooted at the shared per-machine pair root and keyed by this process's
+    // resolved agent name (config `agentName`, else derived from the workspace
+    // path), so two scode processes started in different folders can converse.
+    // Complements the nexus A2A poller above — together they close the receive
+    // loop for both local and cross-machine messaging.
     {
         let coord_tx_local = coord_tx.clone();
-        let workspace = env::current_dir().unwrap_or_default();
+        let cwd = env::current_dir().unwrap_or_default();
+        let configured_name = runtime::ConfigLoader::default_for(&cwd)
+            .load()
+            .ok()
+            .and_then(|rc| {
+                rc.get("agentName")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            });
+        let self_name = runtime::mailbox::local_agent_name(configured_name.as_deref(), &cwd);
+        let root = runtime::mailbox::local_pair_root();
         let _local_poller = runtime::mailbox::spawn_local_poller(
-            workspace,
-            "team-lead".to_string(),
+            root,
+            self_name,
             runtime::HookAbortSignal::new(),
             move |msg| ack_after_coordinator_takes(&coord_tx_local, msg),
         );

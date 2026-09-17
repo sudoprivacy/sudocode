@@ -39,6 +39,58 @@ pub const A2A_INBOX_BASE: &str = "/agents";
 /// re-exported here so the convention reads as one thing in one place.
 pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
 
+/// The shared root under which same-machine standalone `scode` processes keep
+/// their mailboxes, so two started in different folders can address each other.
+///
+/// The standalone analog of a Nexus zone: a stable per-machine prefix that is
+/// NOT the workspace (workspace-rooted inboxes can't see across folders). Lives
+/// under the config home (`~/.nexus/sudocode/local-mailbox`), the same durable,
+/// cross-workspace location the config itself uses.
+#[must_use]
+pub fn local_pair_root() -> std::path::PathBuf {
+    local_pair_root_in(&crate::config::default_config_home())
+}
+
+/// The pair root under an explicit config home. The SSOT `local_pair_root`
+/// delegates to this with `default_config_home()`; tests that pin a config home
+/// compute the same path without depending on process env.
+#[must_use]
+pub fn local_pair_root_in(config_home: &std::path::Path) -> std::path::PathBuf {
+    config_home.join("local-mailbox")
+}
+
+/// This process's mailbox identity — the name peers address and the inbox the
+/// receiver polls. SSOT for "who am I on the mailbox": both the `send` path and
+/// the REPL receiver read this, so they cannot disagree.
+///
+/// Resolution: the `agentName` setting if set (a clean short name the user
+/// picks for pairing), else a name derived from the workspace path. The
+/// derivation folds the FULL path, not just the basename, so two different
+/// projects that happen to share a basename (two `app/` directories) do not
+/// collide inside the shared [`local_pair_root`].
+#[must_use]
+pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Path) -> String {
+    if let Some(name) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    let basename = workspace_root
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "scode".to_string());
+    // Disambiguate same-basename folders with a short hash of the full path.
+    let full = workspace_root.to_string_lossy();
+    if full.is_empty() {
+        return basename;
+    }
+    let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
+    for byte in full.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{basename}-{:06x}", hash & 0xff_ffff)
+}
+
 /// How agent names map to inbox paths.
 ///
 /// The one place a mailbox path shape is defined. There were two such enums —
@@ -47,19 +99,29 @@ pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
 /// `/chat-with-me` leaf ended up spelled four different ways.
 #[derive(Debug, Clone)]
 pub enum InboxConvention {
-    /// Local JSONL: `{root}/.sudocode-inbox/{name}.jsonl`.
-    LocalJsonl { root: String },
-    /// Nexus A2A DT_STREAM, one inbox per recipient:
-    /// `/agents/{name}/chat-with-me`. Raft-replicated, so two agents on
-    /// different nodes converse with no bridge or relay between them.
-    NexusA2a,
+    /// Per-recipient inbox: `{root}/agents/{name}/chat-with-me`.
+    ///
+    /// One shape for every addressed-by-name inbox. `root` is the access/
+    /// isolation prefix — the standalone analog of a Nexus zone:
+    /// - `""` over nexus: the daemon-absolute `/agents/{name}/chat-with-me`
+    ///   (the kernel prepends the real zone).
+    /// - a shared per-machine dir for standalone same-machine pairs
+    ///   ([`local_pair_root`]), so two folders can converse.
+    /// - the workspace root for coordinator↔sub-agent, so a sub-agent belongs
+    ///   to its parent scode and different scodes do not cross-talk.
+    ///
+    /// Framing is the backend's concern, not the path's: `StdFsBackend` writes
+    /// newline-delimited JSON at this path, a DT_STREAM backend writes frames.
+    PerRecipient { root: String },
     /// One stream both parties read AND write, each filtering out its own
     /// writes — the managed-agent `/proc/{pid}/chat-with-me` model.
     ///
     /// Node-local by construction: the path is not keyed by recipient, so
     /// there is no per-agent inbox for a reply to be replicated to. Every name
     /// resolves to the same path, which is what makes "where do I reply to
-    /// this sender" answer itself.
+    /// this sender" answer itself. NOT a `PerRecipient` with a fixed root —
+    /// folding it in would need a sentinel name and break the keyed-by-recipient
+    /// invariant that gives `PerRecipient` its meaning.
     SharedStream { path: String },
 }
 
@@ -73,11 +135,12 @@ impl InboxConvention {
     #[inline]
     pub fn inbox_path(&self, name: &str) -> String {
         match self {
-            InboxConvention::LocalJsonl { root } => {
-                format!("{root}/{LOCAL_INBOX_DIR}/{name}.jsonl")
-            }
-            InboxConvention::NexusA2a => {
-                format!("{A2A_INBOX_BASE}/{name}{CHAT_WITH_ME_SUFFIX}")
+            // Root-safe join: an empty root yields `/agents/...` (nexus
+            // daemon-absolute), a non-empty root yields `{root}/agents/...`
+            // with exactly one separator — never `//agents/...`.
+            InboxConvention::PerRecipient { root } => {
+                let root = root.trim_end_matches('/');
+                format!("{root}{A2A_INBOX_BASE}/{name}{CHAT_WITH_ME_SUFFIX}")
             }
             // Every name resolves to the one stream — so replying to a sender
             // and reading your own inbox are the same path, by design.
@@ -187,7 +250,9 @@ impl Mailbox {
                 auth_token.into(),
             )),
             agent.into(),
-            InboxConvention::NexusA2a,
+            InboxConvention::PerRecipient {
+                root: String::new(),
+            },
         )
     }
 
@@ -277,19 +342,18 @@ impl Mailbox {
         }
 
         match &self.convention {
-            InboxConvention::LocalJsonl { root } => {
-                let recipient = envelope.to.clone();
-                crate::agent_mailbox::append_envelope(
-                    std::path::Path::new(root),
-                    &recipient,
-                    envelope,
-                )
-                .map(|_| ())
+            InboxConvention::PerRecipient { .. } => {
+                // Non-framed backend (StdFs): a message is one JSONL line at the
+                // recipient's inbox path. `path` is the unified
+                // `{root}/agents/{name}/chat-with-me` shape from `inbox_path`;
+                // the JSONL framing is the file backend's, written through the
+                // one envelope-line writer.
+                crate::agent_mailbox::append_envelope_to_path(&path, envelope).map(|_| ())
             }
             // A non-stream path under a stream convention means the inbox was
             // never provisioned. Say so rather than writing a line into a
             // location nothing tails.
-            InboxConvention::NexusA2a | InboxConvention::SharedStream { .. } => Err(format!(
+            InboxConvention::SharedStream { .. } => Err(format!(
                 "mailbox send to {path}: not an append stream — inbox not provisioned"
             )),
         }
@@ -414,11 +478,12 @@ impl Mailbox {
 
     /// List the recipients that have an inbox under this convention.
     ///
-    /// Only the local JSONL convention can answer from the paths alone, because
-    /// only there is a recipient a directory entry. `NexusA2a` inboxes are
-    /// discovered through the agent registry rather than by listing `/agents`,
-    /// and a `SharedStream` has no per-recipient path to enumerate at all — one
-    /// stream, every name resolving to it.
+    /// Only the non-framed per-recipient convention can answer from the paths
+    /// alone, because only there is a recipient a directory entry
+    /// (`{root}/agents/<name>/chat-with-me`). Over a DT_STREAM backend the
+    /// `/agents` namespace is discovered through the agent registry, not by
+    /// listing paths; a `SharedStream` has no per-recipient path to enumerate at
+    /// all — one stream, every name resolving to it.
     ///
     /// # Errors
     ///
@@ -429,15 +494,22 @@ impl Mailbox {
     /// caller has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         match &self.convention {
-            InboxConvention::LocalJsonl { root } => {
-                crate::agent_mailbox::list_recipients(std::path::Path::new(root))
+            // Only enumerable when the backend leaves paths on the host FS.
+            // Over a framed (DT_STREAM) backend the same convention is the
+            // replicated /agents namespace, enumerated through the registry.
+            InboxConvention::PerRecipient { root }
+                if !self.backend_frames(&self.own_inbox_path()) =>
+            {
+                crate::agent_mailbox::list_recipients_under(std::path::Path::new(root))
             }
-            InboxConvention::NexusA2a => Err(
-                "this session's mailbox is the replicated /agents namespace, which is                  enumerated through the agent registry rather than by listing paths"
+            InboxConvention::PerRecipient { .. } => Err(
+                "this session's mailbox is the replicated /agents namespace, which is \
+                 enumerated through the agent registry rather than by listing paths"
                     .to_string(),
             ),
             InboxConvention::SharedStream { .. } => Err(
-                "a shared stream has no per-recipient inbox to enumerate — every name                  resolves to the one path"
+                "a shared stream has no per-recipient inbox to enumerate — every name \
+                 resolves to the one path"
                     .to_string(),
             ),
         }
@@ -491,16 +563,16 @@ impl InboxCursor {
     }
 
     /// Where a workspace-local receiver keeps its position: a dotfile beside
-    /// the inbox it tracks, so it is scoped to the workspace and swept with it.
-    ///
-    /// The one definition of that location. A caller that needs to know whether
-    /// a receiver has started — a test with a message to send, say — asks here
-    /// rather than rebuilding the name, because a rebuilt name is a second
-    /// definition that compiles.
+    /// the inbox it tracks, so it is scoped to the (root, agent) pair and swept
+    /// with it. Keying by root as well as name is load-bearing: the same agent
+    /// name under two roots (the pair root vs a workspace) must not share one
+    /// cursor, or a position from one stream gets applied to another and inbound
+    /// messages are silently skipped.
     #[must_use]
-    pub fn local(workspace_root: &std::path::Path, self_id: &str) -> Self {
+    pub fn local(root: &std::path::Path, self_id: &str) -> Self {
         Self::at(
-            crate::agent_mailbox::mailbox_dir(workspace_root)
+            root.join("agents")
+                .join(self_id)
                 .join(Self::file_name(".cursor-", self_id)),
         )
     }
@@ -665,7 +737,7 @@ pub fn spawn_local_poller(
     let mailbox = Arc::new(Mailbox::new(
         Arc::new(crate::fs_backend::StdFsBackend),
         self_id,
-        InboxConvention::LocalJsonl {
+        InboxConvention::PerRecipient {
             root: workspace_root.to_string_lossy().into_owned(),
         },
     ));
@@ -752,10 +824,16 @@ pub fn sending_mailbox() -> Arc<Mailbox> {
     if let Some(mailbox) = SCOPED_MAILBOX.with(|cell| cell.borrow().clone()) {
         return mailbox;
     }
+    // Ambient fallback with no scoped mailbox: workspace-rooted, so a
+    // coordinator/sub-agent send stays per-workspace (a sub-agent belongs to its
+    // parent scode; different scodes must not cross-talk). The standalone
+    // same-machine pair uses a scoped mailbox rooted at `local_pair_root()`,
+    // installed by the host — this fallback is not that path. `self_id` is empty
+    // here by design (see doc above); a real identity rides the scoped mailbox.
     Arc::new(Mailbox::new(
         Arc::new(crate::fs_backend::StdFsBackend),
         String::new(),
-        InboxConvention::LocalJsonl {
+        InboxConvention::PerRecipient {
             root: crate::current_workspace_root_or_default()
                 .to_string_lossy()
                 .into_owned(),
@@ -785,7 +863,7 @@ mod tests {
         Mailbox::new(
             Arc::new(StdFsBackend),
             self_id.to_string(),
-            InboxConvention::LocalJsonl {
+            InboxConvention::PerRecipient {
                 root: root.to_string(),
             },
         )
@@ -1062,16 +1140,52 @@ mod tests {
 
     #[test]
     fn inbox_path_conventions() {
-        let local = InboxConvention::LocalJsonl {
+        // One shape, root-prefixed. Standalone: a host dir root.
+        let local = InboxConvention::PerRecipient {
             root: "/workspace".to_string(),
         };
         assert_eq!(
             local.inbox_path("worker"),
-            "/workspace/.sudocode-inbox/worker.jsonl"
+            "/workspace/agents/worker/chat-with-me"
         );
 
-        let nexus = InboxConvention::NexusA2a;
+        // Nexus: empty root → daemon-absolute, exactly one leading slash.
+        let nexus = InboxConvention::PerRecipient {
+            root: String::new(),
+        };
         assert_eq!(nexus.inbox_path("win-ai"), "/agents/win-ai/chat-with-me");
+
+        // A trailing slash on the root must not double up.
+        let trailing = InboxConvention::PerRecipient {
+            root: "/workspace/".to_string(),
+        };
+        assert_eq!(
+            trailing.inbox_path("worker"),
+            "/workspace/agents/worker/chat-with-me"
+        );
+    }
+
+    #[test]
+    fn local_agent_name_prefers_configured_over_derived() {
+        let ws = std::path::Path::new("/home/me/projects/app");
+        assert_eq!(local_agent_name(Some("alice"), ws), "alice");
+        assert_eq!(local_agent_name(Some("  bob  "), ws), "bob");
+        // Empty / whitespace config falls through to derivation.
+        assert_ne!(local_agent_name(Some("   "), ws), "");
+    }
+
+    #[test]
+    fn local_agent_name_disambiguates_same_basename_folders() {
+        let a = local_agent_name(None, std::path::Path::new("/home/me/x/app"));
+        let b = local_agent_name(None, std::path::Path::new("/home/me/y/app"));
+        assert!(a.starts_with("app-"), "keeps basename: {a}");
+        assert!(b.starts_with("app-"), "keeps basename: {b}");
+        assert_ne!(a, b, "same basename, different paths must not collide");
+        // Deterministic: same path → same name.
+        assert_eq!(
+            a,
+            local_agent_name(None, std::path::Path::new("/home/me/x/app"))
+        );
     }
 
     #[test]

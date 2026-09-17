@@ -122,6 +122,25 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
   --test pty_agent_duet -- --nocapture
 
+# A daemon that is alive and SILENT — the failure a unit test cannot construct.
+#
+# A dropped connection reports itself; a stopped process holds the socket open
+# and answers nothing, which is how a standing receiver went deaf for four hours
+# while looking idle (#696). `SIGSTOP` reproduces exactly that, and only the
+# harness can do it, because only the harness knows the pid of the daemon it
+# started.
+#
+# Binary mode only: in Docker the daemon is not our child, and Windows has no
+# SIGSTOP that leaves the socket open. Skipped loudly rather than silently, so a
+# run that did not exercise this says so.
+if [ "$MODE" = binary ] && [ -n "$DAEMON_PID" ]; then
+  echo "== [deterministic] a silent server errors, then recovers =="
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_DAEMON_PID="$DAEMON_PID" \
+    "${CARGO_TEST[@]}" live_a_silent_server_errors_and_then_recovers -- --ignored --nocapture
+else
+  echo "== [skip] silent-server fault injection — needs a daemon this script started (MODE=$MODE) =="
+fi
+
 # ---- Optional: real 2-LLM co-host duet (gated) --------------------------------
 if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   echo "== [live] scode -> co-host duet =="

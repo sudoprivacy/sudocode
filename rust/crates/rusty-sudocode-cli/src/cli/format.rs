@@ -1143,6 +1143,13 @@ pub(crate) fn bash_card(
         return ToolCardContent::header_only(header);
     };
 
+    // When the header could not show the whole command — it spans multiple
+    // lines, or a single line longer than the 120-char summary cap — echo the
+    // full command verbatim at the top of the body, each line `$ `-prefixed
+    // (shell convention) so it reads distinctly from the output below. A hacker
+    // tool favors transparency: the exact command run is never hidden.
+    let command_preamble = command_body_preamble(command);
+
     // Background id / return-code interpretation live in `output`.
     if let Some(task_id) = output
         .get("backgroundTaskId")
@@ -1166,14 +1173,47 @@ pub(crate) fn bash_card(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
 
-    stdout_stderr_card(header, stdout_text, stderr_text)
+    stdout_stderr_card(header, command_preamble, stdout_text, stderr_text)
+}
+
+/// Build the `$ `-prefixed full-command preamble for a bash card body, or
+/// `None` when the header already shows the whole command (single line ≤120
+/// chars). Multi-line commands get one `$ ` per line; the preamble is closed
+/// with a dim horizontal rule that separates the command from the output.
+fn command_body_preamble(command: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let is_multiline = command.contains('\n');
+    let is_overlong = command.chars().count() > 120;
+    if !is_multiline && !is_overlong {
+        return None;
+    }
+    let mut preamble = String::new();
+    for line in command.split('\n') {
+        let _ = writeln!(preamble, "{DIM}${RESET} {line}");
+    }
+    // Dim rule (structure, not status) dividing command from output.
+    let rule_width = crossterm::terminal::size()
+        .map_or(24, |(cols, _)| (cols as usize).saturating_sub(6).min(24));
+    let _ = write!(
+        preamble,
+        "{DIM}{}{RESET}",
+        "\u{2500}".repeat(rule_width.max(1))
+    );
+    Some(preamble)
 }
 
 /// Shared stdout/stderr body builder used by [`bash_card`]. Combines the two
 /// streams, drops blank lines, and applies the per-tool line cap from
-/// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. Returns a [`ToolCardContent`]; the L-frame
-/// prefix is applied later by [`render_tool_card`].
-fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardContent {
+/// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. When `command_preamble` is present it is
+/// placed above the output (the verbatim `$ `-prefixed command + a dim rule).
+/// Returns a [`ToolCardContent`]; the L-frame prefix is applied later by
+/// [`render_tool_card`].
+fn stdout_stderr_card(
+    header: String,
+    command_preamble: Option<String>,
+    stdout: &str,
+    stderr: &str,
+) -> ToolCardContent {
     use std::fmt::Write as _;
 
     let all_output: Vec<&str> = stdout
@@ -1183,7 +1223,11 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardCon
         .collect();
 
     if all_output.is_empty() {
-        return ToolCardContent::header_only(header);
+        // No output: still show the full command if the header truncated it.
+        return match command_preamble {
+            Some(preamble) => ToolCardContent::new(header, preamble),
+            None => ToolCardContent::header_only(header),
+        };
     }
 
     let term_width = crossterm::terminal::size()
@@ -1195,6 +1239,12 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardCon
 
     let preview_count = TOOL_OUTPUT_DISPLAY_MAX_LINES;
     let mut body = String::new();
+
+    // Verbatim command sits above the output, separated by its own dim rule.
+    if let Some(preamble) = &command_preamble {
+        body.push_str(preamble);
+        body.push('\n');
+    }
 
     for (i, line) in all_output.iter().take(preview_count).enumerate() {
         let truncated = truncate_to_width(line, max_content_width);
@@ -3675,6 +3725,39 @@ mod tests {
         let plain = ok_card_plain(bash_card(&input, None, ToolStatus::Running));
         assert!(plain.contains("Bash(ls -la)"), "{plain}");
         assert!(plain.contains("· list files"), "{plain}");
+    }
+
+    #[test]
+    fn bash_card_echoes_full_multiline_command_above_output() {
+        // A multi-line command can't fit the single-line header, so the body
+        // shows it verbatim, one `$ ` per line, above the output — hacker-tool
+        // transparency: the exact command run is never hidden.
+        let input = serde_json::json!({ "command": "cd foo\ngit status" });
+        let output = serde_json::json!({ "stdout": "On branch main", "stderr": "" });
+        let plain = ok_card_plain(bash_card(&input, Some(&output), ToolStatus::Ok));
+        assert!(plain.contains("$ cd foo"), "{plain}");
+        assert!(plain.contains("$ git status"), "{plain}");
+        assert!(plain.contains("On branch main"), "{plain}");
+        // A dim rule (U+2500) separates command from output.
+        assert!(
+            plain.contains('\u{2500}'),
+            "expected a separator rule: {plain}"
+        );
+    }
+
+    #[test]
+    fn bash_card_single_line_command_has_no_preamble() {
+        // A short single-line command is fully shown in the header, so the body
+        // is just the output — no redundant `$ ` echo.
+        let input = serde_json::json!({ "command": "ls -la" });
+        let output = serde_json::json!({ "stdout": "file.txt", "stderr": "" });
+        let plain = ok_card_plain(bash_card(&input, Some(&output), ToolStatus::Ok));
+        assert!(plain.contains("Bash(ls -la)"), "{plain}");
+        assert!(
+            !plain.contains("$ ls -la"),
+            "single-line must not repeat: {plain}"
+        );
+        assert!(plain.contains("file.txt"), "{plain}");
     }
 
     #[test]

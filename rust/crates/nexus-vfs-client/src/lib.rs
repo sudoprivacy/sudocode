@@ -333,11 +333,7 @@ impl NexusVfsClient {
                                     // is the wait it asked for plus a grace, so
                                     // the server's own `eof` at `timeout_ms` is
                                     // a normal return rather than a race.
-                                    let deadline = if blocking {
-                                        Duration::from_millis(timeout_ms) + TAIL_GRACE
-                                    } else {
-                                        OP_DEADLINE
-                                    };
+                                    let deadline = tail_deadline(blocking, timeout_ms);
                                     let r = client
                                         .stream_read_at(deadlined(
                                             StreamReadAtRequest {
@@ -405,7 +401,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
@@ -418,7 +414,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     pub fn delete(&self, path: &str, auth_token: &str) -> io::Result<()> {
@@ -430,7 +426,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Append one frame to a DT_STREAM at `path`; returns the byte offset
@@ -447,7 +443,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Non-blocking read of a DT_STREAM at `offset`. Returns
@@ -483,12 +479,10 @@ impl NexusVfsClient {
         // wait it asked for rather than fixed: the server parks up to `timeout_ms`
         // and answers `eof`, and only a reply that never comes at all should trip
         // the bound.
-        let budget = if blocking {
-            Duration::from_millis(timeout_ms) + TAIL_GRACE
-        } else {
-            OP_DEADLINE
-        };
-        await_reply(&resp_rx, budget)
+        await_reply(
+            &resp_rx,
+            tail_deadline(blocking, timeout_ms) + HANDOFF_GRACE,
+        )
     }
 
     /// `sys_setattr(DT_STREAM)` on `path` — create the DT_STREAM container
@@ -514,7 +508,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the
@@ -529,7 +523,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE)
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Stat a path via the generic Call RPC.
@@ -632,6 +626,35 @@ const TAIL_GRACE: Duration = Duration::from_secs(5);
 /// attributable.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
 
+/// How much later than the REQUEST's deadline the reply-channel backstop sits.
+///
+/// Two bounds cover one op and they must not be equal. The request carries the
+/// primary deadline (see [`deadlined`]); [`await_reply`] is a backstop for the
+/// handoff a deadline cannot reach. Setting both to the same value makes which
+/// one fires a coin flip — and the backstop won in practice, so a daemon that
+/// missed its deadline was reported as `vfs worker sent no reply`, blaming the
+/// worker that was correctly waiting. Placing the backstop strictly later means
+/// the deadline always wins for anything that reached a server, the error names
+/// what actually happened, and if the backstop ever does fire its message is
+/// true: the reply never came even though the RPC would have answered by then.
+///
+/// Sized for the handoff itself — an unbounded channel send, a task spawn, and a
+/// `sync_channel` reply — not for the RPC, which the deadline already bounds.
+const HANDOFF_GRACE: Duration = Duration::from_secs(2);
+
+/// The request deadline for one `stream_read_at`.
+///
+/// Derived in ONE place because two callers need the same answer: the public
+/// method (to size its backstop) and the worker arm (to stamp the request). They
+/// computed it separately before, which is the same value with two definitions.
+fn tail_deadline(blocking: bool, timeout_ms: u64) -> Duration {
+    if blocking {
+        Duration::from_millis(timeout_ms) + TAIL_GRACE
+    } else {
+        OP_DEADLINE
+    }
+}
+
 /// Attach `deadline` to `msg` as a gRPC request deadline.
 ///
 /// Every op goes through here rather than passing bare messages, so "a request
@@ -654,15 +677,20 @@ fn deadlined<T>(msg: T, deadline: Duration) -> tonic::Request<T> {
 /// `runtime::mailbox::spawn_inbox_poller` log `inbox poll failed`, back off and
 /// retry, so the receive loop is self-healing rather than permanently deaf.
 ///
-/// Since the request itself now carries a deadline (see [`deadlined`]), the RPC
-/// resolves either way and the reply arrives, so on every path that reaches a
-/// server this bound is not the thing that fires — the gRPC deadline is, and it
-/// says so in the error. What is left for this bound is the handoff the deadline
-/// cannot cover: the op crosses an unbounded channel to the worker and the reply
-/// comes back over a `sync_channel`, so a worker that never polls its receiver,
-/// or a task dropped at runtime teardown, still has to end as an error rather
-/// than as silence. A dropped sender is already `Disconnected`; this covers the
-/// rest.
+/// What this is FOR, now that the request carries its own deadline (see
+/// [`deadlined`]): the handoff, which a deadline cannot reach. The op crosses an
+/// unbounded channel to the worker and the reply returns over a `sync_channel`,
+/// so a worker that never polls its receiver, or a task dropped at runtime
+/// teardown, still has to end as an error rather than as silence. A dropped
+/// sender is already `Disconnected`; this covers the rest.
+///
+/// It is NOT the bound that fires for anything that reached a server — but that
+/// is a consequence of ORDERING, not something to assume. While this budget
+/// equalled the request deadline, which of the two fired was a coin flip, and in
+/// practice this one won: a daemon that missed its deadline surfaced as `vfs
+/// worker sent no reply`, naming the wrong layer. [`HANDOFF_GRACE`] is what puts
+/// this budget strictly later, so the deadline wins where a deadline applies and
+/// this message is only ever emitted when it is true.
 ///
 /// Timing out is NOT the same as knowing the op failed: the task may still be in
 /// flight and may still complete. The error says "no answer within `budget`", and

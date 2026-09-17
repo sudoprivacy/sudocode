@@ -826,9 +826,26 @@ fn live_a_silent_server_errors_and_then_recovers() {
         result.is_err(),
         "a poll against a STOPPED daemon must fail, not park — got {result:?} after {elapsed:?}"
     );
+
+    // The REQUEST's deadline must be what fired, not the reply-channel backstop
+    // behind it. Both bound the same op, and while they were set to the same
+    // value the backstop won — so a daemon that missed its deadline was reported
+    // as `vfs worker sent no reply`, blaming the worker that was correctly
+    // waiting. The backstop now sits strictly later, which turns this into the
+    // attribution check: the client's own backstop wording must NOT be what
+    // surfaced.
+    let message = format!("{result:?}");
     assert!(
-        elapsed < Duration::from_secs(30),
-        "the poll took {elapsed:?} — the deadline is not bounding it"
+        !message.contains("vfs worker sent no reply"),
+        "the reply-channel backstop fired instead of the request deadline, so the          error names the wrong layer: {message}"
+    );
+    // `WAIT_MS` plus the client's tail grace is the request deadline (5.5s for a
+    // 500ms wait); the backstop sits a further handoff grace behind it (7.5s).
+    // Landing before the backstop is what proves the deadline won, so this bound
+    // is deliberately tight — the loose "did not hang" bound is the assert above.
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "the poll took {elapsed:?} — at or past the backstop, so the backstop is          what bounded it rather than the request deadline"
     );
     println!("silent server surfaced as an error after {elapsed:?}: {result:?}");
 

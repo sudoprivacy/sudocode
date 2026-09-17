@@ -8798,8 +8798,8 @@ mod tests {
         assert_eq!(canonicalize_tool_name("Grep"), "grep_search");
         assert_eq!(canonicalize_tool_name("read_file"), "read_file");
         // PascalCase-native tools MUST pass through unchanged — lower-casing
-        // them turns every one into `unsupported tool` (the pty_plan_mode
-        // regression). Guard the whole PascalCase-arm family.
+        // them turns every one into `unsupported tool`. Guard the whole
+        // PascalCase-arm family.
         for tool in [
             "WebFetch",
             "WebSearch",

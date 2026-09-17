@@ -15,7 +15,7 @@ use crate::mcp::RuntimeMcpState;
 // Global side-channel for the "clear context & execute plan" flow.
 //
 // When the user chooses option 1 ("Clear context & execute") in the
-// ExitPlanMode confirmation dialog, the tool executor (running on the ENGINE
+// write_plan confirmation dialog, the tool executor (running on the ENGINE
 // thread, deep in tool dispatch) stores the plan text here. After the turn,
 // `LiveCli::run_turn()` (the RENDERER thread) reads it and, if set, clears the
 // session and re-runs with the plan as the new prompt. It is a *global* Mutex
@@ -213,7 +213,7 @@ fn execute_runtime_tool_with_state(
 /// `null`: the streaming openai-completions wire form for "no arguments"
 /// accumulates an empty `partial_json`, and non-streaming providers can send
 /// `null`. A plain `from_str` rejects both, which broke every no-argument tool
-/// (`EnterPlanMode`, `ExitPlanMode`, …) with "invalid tool input JSON" before
+/// (`Sleep`, `ToolSearch`, …) with "invalid tool input JSON" before
 /// the call ever reached dispatch. Normalize empty / `null` to an empty
 /// argument object here — the single point where the CLI turns a tool-call
 /// argument string into a value — so no-arg tools dispatch. Tools with required
@@ -763,7 +763,7 @@ mod tests {
     fn empty_or_null_arguments_normalize_to_empty_object() {
         // No-argument tool calls stream an empty arguments string (the
         // openai-completions wire form) or the literal `null`. Both must
-        // dispatch as `{}` so no-arg tools (EnterPlanMode, ExitPlanMode, …)
+        // dispatch as `{}` so no-arg tools (Sleep, ToolSearch, …)
         // deserialize into their empty input structs instead of being rejected
         // with "invalid tool input JSON" before dispatch.
         for raw in ["", "   ", "\n\t", "null", "  null  "] {

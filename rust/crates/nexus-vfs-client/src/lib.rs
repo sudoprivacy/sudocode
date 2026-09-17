@@ -9,6 +9,7 @@ use proto::{
 };
 use std::io;
 use std::sync::mpsc;
+use std::time::Duration;
 
 /// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
 /// `Setattr` when provisioning a mailbox DT_STREAM.
@@ -351,7 +352,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
@@ -364,7 +365,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     pub fn delete(&self, path: &str, auth_token: &str) -> io::Result<()> {
@@ -376,7 +377,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     /// Append one frame to a DT_STREAM at `path`; returns the byte offset
@@ -393,7 +394,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     /// Non-blocking read of a DT_STREAM at `offset`. Returns
@@ -425,7 +426,16 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        // The one op that is *designed* to wait, so its ceiling is derived from the
+        // wait it asked for rather than fixed: the server parks up to `timeout_ms`
+        // and answers `eof`, and only a reply that never comes at all should trip
+        // the bound.
+        let budget = if blocking {
+            Duration::from_millis(timeout_ms) + TAIL_MARGIN
+        } else {
+            OP_BUDGET
+        };
+        await_reply(&resp_rx, budget)
     }
 
     /// `sys_setattr(DT_STREAM)` on `path` — create the DT_STREAM container
@@ -451,7 +461,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the
@@ -466,7 +476,7 @@ impl NexusVfsClient {
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        resp_rx.recv().map_err(|_| broken_pipe())?
+        await_reply(&resp_rx, OP_BUDGET)
     }
 
     /// Stat a path via the generic Call RPC.
@@ -536,4 +546,128 @@ fn vfs_err(payload: &[u8]) -> io::Error {
 
 fn broken_pipe() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "vfs worker gone")
+}
+
+/// Ceiling for an ordinary op's reply. Generous on purpose: it is a stuck-detector,
+/// not a latency budget, so it must never fire on a slow-but-working call.
+const OP_BUDGET: Duration = Duration::from_secs(60);
+
+/// Added on top of a blocking tail's own `timeout_ms`, so the ceiling always sits
+/// *after* the server's own deadline and a normal `eof` return wins the race.
+const TAIL_MARGIN: Duration = Duration::from_secs(10);
+
+/// Wait for the worker task's reply, bounded.
+///
+/// Every public method here hands its op to a `tokio::spawn`ed task and waits on a
+/// reply channel. `recv()` returns `Err` only when the sender is **dropped** — not
+/// when the task is alive and never answers, which is what an RPC that never
+/// resolves on a lazily-connected channel produces. So an unbounded `recv()` parks
+/// the calling thread with no error, no log line, and a socket that still reads
+/// `Established`.
+///
+/// That is not hypothetical: a standing A2A receiver stopped consuming its inbox
+/// and was indistinguishable from an idle one for four hours — process alive, CPU
+/// flat, cursor frozen while the stream advanced, and zero output in 160 KB of log
+/// (sudocode #696). Its poller thread was parked exactly here. A ceiling converts
+/// that silence into an `io::Error`, which `runtime::mailbox::spawn_inbox_poller`
+/// already logs as `inbox poll failed` before backing off and retrying — so the
+/// receive loop becomes self-healing instead of permanently deaf.
+///
+/// Timing out is NOT the same as knowing the op failed: the task may still be in
+/// flight and may still complete. The error says "no answer within `budget`", and
+/// every caller here is idempotent-retry safe (a re-read at the same cursor, a
+/// re-`ensure_stream`), so a retry is the correct response.
+fn await_reply<T>(resp_rx: &mpsc::Receiver<io::Result<T>>, budget: Duration) -> io::Result<T> {
+    match resp_rx.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("vfs worker sent no reply within {budget:?}"),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(broken_pipe()),
+    }
+}
+
+/// The first tests in this crate, and deliberately only these four.
+///
+/// Coverage for this client otherwise lives in `runtime/tests/mailbox_nexus_live.rs`,
+/// against a real daemon, which is the right place for anything about the wire. What
+/// cannot be reached from there is [`await_reply`]: it is private, and the failure it
+/// exists for — a worker task that is alive and simply never answers — has no
+/// constructor on the far side of a real connection.
+///
+/// Four cases because the interesting part is not the timeout; it is that adding a
+/// ceiling must not change the other three outcomes.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times_out_rather_than_parking_forever() {
+        // `_tx` must stay BOUND. A bare `_` drops the sender immediately and the
+        // receiver reports Disconnected, which would test the wrong branch and pass
+        // for the wrong reason.
+        let (_tx, rx) = mpsc::sync_channel::<io::Result<u8>>(1);
+        let budget = Duration::from_millis(50);
+
+        let started = std::time::Instant::now();
+        let err = await_reply(&rx, budget).expect_err("a silent worker must not park");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            err.to_string().contains("no reply within"),
+            "the message has to say what happened: {err}"
+        );
+        assert!(
+            started.elapsed() >= budget,
+            "returned before the budget elapsed: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_dropped_worker_is_still_a_broken_pipe() {
+        let (tx, rx) = mpsc::sync_channel::<io::Result<u8>>(1);
+        drop(tx);
+
+        let err = await_reply(&rx, Duration::from_secs(30))
+            .expect_err("a dropped sender must report, not wait out the budget");
+
+        // Distinguishable from the timeout, and unchanged from the behaviour
+        // before the ceiling existed.
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn a_ready_reply_is_returned_without_waiting() {
+        let (tx, rx) = mpsc::sync_channel::<io::Result<u8>>(1);
+        tx.send(Ok(7)).expect("queue the reply");
+
+        let started = std::time::Instant::now();
+        let value = await_reply(&rx, Duration::from_secs(30)).expect("reply should pass through");
+
+        assert_eq!(value, 7);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an already-queued reply must not wait on the budget: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_workers_own_error_is_not_masked() {
+        let (tx, rx) = mpsc::sync_channel::<io::Result<u8>>(1);
+        tx.send(Err(vfs_err(b"permission denied by the zone")))
+            .expect("queue the error");
+
+        let err = await_reply(&rx, Duration::from_secs(30)).expect_err("the error should surface");
+
+        // The ceiling must not turn a real refusal into a timeout, or the caller
+        // retries something that will never succeed.
+        assert_ne!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            err.to_string().contains("permission denied by the zone"),
+            "the worker's own message must survive: {err}"
+        );
+    }
 }

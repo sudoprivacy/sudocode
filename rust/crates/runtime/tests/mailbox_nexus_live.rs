@@ -768,3 +768,98 @@ fn live_collect_inbox() {
         println!("  from={:?} body={:?}", m.from, m.body);
     }
 }
+
+/// A server that stops answering surfaces as an error, and the client recovers
+/// when it answers again.
+///
+/// This is the property #696 was filed for and the one a unit test structurally
+/// cannot reach: not a refused call, not a dropped connection, but a daemon that
+/// is *alive and silent*. A dropped socket reports `BrokenPipe` on its own; a
+/// stopped process holds the connection open and answers nothing, which is what
+/// left a standing receiver indistinguishable from an idle one for four hours —
+/// process up, CPU flat, cursor frozen while the stream advanced.
+///
+/// `SIGSTOP` is the fault injection because it reproduces exactly that: the
+/// socket stays `Established`, the kernel keeps accepting bytes, and no reply
+/// ever comes. The harness owns the daemon it started, so it passes the pid in
+/// `NEXUS_A2A_TEST_DAEMON_PID` — without it this test cannot know which process
+/// to stop and refuses to run rather than passing vacuously.
+///
+/// Both halves are asserted, because either alone is misleading. That the poll
+/// returns an `Err` instead of parking is the bound working; that a poll AFTER
+/// `SIGCONT` succeeds is the recovery, which is what makes the receive loop
+/// self-healing rather than permanently deaf.
+#[test]
+#[ignore = "requires a running nexusd-cluster the harness can stop; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_DAEMON_PID"]
+fn live_a_silent_server_errors_and_then_recovers() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let pid: i32 = std::env::var("NEXUS_A2A_TEST_DAEMON_PID")
+        .expect("set NEXUS_A2A_TEST_DAEMON_PID — the harness knows the daemon it started")
+        .trim()
+        .parse()
+        .expect("NEXUS_A2A_TEST_DAEMON_PID must be a pid");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+
+    let me = "scode-silent-server-probe";
+    let client = dial(&endpoint);
+    mailbox(&client, me, &auth)
+        .ensure_inbox()
+        .expect("ensure inbox");
+    let (_history, tail) = mailbox(&client, me, &auth)
+        .poll(0, 0)
+        .expect("seek to tail while the daemon still answers");
+
+    // A short blocking wait: the deadline derives from it, so the bound under
+    // test is `wait + grace` rather than a fixed ceiling nobody chose.
+    const WAIT_MS: u64 = 500;
+
+    signal(pid, "STOP");
+    let stopped_at = Instant::now();
+    let result = mailbox(&client, me, &auth).poll(tail, WAIT_MS);
+    let elapsed = stopped_at.elapsed();
+    // Resume before asserting: a panic here must not leave the daemon stopped
+    // for the rest of the harness run.
+    signal(pid, "CONT");
+
+    assert!(
+        result.is_err(),
+        "a poll against a STOPPED daemon must fail, not park — got {result:?} after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the poll took {elapsed:?} — the deadline is not bounding it"
+    );
+    println!("silent server surfaced as an error after {elapsed:?}: {result:?}");
+
+    // Recovery: the same mailbox, the same cursor, now that the daemon answers.
+    // Retried because SIGCONT is not instantaneous from the client's side — the
+    // in-flight RPC it abandoned may still be draining.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match mailbox(&client, me, &auth).poll(tail, WAIT_MS) {
+            Ok((_msgs, next)) => {
+                assert_eq!(next, tail, "an idle poll must not move the cursor");
+                println!("recovered: a poll after SIGCONT succeeded at cursor {next}");
+                break;
+            }
+            Err(e) => assert!(
+                Instant::now() < deadline,
+                "the client never recovered after SIGCONT — last error: {e}"
+            ),
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Send `sig` to `pid`. Unix-only by construction: `SIGSTOP` has no Windows
+/// equivalent that leaves the socket open, which is the whole point of the
+/// injection, so the harness only sets the pid where it works.
+fn signal(pid: i32, sig: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(pid.to_string())
+        .status()
+        .unwrap_or_else(|e| panic!("could not run kill -{sig} {pid}: {e}"));
+    assert!(status.success(), "kill -{sig} {pid} failed: {status}");
+}

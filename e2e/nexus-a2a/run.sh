@@ -19,7 +19,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PORT="${NEXUS_A2A_HOST_PORT:-2126}"
+# `run-cross-node.sh` and `run-auth-on.sh` already translate the paths they hand
+# the daemon; this one did not, and the divergence is invisible until it bites:
+# every assertion here goes over gRPC, so a daemon writing its data somewhere
+# else entirely still passes, and only the leftover directories show it.
+# shellcheck source=lib.sh
+. ./lib.sh
+
+# NOT 2126. That is the port `serve-local` defaults to and therefore the one a
+# developer's own daemon is already on — the harness would then either fail to
+# bind or, worse, run its assertions against that daemon instead of the throwaway
+# it thinks it started. Any override still works; only the default moved.
+PORT="${NEXUS_A2A_HOST_PORT:-2143}"
 ENDPOINT="127.0.0.1:${PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
@@ -67,7 +78,7 @@ else
   # stale identity and no quorum.
   DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-nexusd.XXXXXX")"
   echo "== starting nexusd-cluster (binary) on :${PORT} =="
-  "$NEXUSD_BIN"     --bind-addr "0.0.0.0:${PORT}"     --data-dir "$DATA_DIR/data"     --identity-dir "$DATA_DIR/identity"     --no-tls     --insecure-no-auth     >"$DATA_DIR/daemon.log" 2>&1 &
+  "$NEXUSD_BIN"     --bind-addr "0.0.0.0:${PORT}"     --data-dir "$(native_path "$DATA_DIR/data")"     --identity-dir "$(native_path "$DATA_DIR/identity")"     --no-tls     --insecure-no-auth     >"$DATA_DIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
 fi
 

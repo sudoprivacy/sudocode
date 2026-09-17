@@ -540,8 +540,8 @@ pub enum UiCommand {
     ShowInputHint(String),
     /// Update the ContextSlot's todo panel with the current todo list.
     UpdateContext(Vec<runtime::Todo>),
-    /// A tool call started — add a running (yellow) card to the staging
-    /// overlay.
+    /// A tool call started — append a running (yellow) card to the pending
+    /// overlay, in arrival order relative to queued messages.
     ToolStarted {
         id: String,
         name: String,
@@ -554,12 +554,16 @@ pub enum UiCommand {
     ToolFinished {
         id: String,
     },
-    /// Replace the queued-input overlay with the coordinator's current queue
-    /// (compact display texts, oldest first). Empty clears the overlay. This is
-    /// a pure projection of the coordinator's queue — the coordinator sends it
-    /// whenever the queue changes (enqueue on submit-during-turn, clear on
-    /// drain).
-    SetQueue(Vec<String>),
+    /// A message (human input or inbound A2A) was queued for the next turn —
+    /// append it to the pending overlay in arrival order. `display` is the
+    /// compact one-line form. The coordinator sends one per enqueue (not a
+    /// wholesale list) so tools and messages keep their true interleaving.
+    QueuedMessagePush {
+        display: String,
+    },
+    /// Clear all queued-message items from the pending overlay (tool cards
+    /// stay). Sent by the coordinator when the queue drains at a turn boundary.
+    QueuedMessagesClear,
 }
 
 #[derive(Clone)]
@@ -600,8 +604,14 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
     }
 
-    pub fn set_queue(&self, display_texts: Vec<String>) {
-        let _ = self.tx.send(UiCommand::SetQueue(display_texts));
+    pub fn queued_message_push(&self, display: &str) {
+        let _ = self.tx.send(UiCommand::QueuedMessagePush {
+            display: display.to_string(),
+        });
+    }
+
+    pub fn queued_messages_clear(&self) {
+        let _ = self.tx.send(UiCommand::QueuedMessagesClear);
     }
 }
 
@@ -1075,12 +1085,41 @@ fn strip_ansi(input: &str) -> String {
 /// so many concurrent cards can't flood the screen or make every frame redraw
 /// hundreds of lines. Overflow collapses to a `… +N more running` line.
 ///
-/// A pure projection of `cards` — it renders only running calls and never
-/// commits to scrollback (the render engine does that on the ordered output
-/// channel). Height budget mirrors the task panel: `min(10, max(3, rows-14))`,
-/// hidden entirely on a very short terminal.
-fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
-    if cards.is_empty() {
+/// One pending item awaiting the user's eye at a turn boundary: either an
+/// in-flight tool call (rendered as a running L-frame card) or a message queued
+/// for the next turn (a human `❯` line or an inbound A2A `📨` line). They share
+/// one ordered list so the overlay shows exactly what arrived, in arrival order
+/// — a tool starting, then a peer message, then another tool, interleave the
+/// way they happened rather than being grouped into two panes.
+#[derive(Clone, Debug)]
+pub enum PendingItem {
+    /// An in-flight tool call. Keyed by `tool_use_id`; removed on completion
+    /// (the finished green/red card is written to scrollback by the render
+    /// engine, not here).
+    Tool(ToolCard),
+    /// A message queued for the next turn — `display` is the compact one-line
+    /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
+    /// the coordinator echoes the real line to scrollback when it flushes.
+    QueuedMessage { display: String },
+}
+
+/// Render the pending overlay: in-flight tool cards and queued messages in one
+/// ordered list, joined into one multi-line string.
+///
+/// Queued messages take priority in the height budget — they are the thing the
+/// user is waiting to see (a queued input, an inbound A2A), and each is one
+/// line, so all of them always render, in arrival order. Tool cards fill the
+/// remaining budget in arrival order; excess tool cards collapse to a
+/// `… +N more running` line so a busy turn can't push a message out of view.
+///
+/// A pure projection of `items` — it never commits to scrollback (the render
+/// engine commits finished tool cards; the coordinator echoes flushed messages).
+/// Height budget mirrors the task panel: `min(10, max(3, rows-14))`, hidden
+/// entirely on a very short terminal.
+fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
+    use crate::render::{DIM, RESET};
+
+    if items.is_empty() {
         return String::new();
     }
     // Same budget family as render_todo_panel; hide on a very short terminal
@@ -1090,69 +1129,52 @@ fn render_staging_overlay(cards: &[ToolCard], term_rows: usize) -> String {
     }
     let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
 
-    let mut lines: Vec<String> = Vec::new();
-    let mut shown_cards = 0usize;
-    for card in cards {
-        let rendered = crate::cli::format::format_tool_call_start(&card.name, &card.input);
-        let card_lines: Vec<&str> = rendered.lines().collect();
-        // Keep whole cards: stop before a card that would breach the budget,
-        // unless nothing has been shown yet (always show at least one card,
-        // truncated, so the user sees *something* running).
-        if !lines.is_empty() && lines.len() + card_lines.len() > max_lines {
-            break;
-        }
-        for l in &card_lines {
-            if lines.len() >= max_lines {
-                break;
-            }
-            lines.push((*l).to_string());
-        }
-        shown_cards += 1;
-    }
-
-    let hidden = cards.len() - shown_cards;
-    if hidden > 0 {
-        use crate::render::{DIM, RESET};
-        lines.push(format!("{DIM}… +{hidden} more running{RESET}"));
-    }
-    lines.join("\n")
-}
-
-/// Render the queue overlay: user inputs queued behind the running turn, one
-/// compact `↳ queued: <text>` line each (DIM), joined into one multi-line
-/// string. Capped to a height budget like the staging overlay; overflow
-/// collapses to a `… +N more queued` line. Hidden on a very short terminal.
-///
-/// A pure projection of the queued display texts — it holds nothing itself and
-/// never commits to scrollback (the coordinator echoes `❯ text` there when the
-/// item actually flushes).
-fn render_queue_overlay(items: &[String], term_rows: usize) -> String {
-    use crate::render::{DIM, RESET};
-
-    if items.is_empty() {
-        return String::new();
-    }
-    if term_rows <= 10 {
-        return String::new();
-    }
-    let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+    // Messages are one line each and always shown; reserve their space first so
+    // tool cards (multi-line) can never crowd a queued message out.
+    let message_count = items
+        .iter()
+        .filter(|i| matches!(i, PendingItem::QueuedMessage { .. }))
+        .count();
+    // Budget left for tool-card lines after messages take their rows. Keep at
+    // least room for the overflow marker if there are any tools.
+    let tool_budget = max_lines.saturating_sub(message_count);
 
     let mut lines: Vec<String> = Vec::new();
+    let mut tool_lines_used = 0usize;
+    let mut tools_shown = 0usize;
+    let mut tools_total = 0usize;
     for item in items {
-        if lines.len() >= max_lines {
-            break;
+        match item {
+            PendingItem::QueuedMessage { display } => {
+                // Always render (one line, collapsed), in arrival position.
+                let first = display.lines().next().unwrap_or("");
+                lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
+            }
+            PendingItem::Tool(card) => {
+                tools_total += 1;
+                let card_lines: Vec<String> =
+                    crate::cli::format::format_tool_call_start(&card.name, &card.input)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                // Reserve one line for the overflow marker when more tools than
+                // fit remain. Keep whole cards.
+                let fits = tool_lines_used + card_lines.len() <= tool_budget.saturating_sub(1)
+                    || (tools_shown == 0 && tool_lines_used + card_lines.len() <= tool_budget);
+                if fits {
+                    for l in card_lines {
+                        lines.push(l);
+                        tool_lines_used += 1;
+                    }
+                    tools_shown += 1;
+                }
+            }
         }
-        // Collapse to the first line so a multi-line queued input stays one row.
-        let first = item.lines().next().unwrap_or("");
-        lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
     }
 
-    let hidden = items.len() - lines.len();
-    if hidden > 0 {
-        // Replace the last shown line with the overflow marker so the total
-        // never exceeds the budget.
-        lines.pop();
-        lines.push(format!("{DIM}… +{} more queued{RESET}", hidden + 1));
+    let tools_hidden = tools_total - tools_shown;
+    if tools_hidden > 0 {
+        lines.push(format!("{DIM}… +{tools_hidden} more running{RESET}"));
     }
     lines.join("\n")
 }
@@ -1278,13 +1300,13 @@ struct ReplContext {
     /// instead of a `use_state` hook to avoid shifting hook indices.
     context_todos: Arc<Mutex<Vec<runtime::Todo>>>,
     /// Running tool cards for the StagingSlot overlay, in insertion order.
-    /// `ToolStarted` appends; `ToolFinished` removes by id. Same `Arc<Mutex>`
-    /// rationale as `context_todos` — avoids shifting hook indices.
-    staging_cards: Arc<Mutex<Vec<ToolCard>>>,
-    /// Queued-input display texts for the queue overlay (between StagingSlot and
-    /// StatusSlot), oldest first. Replaced wholesale by `UiCommand::SetQueue`.
-    /// Same `Arc<Mutex>` rationale as `staging_cards`.
-    queued_inputs: Arc<Mutex<Vec<String>>>,
+    /// Pending items for the overlay above the StatusSlot: in-flight tool cards
+    /// and queued messages (human + inbound A2A) in one ordered list, so the
+    /// overlay shows arrival order across both. `ToolStarted`/`QueuedMessagePush`
+    /// append; `ToolFinished` removes a tool by id; `QueuedMessagesClear` drops
+    /// the queued messages. Same `Arc<Mutex>` rationale as `context_todos` —
+    /// avoids shifting hook indices.
+    pending: Arc<Mutex<Vec<PendingItem>>>,
 }
 
 #[component]
@@ -1299,10 +1321,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
     let context_todos = Arc::clone(&ctx.context_todos);
     let context_todos_for_future = Arc::clone(&ctx.context_todos);
-    let staging_cards = Arc::clone(&ctx.staging_cards);
-    let staging_cards_for_future = Arc::clone(&ctx.staging_cards);
-    let queued_inputs = Arc::clone(&ctx.queued_inputs);
-    let queued_inputs_for_future = Arc::clone(&ctx.queued_inputs);
+    let pending = Arc::clone(&ctx.pending);
+    let pending_for_future = Arc::clone(&ctx.pending);
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -1447,8 +1467,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                         Ok(UiCommand::ToolStarted { id, name, input }) => {
-                            if let Ok(mut cards) = staging_cards_for_future.lock() {
-                                cards.push(ToolCard { id, name, input });
+                            if let Ok(mut pending) = pending_for_future.lock() {
+                                pending.push(PendingItem::Tool(ToolCard { id, name, input }));
                             }
                         }
                         Ok(UiCommand::ToolFinished { id }) => {
@@ -1456,16 +1476,24 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             // finished card's permanent content is written to
                             // scrollback by the render engine on the ordered
                             // `output` channel — never from here — so the
-                            // overlay stays a pure, order-free projection.
-                            if let Ok(mut cards) = staging_cards_for_future.lock() {
-                                cards.retain(|c| c.id != id);
+                            // overlay stays a pure projection.
+                            if let Ok(mut pending) = pending_for_future.lock() {
+                                pending
+                                    .retain(|p| !matches!(p, PendingItem::Tool(c) if c.id == id));
                             }
                         }
-                        Ok(UiCommand::SetQueue(items)) => {
-                            // Pure projection of the coordinator's queue; the
-                            // coordinator resends the full list on every change.
-                            if let Ok(mut q) = queued_inputs_for_future.lock() {
-                                *q = items;
+                        Ok(UiCommand::QueuedMessagePush { display }) => {
+                            // Append in arrival order, interleaved with tool
+                            // cards, so the overlay mirrors what happened.
+                            if let Ok(mut pending) = pending_for_future.lock() {
+                                pending.push(PendingItem::QueuedMessage { display });
+                            }
+                        }
+                        Ok(UiCommand::QueuedMessagesClear) => {
+                            // Drop queued messages (tool cards stay); the
+                            // coordinator has flushed the queue into a turn.
+                            if let Ok(mut pending) = pending_for_future.lock() {
+                                pending.retain(|p| matches!(p, PendingItem::Tool(_)));
                             }
                         }
                         Err(TryRecvError::Empty) => break,
@@ -1996,36 +2024,24 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         format!("{todo_line}\n{sep}")
     };
 
-    // StagingSlot: running tool cards (yellow), rendered via the same SSOT as
-    // completed cards (`format_tool_call_start` == the Running L-frame). Built
-    // as one multi-line string so the element tree keeps a fixed shape (empty
-    // string when no cards) — same hook-index rationale as the task panel. This
-    // is a pure overlay: it shows only in-flight calls and never commits to
-    // scrollback (the render engine does that on the ordered output channel).
-    let staging_text = staging_cards
+    // PendingSlot: in-flight tool cards (yellow L-frames) and queued messages
+    // (human `❯` / inbound A2A `📨`) in one ordered overlay, in arrival order.
+    // Built as one multi-line string so the element tree keeps a fixed shape
+    // (empty string when nothing pending) — same hook-index rationale as the
+    // todo panel. A pure overlay: it never commits to scrollback (the render
+    // engine commits finished tool cards; the coordinator echoes flushed
+    // messages).
+    let pending_text = pending
         .lock()
         .ok()
-        .map(|cards| render_staging_overlay(&cards, term_height as usize))
-        .unwrap_or_default();
-
-    // QueueSlot: user inputs queued behind the running turn (DIM), between the
-    // StagingSlot and StatusSlot. Same pure-overlay / fixed-element-shape
-    // rationale as the staging overlay — a queued input lives here (never in
-    // scrollback) until the coordinator flushes it at the turn boundary.
-    let queue_text = queued_inputs
-        .lock()
-        .ok()
-        .map(|items| render_queue_overlay(&items, term_height as usize))
+        .map(|items| render_pending_overlay(&items, term_height as usize))
         .unwrap_or_default();
 
     element! {
         View(flex_direction: FlexDirection::Column) {
-            // StagingSlot: in-flight tool cards (yellow). Empty string renders
-            // nothing; the element is always present to keep hook order.
-            Text(content: staging_text)
-            // QueueSlot: inputs queued behind the running turn (DIM). Empty
-            // string renders nothing; element always present for hook order.
-            Text(content: queue_text)
+            // PendingSlot: tools + queued messages, arrival order. Empty string
+            // renders nothing; element always present to keep hook order.
+            Text(content: pending_text)
             // StatusSlot
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
@@ -2142,8 +2158,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
         context_todos: Arc::new(Mutex::new(tools::global_todo_list())),
-        staging_cards: Arc::new(Mutex::new(Vec::new())),
-        queued_inputs: Arc::new(Mutex::new(Vec::new())),
+        pending: Arc::new(Mutex::new(Vec::new())),
     };
 
     let banner = startup_banner.to_string();
@@ -2220,20 +2235,26 @@ mod tests {
     }
 
     #[test]
-    fn staging_overlay_empty_when_no_cards() {
-        assert_eq!(render_staging_overlay(&[], 40), "");
+    fn pending_overlay_empty_when_nothing_pending() {
+        assert_eq!(render_pending_overlay(&[], 40), "");
     }
 
     #[test]
-    fn staging_overlay_hidden_on_short_terminal() {
+    fn pending_overlay_hidden_on_short_terminal() {
         // ≤10 rows: hide entirely rather than crowd out the prompt.
-        assert_eq!(render_staging_overlay(&[tool_card("1", "bash")], 8), "");
+        assert_eq!(
+            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8),
+            ""
+        );
     }
 
     #[test]
-    fn staging_overlay_renders_one_card_per_running_call() {
-        let cards = vec![tool_card("1", "bash"), tool_card("2", "read_file")];
-        let plain = strip_ansi(&render_staging_overlay(&cards, 40));
+    fn pending_overlay_renders_one_card_per_running_call() {
+        let items = vec![
+            PendingItem::Tool(tool_card("1", "bash")),
+            PendingItem::Tool(tool_card("2", "read_file")),
+        ];
+        let plain = strip_ansi(&render_pending_overlay(&items, 40));
         // Each running call is a Running L-frame card (╭─ header … ╰─).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
@@ -2244,12 +2265,36 @@ mod tests {
     }
 
     #[test]
-    fn staging_overlay_collapses_overflow_beyond_height_budget() {
+    fn pending_overlay_interleaves_tools_and_messages_in_arrival_order() {
+        // A tool, then a queued message, then another tool — the overlay shows
+        // them in arrival order, not grouped into two panes.
+        let items = vec![
+            PendingItem::Tool(tool_card("1", "bash")),
+            PendingItem::QueuedMessage {
+                display: "📨 A2A from mac-ai: hi".to_string(),
+            },
+            PendingItem::Tool(tool_card("2", "read_file")),
+        ];
+        let plain = strip_ansi(&render_pending_overlay(&items, 40));
+        let bash_at = plain.find("Bash").expect("bash card");
+        let msg_at = plain.find("A2A from mac-ai").expect("queued message");
+        let read_at = plain.find("Read").expect("read card");
+        assert!(
+            bash_at < msg_at && msg_at < read_at,
+            "arrival order tool→message→tool must be preserved: {plain}"
+        );
+        assert!(plain.contains("↳ queued:"), "message line marker: {plain}");
+    }
+
+    #[test]
+    fn pending_overlay_collapses_overflow_beyond_height_budget() {
         // rows=24 → budget min(10,max(3,10)) = 10 lines. Each card is 3 lines
         // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
-        // fit and the rest collapse into a "+N more running" line.
-        let cards: Vec<ToolCard> = (0..8).map(|i| tool_card(&i.to_string(), "bash")).collect();
-        let plain = strip_ansi(&render_staging_overlay(&cards, 24));
+        // fit and the rest collapse into a "+N more pending" line.
+        let items: Vec<PendingItem> = (0..8)
+            .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
+            .collect();
+        let plain = strip_ansi(&render_pending_overlay(&items, 24));
         assert!(
             plain.contains("more running"),
             "expected overflow summary: {plain}"

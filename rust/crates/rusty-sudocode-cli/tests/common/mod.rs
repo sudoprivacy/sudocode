@@ -100,13 +100,12 @@ const PROMPT_MARKER: &str = "\u{276f}";
 pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, context: &str) {
     let deadline = Instant::now() + budget;
     loop {
-        let shown = sess.render(|screen| {
-            screen
-                .contents()
-                .lines()
-                .any(|line| line.contains(PROMPT_MARKER) && line.contains(text))
-        });
-        if shown {
+        // The LIVE input row only — `input_line_of` takes the lowest row that
+        // carries the marker. Scanning every marker-bearing row would also match
+        // a replayed history line, and on `--resume` it matched typed characters
+        // that had landed IN the transcript rather than on the input line, which
+        // is the bug this narrowing exists to catch rather than confirm.
+        if sess.render(|s| input_line_of(&s.contents()).contains(text)) {
             return;
         }
         if Instant::now() >= deadline {
@@ -182,19 +181,51 @@ pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
 /// # Panics
 /// When the buffer has not gone empty within `budget`; the message carries
 /// `context`, what the buffer held, and the rendered screen.
+/// Block until the REPL is genuinely ready: the input line is empty AND the
+/// screen has stopped changing.
+///
+/// Emptiness alone is not readiness. On `--resume` the restored history is
+/// replayed row by row, and the lowest prompt row reads empty both BEFORE the
+/// replay starts and WHILE it is still painting — the replay then pushes the
+/// input row further down. A caller that types into that window has its
+/// characters land in the transcript instead of the input line: CI caught
+/// exactly that, with `/exit` wedged onto a replayed history row
+/// (`/exit❯ say hello world …`) and the submit that followed going nowhere, so
+/// the child never exited and the test died 15s later on `<child exit>`.
+/// Observed on `pty_resume.rs:132` on `main` before this helper was hardened.
+///
+/// So the screen must also hold still: `SETTLE_POLLS` consecutive identical
+/// renders, which is what distinguishes "done painting" from "between rows".
+///
+/// # Panics
+/// When the input line never emptied, or never settled, within `budget`; the
+/// message says which and carries the rendered screen.
 pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
+    /// Identical consecutive renders required before calling the screen settled.
+    const SETTLE_POLLS: u32 = 4;
     let deadline = Instant::now() + budget;
+    let mut previous: Option<String> = None;
+    let mut stable = 0u32;
     loop {
-        let line = sess.render(|screen| input_line_of(&screen.contents()));
-        if line.is_empty() {
-            return;
+        let screen = sess.render(|s| s.contents());
+        let line = input_line_of(&screen);
+        if line.is_empty() && previous.as_deref() == Some(screen.as_str()) {
+            stable += 1;
+            if stable >= SETTLE_POLLS {
+                return;
+            }
+        } else {
+            stable = 0;
         }
         if Instant::now() >= deadline {
-            let screen = sess.render(|s| s.contents());
-            panic!(
-                "{context}: the input line still held {line:?} after {budget:?}\nPTY:\n{screen}"
-            );
+            let unmet = if line.is_empty() {
+                "the input line emptied but the screen kept changing"
+            } else {
+                "the input line still held content"
+            };
+            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
         }
+        previous = Some(screen);
         std::thread::sleep(Duration::from_millis(25));
     }
 }

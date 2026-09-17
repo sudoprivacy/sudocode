@@ -182,26 +182,16 @@ impl Config {
     }
 
     /// System-prompt section telling the model its A2A identity and how to
-    /// reach peers. Derived purely from config, so it stays the single
-    /// source for the peer-awareness text.
+    /// reach peers. Delegates the reply contract + framing to the shared
+    /// [`crate::agent_mailbox::repl_a2a_prompt_section`] (the SSOT every REPL
+    /// receive path renders) and prepends the nexus-specific network note.
     #[must_use]
     pub fn peer_system_prompt(&self) -> String {
-        let mut s = format!(
-            "## Agent-to-agent messaging\n\nYou are reachable on a nexus A2A network as the agent \"{}\". \
-             To message another agent, call the `send` tool with a JSON object \
-             {{\"to\": \"<agent name>\", \"message\": \"<your message>\"}}. \
-             A successful send returns `message delivered to <agent name>`; any other result \
-             means the message did NOT leave this machine — say so rather than reporting success. \
-             Messages other agents send you are delivered into this conversation as they arrive.",
-            self.agent
-        );
-        if !self.peers.is_empty() {
-            s.push_str(&format!(
-                "\n\nKnown peers you can address: {}.",
-                self.peers.join(", ")
-            ));
-        }
-        s
+        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent, &self.peers);
+        format!(
+            "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
+             be on another machine; addressing it by name still reaches it."
+        )
     }
 }
 

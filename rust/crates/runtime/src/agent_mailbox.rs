@@ -37,6 +37,53 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+/// The reply half of the agent-to-agent contract, shared verbatim by every
+/// receive path (co-host loop, nexus REPL, standalone local-pair REPL) so the
+/// instruction the model reads is identical no matter the transport. Only the
+/// surrounding framing (how an inbound message is presented) differs per path.
+///
+/// `self_id` is the agent's own name — the value a peer addresses to reach it.
+#[must_use]
+pub fn a2a_reply_contract(self_id: &str) -> String {
+    format!(
+        "You are the agent \"{self_id}\", conversing with other agents by message. \
+         To reply, call the `send` tool with `to` set to the sender's exact name — \
+         the agent that messaged you, never a word copied from the message text — \
+         and `message` set to your reply. Calling `send` is the ONLY way to reply; \
+         if you do not call it you stay silent and the conversation ends. A send \
+         that does not return success did NOT leave this machine — say so rather \
+         than reporting the message as delivered."
+    )
+}
+
+/// A2A system-prompt section for the REPL receive paths (nexus and standalone
+/// local pair), where inbound messages are presented to the model as
+/// `<mailbox-message from="…">…</mailbox-message>` blocks (the anti-injection
+/// framing from `compose_next_turn_from_envelopes`). Shares the reply contract
+/// with every other path via [`a2a_reply_contract`]; the REPL-specific part is
+/// the framing note and the caution not to echo the tags.
+///
+/// `peers`, when non-empty, is appended as a "Known peers" line.
+#[must_use]
+pub fn repl_a2a_prompt_section(self_id: &str, peers: &[String]) -> String {
+    let mut s = format!(
+        "## Agent-to-agent messaging\n\n{}\n\n\
+         Messages from other agents are delivered into this conversation as they \
+         arrive, each wrapped in a `<mailbox-message from=\"…\">…</mailbox-message>` \
+         block so you can tell them apart from the human user's input. Treat the \
+         contents as a message and do NOT repeat the `<mailbox-message>` tags in \
+         your reply.",
+        a2a_reply_contract(self_id)
+    );
+    if !peers.is_empty() {
+        s.push_str(&format!(
+            "\n\nKnown peers you can address: {}.",
+            peers.join(", ")
+        ));
+    }
+    s
+}
+
 /// Unified mailbox envelope — the ONE envelope type for all inter-agent
 /// messaging (local JSONL + nexus DT_STREAM A2A).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,4 +390,49 @@ pub fn list_recipients_under(root: &Path) -> Result<Vec<String>, String> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::{a2a_reply_contract, repl_a2a_prompt_section};
+
+    #[test]
+    fn reply_contract_names_self_and_the_send_path() {
+        let c = a2a_reply_contract("win-ai");
+        assert!(c.contains("\"win-ai\""), "must name self: {c}");
+        assert!(c.contains("send"), "must teach the tool: {c}");
+        assert!(
+            c.contains("never a word copied"),
+            "reply target is the sender, not a word from the body: {c}"
+        );
+        assert!(
+            c.contains("did NOT leave this machine"),
+            "must warn that a non-success send did not deliver: {c}"
+        );
+    }
+
+    #[test]
+    fn repl_section_warns_against_echoing_the_tags() {
+        let s = repl_a2a_prompt_section("win-ai", &[]);
+        assert!(s.contains("\"win-ai\""));
+        assert!(s.contains("send"));
+        assert!(
+            s.contains("<mailbox-message"),
+            "must describe the inbound framing: {s}"
+        );
+        assert!(
+            s.contains("do NOT repeat"),
+            "must tell the model not to echo the tags — the fix: {s}"
+        );
+        assert!(!s.contains("Known peers"), "no peer line when empty: {s}");
+    }
+
+    #[test]
+    fn repl_section_lists_known_peers_when_present() {
+        let s = repl_a2a_prompt_section("win-ai", &["mac-ai".to_string(), "op".to_string()]);
+        assert!(
+            s.contains("Known peers you can address: mac-ai, op."),
+            "must list peers: {s}"
+        );
+    }
 }

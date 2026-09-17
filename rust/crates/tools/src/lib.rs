@@ -7045,6 +7045,13 @@ const CORE_TOOLS: &[&str] = &[
     "pid_fork",
     "ToolSearch",
     "AskUserQuestion",
+    // Replying to an inbound a2a / sub-agent message is done with `send`, and it
+    // is the ONLY way to reply — so `send` is required to finish the default path
+    // of the receive workflow, exactly the `pid_output` case above. Left deferred,
+    // a model that received a message had to ToolSearch for `send` before it could
+    // answer, and often concluded it could not reply at all. A tool required to
+    // finish a core workflow is core.
+    "send",
     // Plan-before-implement is a proactive default: keep it always-visible so the
     // model reaches for it without a ToolSearch round-trip first (deferring it
     // would suppress exactly the proactivity we want).
@@ -9863,6 +9870,11 @@ mod tests {
             "ToolSearch is core"
         );
         assert_eq!(core_tools.get("Sleep"), Some(&false), "Sleep is core");
+        assert_eq!(
+            core_tools.get("send"),
+            Some(&false),
+            "send is core — replying to an inbound message is the a2a receive path"
+        );
         assert_eq!(
             core_tools.get("CronCreate"),
             Some(&true),

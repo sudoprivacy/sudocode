@@ -230,13 +230,9 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
 pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
     format!(
         "# Agent-to-agent messaging\n\
-         You are the agent \"{self_id}\", conversing with other agents by message. \
-         Each message you receive is shown as `[message from <sender>]` followed by \
-         its text. To reply, call the `send` tool with `to` set to that \
-         exact `<sender>` name 鈥?the agent that messaged you, never a word copied \
-         from the message text 鈥?and `message` set to your reply. Calling \
-         `send` is the only way to reply; if you do not call it you stay \
-         silent and the conversation ends."
+         Each message you receive is shown as `[message from <sender>]` followed \
+         by its text. {}",
+        crate::agent_mailbox::a2a_reply_contract(self_id)
     )
 }
 

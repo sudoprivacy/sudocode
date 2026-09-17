@@ -333,16 +333,35 @@ fn compact_with_model(
         ],
     )
     .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let budget = Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let screen = cli.render(|screen| screen.contents());
         if common::screen_contains(&screen, expected) {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "expected {expected}\n{screen}"
-        );
+        if std::time::Instant::now() >= deadline {
+            // A child that has already exited cannot put anything more on
+            // screen, so report THAT instead of the text we were waiting for.
+            // Polling `render` alone cannot separate "still working" from
+            // "exited without printing it" — both look like a screen that
+            // stopped changing, and the wait spends its whole budget before
+            // blaming the transcript. Measured under a CPU-starved container:
+            // the process was already a zombie 5s into a 30s wait, and the
+            // panic still read `expected history preserved`, discarding the
+            // exit code that would have explained it.
+            cli.set_default_timeout(Duration::from_millis(50));
+            match cli.expect_eof() {
+                Ok(code) => panic!(
+                    "scode exited with code {code} without ever showing \
+                     {expected:?}\n{screen}"
+                ),
+                Err(_) => panic!(
+                    "timed out after {budget:?} waiting for {expected:?}; scode \
+                     is still running\n{screen}"
+                ),
+            }
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
     cli.expect_eof().unwrap()

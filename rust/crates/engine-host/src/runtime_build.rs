@@ -459,6 +459,30 @@ pub(crate) fn build_runtime_with_plugin_state(
     // which is what stops the two from drifting.
     if let Some(a2a_session) = a2a {
         tool_executor.set_mailbox(a2a_session.mailbox());
+    } else {
+        // Standalone (no nexus): route `send` to the shared same-machine pair
+        // root under this process's resolved identity, so a peer scode started
+        // in another folder receives it (its poller tails the same
+        // `{pair_root}/agents/{name}/chat-with-me`). Without this the send would
+        // fall back to workspace-local, which two different folders never share.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let configured = runtime::ConfigLoader::default_for(&cwd)
+            .load()
+            .ok()
+            .and_then(|rc| {
+                rc.get("agentName")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            });
+        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), &cwd);
+        tool_executor.set_mailbox(std::sync::Arc::new(runtime::mailbox::Mailbox::new(
+            std::sync::Arc::new(runtime::fs_backend::StdFsBackend),
+            self_name,
+            runtime::mailbox::InboxConvention::PerRecipient {
+                root: runtime::mailbox::local_pair_root()
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )));
     }
     let runtime = ConversationRuntime::new_with_features(
         session,

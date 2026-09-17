@@ -563,16 +563,16 @@ impl InboxCursor {
     }
 
     /// Where a workspace-local receiver keeps its position: a dotfile beside
-    /// the inbox it tracks, so it is scoped to the workspace and swept with it.
-    ///
-    /// The one definition of that location. A caller that needs to know whether
-    /// a receiver has started — a test with a message to send, say — asks here
-    /// rather than rebuilding the name, because a rebuilt name is a second
-    /// definition that compiles.
+    /// the inbox it tracks, so it is scoped to the (root, agent) pair and swept
+    /// with it. Keying by root as well as name is load-bearing: the same agent
+    /// name under two roots (the pair root vs a workspace) must not share one
+    /// cursor, or a position from one stream gets applied to another and inbound
+    /// messages are silently skipped.
     #[must_use]
-    pub fn local(workspace_root: &std::path::Path, self_id: &str) -> Self {
+    pub fn local(root: &std::path::Path, self_id: &str) -> Self {
         Self::at(
-            crate::agent_mailbox::mailbox_dir(workspace_root)
+            root.join("agents")
+                .join(self_id)
                 .join(Self::file_name(".cursor-", self_id)),
         )
     }

@@ -932,18 +932,23 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
     let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
     let content_width = term_width.saturating_sub(2).max(1);
     let mut out = String::new();
-    for (i, seg) in wrap_ansi_to_width(&content.header, content_width)
-        .iter()
-        .enumerate()
-    {
-        let prefix = if i == 0 { &top } else { &bar };
-        if i > 0 {
-            out.push('\n');
+    // Header may itself contain newlines (e.g. a multi-line command echoed in
+    // the identity). Split on them first — exactly like the body — so every
+    // physical line gets a frame prefix; otherwise an embedded `\n` produces a
+    // row with no `│` that spills past the left frame.
+    let mut first_row = true;
+    for line in content.header.split('\n') {
+        for seg in wrap_ansi_to_width(line, content_width) {
+            let prefix = if first_row { &top } else { &bar };
+            if !first_row {
+                out.push('\n');
+            }
+            let _ = write!(out, "{prefix} {seg}");
+            first_row = false;
         }
-        let _ = write!(out, "{prefix} {seg}");
     }
     if let Some(body) = &content.body {
-        for line in body.lines() {
+        for line in body.split('\n') {
             for seg in wrap_ansi_to_width(line, content_width) {
                 let _ = write!(out, "\n{bar} {seg}");
             }
@@ -982,6 +987,27 @@ fn wrap_ansi_to_width(s: &str, width: usize) -> Vec<String> {
                 }
             }
             carried_style = true;
+            continue;
+        }
+        // A tab has no intrinsic display width (`UnicodeWidthChar::width`
+        // returns `None`), but visually advances to the next 8-column tab stop.
+        // Counting it as 0 undercounts the row, so the terminal wraps it and
+        // the continuation escapes the frame. Expand it to spaces up to the
+        // next tab stop instead.
+        if ch == '\t' {
+            let advance = 8 - (vis % 8);
+            if vis + advance > width && vis > 0 {
+                if carried_style {
+                    cur.push_str(RESET);
+                }
+                rows.push(std::mem::take(&mut cur));
+                vis = 0;
+            }
+            let advance = 8 - (vis % 8);
+            for _ in 0..advance {
+                cur.push(' ');
+            }
+            vis += advance;
             continue;
         }
         let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
@@ -2562,6 +2588,32 @@ mod tests {
                 "wrapped body row must start with the frame bar: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn render_tool_card_frames_every_line_of_multiline_header_and_tabs() {
+        // Regression: a header carrying its own newlines (e.g. a multi-line
+        // command echoed in the identity) used to spill past the left frame,
+        // because only the body was split on `\n`. And a tab was counted as 0
+        // width, so a tabbed row overflowed and the terminal-wrapped remainder
+        // escaped the frame. Every physical row must now start with a frame
+        // glyph (top `╭`, bar `│`, or bottom `╰`).
+        let header = "PowerShell(command=cd foo\ngit status)".to_string();
+        let body = "col1\tcol2\tcol3".to_string();
+        let content = ToolCardContent::new(header, body);
+        let plain = ok_card_plain(content);
+        for line in plain.lines() {
+            let first = line.trim_start().chars().next().unwrap_or(' ');
+            assert!(
+                matches!(first, '\u{256d}' | '\u{2502}' | '\u{2570}'),
+                "every card row must start with a frame glyph: {line:?}"
+            );
+        }
+        // The second header line survived as its own framed row.
+        assert!(
+            plain.lines().any(|l| l.contains("git status")),
+            "multi-line header second line must render: {plain:?}"
+        );
     }
 
     #[test]

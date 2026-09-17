@@ -238,46 +238,96 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
     compact(screen).contains(&compact(text))
 }
 
-/// Block until a turn has finished AND the REPL is ready for input again.
+/// How long a live turn may take before a gate calls it a failure.
 ///
-/// Two conditions, because the status line alone is not enough. `ctx …` is
-/// printed when a turn ends, but the REPL has not necessarily re-armed its
-/// input line by then — the submitted text can still be sitting on the prompt
-/// row. A caller that sends the next thing in that window loses the
-/// keystrokes, and the damage surfaces far away: `/exit` never registers, the
-/// child never exits, and the test dies as
-/// `clean exit: Timeout(15s, "<child exit>")`. That was observed four times
-/// with identical wording — `pty_cancel.rs:129` and `pty_resume.rs:97`, on
-/// ubuntu and on macos, including on the commit that added this helper — which
-/// is why it waits for readiness and not just for the status line. The
-/// readiness test reuses the same parse as [`expect_input_line_cleared`]:
-/// the prompt row is back and holds nothing.
+/// Generous on purpose: a live turn that writes a file is a model call plus
+/// tool use. Slowness is answered with a bigger budget, never with a looser
+/// condition — a permissive gate turns a real miss into a green run.
+pub const LIVE_TURN_BUDGET: Duration = Duration::from_secs(180);
+
+/// The per-turn status line as `screen` currently reads it, or `""` when no
+/// turn has completed yet.
 ///
-/// Ordered deliberately: the turn must be seen FIRST. An input line can read
-/// empty before the turn even starts, so the reverse order would return
-/// immediately and prove nothing.
+/// `ctx <used>/<window> (<pct>%)` (`cli::format::format_context_usage_segment`)
+/// occupies iocraft's `StatusSlot`, whose priority is `Spinner > TurnResult`:
+/// while a turn runs the spinner owns the slot and the REPL clears the previous
+/// turn's result the moment that happens. So this line is the turn's own edge.
+#[must_use]
+pub fn turn_status_line(screen: &str) -> String {
+    screen
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("ctx "))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Snapshot the status line BEFORE submitting, for
+/// [`expect_turn_complete_after`].
+#[must_use]
+pub fn turn_status_marker(sess: &PtySession) -> String {
+    turn_status_line(&sess.render(|screen| screen.contents()))
+}
+
+/// Block until the turn submitted after `marker` was taken has finished AND the
+/// REPL is ready for input again.
+///
+/// Three conditions, each one present because leaving it out produced a real
+/// failure:
+///
+/// * **A status line exists.** `expect("❯")` cannot stand in for it: the prompt
+///   glyph is permanent chrome that iocraft re-emits on every redraw, so it
+///   matches instantly and says nothing about the turn. Callers that leaned on
+///   it read the filesystem before the model had written anything — the
+///   regression recorded in #689 after #685 removed the status-line waits from
+///   `pty_memory`.
+/// * **It differs from `marker`.** The result line stays on screen until the
+///   next turn starts, so a presence check alone is satisfied by the PREVIOUS
+///   turn's line and returns before this turn has run. Comparing against the
+///   pre-submit snapshot is what separates the two. Snapshotting rather than
+///   waiting for the old line to vanish also keeps a turn that finishes before
+///   the first poll from deadlocking the gate.
+/// * **The input line is empty.** The status line can be printed before the
+///   REPL re-arms its input row; a caller that sends the next thing in that
+///   window loses the keystrokes, and the damage surfaces far away — `/exit`
+///   never registers, the child never exits, and the test dies as
+///   `clean exit: Timeout(15s, "<child exit>")`. Observed four times with
+///   identical wording across `pty_cancel` and `pty_resume`, on ubuntu and on
+///   macos. The readiness parse is the one [`expect_input_line_cleared`] uses.
 ///
 /// # Panics
-/// When no turn completed, or the input line never came back empty, within
-/// `budget`. The message says which of the two it was and carries the screen.
-pub fn expect_turn_complete(sess: &PtySession, budget: Duration, context: &str) {
+/// When no new turn completed, or the input line never came back empty, within
+/// `budget`. The message says which condition was unmet and carries both the
+/// marker and the screen.
+pub fn expect_turn_complete_after(
+    sess: &PtySession,
+    marker: &str,
+    budget: Duration,
+    context: &str,
+) {
     let deadline = Instant::now() + budget;
-    let mut saw_turn = false;
     loop {
         let screen = sess.render(|screen| screen.contents());
-        if !saw_turn && screen_contains(&screen, "ctx") {
-            saw_turn = true;
-        }
-        if saw_turn && input_line_of(&screen).is_empty() {
+        let status = turn_status_line(&screen);
+        let fresh = !status.is_empty() && status != marker;
+        if fresh && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {
-            let unmet = if saw_turn {
-                "the turn finished but the input line never came back empty"
+            let unmet = if fresh {
+                "this turn finished but the input line never came back empty"
+            } else if status.is_empty() {
+                "no per-turn status line ever appeared, so no turn ran"
             } else {
-                "no per-turn status line appeared"
+                "the status line still reads exactly as it did before the \
+                 submit, so no NEW turn completed"
             };
-            panic!("{context}: {unmet} within {budget:?}\nPTY:\n{screen}");
+            panic!(
+                "{context}: {unmet} within {budget:?}\n\
+                 marker before submit: {marker:?}\n\
+                 status line now:      {status:?}\n\
+                 PTY:\n{screen}"
+            );
         }
         std::thread::sleep(Duration::from_millis(25));
     }

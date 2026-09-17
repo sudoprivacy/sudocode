@@ -123,8 +123,9 @@ fn resume_seeds_history_for_up_arrow() {
     };
     sess.set_default_timeout(turn_timeout);
     sess.expect("❯").expect("REPL prompt");
+    let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    common::expect_turn_complete(&sess, turn_timeout, "initial turn");
+    common::expect_turn_complete_after(&sess, &marker, turn_timeout, "initial turn");
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
 

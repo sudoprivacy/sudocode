@@ -1670,6 +1670,10 @@ where
         // Start a fresh per-turn usage accumulator so the status line bills the
         // whole turn (all tool-loop requests), not just the last request.
         self.usage_tracker.begin_turn();
+        // Wall-clock start of the turn: recorded at turn end into the tracker
+        // (the status line's `+Ns`/`Σs`) and stamped onto the turn's last
+        // assistant message so it persists and re-sums on resume.
+        let turn_started_at = std::time::Instant::now();
         self.session
             .push_user_blocks(blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -2551,6 +2555,24 @@ where
         };
 
         self.finish_current_turn_tracking();
+
+        // Record the turn's wall-clock time: into the tracker (status line) and
+        // stamped onto the last assistant message in the persisted session, so
+        // it survives to resume and re-sums into the cumulative total.
+        let turn_duration_ms = turn_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.usage_tracker.record_turn_duration(turn_duration_ms);
+        if let Some(message) = self
+            .session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+        {
+            message.duration_ms = Some(turn_duration_ms);
+        }
 
         let turn_usage = sum_assistant_message_usage(&assistant_messages);
         let session_usage = self.usage_tracker.cumulative_usage();

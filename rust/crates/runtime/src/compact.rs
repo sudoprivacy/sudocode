@@ -617,6 +617,7 @@ fn build_compaction_messages(
                 blocks,
                 usage: None,
                 model: None,
+                duration_ms: None,
             })
         })
         .collect();
@@ -748,6 +749,7 @@ pub async fn compact_session<C: ApiClient>(
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
         model: None,
+        duration_ms: None,
     }];
     compacted_messages.extend(preserved);
 
@@ -837,6 +839,7 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
         model: None,
+        duration_ms: None,
     }];
     compacted_messages.extend(preserved);
 
@@ -918,6 +921,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
         model: None,
+        duration_ms: None,
     }];
     compacted_messages.extend(preserved);
 
@@ -1371,6 +1375,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
         ];
 
@@ -1746,6 +1751,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
             ConversationMessage::user_text("tiny"),
             ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -1860,6 +1866,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
         ];
 

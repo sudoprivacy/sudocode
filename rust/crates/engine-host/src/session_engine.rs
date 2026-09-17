@@ -624,6 +624,7 @@ impl SessionEngine {
                 blocks: vec![block],
                 usage: None,
                 model: None,
+                duration_ms: None,
             };
             session
                 .runtime

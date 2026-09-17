@@ -2013,18 +2013,26 @@ fn format_token_count_round(n: u32) -> String {
 pub(crate) struct TurnStatus<'a> {
     /// The model that answered.
     pub model: &'a str,
-    /// 1-based turn number within the session.
+    /// 1-based turn number within the session (cumulative).
     pub turn: u32,
-    /// The turn's usage — token counts and the cost estimate.
+    /// The most recent turn's usage — its token counts, cost, and the KV-cache
+    /// figures. Rendered with a `+` prefix (this-turn) in the status line.
     pub usage: &'a TokenUsage,
+    /// Session-cumulative usage across every turn (tokens + cost). Rendered with
+    /// a `Σ` prefix. On resume this is rebuilt from the persisted session so the
+    /// running totals continue seamlessly.
+    pub cumulative_usage: &'a TokenUsage,
     /// Current context-window occupancy (`TokenUsage::context_tokens` of the
     /// latest turn), NOT the session-cumulative total. See
     /// [`format_context_usage_segment`].
     pub context_tokens: Option<u32>,
     /// The model's context window, the denominator for the occupancy segment.
     pub context_window: Option<u32>,
-    /// Wall-clock time the turn took.
-    pub elapsed: Duration,
+    /// Wall-clock time the most recent turn took (the `+Ns` field). `None` on a
+    /// resume where the last turn's duration was not persisted.
+    pub elapsed: Option<Duration>,
+    /// Session-cumulative wall-clock time across every turn (the `Σs` field).
+    pub cumulative_duration: Option<Duration>,
     /// Current git branch, when the workspace is a repository.
     pub branch: Option<&'a str>,
     /// The proxy account the turn was billed to, when one resolved. Shown
@@ -2110,33 +2118,14 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
         model,
         turn,
         usage,
+        cumulative_usage,
         context_tokens,
         context_window,
         elapsed,
+        cumulative_duration,
         branch,
         account,
     } = status;
-    let total = usage.total_tokens();
-    let tokens_display = if total >= 1000 {
-        format!("{:.1}k", f64::from(total) / 1000.0)
-    } else {
-        total.to_string()
-    };
-    // Cost: prefer the real amount the billing backend charged; fall back to a
-    // per-model local estimate (marked with a leading `~`) when it did not
-    // report one. The estimate uses the actual model's pricing, not a fixed
-    // default tier.
-    let cost_display = if let Some(real) = usage.real_cost_usd() {
-        (real > 0.0).then(|| format!("${real:.2}"))
-    } else {
-        let pricing = runtime::pricing_for_model(model)
-            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
-        let est = usage
-            .estimate_cost_usd_with_pricing(pricing)
-            .total_cost_usd();
-        (est > 0.0).then(|| format!("~${est:.2}"))
-    };
-    let secs = elapsed.as_secs_f64();
 
     let mut segments: Vec<String> = Vec::with_capacity(8);
     segments.push(format!("[{model}]"));
@@ -2146,11 +2135,29 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
         segments.push(format!("acct {account}"));
     }
     segments.push(format!("turn {turn}"));
-    segments.push(format!("{tokens_display} tokens"));
-    if let Some(cost) = cost_display {
+
+    // Cost and tokens carry BOTH the last turn (`+`) and the session total
+    // (`Σ`), so the line reads the same live or resumed: `+` is "just now", `Σ`
+    // is "this whole session". Cost is omitted entirely when neither side has a
+    // figure (unknown-pricing model with no real cost reported).
+    let turn_cost = cost_for(usage, model);
+    let cum_cost = cost_for(cumulative_usage, model);
+    if let Some(cost) = combine_turn_and_cumulative(turn_cost.as_deref(), cum_cost.as_deref()) {
         segments.push(cost);
     }
-    segments.push(format!("{secs:.1}s"));
+    let turn_tokens = format!("+{}", format_token_count(usage.total_tokens()));
+    let cum_tokens = format!(
+        "\u{3a3}{}",
+        format_token_count(cumulative_usage.total_tokens())
+    );
+    segments.push(format!("{turn_tokens} {cum_tokens} tokens"));
+
+    // Wall-clock: the last turn (`+Ns`) and the session total (`Σs`). Both are
+    // omitted on a resume where no duration was persisted.
+    if let Some(dur) = combine_durations(elapsed, cumulative_duration) {
+        segments.push(dur);
+    }
+
     // Context-window usage: current occupancy / model window. Uses the same
     // occupancy metric as auto-compaction (see format_context_usage_segment).
     if let (Some(used), Some(window)) = (context_tokens, context_window) {
@@ -2158,7 +2165,8 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
             segments.push(segment);
         }
     }
-    // KV-cache efficiency: hit rate + write rate over the prompt total.
+    // KV-cache efficiency: hit rate + write rate over the most recent turn's
+    // prompt total.
     if let Some(segment) = format_cache_efficiency_segment(usage) {
         segments.push(segment);
     }
@@ -2166,6 +2174,58 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
         segments.push(branch.to_string());
     }
     format!("{DIM}{}{RESET}", segments.join(" · "))
+}
+
+/// The cost of one `usage`, as a display string without any prefix: the real
+/// billed amount (`$X`), or a per-model estimate marked `~$X`, or `None` when
+/// there is nothing to bill (zero, or an unknown-pricing model with no real
+/// cost). Shared by the per-turn and cumulative cost fields.
+#[inline]
+fn cost_for(usage: &TokenUsage, model: &str) -> Option<String> {
+    if let Some(real) = usage.real_cost_usd() {
+        (real > 0.0).then(|| format!("${real:.2}"))
+    } else {
+        let pricing = runtime::pricing_for_model(model)
+            .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
+        let est = usage
+            .estimate_cost_usd_with_pricing(pricing)
+            .total_cost_usd();
+        (est > 0.0).then(|| format!("~${est:.2}"))
+    }
+}
+
+/// Render the paired `+turn Σcumulative` cost field. Either side may be absent
+/// (e.g. a free turn inside a paid session); the field is omitted only when
+/// both are.
+#[inline]
+fn combine_turn_and_cumulative(turn: Option<&str>, cumulative: Option<&str>) -> Option<String> {
+    match (turn, cumulative) {
+        (Some(t), Some(c)) => Some(format!("+{t} \u{3a3}{c}")),
+        (Some(t), None) => Some(format!("+{t}")),
+        (None, Some(c)) => Some(format!("\u{3a3}{c}")),
+        (None, None) => None,
+    }
+}
+
+/// Render the paired `+Ns Σs` wall-clock field from the last-turn and
+/// cumulative durations. Omitted when neither is known (a resume with no
+/// persisted duration).
+#[inline]
+fn combine_durations(turn: Option<Duration>, cumulative: Option<Duration>) -> Option<String> {
+    let fmt = |d: Duration| {
+        let secs = d.as_secs_f64();
+        if secs >= 60.0 {
+            format!("{:.0}m{:02.0}s", (secs / 60.0).floor(), secs % 60.0)
+        } else {
+            format!("{secs:.1}s")
+        }
+    };
+    match (turn, cumulative) {
+        (Some(t), Some(c)) => Some(format!("+{} \u{3a3}{}", fmt(t), fmt(c))),
+        (Some(t), None) => Some(format!("+{}", fmt(t))),
+        (None, Some(c)) => Some(format!("\u{3a3}{}", fmt(c))),
+        (None, None) => None,
+    }
 }
 
 /// Render the box that frames an interactive permission-approval prompt.
@@ -2424,6 +2484,7 @@ mod tests {
                 .collect(),
             usage: None,
             model: None,
+            duration_ms: None,
         }
     }
 
@@ -2603,6 +2664,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
             runtime::ConversationMessage {
                 role: runtime::MessageRole::Tool,
@@ -2614,6 +2676,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
         ];
         let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
@@ -2649,6 +2712,7 @@ mod tests {
             }],
             usage: None,
             model: None,
+            duration_ms: None,
         }];
         let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
         assert!(plain.contains("hello there"), "{plain}");
@@ -2698,16 +2762,18 @@ mod tests {
             model: "claude-opus-4-6",
             turn: 3,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_secs_f64(1.2),
+            elapsed: Some(Duration::from_secs_f64(1.2)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("[claude-opus-4-6]"), "{plain}");
         assert!(plain.contains("turn 3"), "{plain}");
-        assert!(plain.contains("1.5k tokens"), "{plain}");
+        assert!(plain.contains("1.5k Σ1.5k tokens"), "{plain}");
         assert!(plain.contains("$"), "expected cost segment in {plain}");
         assert!(plain.contains("1.2s"), "{plain}");
     }
@@ -2719,9 +2785,11 @@ mod tests {
             model: "claude-opus-4-6",
             turn: 1,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_secs_f64(0.3),
+            elapsed: Some(Duration::from_secs_f64(0.3)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
@@ -2743,9 +2811,11 @@ mod tests {
             model: "claude-opus-4-8",
             turn: 3,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_secs_f64(1.2),
+            elapsed: Some(Duration::from_secs_f64(1.2)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
@@ -2770,9 +2840,11 @@ mod tests {
             model: "claude-opus-4-8",
             turn: 3,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_secs_f64(1.2),
+            elapsed: Some(Duration::from_secs_f64(1.2)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
@@ -2790,9 +2862,11 @@ mod tests {
             model: "claude-opus-4-6",
             turn: 1,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_millis(800),
+            elapsed: Some(Duration::from_millis(800)),
+            cumulative_duration: None,
             branch: Some("feat/tui-backlog-179"),
             account: None,
         });
@@ -2807,15 +2881,17 @@ mod tests {
             model: "claude-opus-4-6",
             turn: 1,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_millis(800),
+            elapsed: Some(Duration::from_millis(800)),
+            cumulative_duration: None,
             branch: Some(""),
             account: None,
         });
         let plain = strip_ansi(&rendered);
         // Trailing segment should be the duration, not an empty " · ".
-        assert!(plain.ends_with("0.8s"), "{plain}");
+        assert!(plain.ends_with("+0.8s"), "{plain}");
     }
 
     #[test]
@@ -2888,9 +2964,11 @@ mod tests {
             model: "claude-sonnet-4-6",
             turn: 3,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: Some(10_000),
             context_window: Some(1_000_000),
-            elapsed: Duration::from_secs_f64(0.5),
+            elapsed: Some(Duration::from_secs_f64(0.5)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
@@ -2906,9 +2984,11 @@ mod tests {
             model: "claude-sonnet-4-6",
             turn: 2,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: Some(150_000),
             context_window: Some(1_000_000),
-            elapsed: Duration::from_secs_f64(0.5),
+            elapsed: Some(Duration::from_secs_f64(0.5)),
+            cumulative_duration: None,
             branch: None,
             account: None,
         });
@@ -2923,14 +3003,75 @@ mod tests {
             model: "claude-sonnet-4-6",
             turn: 1,
             usage: &usage,
+            cumulative_usage: &usage,
             context_tokens: None,
             context_window: None,
-            elapsed: Duration::from_millis(500),
+            elapsed: Some(Duration::from_millis(500)),
+            cumulative_duration: None,
             branch: None,
             account: Some("fujitoken"),
         });
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("acct fujitoken"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_shows_turn_and_cumulative_with_prefixes() {
+        // B2 contract: cost, tokens, and wall-clock each carry the last turn
+        // (`+`) and the session total (`Σ`), so the line reads the same live or
+        // resumed.
+        let turn = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cost_units: Some(385_000), // $0.77
+            cost_currency: Some(runtime::UsageCostCurrency::SudoPoint),
+            ..TokenUsage::default()
+        };
+        let cumulative = TokenUsage {
+            input_tokens: 8_000,
+            output_tokens: 4_000,
+            cost_units: Some(2_400_000), // $4.80
+            cost_currency: Some(runtime::UsageCostCurrency::SudoPoint),
+            ..TokenUsage::default()
+        };
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-8",
+            turn: 469,
+            usage: &turn,
+            cumulative_usage: &cumulative,
+            context_tokens: None,
+            context_window: None,
+            elapsed: Some(Duration::from_secs_f64(1.2)),
+            cumulative_duration: Some(Duration::from_secs(312)),
+            branch: None,
+            account: None,
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("+$0.77 \u{3a3}$4.80"), "{plain}");
+        assert!(plain.contains("+1.5k \u{3a3}12.0k tokens"), "{plain}");
+        assert!(plain.contains("+1.2s \u{3a3}5m12s"), "{plain}");
+    }
+
+    #[test]
+    fn turn_status_line_omits_duration_when_neither_side_known() {
+        // A resume with no persisted duration: the wall-clock field disappears
+        // entirely rather than showing a bogus 0s.
+        let usage = TokenUsage::default();
+        let rendered = format_turn_status_line(&TurnStatus {
+            model: "claude-opus-4-8",
+            turn: 5,
+            usage: &usage,
+            cumulative_usage: &usage,
+            context_tokens: None,
+            context_window: None,
+            elapsed: None,
+            cumulative_duration: None,
+            branch: None,
+            account: None,
+        });
+        let plain = strip_ansi(&rendered);
+        assert!(!plain.contains("+0.0s"), "{plain}");
+        assert!(!plain.contains("\u{3a3}0s"), "{plain}");
     }
 
     #[test]

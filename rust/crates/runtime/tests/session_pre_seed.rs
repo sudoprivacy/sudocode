@@ -13,6 +13,7 @@ fn user_text(text: &str) -> ConversationMessage {
         }],
         usage: None,
         model: None,
+        duration_ms: None,
     }
 }
 
@@ -24,6 +25,7 @@ fn assistant_text(text: &str) -> ConversationMessage {
         }],
         usage: None,
         model: Some("test-model".to_string()),
+        duration_ms: None,
     }
 }
 
@@ -38,6 +40,7 @@ fn tool_use(id: &str, name: &str, input: &str) -> ConversationMessage {
         }],
         usage: None,
         model: Some("test-model".to_string()),
+        duration_ms: None,
     }
 }
 
@@ -52,6 +55,7 @@ fn placeholder_tool_result(tool_use_id: &str) -> ConversationMessage {
         }],
         usage: None,
         model: None,
+        duration_ms: None,
     }
 }
 

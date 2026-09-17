@@ -138,6 +138,7 @@ mod tests {
             }],
             usage: None,
             model: None,
+            duration_ms: None,
         }
     }
 

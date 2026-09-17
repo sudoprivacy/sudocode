@@ -316,6 +316,14 @@ pub struct UsageTracker {
     cumulative: TokenUsage,
     cumulative_cost: UsageCostAggregation,
     turns: u32,
+    /// Wall-clock time the most recently recorded turn took, in milliseconds.
+    /// The status line's `+Ns` field. `None` until a turn duration is recorded.
+    latest_turn_duration_ms: Option<u64>,
+    /// Sum of every recorded turn's wall-clock time, in milliseconds — the
+    /// session's total compute time. On local compute this is the real cost
+    /// (there is no token bill), so it is persisted per assistant message and
+    /// re-summed on resume via [`from_session`](Self::from_session).
+    cumulative_duration_ms: u64,
 }
 
 impl UsageTracker {
@@ -333,6 +341,9 @@ impl UsageTracker {
         for message in &session.messages {
             if let Some(usage) = message.usage {
                 tracker.record(usage);
+            }
+            if let Some(duration_ms) = message.duration_ms {
+                tracker.record_turn_duration(duration_ms);
             }
         }
         if session.compaction.is_some() {
@@ -411,6 +422,25 @@ impl UsageTracker {
     #[must_use]
     pub fn turns(&self) -> u32 {
         self.turns
+    }
+
+    /// Record the wall-clock duration of a completed turn: it becomes the
+    /// latest-turn duration and adds to the session total.
+    pub fn record_turn_duration(&mut self, ms: u64) {
+        self.latest_turn_duration_ms = Some(ms);
+        self.cumulative_duration_ms = self.cumulative_duration_ms.saturating_add(ms);
+    }
+
+    /// Wall-clock time the most recently recorded turn took, in milliseconds.
+    #[must_use]
+    pub fn latest_turn_duration_ms(&self) -> Option<u64> {
+        self.latest_turn_duration_ms
+    }
+
+    /// Sum of every recorded turn's wall-clock time, in milliseconds.
+    #[must_use]
+    pub fn cumulative_duration_ms(&self) -> u64 {
+        self.cumulative_duration_ms
     }
 }
 
@@ -681,6 +711,7 @@ mod tests {
                 cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
             model: None,
+            duration_ms: None,
         }];
 
         let tracker = UsageTracker::from_session(&session);
@@ -719,6 +750,7 @@ mod tests {
                 cost_currency: Some(UsageCostCurrency::SudoPoint),
             }),
             model: None,
+            duration_ms: None,
         }];
 
         let tracker = UsageTracker::from_session(&session);
@@ -732,5 +764,30 @@ mod tests {
             tracker.cumulative_usage().cost_currency,
             Some(UsageCostCurrency::SudoPoint)
         );
+    }
+
+    #[test]
+    fn from_session_sums_per_message_durations_into_cumulative() {
+        // Two assistant turns carrying wall-clock durations: the tracker
+        // rebuilt on resume must report the last turn's duration as latest and
+        // the sum as cumulative (the status line's `+Ns Σs`).
+        let mut session = Session::new();
+        let mut turn = |ms: u64| ConversationMessage {
+            role: MessageRole::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            usage: Some(TokenUsage {
+                input_tokens: 1,
+                ..TokenUsage::default()
+            }),
+            model: None,
+            duration_ms: Some(ms),
+        };
+        session.messages = vec![turn(1000), turn(2500)];
+
+        let tracker = UsageTracker::from_session(&session);
+        assert_eq!(tracker.latest_turn_duration_ms(), Some(2500));
+        assert_eq!(tracker.cumulative_duration_ms(), 3500);
     }
 }

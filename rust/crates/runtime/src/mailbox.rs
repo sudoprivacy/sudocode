@@ -39,6 +39,50 @@ pub const A2A_INBOX_BASE: &str = "/agents";
 /// re-exported here so the convention reads as one thing in one place.
 pub use crate::agent_mailbox::LOCAL_INBOX_DIR;
 
+/// The shared root under which same-machine standalone `scode` processes keep
+/// their mailboxes, so two started in different folders can address each other.
+///
+/// The standalone analog of a Nexus zone: a stable per-machine prefix that is
+/// NOT the workspace (workspace-rooted inboxes can't see across folders). Lives
+/// under the config home (`~/.nexus/sudocode/local-mailbox`), the same durable,
+/// cross-workspace location the config itself uses.
+#[must_use]
+pub fn local_pair_root() -> std::path::PathBuf {
+    crate::config::default_config_home().join("local-mailbox")
+}
+
+/// This process's mailbox identity — the name peers address and the inbox the
+/// receiver polls. SSOT for "who am I on the mailbox": both the `send` path and
+/// the REPL receiver read this, so they cannot disagree.
+///
+/// Resolution: the `agentName` setting if set (a clean short name the user
+/// picks for pairing), else a name derived from the workspace path. The
+/// derivation folds the FULL path, not just the basename, so two different
+/// projects that happen to share a basename (two `app/` directories) do not
+/// collide inside the shared [`local_pair_root`].
+#[must_use]
+pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Path) -> String {
+    if let Some(name) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    let basename = workspace_root
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "scode".to_string());
+    // Disambiguate same-basename folders with a short hash of the full path.
+    let full = workspace_root.to_string_lossy();
+    if full.is_empty() {
+        return basename;
+    }
+    let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
+    for byte in full.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{basename}-{:06x}", hash & 0xff_ffff)
+}
+
 /// How agent names map to inbox paths.
 ///
 /// The one place a mailbox path shape is defined. There were two such enums —
@@ -1072,6 +1116,26 @@ mod tests {
 
         let nexus = InboxConvention::NexusA2a;
         assert_eq!(nexus.inbox_path("win-ai"), "/agents/win-ai/chat-with-me");
+    }
+
+    #[test]
+    fn local_agent_name_prefers_configured_over_derived() {
+        let ws = std::path::Path::new("/home/me/projects/app");
+        assert_eq!(local_agent_name(Some("alice"), ws), "alice");
+        assert_eq!(local_agent_name(Some("  bob  "), ws), "bob");
+        // Empty / whitespace config falls through to derivation.
+        assert_ne!(local_agent_name(Some("   "), ws), "");
+    }
+
+    #[test]
+    fn local_agent_name_disambiguates_same_basename_folders() {
+        let a = local_agent_name(None, std::path::Path::new("/home/me/x/app"));
+        let b = local_agent_name(None, std::path::Path::new("/home/me/y/app"));
+        assert!(a.starts_with("app-"), "keeps basename: {a}");
+        assert!(b.starts_with("app-"), "keeps basename: {b}");
+        assert_ne!(a, b, "same basename, different paths must not collide");
+        // Deterministic: same path → same name.
+        assert_eq!(a, local_agent_name(None, std::path::Path::new("/home/me/x/app")));
     }
 
     #[test]

@@ -95,16 +95,23 @@ impl QueueMode {
 /// A single queued user input.
 ///
 /// `text` is the full content sent to the model (paste placeholders expanded).
-/// `display` is the compact form shown in the queue overlay and echoed to
+/// `display` is the compact form shown in the pending overlay and echoed to
 /// scrollback when the item flushes (paste collapsed to a placeholder chip).
-/// `echo_on_flush` is true for human input — its `❯ display` line is written to
-/// scrollback at the turn boundary, mirroring an idle submit — and false for
-/// A2A peer messages, which already printed their own banner on receipt.
+/// `kind` selects the scrollback marker at flush — `❯` for human input, `📨`
+/// for an inbound A2A peer message. Both echo on flush (symmetric): the queued
+/// item lands in scrollback at the moment it actually runs, never earlier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput {
     pub text: String,
     pub display: String,
-    pub echo_on_flush: bool,
+    pub kind: QueuedKind,
+}
+
+/// Where a queued item came from — selects its scrollback marker on flush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedKind {
+    Human,
+    Peer,
 }
 
 impl QueuedInput {
@@ -112,16 +119,25 @@ impl QueuedInput {
         Self {
             text: text.into(),
             display: display.into(),
-            echo_on_flush: true,
+            kind: QueuedKind::Human,
         }
     }
     pub fn peer(text: impl Into<String>, display: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             display: display.into(),
-            echo_on_flush: false,
+            kind: QueuedKind::Peer,
         }
     }
+}
+
+/// One line to echo to scrollback when the queue flushes — its `display` text
+/// and the `kind` that selects the marker. The caller renders it (the queue
+/// stays rendering-agnostic).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EchoLine {
+    pub display: String,
+    pub kind: QueuedKind,
 }
 
 /// The decision returned by `submit_during_turn` — what the caller must do.
@@ -141,10 +157,11 @@ pub struct NextTurn {
     /// The prompt text to hand to `run_turn`. When multiple items were batched,
     /// this is their `text` fields joined with `\n\n` in submission order.
     pub prompt: String,
-    /// The `❯ display` lines to echo to scrollback for this run, in submission
-    /// order — only the items whose `echo_on_flush` is set (human input). Empty
-    /// for an idle submit, whose echo the coordinator prints directly.
-    pub echoes: Vec<String>,
+    /// The scrollback lines to echo for this run, in submission order (every
+    /// queued item echoes on flush now — human and peer alike). Each carries the
+    /// marker `kind` so the caller renders `❯`/`📨` correctly. Empty for an idle
+    /// submit, whose echo the coordinator prints directly.
+    pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.
     pub consumed: usize,
 }
@@ -229,9 +246,9 @@ impl TurnInputCoordinator {
     }
 
     /// Called on turn end. Consumes all queued items and joins their text with
-    /// `\n\n` for a single batched turn. `echoes` collects the `display` text of
-    /// items marked `echo_on_flush` (human input) so the caller can write them
-    /// to scrollback now, at the moment they actually run.
+    /// `\n\n` for a single batched turn. `echoes` collects an [`EchoLine`] per
+    /// item (human and peer alike) so the caller can write them to scrollback
+    /// now, at the moment they actually run, with the right marker.
     ///
     /// Returns `None` when the queue is empty — the caller reverts to the
     /// idle prompt.
@@ -243,9 +260,10 @@ impl TurnInputCoordinator {
         let mut echoes = Vec::new();
         let mut consumed = 0_usize;
         while let Some(item) = self.queue.pop_front() {
-            if item.echo_on_flush {
-                echoes.push(item.display);
-            }
+            echoes.push(EchoLine {
+                display: item.display,
+                kind: item.kind,
+            });
             parts.push(item.text);
             consumed += 1;
         }
@@ -319,22 +337,28 @@ mod queue_docs {
         assert_eq!(c.peek_display(), vec!["B", "C", "D"]);
         let next = c.drain_next().expect("batched turn present");
         assert_eq!(next.prompt, "B\n\nC\n\nD");
-        assert_eq!(next.echoes, vec!["B", "C", "D"]);
+        let echo_texts: Vec<&str> = next.echoes.iter().map(|e| e.display.as_str()).collect();
+        assert_eq!(echo_texts, vec!["B", "C", "D"]);
+        assert!(next.echoes.iter().all(|e| e.kind == QueuedKind::Human));
         assert_eq!(next.consumed, 3);
         assert!(c.drain_next().is_none(), "queue drained");
     }
 
     #[test]
-    fn peer_input_batches_but_does_not_echo() {
-        // A2A peer messages already printed their own banner on receipt, so
-        // they run but do not add a `❯` echo line at flush time.
+    fn peer_and_human_both_echo_with_their_kind() {
+        // Both human and peer messages echo on flush now (symmetric), each with
+        // its own marker kind so the caller renders `❯` vs `📨`.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(human("human"), mode);
         c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
         let next = c.drain_next().expect("batched turn present");
         assert_eq!(next.prompt, "human\n\npeer-text");
-        assert_eq!(next.echoes, vec!["human"], "only human input echoes");
+        assert_eq!(next.echoes.len(), 2, "both echo on flush");
+        assert_eq!(next.echoes[0].display, "human");
+        assert_eq!(next.echoes[0].kind, QueuedKind::Human);
+        assert_eq!(next.echoes[1].display, "peer-display");
+        assert_eq!(next.echoes[1].kind, QueuedKind::Peer);
     }
 
     #[test]

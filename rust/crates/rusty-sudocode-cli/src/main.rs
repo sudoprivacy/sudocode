@@ -2902,6 +2902,21 @@ fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
     }
 }
 
+/// Write an inbound A2A peer message to scrollback. Mirrors
+/// [`echo_submit_to_scrollback`] but the `display` already carries its own
+/// `📨 A2A from X: …` marker, so it is printed verbatim (bold, first line) with
+/// continuation lines indented — the peer counterpart of the human `❯` echo,
+/// committed at the moment the message is actually handed to a turn.
+fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
+    let mut lines = display.split('\n');
+    if let Some(first) = lines.next() {
+        output.println(&format!("{}{first}{}", render::BOLD, RESET));
+        for line in lines {
+            output.println(&format!("  {line}"));
+        }
+    }
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -3040,14 +3055,22 @@ fn run_repl_iocraft_dispatch(
                 }
                 let next = coord.lock().unwrap().drain_next();
                 if let Some(next) = next {
-                    // Echo the queued human inputs to scrollback now, as they
-                    // actually run — the coordinator deferred these from submit
-                    // time so a queued input never looked sent. Then clear the
-                    // queue overlay: these items are leaving the queue.
+                    // Echo the queued items to scrollback now, as they actually
+                    // run — the coordinator deferred these from submit time so a
+                    // queued item never looked sent. Each carries its marker
+                    // kind (`❯` human / `📨` peer). Then clear the queued
+                    // messages from the pending overlay: they're leaving the queue.
                     for echo in &next.echoes {
-                        echo_submit_to_scrollback(&repl_output, echo);
+                        match echo.kind {
+                            input_queue::QueuedKind::Human => {
+                                echo_submit_to_scrollback(&repl_output, &echo.display)
+                            }
+                            input_queue::QueuedKind::Peer => {
+                                echo_peer_to_scrollback(&repl_output, &echo.display)
+                            }
+                        }
                     }
-                    repl_ui_cmd.set_queue(Vec::new());
+                    repl_ui_cmd.queued_messages_clear();
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -3062,10 +3085,16 @@ fn run_repl_iocraft_dispatch(
                 continue;
             }
             CoordinatorEvent::PeerMessage(msg, ack) => {
-                repl_output.println(&format!("\n\u{1f4e8} A2A from {}: {}", msg.from, msg.body));
+                // A2A is DRY with human input: idle → echo to scrollback now and
+                // start a turn; during a turn → hold in the pending overlay and
+                // echo at the flush boundary. The only difference from human is
+                // the marker (`QueuedKind::Peer` → `📨 A2A from X: …` vs `❯`).
                 let peer_from = msg.from.clone();
+                let display = format!("\u{1f4e8} A2A from {}: {}", msg.from, msg.body);
                 let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
                 if !turn_active {
+                    echo_peer_to_scrollback(&repl_output, &display);
+                    let _ = coord.lock().unwrap().submit_when_idle(prompt.clone());
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
@@ -3079,10 +3108,11 @@ fn run_repl_iocraft_dispatch(
                 } else {
                     let mut coord_lock = coord.lock().unwrap();
                     coord_lock.submit_during_turn(
-                        input_queue::QueuedInput::peer(prompt, format!("A2A from {peer_from}")),
+                        input_queue::QueuedInput::peer(prompt, display.clone()),
                         input_queue::QueueMode::Queue,
                     );
-                    repl_ui_cmd.set_queue(coord_lock.peek_display());
+                    repl_ui_cmd.queued_message_push(&display);
+                    let _ = peer_from;
                 }
                 // Taken: the message is this process's responsibility now, so
                 // the receiver may advance its cursor. What remains — the
@@ -3262,12 +3292,12 @@ fn run_repl_iocraft_dispatch(
                     } else {
                         let mut coord_lock = coord.lock().unwrap();
                         let outcome = coord_lock.submit_during_turn(
-                            input_queue::QueuedInput::human(text, display),
+                            input_queue::QueuedInput::human(text, display.clone()),
                             input_queue::load_queue_mode(&shared_mode),
                         );
                         match outcome {
                             input_queue::SubmitOutcome::Queued => {
-                                repl_ui_cmd.set_queue(coord_lock.peek_display());
+                                repl_ui_cmd.queued_message_push(&display);
                             }
                             input_queue::SubmitOutcome::Rejected => {
                                 repl_output.println(

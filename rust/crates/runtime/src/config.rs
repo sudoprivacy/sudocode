@@ -1769,7 +1769,7 @@ fn parse_permission_mode_label(
     context: &str,
 ) -> Result<ResolvedPermissionMode, ConfigError> {
     match mode {
-        "default" | "plan" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
+        "default" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
         "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
         "dontAsk" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
         other => Err(ConfigError::Parse(format!(
@@ -3584,7 +3584,7 @@ mod tests {
     fn permission_mode_aliases_resolve_to_expected_modes() {
         // given / when / then
         assert_eq!(
-            parse_permission_mode_label("plan", "test").expect("plan should resolve"),
+            parse_permission_mode_label("default", "test").expect("default should resolve"),
             ResolvedPermissionMode::ReadOnly
         );
         assert_eq!(

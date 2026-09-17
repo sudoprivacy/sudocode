@@ -118,14 +118,6 @@ fn canonicalize_preserves_canonical_names() {
 
 #[test]
 fn canonicalize_preserves_pascalcase_native_tools() {
-    assert_eq!(
-        tools::canonicalize_tool_name("EnterPlanMode"),
-        "EnterPlanMode"
-    );
-    assert_eq!(
-        tools::canonicalize_tool_name("ExitPlanMode"),
-        "ExitPlanMode"
-    );
     assert_eq!(tools::canonicalize_tool_name("TodoWrite"), "TodoWrite");
     assert_eq!(tools::canonicalize_tool_name("WebFetch"), "WebFetch");
     assert_eq!(tools::canonicalize_tool_name("Skill"), "Skill");

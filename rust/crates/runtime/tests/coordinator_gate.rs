@@ -106,8 +106,7 @@ fn allowlist_excludes_write_side_tools() {
         "PowerShell",
         "REPL",
         "NotebookEdit",
-        "EnterPlanMode",
-        "ExitPlanMode",
+        "write_plan",
     ] {
         assert!(
             !allowed.contains(name),

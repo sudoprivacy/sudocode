@@ -3696,6 +3696,27 @@ impl LiveCli {
         let engine_handle = EngineSession::spawn(engine.clone() as Arc<dyn EngineDelegate>);
         let lifecycle = engine as Arc<dyn SessionLifecycle>;
 
+        // Scope the plan file (write_plan's SSOT) to this session so concurrent
+        // sessions in one workspace don't clobber each other's plan. One process
+        // serves one session, so a process-global env var is the right handle
+        // (same pattern the todo store uses). Skip if the caller already set it
+        // (tests point it at a temp path).
+        if std::env::var_os("SUDOCODE_PLAN_FILE").is_none() {
+            let session_id = lifecycle.session_snapshot().session_id;
+            let sanitized: String = session_id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let plan_file = cwd.join(".sudocode").join(format!("{sanitized}.plan.md"));
+            std::env::set_var("SUDOCODE_PLAN_FILE", plan_file);
+        }
+
         // Record session started event.
         let is_child_process = std::env::var("SUDOWORK_CHILD_PROCESS").is_ok();
         let mode = if is_child_process {

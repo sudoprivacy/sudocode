@@ -1,4 +1,4 @@
-//! LIVE co-host proof — the real thing behind the whole in-process effort.
+//! LIVE co-host proof 鈥?the real thing behind the whole in-process effort.
 //!
 //! Drives `tools::managed_agent::spawn_managed_agent` (the EXACT factory the
 //! nexusd `SudoCodeSpawnAdapter` calls) on a real in-memory `Kernel`: plants
@@ -12,8 +12,8 @@
 //! sudocode agent loop, co-hosted on a kernel, conversing over the mailbox
 //! with a real LLM using in-process syscalls (no gRPC on its fs/mailbox path).
 //!
-//! `#[ignore]` — opt-in, needs a live LLM. Run with:
-//!   ANTHROPIC_API_KEY=<sudorouter sk-…> \
+//! `#[ignore]` 鈥?opt-in, needs a live LLM. Run with:
+//!   ANTHROPIC_API_KEY=<sudorouter sk-鈥? \
 //!   ANTHROPIC_BASE_URL=https://napi.sudorouter.ai \
 //!   cargo test -p tools --test cohost_live_llm -- --ignored --nocapture
 
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
-use runtime::spawn_task::Mailbox;
+use runtime::spawn_task::CohostMailbox;
 use tools::managed_agent::spawn_managed_agent;
 
 const DT_STREAM: i32 = 4;
@@ -167,11 +167,12 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     plant_chat_stream(&kernel, pid);
     let desc = make_desc(pid, agent_id);
 
-    // Spawn the REAL managed-agent loop — the same factory nexusd's
+    // Spawn the REAL managed-agent loop 鈥?the same factory nexusd's
     // SudoCodeSpawnAdapter calls. Node-local single-stream mailbox (the
     // agent reads + replies on /proc/{pid}/chat-with-me). State transitions
-    // are printed so WarmingUp → Ready → Busy → Ready is observable.
-    let mailbox = Mailbox::local_stream(format!("/proc/{pid}/chat-with-me"), agent_id.to_string());
+    // are printed so WarmingUp 鈫?Ready 鈫?Busy 鈫?Ready is observable.
+    let mailbox =
+        CohostMailbox::local_stream(format!("/proc/{pid}/chat-with-me"), agent_id.to_string());
     let handle = spawn_managed_agent(Arc::clone(&kernel), desc, mailbox, |state, reason| {
         eprintln!("[agent state] {state:?} reason={reason:?}");
     });
@@ -180,19 +181,19 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     let cwm = format!("/proc/{pid}/chat-with-me");
     let prompt = "You are being tested over a nexus A2A mailbox. \
                   Reply with exactly one word: PONG";
-    eprintln!("[user → agent] {prompt}");
+    eprintln!("[user 鈫?agent] {prompt}");
     write_prompt(&kernel, &cwm, &ctx, "user-test", agent_id, prompt);
 
     let reply = wait_for_agent_reply(&kernel, &cwm, &ctx, agent_id, Duration::from_secs(90));
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
-    let reply = reply.expect("no agent reply within 90s — LLM turn did not complete");
+    let reply = reply.expect("no agent reply within 90s 鈥?LLM turn did not complete");
     let body = reply
         .get("body")
         .and_then(|b| b.as_str())
         .unwrap_or_default();
-    eprintln!("[agent → user] {body}");
+    eprintln!("[agent 鈫?user] {body}");
 
     assert_eq!(
         reply.get("from").and_then(|f| f.as_str()),

@@ -43,6 +43,17 @@ use serde::{Deserialize, Serialize};
 /// surrounding framing (how an inbound message is presented) differs per path.
 ///
 /// `self_id` is the agent's own name — the value a peer addresses to reach it.
+///
+/// Includes the at-least-once caveat because delivery is a property of the
+/// poller and every path polls: [`crate::mailbox::spawn_inbox_poller`] keeps ONE
+/// cursor for a whole batch, so a batch it could not finish is read again and
+/// its frames arrive a second time, byte-identical to ones already answered.
+/// Left unsaid, a receiver treats every arrival as new — observed live, where a
+/// single re-read marker drew three replies. The decision stays with the model
+/// rather than becoming suppression in the poller: knowing what it had already
+/// forwarded would need a second durable fact beside [`crate::mailbox::InboxCursor`],
+/// a new SSOT next to the one that exists to fix this very class of bug, while
+/// the model already holds the history that answers it.
 #[must_use]
 pub fn a2a_reply_contract(self_id: &str) -> String {
     format!(
@@ -52,7 +63,15 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
          and `message` set to your reply. Calling `send` is the ONLY way to reply; \
          if you do not call it you stay silent and the conversation ends. A send \
          that does not return success did NOT leave this machine — say so rather \
-         than reporting the message as delivered."
+         than reporting the message as delivered.\n\n\
+         Messages reach you at least once, which means the same message can arrive \
+         more than once: delivery tracks one position for a whole batch and re-reads \
+         a batch it could not finish. A repeat delivery is identical to the copy you \
+         already saw, its send time included, while a peer choosing to say something \
+         again sends a later one — and your own earlier turns are the record of what \
+         you have already answered. Judge for yourself whether a message you have \
+         answered before needs another reply; answering the same one twice is rarely \
+         what the sender wanted, and silence is a valid response."
     )
 }
 
@@ -421,6 +440,35 @@ mod prompt_tests {
         assert!(
             c.contains("did NOT leave this machine"),
             "must warn that a non-success send did not deliver: {c}"
+        );
+    }
+
+    /// The contract tells the model that delivery repeats, and leaves the call
+    /// to it.
+    ///
+    /// In the contract rather than the REPL section because at-least-once is a
+    /// property of the poller and every receive path polls — the co-host loop as
+    /// much as either REPL. A receiver told only that messages "arrive" answers a
+    /// re-delivered one again; one re-read marker drew three replies live.
+    ///
+    /// Three separate assertions because each fact is load-bearing alone: that
+    /// repeats happen, what distinguishes one from a peer genuinely repeating
+    /// itself, and that the judgement is the model's rather than a rule imposed
+    /// on it.
+    #[test]
+    fn reply_contract_states_that_delivery_repeats_and_leaves_the_call_to_the_model() {
+        let c = a2a_reply_contract("win-ai");
+        assert!(
+            c.contains("at least once") && c.contains("more than once"),
+            "the model must be told the same message can arrive again: {c}"
+        );
+        assert!(
+            c.contains("send time"),
+            "it needs the field that separates a repeat delivery from a repeat message: {c}"
+        );
+        assert!(
+            c.contains("Judge for yourself"),
+            "the call stays with the model, not with a hard rule: {c}"
         );
     }
 

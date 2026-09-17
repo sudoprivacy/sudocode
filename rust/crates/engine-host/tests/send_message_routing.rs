@@ -305,6 +305,58 @@ fn the_envelope_carries_its_summary_over_nexus() {
     assert_eq!(envelope["to"], "mac-ai");
 }
 
+/// The envelope carries the time it was sent, over nexus too.
+///
+/// Delivery into an inbox is at-least-once by design: `spawn_inbox_poller`
+/// advances ONE cursor for a whole batch, so a batch the consumer did not fully
+/// accept is read again, and the frames it re-hands over are byte-identical to
+/// ones the receiving model has already answered. The send time is the only
+/// field that separates the two cases a receiver must tell apart — the same
+/// bytes handed over twice carry the SAME timestamp, a peer genuinely repeating
+/// itself carries a later one.
+///
+/// Pinned on the FRAMED path specifically, because that is where it was missing:
+/// the JSONL branch has always stamped inside `append_envelope_to_path`, while
+/// the stream branch serialises the envelope as-is, so every message that ever
+/// crossed a DT_STREAM arrived with `timestamp` absent. A `StdFsBackend` pair
+/// root cannot show this — its `is_append_stream` is a hardcoded `false`, so it
+/// only ever exercises the branch that already worked.
+///
+/// `skip_serializing_if = "is_zero"` is why the presence check is the assertion:
+/// an unstamped envelope omits the field rather than sending a zero.
+#[test]
+fn the_envelope_carries_a_send_time_over_nexus() {
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+
+    let (executor, appends, _provisions) = nexus_executor();
+    call(
+        &executor,
+        "send",
+        r#"{"to":"mac-ai","message":"the body","summary":"the summary"}"#,
+    )
+    .expect("send must succeed");
+
+    let wrote = appends.lock().expect("appends poisoned").clone();
+    assert_eq!(wrote.len(), 1, "expected one envelope, got {wrote:?}");
+    assert_eq!(
+        wrote[0].0, "/agents/mac-ai/chat-with-me",
+        "the framed A2A path is the one this pins"
+    );
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&wrote[0].1).expect("the record is a JSON envelope");
+    let sent_at = envelope["timestamp"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a crossing envelope must carry its send time, got: {envelope}"));
+    assert!(
+        sent_at >= before,
+        "the stamp must be the current unix seconds, got {sent_at} (before={before})"
+    );
+}
+
 /// With no mailbox given to the executor, the same tool writes the workspace.
 ///
 /// The contract, not a fallback: one tool, and the session chooses the

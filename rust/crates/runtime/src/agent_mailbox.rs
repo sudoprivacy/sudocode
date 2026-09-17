@@ -98,8 +98,21 @@ pub struct MailboxEnvelope {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// Unix seconds. `now_secs()` at write time for local JSONL;
-    /// 0 when read from nexus (the stream carries its own ordering).
+    /// Unix seconds, stamped by the sender at write time on every path —
+    /// [`crate::mailbox::Mailbox::send`] for both conventions, and
+    /// [`append_envelope_to_path`] for a caller that writes a line directly.
+    ///
+    /// Load-bearing for a receiver, not decoration. Inbox delivery is
+    /// at-least-once (see [`crate::mailbox::spawn_inbox_poller`]: the cursor is
+    /// one offset, so a batch the consumer did not fully accept is re-read), and
+    /// a re-delivered frame is byte-identical to the one already in the
+    /// receiving model's history. The timestamp is what separates the two cases
+    /// it must tell apart: the same bytes handed over twice carry the SAME
+    /// timestamp, while a peer genuinely repeating itself carries a later one.
+    ///
+    /// `0` therefore means "unstamped", which after this is only a frame from a
+    /// writer that predates the stamp — it deserialises to 0 by `default` and is
+    /// omitted from the wire by `is_zero`, so an old reader is unaffected.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,7 +208,7 @@ pub mod kinds {
     pub const TASK_NOTIFICATION: &str = "task_notification";
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -3554,9 +3554,9 @@ impl runtime::QuestionPrompter for NoopQuestionPrompter {
 /// Renderer-side question prompter for the SYNC REPL. Draws the question +
 /// numbered options and reads the choice via rustyline — a raw
 /// `io::stdin().read_line` is unreliable under Windows ConPTY (it silently
-/// dropped stdin writes during the old ExitPlanMode dialog); rustyline reads the
+/// dropped stdin writes during the old plan-mode dialog); rustyline reads the
 /// console the same Windows-safe way the REPL prompt does. Answers both
-/// `AskUserQuestion` and the `ExitPlanMode` "Choose an action" dialog, now that
+/// `AskUserQuestion` and the `write_plan` "Choose an action" dialog, now that
 /// both cross the seam as `QuestionRequest`s.
 struct CliQuestionPrompter;
 
@@ -4147,7 +4147,7 @@ impl LiveCli {
             } else {
                 Box::new(AutoDenyPermissionPrompter)
             };
-        // Interactive REPL: draw AskUserQuestion / ExitPlanMode dialogs and read
+        // Interactive REPL: draw AskUserQuestion / write_plan dialogs and read
         // the choice (Windows-safe via rustyline). One-shot: no interactive user.
         let mut question_prompter: Box<dyn runtime::QuestionPrompter> = if self.is_repl {
             Box::new(CliQuestionPrompter)

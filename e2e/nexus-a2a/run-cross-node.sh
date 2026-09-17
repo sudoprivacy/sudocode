@@ -131,11 +131,30 @@ fi
 # Both observers have to be armed or the wake below cannot happen on either
 # side. Asserting it here turns "the wake test timed out" into "the node never
 # armed its observer", which is a different bug with a different owner.
+#
+# Polled, not sampled once. Arming "rides zone materialization rather than a
+# boot-time sweep" (nexus-vfs `profiles/cluster`), so it is a DIFFERENT event
+# from the raft catch-up gated on above — reading the log the instant catch-up
+# lands is a race, and it lost on main at ea0922f0 as well as here. The budget
+# is the diagnostic: if the line never comes, the message below is still the one
+# worth printing.
+echo "== waiting for both nodes to arm their a2a stream-wakeup observers =="
 for node in founder joiner; do
-  grep -q "stream-wakeup" "$DATA_DIR/$node.log" \
-    || { echo "!! $node never armed its a2a stream-wakeup observer" >&2; exit 1; }
+  armed=
+  for i in $(seq 1 30); do
+    if grep -q "stream-wakeup" "$DATA_DIR/$node.log" 2>/dev/null; then
+      echo "   $node armed after ~${i}s"
+      armed=1
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$armed" ]; then
+    echo "!! $node never armed its a2a stream-wakeup observer" >&2
+    tail -40 "$DATA_DIR/$node.log" >&2
+    exit 1
+  fi
 done
-echo "== both nodes armed their a2a stream-wakeup observers =="
 
 echo "== [cross-node] a peer node's write wakes a parked blocking tail =="
 NEXUS_A2A_TEST_ENDPOINT="$JOINER" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER" \

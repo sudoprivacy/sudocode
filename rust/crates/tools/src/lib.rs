@@ -2483,10 +2483,16 @@ fn write_envelope(
         to: recipient.to_string(),
         body: text.to_string(),
         summary: summary.map(str::to_string),
-        // Stamped by the local JSONL writer, and deliberately left unset over
-        // nexus: a DT_STREAM's raft-assigned offset is the ordering authority
-        // there, and a sender's wall clock would only add skew. See
-        // `MailboxEnvelope::timestamp`.
+        // Left for the transport to stamp, on either convention — see
+        // `Mailbox::send`. This used to say a sender's clock was deliberately
+        // omitted over nexus because a DT_STREAM's raft offset is the ordering
+        // authority. The premise holds and the conclusion does not: the offset
+        // orders frames inside the stream, but it never reaches the receiving
+        // model, so it cannot answer the question a receiver actually faces —
+        // whether these bytes are ones it has already answered. Delivery is
+        // at-least-once, so that question is routine, and the send time is the
+        // only field that separates a re-delivery (same timestamp) from a peer
+        // repeating itself (a later one).
         timestamp: 0,
         color: None,
         kind: kind.to_string(),

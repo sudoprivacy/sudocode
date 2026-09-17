@@ -331,6 +331,19 @@ impl Mailbox {
         if envelope.from.is_empty() {
             envelope.from = self.self_id.clone();
         }
+        // Stamp here, above the convention split, because a receiver needs it on
+        // BOTH paths and only the JSONL branch used to provide it: the framed
+        // branch below serialises the envelope as-is, so every message that ever
+        // crossed a DT_STREAM arrived with `timestamp: 0`. Delivery is
+        // at-least-once (see `spawn_inbox_poller`), and a re-delivered frame is
+        // byte-identical to one the receiving model has already answered — the
+        // send time is what distinguishes "these same bytes again" from "my peer
+        // said that a second time". Guarded on 0 so a caller that supplies its
+        // own time (a relay preserving the original) keeps it, which is also why
+        // `append_envelope_to_path`'s identical guard stays a no-op after this.
+        if envelope.timestamp == 0 {
+            envelope.timestamp = crate::agent_mailbox::now_secs();
+        }
         let path = self.convention.inbox_path(&envelope.to);
 
         if self.backend_frames(&path) {

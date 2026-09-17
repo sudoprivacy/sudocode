@@ -7491,6 +7491,7 @@ fn build_forked_messages(
         blocks: user_blocks,
         usage: None,
         model: None,
+        duration_ms: None,
     };
 
     vec![full_assistant, user_message]
@@ -10180,6 +10181,7 @@ mod tests {
             }],
             usage: None,
             model: None,
+            duration_ms: None,
         }];
         let converted = convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -10235,6 +10237,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
             ConversationMessage {
                 role: MessageRole::Tool,
@@ -10246,6 +10249,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
         ];
         let discovered = extract_discovered_tool_names(&messages);

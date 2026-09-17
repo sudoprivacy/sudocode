@@ -422,12 +422,27 @@ pub(crate) fn build_runtime_with_plugin_state(
     if !deferred_section.is_empty() {
         system_prompt.dynamic_sections.push(deferred_section);
     }
-    // nexus A2A: teach the model its A2A identity + how to reach peers, so the
-    // standalone loop knows it can `send` to a named peer.
+    // A2A: teach the model its identity + how to reply, so a receiving loop
+    // knows it can `send` back to a named peer and doesn't echo the message
+    // framing. Every receive path renders the shared REPL section; nexus adds
+    // its network note (via `peer_system_prompt`), standalone uses the same
+    // local identity the `send` routing below resolves.
     if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
             .push(session.peer_system_prompt());
+    } else {
+        let configured = ConfigLoader::default_for(cwd).load().ok().and_then(|rc| {
+            rc.get("agentName")
+                .and_then(|v| v.as_str().map(str::to_string))
+        });
+        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), cwd);
+        system_prompt
+            .dynamic_sections
+            .push(runtime::agent_mailbox::repl_a2a_prompt_section(
+                &self_name,
+                &[],
+            ));
     }
     let client = match EngineApiClient::new(
         session_id,

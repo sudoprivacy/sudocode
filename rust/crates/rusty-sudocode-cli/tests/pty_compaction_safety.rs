@@ -24,12 +24,57 @@ struct Provider {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+/// Fail loudly when a `0o500` directory does not actually refuse writes.
+///
+/// Probes the behaviour rather than asking `geteuid() == 0`. The question that
+/// decides whether the injection works is "does this environment enforce the
+/// permission bit", and running as root is only one of the ways the answer is
+/// no — a filesystem mounted without unix modes is another. Asking the
+/// behaviour covers both, and cannot drift from what the injection relies on.
+#[cfg(unix)]
+fn assert_permission_injection_is_armed(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Probe INSIDE the directory the injection will disarm, so the answer comes
+    // from the filesystem that will carry it. Probing the process-wide temp dir
+    // answers about whatever is mounted THERE — the same tree today only
+    // because `HarnessWorkspace` happens to build under it too, a coupling
+    // nothing declares and nothing would catch if it moved.
+    let probe = dir.join(".permission-probe");
+    std::fs::create_dir_all(&probe).expect("probe dir");
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500)).expect("probe chmod");
+    let wrote = std::fs::write(probe.join("canary"), b"x").is_ok();
+    // Restore before removing: a directory left at 0o500 cannot be emptied.
+    let _ = std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_dir_all(&probe);
+    assert!(
+        !wrote,
+        "this test injects a persistence failure by making the workspace \
+         read-only (0o500), but this environment let the write through — most \
+         often because the suite is running as root, which bypasses permission \
+         bits. Run it as a non-root user. As root the injected failure never \
+         happens, compaction SUCCEEDS, and the miss surfaces as a misleading \
+         assertion about the transcript instead of naming the disarmed injection."
+    );
+}
+
 impl Provider {
     fn new(mode: &'static str) -> Self {
         Self::with_commit_failure(mode, None)
     }
 
+    /// `read_only_dir` makes the workspace unwritable once the model has
+    /// answered, so the CLI's persistence step fails.
+    ///
+    /// The injection proves itself here rather than in the test: a silently
+    /// disarmed injection turns "the product refused to lose the transcript"
+    /// into "the product compacted successfully", which reads as a product
+    /// regression and points nowhere near the environment that caused it.
     fn with_commit_failure(mode: &'static str, read_only_dir: Option<PathBuf>) -> Self {
+        #[cfg(unix)]
+        if let Some(dir) = read_only_dir.as_deref() {
+            assert_permission_injection_is_armed(dir);
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());

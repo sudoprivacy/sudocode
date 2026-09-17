@@ -741,16 +741,16 @@ fn config_tree_navigate_back_and_toggle() {
         panic!("permissions children: {e}\nPTY:\n{screen}");
     });
 
-    // 9. Select [1] defaultMode → Enum DialPad (plan, read-only, ...).
+    // 9. Select [1] defaultMode → Enum DialPad (read-only, workspace-write, ...).
     sess.send("1").expect("select defaultMode");
     sess.expect("(?i)select value").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("enum picker for defaultMode: {e}\nPTY:\n{screen}");
     });
 
-    // 10. Select [1] plan → writes to settings.json.
-    sess.send("1").expect("select plan");
-    sess.expect("= \"plan\"").unwrap_or_else(|e| {
+    // 10. Select [1] read-only → writes to settings.json.
+    sess.send("1").expect("select read-only");
+    sess.expect("= \"read-only\"").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("enum write confirmation: {e}\nPTY:\n{screen}");
     });
@@ -759,8 +759,8 @@ fn config_tree_navigate_back_and_toggle() {
     let updated2 = fs::read_to_string(&settings_path).expect("read settings.json (2)");
     let json2: serde_json::Value = serde_json::from_str(&updated2).expect("parse (2)");
     assert_eq!(
-        json2["permissions"]["defaultMode"], "plan",
-        "settings.json should have permissions.defaultMode = plan\nFile contents:\n{updated2}"
+        json2["permissions"]["defaultMode"], "read-only",
+        "settings.json should have permissions.defaultMode = read-only\nFile contents:\n{updated2}"
     );
 
     // ── sudocode.json browsing ──

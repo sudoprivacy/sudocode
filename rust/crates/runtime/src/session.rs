@@ -67,6 +67,11 @@ pub struct ConversationMessage {
     pub usage: Option<TokenUsage>,
     /// The model that generated this message (set only for assistant messages).
     pub model: Option<String>,
+    /// Wall-clock time the turn that produced this message took, in
+    /// milliseconds (set only for assistant messages). Persisted so a resumed
+    /// session can report cumulative wall time — the true cost when the turn
+    /// ran on local compute rather than a token-billed API.
+    pub duration_ms: Option<u64>,
 }
 
 /// Metadata describing the latest compaction that summarized a session.
@@ -505,6 +510,7 @@ impl Session {
             blocks,
             usage: None,
             model: None,
+            duration_ms: None,
         })
     }
 
@@ -939,6 +945,7 @@ impl ConversationMessage {
             blocks: vec![ContentBlock::Text { text: text.into() }],
             usage: None,
             model: None,
+            duration_ms: None,
         }
     }
 
@@ -949,6 +956,7 @@ impl ConversationMessage {
             blocks,
             usage: None,
             model: None,
+            duration_ms: None,
         }
     }
 
@@ -959,6 +967,7 @@ impl ConversationMessage {
             blocks,
             usage,
             model: None,
+            duration_ms: None,
         }
     }
 
@@ -979,6 +988,7 @@ impl ConversationMessage {
             }],
             usage: None,
             model: None,
+            duration_ms: None,
         }
     }
 
@@ -1006,6 +1016,12 @@ impl ConversationMessage {
         }
         if let Some(model) = &self.model {
             object.insert("model".to_string(), JsonValue::String(model.clone()));
+        }
+        if let Some(duration_ms) = self.duration_ms {
+            object.insert(
+                "duration_ms".to_string(),
+                JsonValue::Number(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
+            );
         }
         JsonValue::Object(object)
     }
@@ -1041,11 +1057,16 @@ impl ConversationMessage {
             .get("model")
             .and_then(JsonValue::as_str)
             .map(String::from);
+        let duration_ms = object
+            .get("duration_ms")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| u64::try_from(value).ok());
         Ok(Self {
             role,
             blocks,
             usage,
             model,
+            duration_ms,
         })
     }
 }

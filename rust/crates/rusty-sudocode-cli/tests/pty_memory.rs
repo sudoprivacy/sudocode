@@ -496,14 +496,20 @@ fn memory_write_read_forget_workflow() {
     });
 
     // ── Step 1: Write memory ─────────────────────────────────────────
+    let marker = common::turn_status_marker(&sess);
     sess.send("Remember this: my favorite programming language is Rust. Save it to memory now.\r")
         .expect("send remember request");
 
-    // Wait for the turn to complete (REPL prompt returns).
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after write: {e}\nPTY screen:\n{screen}");
-    });
+    // Gate the on-disk assertion below on THIS turn finishing. `expect("❯")`
+    // cannot: the prompt glyph is permanent chrome that iocraft re-emits on
+    // every redraw, so it matched instantly and the assertion then read the
+    // filesystem ~2s into the run, before the model had written anything.
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "memory write turn",
+    );
 
     // Verify a .md file appeared in the memory directory.
     // TestEnv sets HOME to workspace/home, so memory lands there.
@@ -535,13 +541,20 @@ fn memory_write_read_forget_workflow() {
     sess.expect("❯").expect("prompt after /memory");
 
     // ── Step 3: Forget memory ────────────────────────────────────────
+    let marker = common::turn_status_marker(&sess);
     sess.send("Forget my favorite programming language. Remove that memory entry.\r")
         .expect("send forget request");
 
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after forget: {e}\nPTY screen:\n{screen}");
-    });
+    // Step 1 left its own status line on screen, so this is precisely the case
+    // a bare presence check gets wrong: it would be satisfied by that earlier
+    // line and return before the forget turn had run. The marker is what makes
+    // the difference observable.
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "memory forget turn",
+    );
 
     // ── Step 4: the fact is gone from disk ───────────────────────────
     //
@@ -727,6 +740,7 @@ fn memory_staleness_updates_existing_entry() {
     });
 
     // Tell the model the fact has changed.
+    let marker = common::turn_status_marker(&sess);
     sess.send("We migrated from PostgreSQL to MySQL last week. Update the existing memory entry project_database.md now: replace its PostgreSQL details with MySQL details. Do not only update MEMORY.md.\r")
         .expect("send update request");
 
@@ -740,10 +754,12 @@ fn memory_staleness_updates_existing_entry() {
             });
     }
 
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after stale update: {e}\nPTY screen:\n{screen}");
-    });
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "memory update turn",
+    );
 
     // Verify the entry was updated, not duplicated.
     let md_count = count_md_files(&memory_dir);
@@ -867,6 +883,7 @@ fn memory_multi_type_single_session() {
     });
 
     // Ask to remember three things of different types in one go.
+    let marker = common::turn_status_marker(&sess);
     sess.send(
         "Please save these three things to memory:\n\
          1. I am a senior Rust developer (this is about me, the user)\n\
@@ -876,19 +893,20 @@ fn memory_multi_type_single_session() {
     )
     .expect("send multi-type request");
 
-    // Wait for the turn to finish — see the note in
-    // `memory_write_read_forget_workflow` on why this is keyed on the status
-    // line rather than on a tool name.
-    sess.expect("ctx ").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should see the turn status line after the writes: {e}\nPTY screen:\n{screen}");
-    });
-
-    // Wait for turn completion.
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after multi-type: {e}\nPTY screen:\n{screen}");
-    });
+    // One gate, the same one the rest of this file uses. The pair it replaces —
+    // `expect("ctx ")` then `expect("❯")` — is the shape #685 left behind here
+    // after removing it everywhere else, and it has both weaknesses: matching on
+    // the unconsumed stream lets a redraw of an EARLIER turn's status line
+    // satisfy it, and `❯` is permanent chrome that matches instantly. Keyed on
+    // the status line rather than on a tool name for the original reason: which
+    // write tool a live model reaches for is its own choice, and what this step
+    // needs is for the turn to be over before the assertions below run.
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "memory multi-type turn",
+    );
 
     // Verify at least 3 memory files were created (excluding MEMORY.md).
     let files = list_md_files(&memory_dir);

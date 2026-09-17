@@ -47,18 +47,6 @@ fn unique_dir(label: &str) -> PathBuf {
     ))
 }
 
-/// Real `~/.nexus/sudocode` on this machine (for live auth seeding).
-fn real_config_home() -> PathBuf {
-    std::env::var_os("SUDO_CODE_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .or_else(|| std::env::var_os("HOME"))
-                .map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
-        })
-        .expect("no SUDO_CODE_CONFIG_HOME, HOME, or USERPROFILE")
-}
-
 struct CronEnv {
     config_home: PathBuf,
     home: PathBuf,
@@ -75,14 +63,17 @@ impl CronEnv {
             fs::create_dir_all(d).expect("mkdir");
         }
         if is_live() {
-            // Seed auth from the real config so a fired cron reaches the API.
-            let src = real_config_home();
-            for name in ["sudocode.json", "scode.json"] {
-                let s = src.join(name);
-                if s.exists() {
-                    let _ = fs::copy(&s, config_home.join(name));
-                }
-            }
+            // Seed auth from the real config so a fired cron reaches the API —
+            // through the ONE helper that knows which files that takes.
+            //
+            // This used to copy `sudocode.json` and `scode.json` and stop there,
+            // which leaves out `settings.json` and with it `auth_profile`. A
+            // machine with several proxy accounts configured then gives the
+            // spawned `scode` no way to choose one, and it exits before drawing
+            // a prompt — so every test here failed as `Timeout(45s, "❯")`,
+            // pointing at the REPL rather than at the seeding above it.
+            let src = runtime::config::default_config_home();
+            common::copy_live_credentials(&src, &config_home);
             assert!(
                 config_home.join("sudocode.json").exists(),
                 "live mode needs {}/sudocode.json",

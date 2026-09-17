@@ -1,4 +1,4 @@
-//! Managed-agent loop spawn entry — v2 ConversationRuntime integration.
+//! Managed-agent loop spawn entry 鈥?v2 ConversationRuntime integration.
 //!
 //! Wires the per-pid agent loop into a full LLM turn-driver that waits
 //! on the agent's mailbox (via a blocking `sys_read` on the DT_STREAM tail)
@@ -12,9 +12,9 @@
 //!
 //! The loop drives the following agent-state transitions:
 //!   WARMING_UP (runtime construction)
-//!   → READY (idle, polling mailbox)
-//!   → BUSY (per turn, while `run_turn` executes)
-//!   → READY (turn complete, back to polling)
+//!   鈫?READY (idle, polling mailbox)
+//!   鈫?BUSY (per turn, while `run_turn` executes)
+//!   鈫?READY (turn complete, back to polling)
 //!
 //! State is surfaced to the caller via the `state_callback` closure
 //! passed to [`spawn_task`]; the caller (typically nexus's
@@ -23,14 +23,14 @@
 //!
 //! ## Cancellation
 //!
-//! Callers reuse [`crate::HookAbortSignal`] — the same signal
+//! Callers reuse [`crate::HookAbortSignal`] 鈥?the same signal
 //! `with_hook_abort_signal` threads into the `ConversationRuntime`.
 //! `cancel(Turn)` and `cancel(Session)` both translate to
 //! `abort_signal.abort()`; the runtime's built-in abort check
 //! short-circuits the current turn and the loop exits on the next
 //! poll iteration.
 //!
-//! ## v1 → v2 migration
+//! ## v1 鈫?v2 migration
 //!
 //! v1 (echo scaffolding) is replaced in-place. The function signature
 //! is extended with `api_client`, `tool_executor`, `system_prompt`,
@@ -68,14 +68,14 @@ use crate::session::Session;
 /// on a same-node or replicated write (the raft apply observer signals BOTH the
 /// file-watch and the stream condvar); for a non-WAL stream a same-node
 /// `sys_write` wakes neither (it appends via the backend, not `write_nowait`),
-/// so both fall back to this timeout. The wins are (1) DRY — the same
+/// so both fall back to this timeout. The wins are (1) DRY 鈥?the same
 /// cursor-aware tail primitive the standalone `scode` receiver uses over gRPC
 /// (`StreamReadAt` blocking); (2) one syscall that both waits AND returns the
 /// frame at the cursor, no follow-up read; (3) atomic check-then-park closes
 /// the lost-wakeup gap between the old separate `sys_read` and `sys_watch`.
 const READ_BLOCK_MS: u64 = 500;
 
-/// Where the co-hosted agent's chat mailbox lives — the path the loop reads for
+/// Where the co-hosted agent's chat mailbox lives 鈥?the path the loop reads for
 /// inbound messages and where each reply is written.
 ///
 /// Both are derived from one [`InboxConvention`], the shared definition of
@@ -83,15 +83,15 @@ const READ_BLOCK_MS: u64 = 500;
 /// builder for overlapping shapes, which is how the `/chat-with-me` leaf came
 /// to be spelled four different ways.
 #[derive(Debug, Clone)]
-pub struct Mailbox {
+pub struct CohostMailbox {
     self_id: String,
     convention: InboxConvention,
 }
 
-impl Mailbox {
+impl CohostMailbox {
     /// Node-local single stream (the managed-agent `/proc/{pid}/chat-with-me`
     /// model): the loop reads AND replies on the SAME path; both parties filter
-    /// `from != self`. NOT raft-replicated — same-node only.
+    /// `from != self`. NOT raft-replicated 鈥?same-node only.
     #[must_use]
     pub fn local_stream(path: impl Into<String>, self_id: impl Into<String>) -> Self {
         Self {
@@ -106,13 +106,15 @@ impl Mailbox {
     /// different nodes converse with no bridge or relay.
     ///
     /// The base is not a parameter. It was, and every caller passed the same
-    /// constant — a knob nobody turned, with a trailing-slash trim behind it to
-    /// tolerate spellings nobody used. It is [`crate::mailbox::A2A_INBOX_BASE`].
+    /// constant 鈥?a knob nobody turned, with a trailing-slash trim behind it to
+    /// tolerate spellings nobody used. It is [`crate::CohostMailbox::a2a_inbox_BASE`].
     #[must_use]
     pub fn a2a_inbox(self_name: impl Into<String>) -> Self {
         Self {
             self_id: self_name.into(),
-            convention: InboxConvention::NexusA2a,
+            convention: InboxConvention::PerRecipient {
+                root: String::new(),
+            },
         }
     }
 
@@ -122,7 +124,7 @@ impl Mailbox {
         self.convention.inbox_path(&self.self_id)
     }
 
-    /// This agent's own id — filters its own writes out of the inbox and is
+    /// This agent's own id 鈥?filters its own writes out of the inbox and is
     /// stamped as `from` on replies + as the operation actor.
     #[inline]
     fn self_id(&self) -> &str {
@@ -152,7 +154,7 @@ pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + S
 /// Shared handler for the `send` A2A tool: read `{to, message}` from the
 /// parsed tool input and hand it to `sender`. BOTH the co-host
 /// (`ManagedToolExecutor`) and the standalone CLI executor route their
-/// `send` here, so the parse + delivery contract is defined ONCE — only
+/// `send` here, so the parse + delivery contract is defined ONCE 鈥?only
 /// the `sender` differs by deployment (in-process [`mailbox_sender`] vs gRPC
 /// `crate::nexus_mailbox::grpc_sender`).
 ///
@@ -182,12 +184,12 @@ pub fn handle_send_message(
 }
 
 /// Build the [`MailboxSender`] for a co-hosted agent (its kernel + mailbox +
-/// operation identity). Lives here, next to `Mailbox::reply_path`, so the
+/// operation identity). Lives here, next to `CohostMailbox::reply_path`, so the
 /// envelope build + reply-path + `sys_write` stay in one place.
 #[must_use]
 pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
     kernel: Arc<K>,
-    mailbox: Mailbox,
+    mailbox: CohostMailbox,
     owner_id: String,
     zone_id: String,
 ) -> MailboxSender {
@@ -217,13 +219,13 @@ pub fn mailbox_sender<K: KernelSyscall + Send + Sync + 'static>(
 ///
 /// It is the prose counterpart of two mechanisms this module owns and MUST stay
 /// in step with them:
-/// * inbound framing — `run_loop` hands each message to the turn as
+/// * inbound framing 鈥?`run_loop` hands each message to the turn as
 ///   `[message from <sender>]\n\n<body>`, so `<sender>` is the reply target;
-/// * the reply path — [`mailbox_sender`] wires the `send` tool as the
+/// * the reply path 鈥?[`mailbox_sender`] wires the `send` tool as the
 ///   ONLY way a co-hosted agent replies (writing to the sender's inbox).
 ///
 /// Kept next to those two so the wording cannot drift from the framing/tool it
-/// describes. `self_id` is the agent's own name (`Mailbox::self_id`).
+/// describes. `self_id` is the agent's own name (`CohostMailbox::self_id`).
 #[must_use]
 pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
     format!(
@@ -231,8 +233,8 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
          You are the agent \"{self_id}\", conversing with other agents by message. \
          Each message you receive is shown as `[message from <sender>]` followed by \
          its text. To reply, call the `send` tool with `to` set to that \
-         exact `<sender>` name — the agent that messaged you, never a word copied \
-         from the message text — and `message` set to your reply. Calling \
+         exact `<sender>` name 鈥?the agent that messaged you, never a word copied \
+         from the message text 鈥?and `message` set to your reply. Calling \
          `send` is the only way to reply; if you do not call it you stay \
          silent and the conversation ends."
     )
@@ -240,7 +242,7 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
 
 /// Handle returned by [`spawn_task`].
 pub struct SpawnHandle {
-    /// Shared abort signal — wired into the [`ConversationRuntime`] via
+    /// Shared abort signal 鈥?wired into the [`ConversationRuntime`] via
     /// `with_hook_abort_signal` so both turn-level and session-level
     /// cancellation share the same wire.
     pub abort_signal: HookAbortSignal,
@@ -251,7 +253,7 @@ pub struct SpawnHandle {
 /// Spawn the managed-agent loop for a freshly-allocated pid.
 ///
 /// The caller supplies a fully-constructed `api_client` and
-/// `tool_executor` — spawn_task owns the mailbox poll loop, the
+/// `tool_executor` 鈥?spawn_task owns the mailbox poll loop, the
 /// `ConversationRuntime` lifecycle, and state-transition reporting.
 ///
 /// `state_callback` is invoked on every state transition so the caller
@@ -261,7 +263,7 @@ pub struct SpawnHandle {
 pub fn spawn_task<K, C, T, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
-    mailbox: Mailbox,
+    mailbox: CohostMailbox,
     api_client: C,
     tool_executor: T,
     system_prompt: SystemPrompt,
@@ -298,14 +300,14 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// v2 loop — ConversationRuntime integration
+// v2 loop 鈥?ConversationRuntime integration
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 fn run_loop<K, C, T, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
-    mailbox: Mailbox,
+    mailbox: CohostMailbox,
     api_client: C,
     tool_executor: T,
     system_prompt: SystemPrompt,
@@ -329,7 +331,7 @@ fn run_loop<K, C, T, F>(
 
     // The VFS-backed file tools are constructed by the spawn factory
     // (`tools::managed_agent::spawn_managed_agent`), which injects a
-    // `KernelFsBackend` into the `tool_executor` this loop receives — so
+    // `KernelFsBackend` into the `tool_executor` this loop receives 鈥?so
     // the loop itself no longer builds one.
 
     let session = Session::new();
@@ -348,21 +350,21 @@ fn run_loop<K, C, T, F>(
 
     // Inbox the loop reads/watches, and the id it filters its own writes by.
     // For A2A this is the replicated `/agents/<self>/chat-with-me`; replies
-    // go to the SENDER's inbox (raft-replicated → cross-machine, no bridge).
+    // go to the SENDER's inbox (raft-replicated 鈫?cross-machine, no bridge).
     let inbox_path = mailbox.inbox_path();
     let self_id = mailbox.self_id().to_string();
     let ctx = OperationContext::new(&desc.owner_id, &desc.zone_id, false, Some(&self_id), true);
 
     // Durable per-agent read cursor (node-local). A (re)spawned agent RESUMES
     // from the offset it last PROCESSED instead of replaying its whole inbox and
-    // re-answering every historical message — the #81 re-reply storm, observed
-    // live in the Win↔Mac duet when a respawned agent re-answered the entire
+    // re-answering every historical message 鈥?the #81 re-reply storm, observed
+    // live in the Win鈫擬ac duet when a respawned agent re-answered the entire
     // conversation. First spawn (no cursor yet) loads 0 and delivers all waiting
     // messages, so there is NO seek-to-tail delivery race. The cursor is a
     // node-local DT_REG (`sys_write` create-or-overwrites it; it lives in the
     // node's durable metastore, so it survives a daemon restart); each node's
-    // agent owns its own cursor. All cursor I/O degrades GRACEFULLY (load → 0,
-    // save ignored) so a missing / unmounted cursor path never wedges the agent —
+    // agent owns its own cursor. All cursor I/O degrades GRACEFULLY (load 鈫?0,
+    // save ignored) so a missing / unmounted cursor path never wedges the agent 鈥?
     // only the no-replay guarantee weakens to "replay from 0".
     let cursor_path = cursor_path_for(&self_id);
     let mut next_offset: u64 = load_cursor(kernel.as_ref(), &cursor_path, &ctx);
@@ -378,13 +380,13 @@ fn run_loop<K, C, T, F>(
                             // Drive ONE turn on the inbound message. The sender is
                             // surfaced in the prompt so the agent can address a reply.
                             // The agent decides whether to reply by calling the
-                            // `send` tool DURING the turn — the loop NO LONGER
+                            // `send` tool DURING the turn 鈥?the loop NO LONGER
                             // harvests the turn's text and auto-forwards it. Not
                             // calling `send` means silence, so the
                             // conversation ends instead of two agents bouncing every
                             // turn's output back to each other forever (the ping-pong).
-                            // The body is a peer's text — another organisation's
-                            // on a cross-org hop — so its harness markup is made
+                            // The body is a peer's text 鈥?another organisation's
+                            // on a cross-org hop 鈥?so its harness markup is made
                             // inert before it becomes part of a prompt. Without
                             // this a peer can spell a `<system-reminder>`, the
                             // one tag the system prompt tells this model to
@@ -403,7 +405,7 @@ fn run_loop<K, C, T, F>(
                 if let Some(advanced) = result.stream_next_offset {
                     let advanced = advanced as u64;
                     // Persist the cursor only on REAL forward progress (a message
-                    // was consumed) — never on idle no-op reads, which would
+                    // was consumed) 鈥?never on idle no-op reads, which would
                     // rewrite the same offset every watch tick. Saving here (after
                     // the turn ran) makes a crash mid-turn re-process only that one
                     // message on respawn (at-least-once), never the whole history.
@@ -414,14 +416,14 @@ fn run_loop<K, C, T, F>(
                 }
             }
             Err(e) => {
-                // A read error is NOT terminal — `abort` (checked by the
+                // A read error is NOT terminal 鈥?`abort` (checked by the
                 // `while`) is the SOLE terminal signal. For the managed
                 // `/proc` stream, teardown fires `abort` via the service's
                 // on_terminate observer, so the loop still exits promptly.
                 // For the A2A inbox the stream is a durable, raft-replicated
                 // path: a cold-read-before-`resolve`, a momentary not-leader,
                 // or being read before the mint has planted it are all
-                // TRANSIENT — a `break` here would silently kill a co-hosted
+                // TRANSIENT 鈥?a `break` here would silently kill a co-hosted
                 // agent for the daemon's lifetime. Log, then pace the retry
                 // and re-check `abort`. The happy path is paced by the
                 // blocking read itself (which parks on the tail); an error
@@ -470,8 +472,8 @@ fn cursor_path_for(agent_id: &str) -> String {
     format!("/.cohost-cursor-{safe}")
 }
 
-/// Read the persisted cursor (a decimal offset). Any failure — path unmounted,
-/// not-yet-created, or unparsable — yields 0, i.e. start from the inbox head.
+/// Read the persisted cursor (a decimal offset). Any failure 鈥?path unmounted,
+/// not-yet-created, or unparsable 鈥?yields 0, i.e. start from the inbox head.
 fn load_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext) -> u64 {
     kernel
         .sys_read(path, ctx, 0, 0)
@@ -497,25 +499,25 @@ fn save_cursor<K: KernelSyscall>(kernel: &K, path: &str, ctx: &OperationContext,
 
 #[cfg(test)]
 mod tests {
-    use super::Mailbox;
+    use super::CohostMailbox;
 
     #[test]
     fn a2a_inbox_reads_self_replies_to_sender() {
-        let mb = Mailbox::a2a_inbox("win-ai");
-        // Reads its OWN inbox …
+        let mb = CohostMailbox::a2a_inbox("win-ai");
+        // Reads its OWN inbox 鈥?
         assert_eq!(mb.inbox_path(), "/agents/win-ai/chat-with-me");
         assert_eq!(mb.self_id(), "win-ai");
-        // … and replies to the SENDER's inbox (raft-replicated → the peer's
+        // 鈥?and replies to the SENDER's inbox (raft-replicated 鈫?the peer's
         // node sees it), NOT its own.
         assert_eq!(mb.reply_path("mac-ai"), "/agents/mac-ai/chat-with-me");
         // A trailing slash on the base is tolerated.
-        let mb2 = Mailbox::a2a_inbox("a");
+        let mb2 = CohostMailbox::a2a_inbox("a");
         assert_eq!(mb2.inbox_path(), "/agents/a/chat-with-me");
     }
 
     #[test]
     fn local_stream_reads_and_replies_on_the_same_path() {
-        let mb = Mailbox::local_stream("/proc/7/chat-with-me", "scode");
+        let mb = CohostMailbox::local_stream("/proc/7/chat-with-me", "scode");
         assert_eq!(mb.inbox_path(), "/proc/7/chat-with-me");
         assert_eq!(mb.self_id(), "scode");
         // LocalStream replies on the shared stream regardless of sender.
@@ -525,13 +527,13 @@ mod tests {
     #[test]
     fn cohost_prompt_teaches_reply_to_sender_via_send_message() {
         let section = super::cohost_a2a_prompt_section("chatbot");
-        // Names the agent so the model knows its own identity …
+        // Names the agent so the model knows its own identity 鈥?
         assert!(section.contains("chatbot"));
-        // … names the ONLY reply path …
+        // 鈥?names the ONLY reply path 鈥?
         assert!(section.contains("send"));
-        // … mirrors the `[message from <sender>]` framing `run_loop` emits …
+        // 鈥?mirrors the `[message from <sender>]` framing `run_loop` emits 鈥?
         assert!(section.contains("[message from <sender>]"));
-        // … and encodes the fix: reply target is the sender, never a word
+        // 鈥?and encodes the fix: reply target is the sender, never a word
         // lifted from the message body (the exact mistake this prevents).
         assert!(section.contains("never a word copied"));
     }

@@ -24,6 +24,23 @@ use common::TestEnv;
 fn todo_write_roundtrips_a_list() {
     let env = TestEnv::new("todo-write");
 
+    // Mock backend, so the checklist renders from a scripted tool call rather
+    // than from a live model's choice of tool — the same scoping, for the same
+    // reason, as `pty_hook_progress` and `pty_sleep`. What this test asserts is
+    // that a `TodoWrite` call and its result reach the terminal; in live mode
+    // whether the model reaches for `TodoWrite` at all is its decision, and a
+    // run that answers in prose instead fails here on that decision rather than
+    // on the rendering under test. The half that is meaningful against a real
+    // model — the turn completing and exiting 0 — is covered live by
+    // `todo_write_persists_then_empty_wipes_store`.
+    if env.is_live() {
+        eprintln!(
+            "SKIP todo_write_roundtrips_a_list: SCODE_TEST_BACKEND=live — the \
+             terminal assertion depends on the model choosing TodoWrite"
+        );
+        return;
+    }
+
     let prompt = env.prompt(
         "Create a todo list with TodoWrite for: 'Write parser' (in progress) and \
          'Run tests' (pending). Just call the tool.",

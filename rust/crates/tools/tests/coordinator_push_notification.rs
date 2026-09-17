@@ -103,7 +103,7 @@ fn coord_mode_off_persist_terminal_does_not_touch_inbox() {
     )
     .expect("persist ok");
 
-    let inbox = agent_mailbox::mailbox_path(&ws, COORDINATOR_INBOX_RECIPIENT);
+    let inbox = agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
     assert!(
         !inbox.exists(),
         "coord mode OFF must not create the coordinator inbox file"

@@ -40,7 +40,8 @@
 //!   prefix, a preset-specific marker word). The tests are structural
 //!   guards, not response-string oracles.
 //! - **Timeouts sized for real LLM latency** — each test allows up to
-//!   `LIVE_TIMEOUT * 3` for the full parent→child→completion chain.
+//!   `LIVE_TIMEOUT * 8` for the full parent→child→completion chain
+//!   (see `preset_test_timeout` for why that multiple).
 //!   Sudorouter's response times can spike on cold cache.
 
 mod common;
@@ -71,15 +72,30 @@ fn require_live(env: &TestEnv, test_name: &str) -> bool {
 /// The full parent→child→completion chain can take longer than a
 /// single LLM call — allocate ample slack so a slow cold-cache turn
 /// doesn't false-fail us.
+///
+/// `* 8`, matching the other tests that drive a parent→child→report chain
+/// (`pty_agent_summary`, `pty_agent_memory_scoping`, `pty_custom_agents`,
+/// `pty_agent_model_inheritance`). `* 3` was not enough: a run timed out at 90s
+/// with the screen showing `scode: still waiting on …` three times over, i.e.
+/// the request was still in flight and the chain had not failed at all. A
+/// latency ceiling set below what the chain actually takes reads as a product
+/// failure, and the answer to slowness is a budget that fits it — not a skip,
+/// which would hide a real miss just as readily.
 fn preset_test_timeout() -> Duration {
-    LIVE_TIMEOUT.saturating_mul(3)
+    LIVE_TIMEOUT.saturating_mul(8)
 }
 
 /// Watch the PTY session for one of the "an agent completed" sentinels
 /// that a coordinator/parent surfaces after Agent has dispatched.
 /// Any single hit is enough — real LLM responses vary in exact
-/// phrasing. Fails the test if none appear before the deadline.
-fn expect_completion_sentinel(sess: &mut pty_expect::PtySession, preset: &str) {
+/// phrasing.
+///
+/// Returns `false` when the sentinel never arrived *and* the screen shows the
+/// run was still waiting on the gateway. An upstream that never answered says
+/// nothing about the preset chain, and a live test that reports it as a product
+/// failure is worse than one that says it could not run. Panics on a genuine
+/// miss — the sentinel absent with the model demonstrably answering.
+fn expect_completion_sentinel(sess: &mut pty_expect::PtySession, preset: &str) -> bool {
     // Sentinels in order of specificity:
     //   1. Structural: task-notification XML opener (coord mode on)
     //      or the launched agent_id manifest opener (default).
@@ -87,21 +103,21 @@ fn expect_completion_sentinel(sess: &mut pty_expect::PtySession, preset: &str) {
     // The regex OR pattern matches any of them, without regex-special
     // characters that pty-expect's matcher would trip on.
     let pattern = r"task-notification|agent-|completed|finished";
-    sess.expect(pattern).unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
+    if let Err(error) = sess.expect(pattern) {
+        let tail = common::screen_tail(sess, 600);
+        if common::model_unavailable_in_screen(&tail) {
+            eprintln!(
+                "SKIP preset {preset}: the gateway did not serve the run \
+                 (screen tail below)\n{tail}"
+            );
+            return false;
+        }
         panic!(
-            "preset {preset} run did not surface a completion sentinel: {e}\n\
-             tail of PTY screen (last 600 chars):\n{tail}",
-            tail = screen
-                .chars()
-                .rev()
-                .take(600)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>(),
+            "preset {preset} run did not surface a completion sentinel: {error}\n\
+             tail of PTY screen (last 600 chars):\n{tail}"
         );
-    });
+    }
+    true
 }
 
 /// Drive a single preset test: spawn scode with a prompt that asks the
@@ -125,7 +141,9 @@ fn run_preset(preset: &str, description: &str, worker_task: &str) {
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     sess.set_default_timeout(preset_test_timeout());
 
-    expect_completion_sentinel(&mut sess, preset);
+    if !expect_completion_sentinel(&mut sess, preset) {
+        return;
+    }
 
     // Drain to natural EOF — a real one-shot run exits after the
     // final assistant turn. Bounded so a hung child can't wedge the

@@ -56,6 +56,35 @@ pub struct TlsPaths {
     pub server_name: String,
 }
 
+impl TlsPaths {
+    /// The three PEMs a minted agent bundle holds, named once.
+    ///
+    /// `nexusd-cluster auth mint` writes `ca.pem`, `agent.pem` and
+    /// `agent-key.pem` into one directory. Every caller that dials with a
+    /// bundle used to re-spell that layout — four copies, each also
+    /// hard-coding [`DEFAULT_TLS_SERVER_NAME`], each free to drift from the
+    /// mint that produces them.
+    ///
+    /// Paths only, no I/O: [`Config::connect`] reads them and names the file
+    /// that failed, so a wrong directory reports itself instead of panicking
+    /// inside whatever closure the caller wrote.
+    #[must_use]
+    pub fn from_bundle_dir(dir: &str) -> Self {
+        let join = |name: &str| {
+            std::path::Path::new(dir)
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
+        Self {
+            ca_pem: join("ca.pem"),
+            client_cert: join("agent.pem"),
+            client_key: join("agent-key.pem"),
+            server_name: DEFAULT_TLS_SERVER_NAME.to_string(),
+        }
+    }
+}
+
 /// Standalone nexus-A2A configuration, resolved from the environment.
 ///
 /// Built by [`Config::from_env`], which returns `Ok(None)` when the

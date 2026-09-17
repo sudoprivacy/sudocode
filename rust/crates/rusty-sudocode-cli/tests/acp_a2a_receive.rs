@@ -220,7 +220,18 @@ fn a2a_peer_message_reaches_an_acp_client() {
     // Both inboxes exist before anything polls: `scode` self-provisions its own,
     // but the peer's has to be there for a reply to have somewhere to go, and
     // provisioning after the receiver seeks to tail would race it.
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
+    // The dial a running `scode` performs, through the one constructor that
+    // owns it. Plaintext by construction: these tests drive an auth-off daemon,
+    // and saying so here is clearer than a helper that hides the posture.
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: String::new(),
+        peers: Vec::new(),
+        api_key: String::new(),
+        tls: None,
+    }
+    .connect()
+    .expect("dial the daemon");
     mailbox(&client, SELF_AGENT, "")
         .ensure_inbox()
         .expect("provision the agent inbox");
@@ -298,7 +309,18 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
     let agent = format!("offline-probe-{}", std::process::id());
     let peer = format!("{agent}-peer");
 
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
+    // The dial a running `scode` performs, through the one constructor that
+    // owns it. Plaintext by construction: these tests drive an auth-off daemon,
+    // and saying so here is clearer than a helper that hides the posture.
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: String::new(),
+        peers: Vec::new(),
+        api_key: String::new(),
+        tls: None,
+    }
+    .connect()
+    .expect("dial the daemon");
     mailbox(&client, &agent, "")
         .ensure_inbox()
         .expect("provision the agent inbox");
@@ -378,7 +400,18 @@ fn a_first_time_receiver_does_not_replay_history() {
     let agent = format!("virgin-probe-{}", std::process::id());
     let peer = format!("{agent}-peer");
 
-    let client = Arc::new(NexusVfsClient::connect(&endpoint).expect("dial the daemon"));
+    // The dial a running `scode` performs, through the one constructor that
+    // owns it. Plaintext by construction: these tests drive an auth-off daemon,
+    // and saying so here is clearer than a helper that hides the posture.
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: String::new(),
+        peers: Vec::new(),
+        api_key: String::new(),
+        tls: None,
+    }
+    .connect()
+    .expect("dial the daemon");
     mailbox(&client, &agent, "")
         .ensure_inbox()
         .expect("provision the agent inbox");

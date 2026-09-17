@@ -57,20 +57,17 @@ fn main() {
         std::process::exit(2);
     };
 
-    let read = |name: &str| {
-        std::fs::read(std::path::Path::new(cert_dir).join(name))
-            .unwrap_or_else(|e| panic!("read {cert_dir}/{name}: {e}"))
-    };
-    let client = Arc::new(
-        NexusVfsClient::connect_tls(
-            endpoint,
-            read("ca.pem"),
-            read("agent.pem"),
-            read("agent-key.pem"),
-            "nexus-node",
-        )
-        .unwrap_or_else(|e| panic!("dial {endpoint} over mTLS: {e}")),
-    );
+    // The same dial a running `scode` performs: one constructor, which names
+    // the bundle layout and the server SAN once and reports which PEM failed.
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: from.clone(),
+        peers: Vec::new(),
+        api_key: String::new(),
+        tls: Some(runtime::nexus_mailbox::TlsPaths::from_bundle_dir(cert_dir)),
+    }
+    .connect()
+    .unwrap_or_else(|e| panic!("{e}"));
 
     // Idempotent, and the sender's own inbox has to exist for a reply to land.
     mailbox(&client, from, "")

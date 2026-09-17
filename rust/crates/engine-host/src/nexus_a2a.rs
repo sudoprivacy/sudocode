@@ -68,7 +68,9 @@ pub fn session() -> Result<Option<&'static Session>, String> {
                 let mailbox = Arc::new(Mailbox::new(
                     Arc::new(backend),
                     config.agent.clone(),
-                    InboxConvention::NexusA2a,
+                    InboxConvention::PerRecipient {
+                        root: String::new(),
+                    },
                 ));
                 mailbox
                     .ensure_inbox()

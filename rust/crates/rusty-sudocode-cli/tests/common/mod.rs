@@ -38,6 +38,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 use pty_expect::{PtySession, Result};
+// The harness must resolve the config home exactly as the binary it spawns
+// does. It used to carry its own copy, which omitted the Windows
+// `USERPROFILE` fallback — so with `HOME` unset the two disagreed and the
+// harness seeded credentials into a directory the child never read.
+use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -95,13 +100,12 @@ const PROMPT_MARKER: &str = "\u{276f}";
 pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, context: &str) {
     let deadline = Instant::now() + budget;
     loop {
-        let shown = sess.render(|screen| {
-            screen
-                .contents()
-                .lines()
-                .any(|line| line.contains(PROMPT_MARKER) && line.contains(text))
-        });
-        if shown {
+        // The LIVE input row only — `input_line_of` takes the lowest row that
+        // carries the marker. Scanning every marker-bearing row would also match
+        // a replayed history line, and on `--resume` it matched typed characters
+        // that had landed IN the transcript rather than on the input line, which
+        // is the bug this narrowing exists to catch rather than confirm.
+        if sess.render(|s| input_line_of(&s.contents()).contains(text)) {
             return;
         }
         if Instant::now() >= deadline {
@@ -177,19 +181,51 @@ pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
 /// # Panics
 /// When the buffer has not gone empty within `budget`; the message carries
 /// `context`, what the buffer held, and the rendered screen.
+/// Block until the REPL is genuinely ready: the input line is empty AND the
+/// screen has stopped changing.
+///
+/// Emptiness alone is not readiness. On `--resume` the restored history is
+/// replayed row by row, and the lowest prompt row reads empty both BEFORE the
+/// replay starts and WHILE it is still painting — the replay then pushes the
+/// input row further down. A caller that types into that window has its
+/// characters land in the transcript instead of the input line: CI caught
+/// exactly that, with `/exit` wedged onto a replayed history row
+/// (`/exit❯ say hello world …`) and the submit that followed going nowhere, so
+/// the child never exited and the test died 15s later on `<child exit>`.
+/// Observed on `pty_resume.rs:132` on `main` before this helper was hardened.
+///
+/// So the screen must also hold still: `SETTLE_POLLS` consecutive identical
+/// renders, which is what distinguishes "done painting" from "between rows".
+///
+/// # Panics
+/// When the input line never emptied, or never settled, within `budget`; the
+/// message says which and carries the rendered screen.
 pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
+    /// Identical consecutive renders required before calling the screen settled.
+    const SETTLE_POLLS: u32 = 4;
     let deadline = Instant::now() + budget;
+    let mut previous: Option<String> = None;
+    let mut stable = 0u32;
     loop {
-        let line = sess.render(|screen| input_line_of(&screen.contents()));
-        if line.is_empty() {
-            return;
+        let screen = sess.render(|s| s.contents());
+        let line = input_line_of(&screen);
+        if line.is_empty() && previous.as_deref() == Some(screen.as_str()) {
+            stable += 1;
+            if stable >= SETTLE_POLLS {
+                return;
+            }
+        } else {
+            stable = 0;
         }
         if Instant::now() >= deadline {
-            let screen = sess.render(|s| s.contents());
-            panic!(
-                "{context}: the input line still held {line:?} after {budget:?}\nPTY:\n{screen}"
-            );
+            let unmet = if line.is_empty() {
+                "the input line emptied but the screen kept changing"
+            } else {
+                "the input line still held content"
+            };
+            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
         }
+        previous = Some(screen);
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -202,15 +238,96 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
     compact(screen).contains(&compact(text))
 }
 
-pub fn expect_turn_complete(sess: &PtySession, budget: Duration, context: &str) {
+/// How long a live turn may take before a gate calls it a failure.
+///
+/// Generous on purpose: a live turn that writes a file is a model call plus
+/// tool use. Slowness is answered with a bigger budget, never with a looser
+/// condition — a permissive gate turns a real miss into a green run.
+pub const LIVE_TURN_BUDGET: Duration = Duration::from_secs(180);
+
+/// The per-turn status line as `screen` currently reads it, or `""` when no
+/// turn has completed yet.
+///
+/// `ctx <used>/<window> (<pct>%)` (`cli::format::format_context_usage_segment`)
+/// occupies iocraft's `StatusSlot`, whose priority is `Spinner > TurnResult`:
+/// while a turn runs the spinner owns the slot and the REPL clears the previous
+/// turn's result the moment that happens. So this line is the turn's own edge.
+#[must_use]
+pub fn turn_status_line(screen: &str) -> String {
+    screen
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("ctx "))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Snapshot the status line BEFORE submitting, for
+/// [`expect_turn_complete_after`].
+#[must_use]
+pub fn turn_status_marker(sess: &PtySession) -> String {
+    turn_status_line(&sess.render(|screen| screen.contents()))
+}
+
+/// Block until the turn submitted after `marker` was taken has finished AND the
+/// REPL is ready for input again.
+///
+/// Three conditions, each one present because leaving it out produced a real
+/// failure:
+///
+/// * **A status line exists.** `expect("❯")` cannot stand in for it: the prompt
+///   glyph is permanent chrome that iocraft re-emits on every redraw, so it
+///   matches instantly and says nothing about the turn. Callers that leaned on
+///   it read the filesystem before the model had written anything — the
+///   regression recorded in #689 after #685 removed the status-line waits from
+///   `pty_memory`.
+/// * **It differs from `marker`.** The result line stays on screen until the
+///   next turn starts, so a presence check alone is satisfied by the PREVIOUS
+///   turn's line and returns before this turn has run. Comparing against the
+///   pre-submit snapshot is what separates the two. Snapshotting rather than
+///   waiting for the old line to vanish also keeps a turn that finishes before
+///   the first poll from deadlocking the gate.
+/// * **The input line is empty.** The status line can be printed before the
+///   REPL re-arms its input row; a caller that sends the next thing in that
+///   window loses the keystrokes, and the damage surfaces far away — `/exit`
+///   never registers, the child never exits, and the test dies as
+///   `clean exit: Timeout(15s, "<child exit>")`. Observed four times with
+///   identical wording across `pty_cancel` and `pty_resume`, on ubuntu and on
+///   macos. The readiness parse is the one [`expect_input_line_cleared`] uses.
+///
+/// # Panics
+/// When no new turn completed, or the input line never came back empty, within
+/// `budget`. The message says which condition was unmet and carries both the
+/// marker and the screen.
+pub fn expect_turn_complete_after(
+    sess: &PtySession,
+    marker: &str,
+    budget: Duration,
+    context: &str,
+) {
     let deadline = Instant::now() + budget;
     loop {
         let screen = sess.render(|screen| screen.contents());
-        if screen_contains(&screen, "ctx") {
+        let status = turn_status_line(&screen);
+        let fresh = !status.is_empty() && status != marker;
+        if fresh && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("{context}: turn did not complete within {budget:?}\nPTY:\n{screen}");
+            let unmet = if fresh {
+                "this turn finished but the input line never came back empty"
+            } else if status.is_empty() {
+                "no per-turn status line ever appeared, so no turn ran"
+            } else {
+                "the status line still reads exactly as it did before the \
+                 submit, so no NEW turn completed"
+            };
+            panic!(
+                "{context}: {unmet} within {budget:?}\n\
+                 marker before submit: {marker:?}\n\
+                 status line now:      {status:?}\n\
+                 PTY:\n{screen}"
+            );
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -643,7 +760,10 @@ fn spawn_with_workspace(
 /// are copied. Deliberately not the rest of the directory: `scode.exe` and its
 /// backups are tens of megabytes each, and `crons.json` / `plugins/` are
 /// exactly the developer state a hermetic run should start without.
-fn copy_live_credentials(real_config_home: &std::path::Path, test_config_home: &std::path::Path) {
+pub fn copy_live_credentials(
+    real_config_home: &std::path::Path,
+    test_config_home: &std::path::Path,
+) {
     for relative in ["sudocode.json", "settings.json"] {
         let source = real_config_home.join(relative);
         if source.exists() {
@@ -733,6 +853,12 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "ETIMEDOUT",
         "ECONNREFUSED",
         "connection refused",
+        // Deliberately NOT here: `scode`'s own "still waiting on <host>" notice.
+        // It is emitted once a turn passes `WAIT_NOTICE_FIRST` and then on an
+        // interval, so every slow-but-successful live turn prints it. Treating
+        // it as unavailability turns any assertion that outlasts its budget into
+        // a skip — including a genuine miss, which a mutation test caught doing
+        // exactly that. Slowness is answered by a bigger budget, not by a skip.
         // The proxy gateway has no channel for this model in the routing group
         // the request landed in. Arrives as a 500 rather than a 404, and repeats
         // on every retry until the routing config changes, so it is a statement
@@ -828,15 +954,6 @@ pub fn spawn_scode_in_dir_with_env(
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn default_config_home() -> PathBuf {
-    std::env::var_os("SUDO_CODE_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

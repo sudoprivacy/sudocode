@@ -49,15 +49,11 @@ fn append_creates_inbox_dir_and_file() {
     )
     .expect("append should succeed");
 
-    let expected_dir = ws.join(".sudocode-inbox");
-    assert!(
-        expected_dir.exists(),
-        ".sudocode-inbox must be created lazily on first append"
-    );
-    let expected_file = expected_dir.join("researcher.jsonl");
+    let expected_file = agent_mailbox::inbox_path_under(&ws, "researcher");
     assert!(
         expected_file.exists(),
-        "recipient's JSONL file must exist after first append"
+        "recipient's inbox must be created lazily on first append at {}",
+        expected_file.display()
     );
 }
 

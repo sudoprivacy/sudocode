@@ -1,15 +1,18 @@
 //! Two `scode` processes converse, over every transport a message can take.
 //!
-//! ## One workflow, three transports
+//! ## One workflow, two nexus transports
 //!
 //! | transport | path an envelope takes | reach |
 //! |---|---|---|
-//! | workspace file | `<shared workspace>/.sudocode-inbox/<to>.jsonl` | one machine, one directory |
 //! | nexus, one node | `/agents/<to>/chat-with-me` on that node | one machine |
 //! | nexus, two nodes | the same stream, replicated by raft | the cross-machine case |
 //!
+//! The standalone same-machine (no-daemon) pair is covered deterministically by
+//! `runtime/tests/same_machine_pair.rs`; this test is the nexus, real-binary
+//! duet.
+//!
 //! The steps and the dependencies between them do not change with the
-//! transport, so this is one test rather than three near-copies that would
+//! transport, so this is one test rather than near-copies that would
 //! drift. What changes is which mailbox the assertions read and, for the local
 //! case, how the sender gets a name — see [`Transport`].
 //!
@@ -64,9 +67,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
-use mock_anthropic_service::{LOCAL_PEER_SENDER, UNIFIED_SEND_BODY, UNIFIED_SEND_RECIPIENT};
+use mock_anthropic_service::{UNIFIED_SEND_BODY, UNIFIED_SEND_RECIPIENT};
 use nexus_vfs_client::NexusVfsClient;
-use runtime::mailbox::{InboxConvention, Mailbox};
+use runtime::mailbox::Mailbox;
 
 /// The receiver's mailbox identity, for every transport.
 ///
@@ -81,15 +84,6 @@ const BUDGET: Duration = Duration::from_secs(30);
 
 /// How the two processes reach each other.
 enum Transport {
-    /// No nexus. Both processes share a workspace and the envelope is a JSONL
-    /// line, which is what a plain `scode` has always done.
-    ///
-    /// The sender names itself through the tool's `sender` field. It has to:
-    /// without nexus there is one mailbox identity, and `Mailbox::poll` skips
-    /// envelopes whose `from` is its own id so a shared stream cannot echo — so
-    /// a sender that did not name itself would write as the coordinator and the
-    /// coordinator would filter it out.
-    WorkspaceFile,
     /// nexus, both processes on the same node.
     OneNode { endpoint: String },
     /// nexus, sender and receiver on different nodes, so every assertion can
@@ -98,14 +92,16 @@ enum Transport {
 }
 
 impl Transport {
-    /// The transports this environment can actually run.
+    /// The nexus transports this environment can run.
     ///
-    /// The workspace case always can. The nexus cases need a daemon, and a
-    /// second endpoint turns the one-node case into the two-node one — there is
-    /// no reason to run both against the same pair of daemons, since two nodes
-    /// is the stronger statement.
+    /// The nexus cases need a daemon, and a second endpoint turns the one-node
+    /// case into the two-node one — there is no reason to run both against the
+    /// same pair of daemons, since two nodes is the stronger statement. The
+    /// standalone same-machine (no-daemon) pair is covered deterministically by
+    /// `runtime/tests/same_machine_pair.rs`, which needs no PTY or config
+    /// plumbing to pin two identities under one pair root.
     fn available() -> Vec<Self> {
-        let mut transports = vec![Self::WorkspaceFile];
+        let mut transports = Vec::new();
         let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT")
             .ok()
             .filter(|e| !e.is_empty());
@@ -124,21 +120,15 @@ impl Transport {
 
     fn label(&self) -> &'static str {
         match self {
-            Self::WorkspaceFile => "workspace file",
             Self::OneNode { .. } => "nexus, one node",
             Self::TwoNodes { .. } => "nexus, two nodes",
         }
     }
 
-    /// The mock scenario the sender runs.
-    ///
-    /// They differ in one field, and it is the field that matters: the local one
-    /// supplies `sender`, the nexus ones leave it out so the session's own A2A
-    /// identity has to answer instead. Between them the two levels of
-    /// sender resolution are both covered.
+    /// The mock scenario the sender runs. The nexus cases leave `sender` out so
+    /// the session's own A2A identity has to answer instead.
     fn scenario(&self) -> &'static str {
         match self {
-            Self::WorkspaceFile => "unified_send_from_named_peer",
             _ => "unified_send_roundtrip",
         }
     }
@@ -159,15 +149,8 @@ fn unique_sender_name() -> String {
 }
 
 /// The receiver's mailbox, as the test reads it.
-fn receiver_mailbox(transport: &Transport, workspace: &Path) -> Mailbox {
+fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
     match transport {
-        Transport::WorkspaceFile => Mailbox::new(
-            Arc::new(runtime::fs_backend::StdFsBackend),
-            RECEIVER.to_string(),
-            InboxConvention::LocalJsonl {
-                root: workspace.to_string_lossy().into_owned(),
-            },
-        ),
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             receiver: endpoint, ..
@@ -180,16 +163,10 @@ fn receiver_mailbox(transport: &Transport, workspace: &Path) -> Mailbox {
 }
 
 /// Where the receiver records its read position, which is how the test knows it
-/// is listening rather than still seeking.
-fn receiver_cursor(transport: &Transport, workspace: &Path, config_home: &Path) -> PathBuf {
-    match transport {
-        // Workspace-relative: a local inbox belongs to the directory.
-        Transport::WorkspaceFile => {
-            runtime::agent_mailbox::mailbox_dir(workspace).join(format!(".cursor-{RECEIVER}"))
-        }
-        // Config home: an A2A identity outlives any one directory.
-        _ => config_home.join(format!("a2a-cursor-{RECEIVER}")),
-    }
+/// is listening rather than still seeking. Config home: an A2A identity outlives
+/// any one directory.
+fn receiver_cursor(_transport: &Transport, config_home: &Path) -> PathBuf {
+    config_home.join(format!("a2a-cursor-{RECEIVER}"))
 }
 
 /// Block until `path` exists.
@@ -235,32 +212,23 @@ fn one_scode_sends_and_another_surfaces_it_on_every_transport() {
 
 fn run_duet(transport: &Transport) {
     let sender_name = unique_sender_name();
-    let expected_from = match transport {
-        Transport::WorkspaceFile => LOCAL_PEER_SENDER.to_string(),
-        _ => sender_name.clone(),
-    };
+    let expected_from = sender_name.clone();
 
     // ── 2. The RECEIVER: a real scode REPL ─────────────────────────────────
     // Started before the inbox is read from, because its cursor is what the
-    // send below must not race.
-    // One environment for both processes: a shared workspace IS the local
-    // transport, and one mock server routes both scenarios by the marker each
-    // prompt carries. Two environments would have to be stitched together for
-    // the local case and would buy nothing for the nexus ones.
+    // send below must not race. One mock server routes the scenario by the
+    // marker the sender's prompt carries.
     let env = TestEnv::new("duet");
     let workspace = env.workspace_root().to_path_buf();
     std::fs::write(workspace.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     // ── 1. Provision the receiver's inbox ──────────────────────────────────
-    // Over nexus a send to a path that is not an append stream fails loudly
-    // rather than writing where nothing tails. Locally the writer creates the
-    // file, so this is a no-op the convention absorbs.
-    let inbox = receiver_mailbox(transport, &workspace);
-    if !matches!(transport, Transport::WorkspaceFile) {
-        inbox
-            .ensure_inbox()
-            .expect("provision the receiver's inbox");
-    }
+    // A send to a path that is not an append stream fails loudly rather than
+    // writing where nothing tails, so provision the receiver's stream first.
+    let inbox = receiver_mailbox(transport, env.config_home());
+    inbox
+        .ensure_inbox()
+        .expect("provision the receiver's inbox");
     let (_history, tail) = inbox.poll(0, 0).expect("seek the inbox to its tail");
 
     let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
@@ -279,7 +247,7 @@ fn run_duet(transport: &Transport) {
         .expect("❯")
         .expect("the receiver's REPL should start");
     wait_for_file(
-        &receiver_cursor(transport, &workspace, env.config_home()),
+        &receiver_cursor(transport, env.config_home()),
         "the receiver's read position",
     );
 
@@ -289,23 +257,12 @@ fn run_duet(transport: &Transport) {
     let prompt = env.prompt(
         &format!(
             "Send a message to {RECEIVER} saying hello from unified send. \
-             Use summary \"greeting test\".{}",
-            match transport {
-                // The local receiver and sender intentionally share one
-                // mailbox identity (`team-lead`). Require the optional sender
-                // override so the receiver does not discard the message as its
-                // own write. This also keeps live mode equivalent to the mock
-                // scenario, which supplies the same field.
-                Transport::WorkspaceFile =>
-                    format!(" Set sender to \"{LOCAL_PEER_SENDER}\" (not the default)."),
-                _ => String::new(),
-            }
+             Use summary \"greeting test\".",
         ),
         transport.scenario(),
     );
     let mut sender_env_vars = Vec::new();
     match transport {
-        Transport::WorkspaceFile => {}
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             sender: endpoint, ..
@@ -352,21 +309,17 @@ fn run_duet(transport: &Transport) {
         transport.label()
     );
 
-    // Over nexus nothing may be written to the workspace. This is the failure
-    // being guarded: the ambient fallback writes `.sudocode-inbox/<to>.jsonl`
-    // and the tool still answers with success, so "it arrived" has to mean it
-    // arrived at the daemon and nowhere else. Locally that file IS the
-    // transport, so the check belongs only to the nexus cases.
-    if !matches!(transport, Transport::WorkspaceFile) {
-        let workspace_inbox =
-            runtime::agent_mailbox::mailbox_dir(&workspace).join(format!("{RECEIVER}.jsonl"));
-        assert!(
-            !workspace_inbox.exists(),
-            "[{}] the sender is on nexus, so nothing may be written to {}",
-            transport.label(),
-            workspace_inbox.display()
-        );
-    }
+    // The sender is on nexus, so nothing may be written to the workspace: the
+    // failure being guarded is the ambient fallback writing a local file while
+    // the tool still answers "sent". "Arrived" has to mean it arrived at the
+    // daemon and nowhere else.
+    let workspace_inbox = runtime::agent_mailbox::inbox_path_under(&workspace, RECEIVER);
+    assert!(
+        !workspace_inbox.exists(),
+        "[{}] the sender is on nexus, so nothing may be written to {}",
+        transport.label(),
+        workspace_inbox.display()
+    );
 
     // ── 4. The receiver surfaces it ────────────────────────────────────────
     // The REPL announces a peer message as `📨 A2A from <name>: <body>`. Seeing
@@ -381,7 +334,7 @@ fn run_duet(transport: &Transport) {
     // cursor, this one is the receiver's, and a receiver that surfaces a message
     // without recording it re-delivers the same message forever — which is how
     // a re-reply storm starts.
-    let cursor_file = receiver_cursor(transport, &workspace, env.config_home());
+    let cursor_file = receiver_cursor(transport, env.config_home());
     let deadline = Instant::now() + BUDGET;
     loop {
         let recorded = std::fs::read_to_string(&cursor_file)

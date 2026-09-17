@@ -7472,6 +7472,7 @@ fn build_forked_messages(
         blocks: user_blocks,
         usage: None,
         model: None,
+        duration_ms: None,
     };
 
     vec![full_assistant, user_message]
@@ -7726,6 +7727,17 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["teammateMode"],
             options: Some(&["tmux", "in-process", "auto"]),
+        },
+        // This process's mailbox identity — the name peers address and the
+        // inbox the receiver polls. Settings scope (per-project settings file):
+        // a sub-agent belongs to its parent scode, so the name is project-scoped
+        // rather than machine-wide. Unset → `runtime::mailbox::local_agent_name`
+        // derives one from the workspace path.
+        "agentName" => ConfigSettingSpec {
+            scope: ConfigScope::Settings,
+            kind: ConfigKind::String,
+            path: &["agentName"],
+            options: None,
         },
         _ => return None,
     })
@@ -9974,6 +9986,7 @@ mod tests {
             }],
             usage: None,
             model: None,
+            duration_ms: None,
         }];
         let converted = convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -10029,6 +10042,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
             ConversationMessage {
                 role: MessageRole::Tool,
@@ -10040,6 +10054,7 @@ mod tests {
                 }],
                 usage: None,
                 model: None,
+                duration_ms: None,
             },
         ];
         let discovered = extract_discovered_tool_names(&messages);

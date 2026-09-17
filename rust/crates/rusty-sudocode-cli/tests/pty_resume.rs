@@ -91,8 +91,9 @@ fn resume_latest_renders_messages_after_banner() {
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(Duration::from_secs(15));
     sess.expect("❯").expect("REPL prompt");
+    let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
-    common::expect_turn_complete(&sess, Duration::from_secs(30), "initial turn");
+    common::expect_turn_complete_after(&sess, &marker, Duration::from_secs(30), "initial turn");
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
 

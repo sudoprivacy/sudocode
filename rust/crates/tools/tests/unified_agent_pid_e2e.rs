@@ -1,10 +1,10 @@
 //! End-to-end mock tests for the Unified Agent/PID Tool System.
 //!
 //! Exercises the full feature without live API keys:
-//! - `TOOL_ALIASES` routing: deprecated names → canonical names
-//! - Input normalization: `body` → `message`, `pid` → `task_id`, etc.
+//! - `TOOL_ALIASES` routing: deprecated names 鈫?canonical names
+//! - Input normalization: `body` 鈫?`message`, `pid` 鈫?`task_id`, etc.
 //! - `compose_next_turn_from_envelopes`: XML formatting + ordering
-//! - Local JSONL poller → channel → delivery roundtrip
+//! - Local JSONL poller 鈫?channel 鈫?delivery roundtrip
 //! - Multi-turn loop: `PeerMessage` injection during idle and busy states
 //! - Multi-turn loop with mixed envelope kinds (message + shutdown)
 //! - `TurnInputCoordinator`: queue/interrupt semantics for `PeerMessage`
@@ -23,7 +23,7 @@ use tools::testing::{compose_next_turn_from_envelopes_for_test, run_multi_turn_l
 /// A first-ever run seeks to the inbox tail rather than replaying a backlog it
 /// was never party to, so an append that lands DURING that seek is positioned
 /// past and never delivered. Every test below spawns the poller and then sends,
-/// so each has to establish "listening" first or it is racing the seek — which
+/// so each has to establish "listening" first or it is racing the seek 鈥?which
 /// is exactly how they passed locally and failed on CI.
 ///
 /// Asks `InboxCursor` where the file is rather than rebuilding the name: a
@@ -41,7 +41,7 @@ fn wait_for_poller_ready(ws: &std::path::Path) {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────
+// 鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn unique_workspace(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -87,9 +87,9 @@ fn envelope_with_request_id(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 1. TOOL ALIAS ROUTING
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn canonicalize_maps_sendmessage_to_send() {
@@ -133,9 +133,9 @@ fn canonicalize_maps_cc_style_read_write_edit_to_snake_case() {
     assert_eq!(tools::canonicalize_tool_name("Grep"), "grep_search");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 2. COMPOSE_NEXT_TURN_FROM_ENVELOPES — XML FORMATTING
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// 2. COMPOSE_NEXT_TURN_FROM_ENVELOPES 鈥?XML FORMATTING
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn compose_single_message_envelope() {
@@ -223,7 +223,7 @@ fn compose_escapes_xml_special_chars_in_from() {
 fn compose_neutralizes_harness_markup_in_body() {
     // `from` was escaped here long before the body was, on the reasoning that a
     // hostile envelope must not break this synthetic prompt. The body is the
-    // same envelope from the same stranger — and it is the field that can spell
+    // same envelope from the same stranger 鈥?and it is the field that can spell
     // the one tag the system prompt tells the model is authoritative.
     let envs = vec![envelope(
         kinds::MESSAGE,
@@ -237,7 +237,7 @@ fn compose_neutralizes_harness_markup_in_body() {
     );
     assert!(
         text.contains("&lt;system-reminder&gt;"),
-        "defanged, not dropped — the receiving model still has to read the \
+        "defanged, not dropped 鈥?the receiving model still has to read the \
          message, and two agents must be able to discuss this markup: {text}"
     );
     assert!(
@@ -269,9 +269,9 @@ fn compose_body_cannot_forge_a_second_sender() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 3. LOCAL JSONL POLLER → CHANNEL → DELIVERY ROUNDTRIP
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// 3. LOCAL JSONL POLLER 鈫?CHANNEL 鈫?DELIVERY ROUNDTRIP
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn local_poller_delivers_sub_agent_message_to_parent() {
@@ -378,7 +378,7 @@ fn local_poller_stops_on_abort() {
     abort.abort();
     handle.join().expect("poller thread should exit cleanly");
 
-    // Write after abort — should never be delivered
+    // Write after abort 鈥?should never be delivered
     agent_mailbox::append_envelope(
         &ws,
         "team-lead",
@@ -394,12 +394,12 @@ fn local_poller_stops_on_abort() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 4. FULL SEND → RECEIVE → COMPOSE → INJECT ROUNDTRIP
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// 4. FULL SEND 鈫?RECEIVE 鈫?COMPOSE 鈫?INJECT ROUNDTRIP
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Simulates the complete message cycle:
-/// 1. Sub-agent uses `send` tool → writes JSONL envelope
+/// 1. Sub-agent uses `send` tool 鈫?writes JSONL envelope
 /// 2. Local poller picks up the envelope
 /// 3. `compose_next_turn_from_envelopes` formats it as XML
 /// 4. The formatted text is injected into the next LLM turn
@@ -471,9 +471,9 @@ fn full_send_receive_compose_inject_cycle() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 5. MULTI-TURN LOOP: MIXED ENVELOPE KINDS
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Verifies that a message envelope triggers a resume turn but a
 /// `shutdown_request` envelope causes immediate exit WITHOUT another turn.
@@ -497,7 +497,7 @@ fn mixed_message_then_shutdown_exits_after_message_turn() {
             let idx = turn_count_cb.fetch_add(1, Ordering::SeqCst);
             match idx {
                 0 => {
-                    // Turn 1: write a message envelope → should trigger turn 2
+                    // Turn 1: write a message envelope 鈫?should trigger turn 2
                     agent_mailbox::append_envelope(
                         &ws_cb,
                         agent_id,
@@ -507,7 +507,7 @@ fn mixed_message_then_shutdown_exits_after_message_turn() {
                     Ok(String::from("turn 1 done"))
                 }
                 1 => {
-                    // Turn 2: write a shutdown_request → should exit after this turn
+                    // Turn 2: write a shutdown_request 鈫?should exit after this turn
                     agent_mailbox::append_envelope(
                         &ws_cb,
                         agent_id,
@@ -532,9 +532,9 @@ fn mixed_message_then_shutdown_exits_after_message_turn() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 6. MAILBOX UNIFIED ABSTRACTION: SEND + POLL ROUNDTRIP
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Tests the unified Mailbox abstraction: send from one agent, poll
 /// from another, verify the envelope is delivered correctly.
@@ -546,7 +546,7 @@ fn unified_mailbox_send_poll_roundtrip() {
     let sender_mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "coordinator".to_string(),
-        InboxConvention::LocalJsonl {
+        InboxConvention::PerRecipient {
             root: ws_str.clone(),
         },
     );
@@ -567,7 +567,7 @@ fn unified_mailbox_send_poll_roundtrip() {
     let receiver_mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "researcher".to_string(),
-        InboxConvention::LocalJsonl { root: ws_str },
+        InboxConvention::PerRecipient { root: ws_str },
     );
 
     let (msgs, cursor) = receiver_mb.poll(0, 0).unwrap();
@@ -592,7 +592,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
     let mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "hub".to_string(),
-        InboxConvention::LocalJsonl {
+        InboxConvention::PerRecipient {
             root: ws_str.clone(),
         },
     );
@@ -620,9 +620,9 @@ fn unified_mailbox_read_all_from_multiple_senders() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 7. ENVELOPE WIRE FORMAT
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Serialization always uses `body`.
 #[test]
@@ -642,9 +642,9 @@ fn envelope_serializes_body_not_text() {
     assert!(!json.contains("\"text\""));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 8. COORDINATOR ALLOWED TOOLS INCLUDES ALL CANONICAL + DEPRECATED
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn coordinator_allowed_tools_includes_canonical_names() {
@@ -657,9 +657,9 @@ fn coordinator_allowed_tools_includes_canonical_names() {
     assert!(allowed.contains("pid_fork"));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 8b. THE COORDINATOR ONLY NAMES TOOLS THAT EXIST
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Canonical names of every tool this build actually ships.
 fn real_tool_names() -> std::collections::BTreeSet<String> {
@@ -691,7 +691,7 @@ fn tools_advertised_in_prompt() -> Vec<String> {
 /// The allowlist lives in `runtime` and the tool specs live in `tools`, so only
 /// a test spanning both crates can catch a name that outlived its tool. Not
 /// hypothetical: `agent_list` stayed in this allowlist, and in the prompt,
-/// after the tool was removed — two branches each resolved half of it.
+/// after the tool was removed 鈥?two branches each resolved half of it.
 #[test]
 fn coordinator_allowlist_names_only_real_tools() {
     let real = real_tool_names();
@@ -706,7 +706,7 @@ fn coordinator_allowlist_names_only_real_tools() {
 /// Every tool the coordinator prompt advertises must exist and be allowed.
 ///
 /// This is the assertion that bites. The prompt is what the model reads, so a
-/// stale line there does not merely go unused — it makes the coordinator call
+/// stale line there does not merely go unused 鈥?it makes the coordinator call
 /// something that cannot answer.
 #[test]
 fn coordinator_prompt_advertises_only_real_allowed_tools() {
@@ -743,37 +743,39 @@ fn coordinator_predicate_admits_deprecated_aliases_via_canonicalization() {
     std::env::remove_var("SUDOCODE_COORDINATOR_MODE");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 9. INBOX PATH CONVENTIONS
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn inbox_convention_local_jsonl_resolves_correctly() {
-    let conv = InboxConvention::LocalJsonl {
+    let conv = InboxConvention::PerRecipient {
         root: "/project".to_string(),
     };
     assert_eq!(
         conv.inbox_path("worker-1"),
-        "/project/.sudocode-inbox/worker-1.jsonl"
+        "/project/agents/worker-1/chat-with-me"
     );
 }
 
 #[test]
 fn inbox_convention_nexus_a2a_resolves_correctly() {
-    let conv = InboxConvention::NexusA2a;
+    let conv = InboxConvention::PerRecipient {
+        root: String::new(),
+    };
     assert_eq!(conv.inbox_path("agent-x"), "/agents/agent-x/chat-with-me");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 10. MULTI-TURN LOOP: PEER MESSAGE INJECTION DURING IDLE
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Simulates the REPL's `PeerMessage` handler when idle:
 /// 1. Local poller picks up a sub-agent message
 /// 2. `compose_next_turn_from_envelopes` formats it
 /// 3. The composed prompt is what `submit_when_idle` would receive
 ///
-/// This is a unit-level simulation (no PTY) — tests the data flow
+/// This is a unit-level simulation (no PTY) 鈥?tests the data flow
 /// from poller through compose. `TurnInputCoordinator` integration
 /// lives in the CLI crate's own tests (`peer_message_queue.rs`).
 #[test]
@@ -821,9 +823,9 @@ fn peer_message_poller_to_compose_roundtrip() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 11. MULTI-TURN LOOP: POLLER → COMPOSE → MULTI-TURN INTEGRATION
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// 11. MULTI-TURN LOOP: POLLER 鈫?COMPOSE 鈫?MULTI-TURN INTEGRATION
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 /// Full integration test: poller delivers message, which feeds into
 /// multi-turn loop. Verifies the complete data path from disk write
@@ -908,9 +910,9 @@ fn poller_compose_multi_turn_integration() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 12. ENVELOPE KINDS MODULE CONSTANTS ARE STABLE
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn kind_constants_match_wire_format() {
@@ -921,9 +923,9 @@ fn kind_constants_match_wire_format() {
     assert_eq!(kinds::TASK_NOTIFICATION, "task_notification");
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 13. MAILBOX SENDER CLOSURE
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 #[test]
 fn mailbox_sender_closure_writes_envelope() {
@@ -933,7 +935,7 @@ fn mailbox_sender_closure_writes_envelope() {
     let mb = Arc::new(Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "team-lead".to_string(),
-        InboxConvention::LocalJsonl { root: ws_str },
+        InboxConvention::PerRecipient { root: ws_str },
     ));
 
     let sender = mb.sender();

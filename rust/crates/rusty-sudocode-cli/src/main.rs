@@ -2921,6 +2921,10 @@ fn run_repl_iocraft_dispatch(
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
+    // On resume, seed the status line with the session's running totals so the
+    // ChromeSlot shows the same B2 line you saw before exit — not the first-run
+    // Tips. `None` for a fresh session (no turns yet) leaves Tips in place.
+    let resume_status = cli.resume_status_line();
 
     // iocraft owns stdin (raw mode) and delivers Ctrl-C / ESC as key events;
     // those `InputEvent::Abort`s cancel the in-flight turn by sending Cancel
@@ -2934,6 +2938,9 @@ fn run_repl_iocraft_dispatch(
     // handle so `input_rx` can be forwarded into the unified event channel.
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
+    if let Some(status) = resume_status {
+        repl_ui_cmd.set_turn_result(&status);
+    }
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
 
     // Route LiveCli output through iocraft's OutputSender so it goes
@@ -2972,16 +2979,28 @@ fn run_repl_iocraft_dispatch(
         );
     }
 
-    // Local JSONL inbox poller: picks up messages that sub-agents
-    // write to `.sudocode-inbox/team-lead.jsonl` via the `send` tool.
-    // Complements the nexus A2A poller above — together they close the
-    // receive loop for both local and cross-machine messaging.
+    // Local same-machine mailbox poller: picks up messages that a peer scode
+    // (or a sub-agent) writes to this process's inbox via the `send` tool.
+    // Rooted at the shared per-machine pair root and keyed by this process's
+    // resolved agent name (config `agentName`, else derived from the workspace
+    // path), so two scode processes started in different folders can converse.
+    // Complements the nexus A2A poller above — together they close the receive
+    // loop for both local and cross-machine messaging.
     {
         let coord_tx_local = coord_tx.clone();
-        let workspace = env::current_dir().unwrap_or_default();
+        let cwd = env::current_dir().unwrap_or_default();
+        let configured_name = runtime::ConfigLoader::default_for(&cwd)
+            .load()
+            .ok()
+            .and_then(|rc| {
+                rc.get("agentName")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            });
+        let self_name = runtime::mailbox::local_agent_name(configured_name.as_deref(), &cwd);
+        let root = runtime::mailbox::local_pair_root();
         let _local_poller = runtime::mailbox::spawn_local_poller(
-            workspace,
-            "team-lead".to_string(),
+            root,
+            self_name,
             runtime::HookAbortSignal::new(),
             move |msg| ack_after_coordinator_takes(&coord_tx_local, msg),
         );
@@ -3841,6 +3860,42 @@ impl LiveCli {
         render_messages(&session.messages, term_width, &renderer)
     }
 
+    /// Build the status line for a freshly resumed session: the same B2 line the
+    /// live REPL shows after a turn, but rebuilt from the persisted session so
+    /// the running totals (cost, tokens, wall time) continue seamlessly. Returns
+    /// `None` for a session with no recorded turns (nothing to summarize —
+    /// StatusSlot falls back to Tips, as for a brand-new session).
+    fn resume_status_line(&self) -> Option<String> {
+        let session = self.lifecycle.session_snapshot();
+        let tracker = runtime::UsageTracker::from_session(&session);
+        if tracker.turns() == 0 {
+            return None;
+        }
+        let model = self.lifecycle.current_model();
+        let latest = tracker.current_turn_usage();
+        let cumulative_usage = tracker.cumulative_usage();
+        let context_window = runtime::model_capabilities::context_window_or_default(&model);
+        let cumulative_duration = (tracker.cumulative_duration_ms() > 0)
+            .then(|| Duration::from_millis(tracker.cumulative_duration_ms()));
+        let elapsed = tracker.latest_turn_duration_ms().map(Duration::from_millis);
+        let branch = env::current_dir()
+            .ok()
+            .and_then(|cwd| resolve_git_branch_for(&cwd));
+        let account = self.lifecycle.current_billing_account();
+        Some(format_turn_status_line(&TurnStatus {
+            model: &model,
+            turn: tracker.turns(),
+            usage: &latest,
+            cumulative_usage: &cumulative_usage,
+            context_tokens: Some(latest.context_tokens()),
+            context_window: Some(context_window),
+            elapsed,
+            cumulative_duration,
+            branch: branch.as_deref(),
+            account: account.name(),
+        }))
+    }
+
     fn repl_completion_candidates(
         &self,
     ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
@@ -4133,6 +4188,9 @@ impl LiveCli {
         //    whole turn, not just the last request.
         let latest = usage_tracker.current_turn_usage();
         let usage = usage_tracker.current_turn_total_usage();
+        let cumulative_usage = usage_tracker.cumulative_usage();
+        let cumulative_duration = (usage_tracker.cumulative_duration_ms() > 0)
+            .then(|| Duration::from_millis(usage_tracker.cumulative_duration_ms()));
         let turns = usage_tracker.turns();
         // Current context-window occupancy (what the provider just processed),
         // the same metric auto-compaction uses — not the session-cumulative
@@ -4152,9 +4210,11 @@ impl LiveCli {
             model,
             turn: turns,
             usage: &usage,
+            cumulative_usage: &cumulative_usage,
             context_tokens: Some(context_tokens),
             context_window: Some(context_window),
-            elapsed,
+            elapsed: Some(elapsed),
+            cumulative_duration,
             branch: branch.as_deref(),
             account: account.name(),
         });

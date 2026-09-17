@@ -1,11 +1,11 @@
-//! Integration tests for `runtime::spawn_task` — drive the REAL v2
+//! Integration tests for `runtime::spawn_task` 鈥?drive the REAL v2
 //! `run_loop` (the exact production loop the co-host runs), NOT a scaffold.
 //!
 //! A scripted mock [`ApiClient`] returns one fixed text turn so the loop's
-//! mailbox mechanics are exercised deterministically with no network: inbound
+//! CohostMailbox mechanics are exercised deterministically with no network: inbound
 //! envelope parse, `from != self` self-filtering, reply routing for BOTH
-//! [`Mailbox`] variants, abort teardown, and the transient-read survival
-//! contract — a durable A2A inbox must NOT die on a read error / on being
+//! [`CohostMailbox`] variants, abort teardown, and the transient-read survival
+//! contract 鈥?a durable A2A inbox must NOT die on a read error / on being
 //! read before it exists (the regression guard for the co-host boot race,
 //! where the loop is spawned before the mint has planted the inbox).
 //!
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
 use runtime::spawn_task::{
-    mailbox_sender, spawn_task, Mailbox, MailboxEnvelope, MailboxSender, SpawnHandle,
+    mailbox_sender, spawn_task, CohostMailbox, MailboxEnvelope, MailboxSender, SpawnHandle,
 };
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, PermissionMode, PermissionPolicy,
@@ -29,10 +29,10 @@ use runtime::{
 
 const DT_STREAM: i32 = 4;
 const STREAM_CAPACITY: usize = 65_536;
-/// Fixed text the scripted provider replies with — asserted end-to-end.
+/// Fixed text the scripted provider replies with 鈥?asserted end-to-end.
 const REPLY_TEXT: &str = "PONG";
 
-// ── Mock provider: one fixed text turn, no tool calls ──────────────────
+// 鈹€鈹€ Mock provider: one fixed text turn, no tool calls 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /// [`ApiClient`] that streams a single `TextDelta` + `MessageStop`, so a
 /// turn resolves to the fixed [`REPLY_TEXT`] with zero network I/O.
@@ -61,14 +61,14 @@ impl ToolExecutor for NoTools {
 }
 
 /// [`ApiClient`] whose one turn calls the `send_message` tool addressed to
-/// `to` with `body` — the co-host's DELIBERATE reply path. Emits a single
+/// `to` with `body` 鈥?the co-host's DELIBERATE reply path. Emits a single
 /// `ToolUse` + `MessageStop` so the loop drives the tool without network I/O.
 struct SendsReply {
     to: String,
     body: String,
     /// Whether the one `send_message` call has been issued. The turn's tool
     /// loop calls `stream` again after executing the tool; that follow-up round
-    /// must end the turn (no further tool) — otherwise the agent would send on
+    /// must end the turn (no further tool) 鈥?otherwise the agent would send on
     /// every round forever within a single turn.
     sent: bool,
 }
@@ -115,7 +115,7 @@ impl ToolExecutor for SendingTools {
     }
 }
 
-// ── Kernel / mailbox helpers ───────────────────────────────────────────
+// 鈹€鈹€ Kernel / CohostMailbox helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn mount(kernel: &Kernel, mount_point: &str) {
     kernel
@@ -126,7 +126,7 @@ fn mount(kernel: &Kernel, mount_point: &str) {
 /// Mount `mount_point` backed by an in-memory `ObjectStore` so DT_REG **content**
 /// (not just metadata) round-trips. The `None`-backend `mount` above carries
 /// only metadata, so a DT_REG write "succeeds" but the read returns FileNotFound
-/// — the durable cursor is a DT_REG, so its persistence needs a content backend
+/// 鈥?the durable cursor is a DT_REG, so its persistence needs a content backend
 /// (production uses host-fs at `/`).
 fn mount_with_backend(kernel: &Kernel, mount_point: &str) {
     kernel.vfs_router_arc().add_mount(
@@ -228,14 +228,18 @@ fn make_desc(pid: &str, name: &str) -> AgentDescriptor {
     }
 }
 
-/// Spawn the REAL `run_loop` (via `spawn_task`) with the scripted mock —
+/// Spawn the REAL `run_loop` (via `spawn_task`) with the scripted mock 鈥?
 /// the exact loop the co-host runs, minus the network provider.
-fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> SpawnHandle {
+fn spawn_real(
+    kernel: Arc<Kernel>,
+    desc: AgentDescriptor,
+    CohostMailbox: CohostMailbox,
+) -> SpawnHandle {
     let system_prompt = SystemPromptBuilder::new().build();
     spawn_task(
         kernel,
         desc,
-        mailbox,
+        CohostMailbox,
         ScriptedReply,
         NoTools,
         system_prompt,
@@ -246,25 +250,25 @@ fn spawn_real(kernel: Arc<Kernel>, desc: AgentDescriptor, mailbox: Mailbox) -> S
 
 /// Spawn the REAL `run_loop` with a scripted `send_message` turn: on each
 /// inbound message the agent DELIBERATELY replies `reply_body` to `reply_to`
-/// via the mailbox sender (the production reply path).
+/// via the CohostMailbox sender (the production reply path).
 fn spawn_sending(
     kernel: Arc<Kernel>,
     desc: AgentDescriptor,
-    mailbox: Mailbox,
+    CohostMailbox: CohostMailbox,
     reply_to: &str,
     reply_body: &str,
 ) -> SpawnHandle {
     let system_prompt = SystemPromptBuilder::new().build();
     let send = mailbox_sender(
         Arc::clone(&kernel),
-        mailbox.clone(),
+        CohostMailbox.clone(),
         desc.owner_id.clone(),
         desc.zone_id.clone(),
     );
     spawn_task(
         kernel,
         desc,
-        mailbox,
+        CohostMailbox,
         SendsReply {
             to: reply_to.to_string(),
             body: reply_body.to_string(),
@@ -412,7 +416,7 @@ fn read_cursor(kernel: &Kernel, agent: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// The tail (next unread offset) of stream `path` — walk to the end and return
+/// The tail (next unread offset) of stream `path` 鈥?walk to the end and return
 /// the final `stream_next_offset`, so a test can gate on "fully drained" without
 /// depending on whether offsets count messages or bytes.
 fn tail_offset(kernel: &Kernel, path: &str, ctx: &OperationContext) -> u64 {
@@ -438,7 +442,7 @@ fn tail_offset(kernel: &Kernel, path: &str, ctx: &OperationContext) -> u64 {
     offset
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// 鈹€鈹€ Tests 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 #[test]
 fn local_stream_round_trip_drives_real_run_loop() {
@@ -449,7 +453,7 @@ fn local_stream_round_trip_drives_real_run_loop() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-ls", "scode"),
-        Mailbox::local_stream(path.to_string(), "scode".to_string()),
+        CohostMailbox::local_stream(path.to_string(), "scode".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -474,13 +478,13 @@ fn a2a_reads_own_inbox_and_replies_to_senders_inbox() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
 
     let ctx = user_ctx();
-    // Sender writes to win-ai's OWN inbox …
+    // Sender writes to win-ai's OWN inbox 鈥?
     write_envelope(
         &kernel,
         "/agents/win-ai/chat-with-me",
@@ -489,7 +493,7 @@ fn a2a_reads_own_inbox_and_replies_to_senders_inbox() {
         "win-ai",
         "hi",
     );
-    // … and the reply must land in the SENDER's inbox, not win-ai's.
+    // 鈥?and the reply must land in the SENDER's inbox, not win-ai's.
     let reply = wait_for_reply(
         &kernel,
         "/agents/user-test/chat-with-me",
@@ -521,10 +525,10 @@ fn loop_exits_on_abort_signal() {
     let handle = spawn_real(
         Arc::clone(&kernel),
         make_desc("pid-abort", "scode"),
-        Mailbox::local_stream(path.to_string(), "scode".to_string()),
+        CohostMailbox::local_stream(path.to_string(), "scode".to_string()),
     );
-    // No message sent — the loop is parked on the blocking `sys_read` tail.
-    // abort() must let it exit on the next `while !abort` check (≤ one read
+    // No message sent 鈥?the loop is parked on the blocking `sys_read` tail.
+    // abort() must let it exit on the next `while !abort` check (鈮?one read
     // block timeout).
     handle.abort_signal.abort();
 
@@ -546,7 +550,7 @@ fn loop_exits_on_abort_signal() {
 fn skips_own_writes_no_reply_storm() {
     // LocalStream reads AND replies on the same path, so the agent sees its
     // own reply on the next poll; `from == self` filtering must stop it from
-    // replying to itself (which would explode the mailbox).
+    // replying to itself (which would explode the CohostMailbox).
     let kernel = Arc::new(Kernel::new());
     mount(&kernel, "/proc");
     let path = "/proc/pid-filter/chat-with-me";
@@ -554,7 +558,7 @@ fn skips_own_writes_no_reply_storm() {
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("pid-filter", "scode"),
-        Mailbox::local_stream(path.to_string(), "scode".to_string()),
+        CohostMailbox::local_stream(path.to_string(), "scode".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -571,7 +575,7 @@ fn skips_own_writes_no_reply_storm() {
     assert_eq!(
         count_from(&kernel, path, &ctx, "scode"),
         1,
-        "agent replied to its own message — the from==self filter is broken"
+        "agent replied to its own message 鈥?the from==self filter is broken"
     );
 }
 
@@ -584,12 +588,12 @@ fn a2a_inbox_survives_read_before_it_exists() {
     // The loop must SURVIVE the transient error and serve the message once
     // the inbox appears.
     let kernel = Arc::new(Kernel::new());
-    // Deliberately do NOT mount /agents yet → the loop's first reads all Err
+    // Deliberately do NOT mount /agents yet 鈫?the loop's first reads all Err
     // (NotMounted). The old `Err(_) => break` would kill the loop here.
     let handle = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -621,7 +625,7 @@ fn a2a_inbox_survives_read_before_it_exists() {
     let _ = handle.join.join();
     assert!(
         reply.is_some(),
-        "loop died on the pre-mint read error (F1 regression) — no reply after the inbox appeared"
+        "loop died on the pre-mint read error (F1 regression) 鈥?no reply after the inbox appeared"
     );
 }
 
@@ -639,7 +643,7 @@ fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
     let handle = spawn_real(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
     );
 
     let ctx = user_ctx();
@@ -664,7 +668,7 @@ fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
 
     assert!(
         leaked.is_none(),
-        "a text-only turn auto-forwarded a reply — the ping-pong (auto-forward) is back"
+        "a text-only turn auto-forwarded a reply 鈥?the ping-pong (auto-forward) is back"
     );
     assert_eq!(
         count_from(&kernel, "/agents/win-ai/chat-with-me", &ctx, "win-ai"),
@@ -716,7 +720,7 @@ fn probe_dt_reg_round_trips_on_test_mount() {
 #[test]
 fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     // #81 root fix: a RESPAWNED co-host agent must resume past what it already
-    // processed — via its durable node-local cursor — NOT replay the whole inbox
+    // processed 鈥?via its durable node-local cursor 鈥?NOT replay the whole inbox
     // and re-answer every historical message (the storm seen live when Mac
     // respawned mac-ai and it re-answered the entire conversation).
     let kernel = Arc::new(Kernel::new());
@@ -730,7 +734,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     let h1 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-1", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -760,11 +764,11 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     );
 
     // Spawn #2 = RESPAWN of the SAME identity into the SAME inbox (still holds
-    // "first"). The durable cursor must make it resume PAST "first" → no re-reply.
+    // "first"). The durable cursor must make it resume PAST "first" 鈫?no re-reply.
     let h2 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-2", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -774,7 +778,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     assert_eq!(
         count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
         1,
-        "respawn re-replied to an already-processed message — durable cursor not honored (#81 storm)"
+        "respawn re-replied to an already-processed message 鈥?durable cursor not honored (#81 storm)"
     );
 
     // Liveness: a NEW message after respawn IS answered (the cursor didn't
@@ -790,7 +794,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
     let h3 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-3", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -814,7 +818,7 @@ fn respawn_resumes_from_durable_cursor_and_does_not_replay_history() {
 #[test]
 fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     // Deepens the #81 fix past a single REPLIED message: a co-host agent usually
-    // reads a message and stays SILENT (the ping-pong fix — it only replies when
+    // reads a message and stays SILENT (the ping-pong fix 鈥?it only replies when
     // it calls `send_message`). Those silently-processed messages must ALSO
     // advance the durable cursor; if the cursor advanced only on messages that
     // produced a reply, a respawn would re-read every silent one and re-answer it.
@@ -826,7 +830,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let ctx = user_ctx();
 
     // Three inbound messages. `SendsReply` replies to the FIRST only (its `sent`
-    // latch), so m1 and m2 are processed SILENTLY — the case under test.
+    // latch), so m1 and m2 are processed SILENTLY 鈥?the case under test.
     for body in ["m0", "m1", "m2"] {
         write_envelope(
             &kernel,
@@ -840,7 +844,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h1 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-1", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -848,7 +852,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     // Deterministically wait for spawn #1 to DRAIN all three. The silent ones
     // leave no observable reply, so gate on the cursor reaching the inbox tail.
     // (Aborting early would leave m1/m2 genuinely unprocessed, and the respawn
-    // then handling them would be CORRECT, not a replay — a flaky false failure.)
+    // then handling them would be CORRECT, not a replay 鈥?a flaky false failure.)
     let tail = tail_offset(&kernel, "/agents/win-ai/chat-with-me", &ctx);
     let deadline = Instant::now() + Duration::from_secs(8);
     while read_cursor(&kernel, "win-ai") < tail && Instant::now() < deadline {
@@ -872,7 +876,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h2 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-2", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -882,11 +886,11 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     assert_eq!(
         count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
         1,
-        "respawn re-answered a silently-processed message — the cursor advanced \
+        "respawn re-answered a silently-processed message 鈥?the cursor advanced \
          only on replies, not on every processed message (#81)"
     );
 
-    // Liveness: a message AFTER the three IS answered → the cursor resumed at the
+    // Liveness: a message AFTER the three IS answered 鈫?the cursor resumed at the
     // true tail, not over-skipped the way a naive seek-to-tail would.
     write_envelope(
         &kernel,
@@ -899,7 +903,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     let h3 = spawn_sending(
         Arc::clone(&kernel),
         make_desc("cohost-win-ai-3", "win-ai"),
-        Mailbox::a2a_inbox("win-ai".to_string()),
+        CohostMailbox::a2a_inbox("win-ai".to_string()),
         "user-test",
         REPLY_TEXT,
     );
@@ -914,6 +918,6 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     assert_eq!(
         count_from(&kernel, "/agents/user-test/chat-with-me", &ctx, "win-ai"),
         2,
-        "the post-respawn message m3 was not answered — cursor over-skipped the live tail"
+        "the post-respawn message m3 was not answered 鈥?cursor over-skipped the live tail"
     );
 }

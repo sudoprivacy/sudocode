@@ -75,8 +75,59 @@ fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     );
 }
 
-/// Choice 4 (exit plan) should reject execution and let the model continue
-/// without implementing the plan.
+/// Choice 1 (clear context & execute) is the default: it resets the session
+/// and re-runs with the plan file as the fresh prompt. Live-only — clearing the
+/// context drops the mock scenario marker, so only a real model can carry the
+/// recursive execute turn.
+#[test]
+fn write_plan_choice_clear_context_executes_plan() {
+    let env = TestEnv::new("plan-clear");
+    if env.is_mock() {
+        // Clearing context strips the PARITY_SCENARIO marker from the injected
+        // plan prompt, so the mock can't answer the recursive turn. The path is
+        // exercised live below.
+        return;
+    }
+
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "write_plan,read_file,glob_search",
+    ]);
+    sess.expect("❯").expect("should see REPL prompt");
+
+    let prompt = env.prompt(
+        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
+        "write_plan_roundtrip",
+    );
+    sess.send(&format!("{prompt}\r")).expect("send prompt");
+
+    sess.set_default_timeout(Duration::from_secs(30));
+    if sess.expect("Choose an action").is_err() {
+        eprintln!("SKIP: live model did not call write_plan");
+        return;
+    }
+
+    // Choose option 1: clear context & execute. The session clears and re-runs
+    // with the plan as the new prompt — a fresh turn must complete without error.
+    let marker = turn_status_marker(&sess);
+    sess.send("1\r").expect("send choice 1");
+    expect_turn_complete_after(
+        &sess,
+        &marker,
+        LIVE_TURN_BUDGET,
+        "clear-context execute turn should complete",
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(Duration::from_secs(15));
+    let exit = sess.expect_eof().unwrap_or(0);
+    assert!(
+        exit == 0 || exit == 143,
+        "exit code should be 0; got {exit}"
+    );
+}
 #[test]
 fn write_plan_choice_exit_rejects_execution() {
     let env = TestEnv::new("plan-exit");

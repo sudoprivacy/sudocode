@@ -32,7 +32,12 @@ fn permission_prompt_allow_is_read_through_shared_editor() {
 
     // workspace-write + a bash command → bash requires danger-full-access →
     // the REPL shows the escalation prompt.
-    let mut sess = env.spawn(&["--permission-mode", "workspace-write", "--allowedTools", "bash"]);
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "bash",
+    ]);
     sess.expect("❯").expect("should see REPL prompt");
 
     sess.send("Run the bash command `echo perm_prompt_ok` and report its output.\r")

@@ -18,7 +18,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{expect_turn_complete_after, turn_status_marker, TestEnv, LIVE_TURN_BUDGET};
+use common::{
+    expect_turn_complete_after, turn_status_marker, TestEnv, EXIT_CODE_SIGTERM, LIVE_TURN_BUDGET,
+};
 
 /// When the model calls write_plan in REPL mode, the user should see a
 /// confirmation dialog. Choosing "keep context & execute" completes the turn.
@@ -70,8 +72,8 @@ fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
     assert!(
-        exit == 0 || exit == 143,
-        "exit code should be 0; got {exit}"
+        exit == 0 || exit == EXIT_CODE_SIGTERM,
+        "exit code should be 0 (or SIGTERM on teardown); got {exit}"
     );
 }
 
@@ -124,8 +126,8 @@ fn write_plan_choice_clear_context_executes_plan() {
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
     assert!(
-        exit == 0 || exit == 143,
-        "exit code should be 0; got {exit}"
+        exit == 0 || exit == EXIT_CODE_SIGTERM,
+        "exit code should be 0 (or SIGTERM on teardown); got {exit}"
     );
 }
 
@@ -190,8 +192,8 @@ fn write_plan_comment_row_is_reachable_and_revises() {
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
     assert!(
-        exit == 0 || exit == 143,
-        "exit code should be 0; got {exit}"
+        exit == 0 || exit == EXIT_CODE_SIGTERM,
+        "exit code should be 0 (or SIGTERM on teardown); got {exit}"
     );
 }
 
@@ -242,7 +244,7 @@ fn write_plan_choice_exit_rejects_execution() {
     sess.set_default_timeout(Duration::from_secs(15));
     let exit = sess.expect_eof().unwrap_or(0);
     assert!(
-        exit == 0 || exit == 143,
-        "exit code should be 0; got {exit}"
+        exit == 0 || exit == EXIT_CODE_SIGTERM,
+        "exit code should be 0 (or SIGTERM on teardown); got {exit}"
     );
 }

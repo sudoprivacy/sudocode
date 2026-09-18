@@ -73,6 +73,15 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Live-mode timeout — real API calls can take a few seconds.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Exit code the PTY reports when a `/exit`-driven shutdown is finalized by the
+/// harness dropping the child (SIGTERM = 128 + 15). Some REPL teardown paths —
+/// notably right after a cross-seam QuestionRequest dialog (e.g. the write_plan
+/// approval) — don't finish flushing the `/exit` on the first line before the
+/// child is reaped, so the PTY sees the termination signal rather than a clean
+/// 0. Tests that exercise those paths accept either 0 or this value; naming it
+/// keeps the intent explicit instead of a bare `143`.
+pub const EXIT_CODE_SIGTERM: u32 = 143;
+
 /// The REPL's input-line marker. The footer and banner never carry it, so a
 /// line containing it is the line the user types on.
 const PROMPT_MARKER: &str = "\u{276f}";

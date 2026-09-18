@@ -3594,6 +3594,29 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Read one choice line through the sync REPL's shared editor, so mid-turn
+/// prompts (write_plan approval, tool-permission y/N) never spawn a second
+/// terminal owner — a throwaway `rustyline::Editor` / `dialoguer::Select`
+/// toggles raw-mode on drop underneath the main editor and perturbs its re-arm.
+/// Falls back to a scoped editor only outside the sync REPL (e.g. iocraft path
+/// or tests), where there is no shared editor to collide with.
+#[inline]
+fn prompt_choice_via_shared_editor(prompt: &str) -> Result<String, String> {
+    let shared = SYNC_REPL_EDITOR.with(|cell| cell.borrow().as_ref().map(Rc::clone));
+    if let Some(editor) = shared {
+        editor
+            .borrow_mut()
+            .prompt_choice(prompt)
+            .map_err(|e| e.to_string())
+    } else {
+        let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
+        editor
+            .readline(prompt)
+            .map(|line| line.trim().to_string())
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl runtime::QuestionPrompter for CliQuestionPrompter {
     fn ask(
         &mut self,
@@ -3608,7 +3631,6 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
                 println!("  {line}");
             }
         }
-        let shared_editor = SYNC_REPL_EDITOR.with(|cell| cell.borrow().as_ref().map(Rc::clone));
         let mut answers = Vec::new();
         for field in &request.fields {
             if !field.prompt.is_empty() && request.title.as_deref() != Some(field.prompt.as_str()) {
@@ -3618,22 +3640,7 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             for (idx, option) in field.options.iter().enumerate() {
                 println!("  [{}] {}", idx + 1, option.label);
             }
-            // Read through the shared REPL editor so raw-mode ownership stays
-            // with one rustyline instance; a throwaway editor perturbed the main
-            // editor's terminal state on drop. Fall back to a scoped editor only
-            // outside the sync REPL (should not happen in practice).
-            let trimmed = if let Some(editor) = &shared_editor {
-                editor
-                    .borrow_mut()
-                    .prompt_choice("Your choice: ")
-                    .map_err(|e| e.to_string())?
-            } else {
-                let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
-                editor
-                    .readline("Your choice: ")
-                    .map(|line| line.trim().to_string())
-                    .map_err(|e| e.to_string())?
-            };
+            let trimmed = prompt_choice_via_shared_editor("Your choice: ")?;
             let trimmed = trimmed.as_str();
             // A 1-indexed digit picks the option's value; otherwise the raw text
             // (custom-input fields).
@@ -5925,21 +5932,27 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
             };
         }
 
-        let items = &["Allow once", "Deny"];
-        let selection = Select::new()
-            .with_prompt("Approve this tool call?")
-            .items(items)
-            .default(0)
-            .interact_opt();
-
-        match selection {
-            Ok(Some(0)) => runtime::PermissionPromptDecision::Allow,
-            Ok(Some(_) | None) => runtime::PermissionPromptDecision::Deny {
-                reason: format!(
-                    "tool '{}' denied by user approval prompt",
-                    request.tool_name
-                ),
-            },
+        // Interactive approval: read y/N through the shared REPL editor so this
+        // mid-turn prompt does not spawn a second terminal owner (dialoguer's
+        // Select opened its own crossterm raw session, the same perturbation the
+        // write_plan dialog had). "1"/allow-ish answers allow; anything else denies.
+        println!("  [1] Allow once");
+        println!("  [2] Deny");
+        let deny = || runtime::PermissionPromptDecision::Deny {
+            reason: format!(
+                "tool '{}' denied by user approval prompt",
+                request.tool_name
+            ),
+        };
+        match prompt_choice_via_shared_editor("Approve this tool call? [1] Allow / [2] Deny: ") {
+            Ok(answer) => {
+                let a = answer.trim().to_ascii_lowercase();
+                if matches!(a.as_str(), "1" | "y" | "yes" | "allow") {
+                    runtime::PermissionPromptDecision::Allow
+                } else {
+                    deny()
+                }
+            }
             Err(error) => runtime::PermissionPromptDecision::Deny {
                 reason: format!("permission approval failed: {error}"),
             },

@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 use serde_json::Value;
 
-const EXPECTED_SUDOSTACK_SHA: &str = "65904eb0a0991366767095b707f5a86835089a1e";
+const EXPECTED_SUDOSTACK_SHA: &str = "6a51190a0e08f673912967716629a2fdb424b85a";
 
 #[test]
 fn common_v1_valid_fixtures_are_accepted() {
@@ -35,7 +35,9 @@ fn common_v1_roundtrip_fixtures_keep_unknown_optional_fields() {
 }
 
 fn parse_common(value: &Value) -> Result<Value, String> {
-    let object = value.as_object().ok_or_else(|| "expected object".to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "expected object".to_string())?;
     let api_version = object
         .get("api_version")
         .and_then(Value::as_str)
@@ -65,14 +67,27 @@ fn validate_resource_ref(object: &serde_json::Map<String, Value>) -> Result<(), 
     if !path.starts_with('/') {
         return Err("path must start with /".to_string());
     }
+    if let Some(version) = object.get("version") {
+        if version.as_str().is_none_or(str::is_empty) {
+            return Err("version must be a non-empty string".to_string());
+        }
+    }
     if let Some(size) = object.get("size_bytes") {
         if !size.as_u64().is_some() {
             return Err("size_bytes must be a non-negative integer".to_string());
         }
     }
     if let Some(digest) = object.get("digest").and_then(Value::as_str) {
-        if !digest.contains(':') {
+        if !is_digest(digest) {
             return Err("digest must carry an algorithm prefix".to_string());
+        }
+    }
+    if let Some(media_type) = object.get("media_type") {
+        if media_type
+            .as_str()
+            .is_none_or(|value| !is_media_type(value))
+        {
+            return Err("media_type must be type/subtype".to_string());
         }
     }
     Ok(())
@@ -80,10 +95,7 @@ fn validate_resource_ref(object: &serde_json::Map<String, Value>) -> Result<(), 
 
 fn validate_error_info(object: &serde_json::Map<String, Value>) -> Result<(), String> {
     let code = required_str(object, "code")?;
-    if !code
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
+    if !code.chars().next().is_some_and(|c| c.is_ascii_uppercase())
         || !code
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
@@ -102,7 +114,10 @@ fn validate_error_info(object: &serde_json::Map<String, Value>) -> Result<(), St
     Ok(())
 }
 
-fn required_str<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Result<&'a str, String> {
+fn required_str<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
     object
         .get(key)
         .and_then(Value::as_str)
@@ -117,6 +132,34 @@ fn is_zone_id(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_digest(value: &str) -> bool {
+    let Some((algorithm, body)) = value.split_once(':') else {
+        return false;
+    };
+    !algorithm.is_empty()
+        && algorithm
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '+' | '.' | '-'))
+        && algorithm
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && !body.is_empty()
+        && body.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '+' | '/' | '=' | '-')
+        })
+}
+
+fn is_media_type(value: &str) -> bool {
+    let Some((top, sub)) = value.split_once('/') else {
+        return false;
+    };
+    !top.is_empty()
+        && !sub.is_empty()
+        && !top.chars().any(char::is_whitespace)
+        && !sub.chars().any(char::is_whitespace)
 }
 
 fn reject_secret_like_keys(value: &Value) -> Result<(), String> {
@@ -141,14 +184,34 @@ fn reject_secret_like_keys(value: &Value) -> Result<(), String> {
 
 fn is_secret_like_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    ["secret", "credential", "password", "private_key", "private-key", "access_token", "access-token", "refresh_token", "refresh-token", "id_token", "id-token", "api_key", "api-key"]
-        .iter()
-        .any(|needle| key.contains(needle))
+    [
+        "secret",
+        "credential",
+        "password",
+        "private_key",
+        "private-key",
+        "access_token",
+        "access-token",
+        "refresh_token",
+        "refresh-token",
+        "id_token",
+        "id-token",
+        "api_key",
+        "api-key",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
 }
 
 fn fixture_files(kind: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    visit(&sudostack_repo().join("fixtures").join(kind).join("common/v1"), &mut files);
+    visit(
+        &sudostack_repo()
+            .join("fixtures")
+            .join(kind)
+            .join("common/v1"),
+        &mut files,
+    );
     files.sort();
     files
 }

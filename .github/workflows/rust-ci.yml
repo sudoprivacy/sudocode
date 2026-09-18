@@ -74,6 +74,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout pinned contract fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudostack
+          ref: 6a51190a0e08f673912967716629a2fdb424b85a
+          path: .contract-input/sudostack
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -165,6 +171,7 @@ jobs:
         # can print its captured failure output.
         env:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
+          SUDOSTACK_REPO: ${{ github.workspace }}/.contract-input/sudostack
         run: cargo test --workspace
 
   a2a-live:

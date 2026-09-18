@@ -97,7 +97,6 @@ aspirations — they're constraints that shape every PR.
 | **Local-first.** | Zero telemetry by default. Your prompts don't leave your machine unless you tell them to. |
 | **Inline only.** | Your terminal stays yours. Scrollback, tmux, ssh, vscode terminal — all preserved. |
 | **Sole goal: heavy-user productivity.** | Every design decision filters through "does this compress wall-clock between a heavy user's thought and outcome?" If not, it doesn't ship. Comfort, onboarding, compatibility for the 99% — explicitly not our problem. |
-| **Stable surface. No silent updates.** | Semver. Breaking change = major bump + release notes. You pin a version, that version stays. |
 | **Everything is file.** | Config in `.scode.json`. Sessions in jsonl. Plugins on the filesystem. Future state on the [nexus VFS](https://github.com/nexi-lab/nexus) — every secret, stream, agent, audit trace addressable through `sys_read` / `sys_write`. No opaque DBs. No sibling APIs hiding state. |
 | **Session is yours.** | jsonl you can read, fork, replay, `awk` through. Zero lock-in. |
 | **Dogfood non-negotiable.** | The team burns this binary daily. No-dogfood, no release. |
@@ -108,7 +107,6 @@ aspirations — they're constraints that shape every PR.
 | | |
 |---|---|
 | **Closed source.** | No proprietary fork. The repo you see is everything. |
-| **Force auto-update.** | You pin, you stay. Forced silent updates is one of the reasons sudocode exists. |
 | **Premium features behind a paywall.** | One binary. No free/pro split. |
 | **Alternate-screen TUI.** | Never hijack your screen. Inline ANSI only. No `ratatui`, no split-pane, no `--tui` flag. |
 | **In-CLI multi-agent dashboard.** | We're a unit. Dashboards belong in sudowork / your tmux / your IDE. |

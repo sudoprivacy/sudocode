@@ -74,9 +74,6 @@ the code first.
   flag because the 99% might fumble = treating us like the 99%.
   We are not them.
 
-- **No silent / forced updates.** Semver. Breaking change = major
-  bump + release notes. You pin a version, that version stays.
-
 - **No telemetry by default.** Opt-in is explicit; never buried.
 
 - **One engine↔renderer seam — do not grow a second.** All

@@ -74,12 +74,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout pinned contract fixtures
-        uses: actions/checkout@v4
-        with:
-          repository: sudoprivacy/sudostack
-          ref: 6a51190a0e08f673912967716629a2fdb424b85a
-          path: .contract-input/sudostack
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -162,6 +156,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout pinned contract fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudostack
+          ref: 6a51190a0e08f673912967716629a2fdb424b85a
+          path: .contract-input/sudostack
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

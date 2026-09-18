@@ -798,7 +798,7 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
     for (index, option) in question.options.iter().enumerate() {
         let selector = if index == selected_index { ">" } else { " " };
         let marker = if option.recommended {
-            " recommended"
+            " (recommended)"
         } else {
             ""
         };
@@ -822,7 +822,14 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
             .as_deref()
             .filter(|hint| !hint.is_empty())
             .unwrap_or("type your own answer");
-        lines.push(format!("  [+] {hint}"));
+        // The custom-input row sits at index == options.len(), so Up/Down can
+        // land on it like any option; `>` marks it when selected.
+        let selector = if selected_index == question.options.len() {
+            ">"
+        } else {
+            " "
+        };
+        lines.push(format!("{selector} [+] {hint}"));
     }
     let arrow_hint = if question.back_value.is_some() {
         "\u{2190}\u{2192} back/open \u{00b7} "
@@ -1575,10 +1582,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::DialPad(question) => {
                                 let selected = dialpad_cursor.get();
-                                submit_dialpad_selection(question, selected, &input_tx_for_events);
-                                if !*has_submitted.read() { has_submitted.set(true); }
-                                input_value.set(String::new());
-                                input_slot.set(InputSlot::TextInput);
+                                if question.allow_custom_input
+                                    && selected == question.options.len()
+                                {
+                                    // Cursor is on the `[+]` custom-input row —
+                                    // enter free-text mode; Enter there routes
+                                    // the typed text back as the answer.
+                                    custom_answer_question.set(Some(question.clone()));
+                                    input_slot.set(InputSlot::TextInput);
+                                    input_value.set(String::new());
+                                } else {
+                                    submit_dialpad_selection(question, selected, &input_tx_for_events);
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
+                                }
                             }
                             InputSlot::FuzzySelect(_) => {
                                 // Prefer the highlighted option. If nothing
@@ -1671,6 +1689,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Down if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {
                         let cur = dialpad_cursor.get();
                         let max = match &current_slot {
+                            // With custom input, options.len() is the extra
+                            // `[+]` row, so the cursor may reach it.
+                            InputSlot::DialPad(q) if q.allow_custom_input => q.options.len(),
                             InputSlot::DialPad(q) => q.options.len().saturating_sub(1),
                             _ => 0,
                         };
@@ -2380,8 +2401,23 @@ mod tests {
         let panel = format_question_panel(&question_with_options(), 1);
 
         assert!(panel.contains("[Setup]"));
-        assert!(panel.contains(" [1] Project recommended"));
+        assert!(panel.contains(" [1] Project (recommended)"));
         assert!(panel.contains("> [2] User"));
+    }
+
+    #[test]
+    fn custom_input_row_is_selectable_past_last_option() {
+        let mut question = question_with_options();
+        question.allow_custom_input = true;
+        question.custom_input_hint = Some("type a comment".to_string());
+
+        // Cursor on the `[+]` row (index == options.len()) marks it, not an
+        // option — this is the row Up/Down can now reach and Enter opens for
+        // free-text input.
+        let panel = format_question_panel(&question, question.options.len());
+        assert!(panel.contains("> [+] type a comment"));
+        assert!(panel.contains("  [1] Project"));
+        assert!(panel.contains("  [2] User"));
     }
 
     #[test]

@@ -128,6 +128,75 @@ fn write_plan_choice_clear_context_executes_plan() {
         "exit code should be 0; got {exit}"
     );
 }
+
+/// The `[+]` free-text row (comment / keep-planning) must be reachable by arrow
+/// keys and accept typed input — the DialPad bug where the cursor couldn't land
+/// on it and typing was swallowed. Down past the 4 options lands on `[+]`;
+/// Enter opens text entry; the typed comment feeds back and the model revises
+/// (calls write_plan again → the dialog reappears). Live-only: only a real model
+/// re-plans on the comment.
+#[test]
+fn write_plan_comment_row_is_reachable_and_revises() {
+    let env = TestEnv::new("plan-comment");
+    if env.is_mock() {
+        // The revise loop needs the model to re-call write_plan on the comment;
+        // the mock returns a fixed plan and can't. The reachability of the row
+        // is unit-tested in repl_ui (custom_input_row_is_selectable_past_last_option).
+        return;
+    }
+
+    let mut sess = env.spawn(&[
+        "--permission-mode",
+        "workspace-write",
+        "--allowedTools",
+        "write_plan",
+    ]);
+    sess.expect("❯").expect("should see REPL prompt");
+
+    let prompt = env.prompt(
+        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
+        "write_plan_roundtrip",
+    );
+    sess.send(&format!("{prompt}\r")).expect("send prompt");
+
+    sess.set_default_timeout(Duration::from_secs(30));
+    if sess.expect("Choose an action").is_err() {
+        eprintln!("SKIP: live model did not call write_plan");
+        return;
+    }
+
+    // Arrow down past the 4 options onto the `[+]` custom-input row, then Enter
+    // to open free-text entry (the previously-broken path).
+    for _ in 0..4 {
+        sess.send("\x1b[B").expect("send Down arrow");
+    }
+    sess.send("\r").expect("open custom input");
+
+    // Type a revision comment and submit. The model should revise and re-present
+    // the plan (dialog reappears), proving the comment fed back.
+    let marker = turn_status_marker(&sess);
+    sess.send("Add an explicit testing step to the plan.\r")
+        .expect("send comment");
+
+    sess.set_default_timeout(LIVE_TURN_BUDGET);
+    let revised = sess.expect("Choose an action").is_ok();
+    if !revised {
+        // Some models answer the comment in prose without re-calling write_plan;
+        // the turn still completes without error.
+        expect_turn_complete_after(&sess, &marker, LIVE_TURN_BUDGET, "comment turn completes");
+    }
+
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(Duration::from_secs(15));
+    let exit = sess.expect_eof().unwrap_or(0);
+    assert!(
+        exit == 0 || exit == 143,
+        "exit code should be 0; got {exit}"
+    );
+}
+
+/// Choice 4 (exit plan) should reject execution and let the model continue
+/// without implementing the plan.
 #[test]
 fn write_plan_choice_exit_rejects_execution() {
     let env = TestEnv::new("plan-exit");

@@ -17,6 +17,8 @@ pub(crate) fn render_repl_help() -> String {
         "REPL".to_string(),
         "  /exit                Quit the REPL".to_string(),
         "  /quit                Quit the REPL".to_string(),
+        "  ! <command>          Run a shell command; output is shown and added to context"
+            .to_string(),
         "  Up/Down              Navigate prompt history".to_string(),
         "  Ctrl-R               Reverse-search prompt history".to_string(),
         "  Tab                  Complete commands, modes, and recent sessions".to_string(),

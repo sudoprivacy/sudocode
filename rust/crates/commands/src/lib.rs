@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 /// Shared status / model / config / doctor report rendering, consumed by both
 /// the in-process REPL renderer and the ACP renderer so they render the same
 /// reports from one definition.
+pub mod bash_mode;
 pub mod reports;
 
 use plugins::{

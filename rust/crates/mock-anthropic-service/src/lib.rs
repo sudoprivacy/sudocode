@@ -262,7 +262,16 @@ enum Scenario {
     /// [`SUBAGENT_SLOW_CHILD_LATENCY`]: background children outlive the
     /// parent's turn and overlap each other.
     SubagentSlowChild,
+    /// One background `Agent` whose child ([`Scenario::SubagentSleepChild`])
+    /// is cancelled while its `bash` call is still running.
+    SubagentEventsCancelTool,
+    /// A child that runs `bash` with [`SUBAGENT_SLEEP_COMMAND`], then answers.
+    SubagentSleepChild,
 }
+
+/// What [`Scenario::SubagentSleepChild`] runs: long enough that a test sees
+/// the difference between an interrupted tool and one left to finish.
+pub const SUBAGENT_SLEEP_COMMAND: &str = "sleep 30";
 
 /// How long [`Scenario::SubagentSlowChild`] holds each request.
 pub const SUBAGENT_SLOW_CHILD_LATENCY: Duration = Duration::from_millis(1500);
@@ -329,6 +338,8 @@ impl Scenario {
             "subagent_tool_child" => Some(Self::SubagentToolChild),
             "subagent_nest_child" => Some(Self::SubagentNestChild),
             "subagent_slow_child" => Some(Self::SubagentSlowChild),
+            "subagent_events_cancel_tool" => Some(Self::SubagentEventsCancelTool),
+            "subagent_sleep_child" => Some(Self::SubagentSleepChild),
             _ => None,
         }
     }
@@ -381,6 +392,8 @@ impl Scenario {
             Self::SubagentToolChild => "subagent_tool_child",
             Self::SubagentNestChild => "subagent_nest_child",
             Self::SubagentSlowChild => "subagent_slow_child",
+            Self::SubagentEventsCancelTool => "subagent_events_cancel_tool",
+            Self::SubagentSleepChild => "subagent_sleep_child",
         }
     }
 }
@@ -824,6 +837,21 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 json!({ "path": SUBAGENT_CHILD_READ_PATH }),
             )])
         }
+        (Scenario::SubagentEventsCancelTool, None) => SubagentStep::Tools(vec![(
+            "toolu_events_cancel_tool",
+            "Agent",
+            agent_call_input(
+                "sleeping child",
+                &child("subagent_sleep_child", "sleep a while"),
+                "general-purpose",
+                true,
+            ),
+        )]),
+        (Scenario::SubagentSleepChild, None) => SubagentStep::Tools(vec![(
+            "toolu_child_sleep",
+            "bash",
+            json!({ "command": SUBAGENT_SLEEP_COMMAND }),
+        )]),
         (Scenario::SubagentNestChild, None) => SubagentStep::Tools(vec![(
             "toolu_nest_spawn",
             "agent_spawn",
@@ -1413,7 +1441,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         | Scenario::SubagentEventsCancel
         | Scenario::SubagentToolChild
         | Scenario::SubagentNestChild
-        | Scenario::SubagentSlowChild => subagent_events_sse(request, scenario),
+        | Scenario::SubagentSlowChild
+        | Scenario::SubagentEventsCancelTool
+        | Scenario::SubagentSleepChild => subagent_events_sse(request, scenario),
     }
 }
 
@@ -1943,7 +1973,9 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         | Scenario::SubagentEventsCancel
         | Scenario::SubagentToolChild
         | Scenario::SubagentNestChild
-        | Scenario::SubagentSlowChild => subagent_events_response(request, scenario),
+        | Scenario::SubagentSlowChild
+        | Scenario::SubagentEventsCancelTool
+        | Scenario::SubagentSleepChild => subagent_events_response(request, scenario),
     }
 }
 
@@ -1997,6 +2029,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SubagentToolChild => "req_subagent_tool_child",
         Scenario::SubagentNestChild => "req_subagent_nest_child",
         Scenario::SubagentSlowChild => "req_subagent_slow_child",
+        Scenario::SubagentEventsCancelTool => "req_subagent_events_cancel_tool",
+        Scenario::SubagentSleepChild => "req_subagent_sleep_child",
     }
 }
 

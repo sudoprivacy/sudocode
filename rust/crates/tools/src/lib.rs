@@ -6994,6 +6994,11 @@ async fn stream_with_provider(
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
     enforcer: Option<PermissionEnforcer>,
+    /// The sub-agent's abort signal, handed over by
+    /// `ConversationRuntime::with_hook_abort_signal`. Tools that honour one
+    /// (`bash`, `Sleep`, `grep_search`, `PowerShell`) stop when it fires;
+    /// without it a cancelled agent sat out whatever tool it was running.
+    abort_signal: Option<HookAbortSignal>,
 }
 
 impl SubagentToolExecutor {
@@ -7001,6 +7006,7 @@ impl SubagentToolExecutor {
         Self {
             allowed_tools,
             enforcer: None,
+            abort_signal: None,
         }
     }
 
@@ -7033,11 +7039,15 @@ impl ToolExecutor for SubagentToolExecutor {
             self.enforcer.as_ref(),
             tool_name,
             &value,
-            None,
+            self.abort_signal.as_ref(),
             Some(ctx),
             &StdFsBackend,
         )
         .map_err(ToolError::new)
+    }
+
+    fn set_abort_signal(&mut self, abort_signal: HookAbortSignal) {
+        self.abort_signal = Some(abort_signal);
     }
 }
 
